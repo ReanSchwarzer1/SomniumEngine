@@ -1,6 +1,6 @@
 //! The main entry point for the Somnium Renderer.
 //!
-//! Orchestrates the `GlobalResourcePool`, `MaterialSystem`, and rendering passes.
+//! Orchestrates the `GlobalResourcePool`, the shader system, and rendering passes.
 //!
 //! Phase 11 additions:
 //! - `ShadowMapResources` + `ShadowPass` for cascade shadow maps
@@ -15,10 +15,7 @@ use crate::{
     context::RenderContext,
     geometry::GeometryPool,
     instance::InstancePool,
-    material::{
-        hlms::MaterialSystem,
-        pool::{GpuMaterial, MaterialPool},
-    },
+    material::pool::{GpuMaterial, MaterialPool},
     pass::{
         gizmo::{GizmoMode, GizmoPass},
         grid::GridPass,
@@ -62,7 +59,7 @@ pub struct SomniumRenderer {
     /// Global descriptor pool (bindless arrays, includes light buffer at binding 6).
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
-    pub materials: MaterialSystem,
+    pub shaders: crate::shaders::Shaders,
     /// The visibility buffer render pass.
     pub vis_pass: VisibilityBufferPass,
     /// The final shading pass.
@@ -71,6 +68,19 @@ pub struct SomniumRenderer {
     pub shadow_resources: ShadowMapResources,
     /// Depth-only shadow render pass (4 cascades).
     pub shadow_pass: ShadowPass,
+    /// Authored directional-light CSM/VSM request. CSM is the measured default.
+    pub directional_shadow_policy: crate::shadow::virtual_map::ShadowLightPolicy,
+    /// Software-sparse page allocator shared by the portable and GPU paths.
+    pub virtual_shadow_cache: crate::shadow::virtual_map::VirtualShadowMap,
+    /// Allocated lazily: a CSM-only scene pays no second shadow-atlas memory.
+    pub virtual_shadow_gpu: Option<crate::shadow::virtual_map::VirtualShadowGpu>,
+    /// Page raster work prepared from screen-visible receivers this frame.
+    pub virtual_shadow_work: Vec<crate::shadow::virtual_map::RenderPage>,
+    /// Honest branch gate: resources alone do not make VSM sampleable.
+    virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness,
+    /// Explicit content revision for in-place mesh edits whose offsets/counts
+    /// remain stable and therefore cannot be discovered by hashing commands.
+    virtual_shadow_caster_content_revision: u64,
 
     /// Global geometry storage.
     pub geometry: GeometryPool,
@@ -135,6 +145,8 @@ pub struct SomniumRenderer {
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
     /// Phase 24M–Q: world cache, scene specular, path tracer, SDF, probes.
     pub lighting_extra_pass: crate::pass::lighting_extra::LightingExtraPass,
+    /// MORROWIND-AB: portable SDF-backed diffuse probe volume.
+    pub ddgi_pass: crate::pass::ddgi::DdgiPass,
     /// Phase VV: ray-traced water reflections (Halcyon).
     pub water_reflection_pass: crate::pass::water_reflection::WaterReflectionPass,
     /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
@@ -203,6 +215,9 @@ pub struct SomniumRenderer {
     /// their state but suppresses transform/light gizmos, selection outlines,
     /// and the optional editor grid from the player's view.
     editor_overlays_enabled: bool,
+    /// MORROWIND-E2. One warning, not one per frame: a game whose UI hook draws
+    /// nothing has a bug, and sixty log lines a second is not how to say so.
+    game_ui_empty_warned: bool,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -473,18 +488,28 @@ impl SomniumRenderer {
 
         // Phase DOOM-B. Built here rather than in the struct literal because it
         // borrows the global pool's layout, and the literal moves the pool.
-        let census_pass = crate::pass::census::CensusPass::new(&ctx.device, &global_pool.layout);
-        let classify_pass =
-            crate::pass::classify::ClassifyPass::new(&ctx.device, &global_pool.layout);
+        // MORROWIND-C. Every WGSL module in the crate is registered here, once,
+        // and every pass below composes through it. This replaces the 29-line
+        // `MaterialSystem` stub that described Ogre's HLMS and did nothing.
+        let shaders = crate::shaders::Shaders::new();
 
-        let materials = MaterialSystem::new();
+        let census_pass =
+            crate::pass::census::CensusPass::new(&ctx.device, &shaders, &global_pool.layout);
+        let classify_pass =
+            crate::pass::classify::ClassifyPass::new(&ctx.device, &shaders, &global_pool.layout);
 
         // Phase 11.5H: Editor infinite-grid overlay (renders to HDR target).
-        let grid_pass = GridPass::new(&ctx.device, HDR_FORMAT, &global_pool.view_proj_buffer);
+        let grid_pass = GridPass::new(
+            &ctx.device,
+            &shaders,
+            HDR_FORMAT,
+            &global_pool.view_proj_buffer,
+        );
 
         // Phase 24A-3: built before the post-process pass, which binds its
         // result buffer.
-        let mut auto_exposure_pass = crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device);
+        let mut auto_exposure_pass =
+            crate::pass::auto_exposure::AutoExposurePass::new(&ctx.device, &shaders);
 
         // Phase 24J: acceleration structures. Constructed even when the device
         // lacks ray query — the pass then does nothing, which keeps the call
@@ -497,6 +522,7 @@ impl SomniumRenderer {
         // Phase 24K: reservoir-based direct lighting, on top of 24J.
         let restir_pass = crate::pass::restir::RestirPass::new(
             &ctx.device,
+            &shaders,
             raytrace_pass.supported(),
             ctx.config.width,
             ctx.config.height,
@@ -507,6 +533,7 @@ impl SomniumRenderer {
         // the same scene bindings the shading pass rasterises through.
         let restir_gi_pass = crate::pass::restir_gi::RestirGiPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
@@ -514,20 +541,26 @@ impl SomniumRenderer {
         );
         let lighting_extra_pass = crate::pass::lighting_extra::LightingExtraPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
             ctx.config.height,
         );
-        let clipmap_pass =
-            crate::pass::terrain_clipmap::TerrainClipmapPass::new(&ctx.device, &global_pool.layout);
+        let ddgi_pass = crate::pass::ddgi::DdgiPass::new(&ctx.device, &shaders);
+        let clipmap_pass = crate::pass::terrain_clipmap::TerrainClipmapPass::new(
+            &ctx.device,
+            &shaders,
+            &global_pool.layout,
+        );
 
         let rt_debug_pass =
-            crate::pass::raytrace::RtDebugPass::new(&ctx.device, raytrace_pass.layout());
+            crate::pass::raytrace::RtDebugPass::new(&ctx.device, &shaders, raytrace_pass.layout());
 
         // Phase 24Z: depth of field, driven by the same aperture as exposure.
         let dof_pass = crate::pass::dof::DofPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -536,6 +569,7 @@ impl SomniumRenderer {
         // Phase 24T: built before the post-process pass, which samples its result.
         let bloom_pass = crate::pass::bloom::BloomPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -544,6 +578,7 @@ impl SomniumRenderer {
         // Phase 11.5K: Post-process pass owns the Rgba16Float HDR render target.
         let postprocess_pass = PostProcessPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             ctx.config.width,
             ctx.config.height,
@@ -553,12 +588,17 @@ impl SomniumRenderer {
         auto_exposure_pass.resize(&ctx.device, &postprocess_pass.hdr_view);
 
         // Phase 24I: screen-space occlusion, consumed by the shading pass.
-        let gtao_pass =
-            crate::pass::gtao::GtaoPass::new(&ctx.device, ctx.config.width, ctx.config.height);
+        let gtao_pass = crate::pass::gtao::GtaoPass::new(
+            &ctx.device,
+            &shaders,
+            ctx.config.width,
+            ctx.config.height,
+        );
 
         // Phase 24F: resolves the jittered HDR frames into a stable image.
         let taa_pass = crate::pass::taa::TaaPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
@@ -568,6 +608,7 @@ impl SomniumRenderer {
         // Phase 11.5B: Transform gizmo (renders to swapchain after tone-mapping).
         let gizmo_pass = GizmoPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &global_pool.view_proj_buffer,
         );
@@ -575,16 +616,18 @@ impl SomniumRenderer {
         // Phase 13E: light gizmos (drawn to the swapchain like the transform gizmo).
         let light_gizmo_pass = crate::pass::light_gizmo::LightGizmoPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &global_pool.view_proj_buffer,
         );
 
         // Phase 11.5J: GPU billboard particle pass.
-        let particle_pass = ParticlePass::new(&ctx.device, ctx.config.format);
+        let particle_pass = ParticlePass::new(&ctx.device, &shaders, ctx.config.format);
 
         // Phase 11.5I: Selection outline (stencil-based, renders to swapchain).
         let outline_pass = OutlinePass::new(
             &ctx.device,
+            &shaders,
             ctx.config.format,
             &geometry.vertex_buffer,
             &geometry.index_buffer,
@@ -597,36 +640,39 @@ impl SomniumRenderer {
         let shadow_resources = ShadowMapResources::new(&ctx.device);
 
         // Phase 11B: Depth-only shadow pass (4 cascades into the atlas).
-        let shadow_pass = ShadowPass::new(&ctx.device, &ctx.queue, &global_pool.layout);
+        let shadow_pass = ShadowPass::new(&ctx.device, &shaders, &ctx.queue, &global_pool.layout);
 
         // Phase 19: build the environment cubemap before the shading pass, which
         // binds it. Contents are generated on the first frame (and whenever the
         // sun changes), not here.
         // Phase 24C: the atmosphere LUTs must exist before the IBL pass, which
         // binds them to ray-march the sky into the environment cubemap.
-        let atmosphere_pass = crate::pass::atmosphere::AtmospherePass::new(&ctx.device);
-        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &atmosphere_pass);
+        let atmosphere_pass = crate::pass::atmosphere::AtmospherePass::new(&ctx.device, &shaders);
+        let ibl_pass = crate::pass::ibl::IblPass::new(&ctx.device, &shaders, &atmosphere_pass);
 
         let vis_pass = VisibilityBufferPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.width,
             ctx.config.height,
             &global_pool.layout,
         );
         let hiz_pass = crate::pass::hiz::HiZPass::new(
             &ctx.device,
+            &shaders,
             &ctx.queue,
             ctx.config.width,
             ctx.config.height,
             &vis_pass.depth_view,
         );
-        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device);
+        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders);
 
         // Phase CONTROL-M. Built before the shading pass because shading binds
         // its cloud-shadow field, and the field must exist before the bind
         // group that names it.
         let cloud_pass = crate::pass::clouds::CloudPass::new(
             &ctx.device,
+            &shaders,
             ctx.config.width,
             ctx.config.height,
         );
@@ -637,6 +683,7 @@ impl SomniumRenderer {
 
         let shading_pass = ShadingPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             HDR_FORMAT, // shading writes to the Rgba16Float HDR texture
             &vis_pass.view,
@@ -656,7 +703,7 @@ impl SomniumRenderer {
             &volumetric_pass.sampler,
             lighting_extra_pass.aux_view(),
             lighting_extra_pass.volume_view(),
-            lighting_extra_pass.sh_buffer(),
+            ddgi_pass.sh_buffer(),
             &cloud_pass.shadow_view,
             &cloud_pass.shadow_params,
             &decal_grid,
@@ -666,6 +713,7 @@ impl SomniumRenderer {
         // needs the global bind group layout and the environment cubemap.
         let transparent_pass = crate::pass::transparent::TransparentPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             &global_pool.layout,
             &ibl_pass.cube_view,
@@ -680,12 +728,14 @@ impl SomniumRenderer {
 
         let water_pass = crate::pass::water::WaterPass::new(
             &ctx.device,
+            &shaders,
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
         );
         let water_reflection_pass = crate::pass::water_reflection::WaterReflectionPass::new(
             &ctx.device,
+            &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
             ctx.config.width,
@@ -698,12 +748,14 @@ impl SomniumRenderer {
                 &water_pass.tex_bind_group_layout,
                 water_pass.spectrum.views(),
             ));
-        let underwater_pass = crate::pass::underwater::UnderwaterPass::new(&ctx.device, HDR_FORMAT);
+        let underwater_pass =
+            crate::pass::underwater::UnderwaterPass::new(&ctx.device, &shaders, HDR_FORMAT);
 
         // Phase 24AD. Built here rather than inside the struct literal because
         // it borrows the visibility pass's depth view, which the literal moves.
         let velocity_pass = crate::pass::velocity::VelocityPass::new(
             &ctx.device,
+            &shaders,
             &vis_pass.depth_view,
             ctx.config.width,
             ctx.config.height,
@@ -711,11 +763,19 @@ impl SomniumRenderer {
 
         Self {
             global_pool,
-            materials,
             vis_pass,
             shading_pass,
             shadow_resources,
             shadow_pass,
+            directional_shadow_policy: crate::shadow::virtual_map::ShadowLightPolicy::default(),
+            virtual_shadow_cache: crate::shadow::virtual_map::VirtualShadowMap::new(
+                crate::shadow::virtual_map::VirtualShadowConfig::default(),
+            )
+            .expect("built-in virtual shadow configuration must be valid"),
+            virtual_shadow_gpu: None,
+            virtual_shadow_work: Vec::with_capacity(64),
+            virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness::default(),
+            virtual_shadow_caster_content_revision: 0,
             geometry,
             materials_pool,
             texture_pool,
@@ -746,28 +806,33 @@ impl SomniumRenderer {
             restir_pass,
             restir_gi_pass,
             lighting_extra_pass,
+            ddgi_pass,
             water_reflection_pass,
             velocity_pass,
             motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
                 &ctx.device,
+                &shaders,
                 HDR_FORMAT,
                 ctx.config.width,
                 ctx.config.height,
             ),
             cas_pass: crate::pass::cas::CasPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
             ),
             present_pass: crate::pass::present::PresentPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
             ),
             fsr_pass: crate::pass::fsr::FsrPass::new(
                 &ctx.device,
+                &shaders,
                 &ctx.queue,
                 ctx.config.width,
                 ctx.config.height,
@@ -797,6 +862,7 @@ impl SomniumRenderer {
             chromatic_aberration: 0.0,
             fxaa_pass: crate::pass::fxaa::FxaaPass::new(
                 &ctx.device,
+                &shaders,
                 ctx.config.format,
                 ctx.config.width,
                 ctx.config.height,
@@ -809,6 +875,7 @@ impl SomniumRenderer {
             light_gizmo_queue: Vec::new(),
             light_gizmos_enabled: true,
             editor_overlays_enabled: true,
+            game_ui_empty_warned: false,
             outline_pass,
             outline_entity: None,
             particle_pass,
@@ -829,7 +896,7 @@ impl SomniumRenderer {
             cull_stats: std::env::var("SOMNIUM_CULL_STATS").is_ok_and(|v| v == "1"),
             cull_stats_buffers: None,
             occlusion_off: std::env::var("SOMNIUM_NO_OCCLUSION").is_ok_and(|v| v == "1"),
-            cull_pass: crate::pass::cull::CullPass::new(&ctx.device),
+            cull_pass: crate::pass::cull::CullPass::new(&ctx.device, &shaders),
             cull_aabbs: Vec::with_capacity(256),
             cluster_args: Vec::with_capacity(256),
             instanced_counts: std::collections::HashMap::new(),
@@ -879,6 +946,9 @@ impl SomniumRenderer {
 
             water_textures_bind_group,
             water_bodies: Default::default(),
+            // Last, deliberately: the fields above borrow it, and a struct
+            // literal evaluates its fields in written order.
+            shaders,
         }
     }
 
@@ -1255,6 +1325,54 @@ impl SomniumRenderer {
         self.light_color = color;
     }
 
+    /// Preserve the per-light authored shadow choice.
+    ///
+    /// `Virtual` resolves to the safe CSM branch until
+    /// [`Self::directional_shadow_technique`] reports every GPU stage ready.
+    pub fn set_directional_shadow_policy(
+        &mut self,
+        policy: crate::shadow::virtual_map::ShadowLightPolicy,
+    ) {
+        self.directional_shadow_policy = policy;
+    }
+
+    /// Lazily allocate the physical page pool and shader-visible page table.
+    /// A CSM-only scene never calls this and pays no VSM memory cost.
+    pub fn enable_virtual_shadow_resources(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        config: crate::shadow::virtual_map::VirtualShadowConfig,
+    ) -> Result<(), &'static str> {
+        let cache = crate::shadow::virtual_map::VirtualShadowMap::new(config)?;
+        let gpu = crate::shadow::virtual_map::VirtualShadowGpu::new(device, queue, config)?;
+        self.shading_pass
+            .set_virtual_shadow_resources(device, &self.vis_pass.view, &gpu);
+        self.water_pass.set_virtual_shadow_resources(&gpu);
+        self.virtual_shadow_cache = cache;
+        self.virtual_shadow_gpu = Some(gpu);
+        self.virtual_shadow_readiness = crate::shadow::virtual_map::VirtualShadowReadiness {
+            gpu_resources: true,
+            page_raster: true,
+            shading_sample: true,
+        };
+        Ok(())
+    }
+
+    /// Effective production branch, after capability/completeness fallback.
+    #[must_use]
+    pub fn directional_shadow_technique(&self) -> crate::shadow::virtual_map::ShadowTechnique {
+        self.directional_shadow_policy
+            .effective(self.virtual_shadow_readiness)
+    }
+
+    /// Invalidate cached VSM depth after an in-place caster geometry edit.
+    /// Transform/index/range changes are detected automatically each frame.
+    pub fn invalidate_virtual_shadow_casters(&mut self) {
+        self.virtual_shadow_caster_content_revision =
+            self.virtual_shadow_caster_content_revision.wrapping_add(1);
+    }
+
     /// Add a local light (Point or Spot) for this frame (Phase 13C).
     pub fn submit_local_light(&mut self, light: crate::cluster::GpuLocalLight) {
         if self.local_lights.len() < crate::cluster::MAX_LOCAL_LIGHTS {
@@ -1494,7 +1612,9 @@ impl SomniumRenderer {
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
             {
-                let data = slice.get_mapped_range();
+                let data = slice
+                    .get_mapped_range()
+                    .expect("indirect readback mapped by the poll above");
                 // DrawIndirectArgs: vertex_count, instance_count, first_vertex,
                 // first_instance — instance_count is the second u32.
                 for a in data.chunks_exact(16) {
@@ -1610,8 +1730,13 @@ impl SomniumRenderer {
 
     fn resize_targets(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.vis_pass
-                .resize(&ctx.device, width, height, &self.global_pool.layout);
+            self.vis_pass.resize(
+                &ctx.device,
+                &self.shaders,
+                width,
+                height,
+                &self.global_pool.layout,
+            );
             // Bloom must resize first: PostProcess keeps its result view in the
             // final bind group, and the old view becomes stale here.
             self.bloom_pass.resize(&ctx.device, width, height);
@@ -1910,45 +2035,59 @@ impl SomniumRenderer {
         });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-        for layer in 0..hero {
-            let i = layer as usize;
-            ids.albedo[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.albedo,
-                    layer,
-                    "Terrain Layer Albedo+Height",
-                ),
-            ) as i32;
-            ids.surface[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.surface,
-                    layer,
-                    "Terrain Layer Surface",
-                ),
-            ) as i32;
-        }
-        if !hero_bank_only {
-            for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
-                let i = (hero + layer) as usize;
+        // Virtual mode deliberately leaves every legacy layer id at -1. The
+        // 4x4 arrays only keep the struct/fallback shape valid; publishing
+        // them would make live shading sample black placeholders instead of
+        // the mean-colour cold-cache fallback.
+        if terrain.layer_textures.virtual_texture.is_none() {
+            for layer in 0..hero {
+                let i = layer as usize;
                 ids.albedo[i] = self.add_texture(
                     ctx,
                     layer_view(
-                        &terrain.layer_textures.albedo_extra,
+                        &terrain.layer_textures.albedo,
                         layer,
-                        "Terrain Layer Albedo+Height Extra",
+                        "Terrain Layer Albedo+Height",
                     ),
                 ) as i32;
                 ids.surface[i] = self.add_texture(
                     ctx,
                     layer_view(
-                        &terrain.layer_textures.surface_extra,
+                        &terrain.layer_textures.surface,
                         layer,
-                        "Terrain Layer Surface Extra",
+                        "Terrain Layer Surface",
                     ),
                 ) as i32;
             }
+            if !hero_bank_only {
+                for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
+                    let i = (hero + layer) as usize;
+                    ids.albedo[i] = self.add_texture(
+                        ctx,
+                        layer_view(
+                            &terrain.layer_textures.albedo_extra,
+                            layer,
+                            "Terrain Layer Albedo+Height Extra",
+                        ),
+                    ) as i32;
+                    ids.surface[i] = self.add_texture(
+                        ctx,
+                        layer_view(
+                            &terrain.layer_textures.surface_extra,
+                            layer,
+                            "Terrain Layer Surface Extra",
+                        ),
+                    ) as i32;
+                }
+            }
+        }
+        if let Some(gpu) = &terrain.layer_textures.virtual_texture {
+            ids.virtual_texture = [
+                self.add_texture(ctx, gpu.albedo_view.clone()) as i32,
+                self.add_texture(ctx, gpu.surface_view.clone()) as i32,
+                self.add_texture(ctx, gpu.page_table_view.clone()) as i32,
+                gpu.shader_atlas_size(),
+            ];
         }
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
@@ -2035,7 +2174,103 @@ impl SomniumRenderer {
     }
 
     /// Execute the rendering pipeline for the current frame.
+    /// Poll for edited shader files and swap in what compiles (MORROWIND-C).
+    ///
+    /// Debug builds only — `Shaders::poll_reload` is a no-op in release, so the
+    /// call costs one branch in a shipped build.
+    ///
+    /// Returns a message for the toast when something happened, and `None` when
+    /// nothing did. Three rules, in order of how badly each is usually got
+    /// wrong:
+    ///
+    /// 1. **A broken edit shows naga's diagnostic.** Not "shader compilation
+    ///    failed" — the location and the reason, which is the only useful thing
+    ///    in a shader failure and the difference between a two-minute fix and
+    ///    an afternoon.
+    /// 2. **A broken edit changes nothing.** The old source stays registered,
+    ///    the old pipelines stay bound, and the next frame draws exactly what
+    ///    the last one did. Never a black screen, never a silent revert.
+    /// 3. **A good edit swaps atomically.** The new module and pipeline are
+    ///    built before either replaces its predecessor.
+    ///
+    /// Coverage is honest and partial: the shading pass rebuilds, because it is
+    /// the acceptance case and `brdf.wgsl` composes into it. Every other pass
+    /// reports its reload and keeps its existing pipeline until it grows a
+    /// `reload` of its own — `ShadingPass::reload` is the pattern, and the
+    /// message says which passes are waiting so the gap is visible rather than
+    /// mistaken for a shader that did not take.
+    pub fn reload_shaders(&mut self, ctx: &RenderContext) -> Option<String> {
+        let outcome = self.shaders.poll_reload(|module, source| {
+            // Parse only. Full validation needs capability flags that mirror the
+            // device's, and a parse failure is the overwhelming majority of what
+            // a mid-edit save produces; a variant that parses and fails
+            // validation is caught at `create_render_pipeline` below and leaves
+            // the old pipeline in place either way.
+            naga::front::wgsl::parse_str(source)
+                .map(|_| ())
+                .map_err(|error| format!("{module}: {}", error.emit_to_string(source)))
+        });
+
+        if outcome.is_empty() {
+            return None;
+        }
+        if !outcome.failures.is_empty() {
+            for failure in &outcome.failures {
+                tracing::warn!("shader reload rejected: {failure}");
+            }
+            return Some(outcome.summary());
+        }
+
+        let mut rebuilt = 0usize;
+        let shading_dirty = outcome
+            .invalidated
+            .iter()
+            .any(|key| key.module == self.shaders.id("shading.wgsl"));
+        if shading_dirty {
+            match self.shading_pass.reload(&ctx.device, &self.shaders) {
+                Ok(()) => rebuilt += 1,
+                Err(error) => {
+                    tracing::warn!("shading pipeline rebuild failed: {error}");
+                    return Some(format!("Shader reload failed - {error}"));
+                }
+            }
+        }
+
+        let pending = outcome.invalidated.len() - rebuilt;
+        let mut message = format!(
+            "Reloaded {} shader module(s), {rebuilt} pipeline(s) rebuilt",
+            outcome.reloaded.len()
+        );
+        if pending > 0 {
+            message.push_str(&format!(
+                " ({pending} variant(s) awaiting a pass-side reload)"
+            ));
+        }
+        tracing::info!("{message}");
+        Some(message)
+    }
+
     pub fn render(&mut self, ctx: &RenderContext, ui: &mut UiManager, window: &Window) {
+        self.render_with_game_ui(ctx, ui, window, None);
+    }
+
+    /// The frame, with a game's UI in it.
+    ///
+    /// MORROWIND-E2. `render` is this with `None`, kept so a caller that has no
+    /// game UI — a test, a capture harness — does not have to say so.
+    ///
+    /// The callback runs at pass 9, **before** the editor shell: a HUD belongs
+    /// under the editor's panels, and in a shipped build there is no editor
+    /// shell for it to be under. In immersive mode the editor's `end_frame` is
+    /// skipped entirely and the game's UI is the only UI, which is the same
+    /// code path rather than a second one.
+    pub fn render_with_game_ui(
+        &mut self,
+        ctx: &RenderContext,
+        ui: &mut UiManager,
+        window: &Window,
+        game_ui: Option<&mut dyn somnium_ui::GameUi>,
+    ) {
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
@@ -2561,15 +2796,48 @@ impl SomniumRenderer {
         // them reach the atlas. Phase CR-E also drops casters that miss every
         // cascade volume. See `rebuild_shadow_casters`.
         self.rebuild_shadow_casters();
+        self.prepare_virtual_shadow_cache(&ctx.queue, &cascades);
         self.profiler.counters.shadow_casters =
             u32::try_from(self.shadow_caster_scratch.len()).unwrap_or(u32::MAX);
+        if !self.virtual_shadow_work.is_empty() {
+            let clear_atlas = self
+                .virtual_shadow_gpu
+                .as_mut()
+                .is_some_and(crate::shadow::virtual_map::VirtualShadowGpu::take_full_clear);
+            self.profiler.begin(&mut encoder, "VSM Pages");
+            self.shadow_pass.record_virtual(
+                &ctx.queue,
+                &mut encoder,
+                self.virtual_shadow_gpu
+                    .as_ref()
+                    .expect("VSM work requires physical resources"),
+                &self.global_pool.bind_group,
+                &self.shadow_caster_scratch,
+                &self.virtual_shadow_work,
+                clear_atlas,
+            );
+            self.profiler.end(&mut encoder);
+        }
         self.profiler.begin(&mut encoder, "Shadows");
-        self.shadow_pass.record(
-            &mut encoder,
-            &self.shadow_resources.atlas_view,
-            &self.global_pool.bind_group,
-            &self.shadow_caster_scratch,
-        );
+        match self.directional_shadow_technique() {
+            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_pass.record(
+                &mut encoder,
+                &self.shadow_resources.atlas_view,
+                &self.global_pool.bind_group,
+                &self.shadow_caster_scratch,
+            ),
+            crate::shadow::virtual_map::ShadowTechnique::Virtual => {
+                // Keep a coarse CSM render as the authored policy's
+                // last-resort page-miss fallback. Sparse page raster happened
+                // above; opaque, terrain, and water consumers sample it later.
+                self.shadow_pass.record(
+                    &mut encoder,
+                    &self.shadow_resources.atlas_view,
+                    &self.global_pool.bind_group,
+                    &self.shadow_caster_scratch,
+                );
+            }
+        }
         self.profiler.end(&mut encoder);
 
         // ── 5.5 Phase 15B/15E2: two-phase GPU instance culling ───────────────
@@ -2739,6 +3007,16 @@ impl SomniumRenderer {
                         local_min: min,
                         local_max: max,
                         vertex_offset: cmd.vertex_offset,
+                        base_color: self.materials_pool.get(cmd.material_id).map_or(
+                            [0.5; 3],
+                            |material| {
+                                [
+                                    material.base_color[0],
+                                    material.base_color[1],
+                                    material.base_color[2],
+                                ]
+                            },
+                        ),
                         brick: self.geometry.mesh_sdf(cmd.vertex_offset),
                     })
                 })
@@ -2752,6 +3030,11 @@ impl SomniumRenderer {
                 self.traced_scene_revision()
             } else {
                 0
+            };
+            let sdf_scene_revision = if self.ddgi_pass.enabled() {
+                self.sdf_scene_revision()
+            } else {
+                traced_scene_revision
             };
             self.lighting_extra_pass.record(
                 &ctx.device,
@@ -2770,6 +3053,7 @@ impl SomniumRenderer {
                 self.view_matrix,
                 self.proj_matrix,
                 traced_scene_revision,
+                sdf_scene_revision,
                 self.camera_pos,
                 self.render_width,
                 self.render_height,
@@ -2777,8 +3061,33 @@ impl SomniumRenderer {
             );
             self.profiler.end(&mut encoder);
             self.profiler.cpu_end();
+
+            // MORROWIND-AB: this pass is deliberately outside the ray-query
+            // guard. It consumes the portable software SDF populated above.
+            self.profiler.begin(&mut encoder, "DDGI");
+            self.ddgi_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                self.lighting_extra_pass.volume_view(),
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                self.camera_pos,
+                self.light_direction,
+                self.light_color,
+                self.lighting_extra_pass
+                    .sdf_scene_revision()
+                    .unwrap_or(sdf_scene_revision),
+            );
+            self.profiler.end(&mut encoder);
+
+            let mut lighting_params = self.lighting_extra_pass.shading_params();
+            // The existing SH gather interprets z/w as cell size and
+            // half-grid extent. Publish the actual DDGI lattice rather than
+            // the 64^3 SDF volume's dimensions.
+            self.ddgi_pass.publish_shading_lattice(&mut lighting_params);
             self.shading_pass
-                .set_lighting_extra(&ctx.queue, self.lighting_extra_pass.shading_params());
+                .set_lighting_extra(&ctx.queue, lighting_params);
         }
 
         // Outside the ray-tracing guards on purpose: a pass that stopped running
@@ -2890,7 +3199,7 @@ impl SomniumRenderer {
             let Some(terrain) = self.terrains.get(i) else {
                 continue;
             };
-            if !self.clipmaps[i].has_dirty() {
+            if !self.clipmaps[i].has_dirty() && !terrain.has_pending_virtual_texture() {
                 continue;
             }
             work.push((i, terrain.terrain_index));
@@ -2900,6 +3209,19 @@ impl SomniumRenderer {
             for (i, terrain_index) in work {
                 let detail = self.clipmaps[i].take_jobs(true, &mut budget);
                 let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                let mut feedback_jobs = Vec::with_capacity(detail.len() + macro_jobs.len());
+                feedback_jobs.extend_from_slice(&detail);
+                feedback_jobs.extend_from_slice(&macro_jobs);
+                let vt_uploaded = self.terrains.get_mut(i).is_some_and(|terrain| {
+                    terrain.feedback_virtual_texture(&ctx.queue, &feedback_jobs)
+                });
+                let virtual_texture = self
+                    .terrains
+                    .get(i)
+                    .filter(|terrain| terrain.virtual_texture_enabled)
+                    .map_or([-1, -1, -1, 0], |terrain| {
+                        terrain.texture_ids.virtual_texture
+                    });
                 if let Some(terrain) = self.terrains.get(i) {
                     let model = self
                         .terrain_queue
@@ -2922,6 +3244,7 @@ impl SomniumRenderer {
                     terrain_index,
                     &detail,
                     true,
+                    virtual_texture,
                 );
                 self.clipmap_pass.record(
                     &ctx.device,
@@ -2932,7 +3255,14 @@ impl SomniumRenderer {
                     terrain_index,
                     &macro_jobs,
                     false,
+                    virtual_texture,
                 );
+                // A later feedback batch can replace mean/ancestor samples
+                // baked by an earlier batch. Recompose after the current jobs
+                // have rendered so page arrival cannot leave stale texels.
+                if vt_uploaded {
+                    self.clipmaps[i].invalidate();
+                }
             }
         }
         self.profiler.end(&mut encoder);
@@ -3884,6 +4214,30 @@ impl SomniumRenderer {
 
         // ── 9. UI Overlay ────────────────────────────────────────────────────
         self.profiler.begin(&mut encoder, "UI");
+        // MORROWIND-E2. The game first, the editor over it. A separate profiler
+        // zone on purpose: a HUD that costs two milliseconds should be visible
+        // as a HUD that costs two milliseconds, not as an editor that got
+        // slower.
+        if let Some(game_ui) = game_ui {
+            self.profiler.begin(&mut encoder, "Game UI");
+            let mut frame = somnium_ui::GameUiFrame::new(
+                window,
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                ctx.config.format,
+            );
+            game_ui.draw_ui(&mut frame);
+            let drawn = frame.drawn();
+            self.profiler.end(&mut encoder); // Game UI
+            if drawn == 0 && !self.game_ui_empty_warned {
+                self.game_ui_empty_warned = true;
+                tracing::warn!(
+                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
+                );
+            }
+        }
         if !ui.is_immersive() {
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
         }
@@ -4028,7 +4382,10 @@ impl SomniumRenderer {
                 }
             }
         }
-        output.present();
+        // wgpu 30 moved presentation from the surface texture to the queue,
+        // so the present is ordered against submitted work explicitly rather
+        // than implicitly by the texture's lifetime.
+        ctx.queue.present(output);
 
         self.clear_frame_queues();
     }
@@ -4092,6 +4449,31 @@ impl SomniumRenderer {
         hash
     }
 
+    /// Revision of geometry/material inputs that require rebuilding the SDF.
+    /// Lighting is deliberately absent: DDGI handles light changes in probe
+    /// history, while rebuilding 64³ geometry for a moving sun is pure waste.
+    /// The SDF pass waits for a changed revision to settle for one frame, so a
+    /// continuous animation does not force a 64³ CPU rebuild every frame.
+    fn sdf_scene_revision(&self) -> u64 {
+        fn mix(hash: &mut u64, value: u64) {
+            *hash ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        mix(&mut hash, self.virtual_shadow_caster_content_revision);
+        mix(&mut hash, self.materials_pool.revision());
+        for cmd in &self.draw_queue {
+            mix(&mut hash, u64::from(cmd.vertex_offset));
+            mix(&mut hash, u64::from(cmd.index_offset));
+            mix(&mut hash, u64::from(cmd.index_count));
+            mix(&mut hash, u64::from(cmd.material_id));
+            for value in cmd.transform.to_cols_array() {
+                mix(&mut hash, u64::from(value.to_bits()));
+            }
+        }
+        hash
+    }
+
     /// Which draws are worth rendering into the shadow atlas this frame.
     ///
     /// # Why this exists
@@ -4124,15 +4506,104 @@ impl SomniumRenderer {
     ///   which is why UE uses it in place of a per-asset shadow distance.
     ///
     /// UE applies it to whole-scene (CSM) shadows only and skips it for virtual
-    /// shadow maps, which need the draw for GPU-side caching. Somnium has only
-    /// the cascade path, so it applies everywhere.
+    /// shadow maps, which need the draw for GPU-side caching. Somnium follows
+    /// that split now: the measured CSM default keeps the threshold, while an
+    /// effective VSM light retains every caster for its demanded pages (and
+    /// therefore for the coarse CSM miss fallback rendered in the same frame).
     ///
     /// Phase CR-E: a caster that fails the **camera** frustum can still shadow
     /// into view. Those live in `shadow_only_queue` with instance indices after
     /// the vis draws. This method cascade-frustum-culls both lists; it never
     /// camera-culls a caster.
+    /// Build the software-sparse page plan from receivers that survived the
+    /// main-view submission.  This is screen-space demand at draw granularity:
+    /// off-screen objects never request pages, and very large queues are
+    /// deterministically reduced to 4k receiver samples before neighbourhood
+    /// expansion. A later depth-reduction compute pass can feed the same cache
+    /// at pixel-tile granularity without changing its allocation contract.
+    fn prepare_virtual_shadow_cache(
+        &mut self,
+        queue: &wgpu::Queue,
+        cascades: &[crate::shadow::cascade::CascadeData; crate::shadow::NUM_CASCADES],
+    ) {
+        use crate::shadow::virtual_map::{DirectionalClipmap, ShadowTechnique};
+
+        self.virtual_shadow_work.clear();
+        self.profiler.counters.virtual_shadow_pages = 0;
+        self.profiler.counters.virtual_shadow_resident = 0;
+        if self.directional_shadow_policy.technique != ShadowTechnique::Virtual
+            || self.virtual_shadow_gpu.is_none()
+        {
+            if let Some(gpu) = &self.virtual_shadow_gpu {
+                gpu.set_enabled(queue, false, self.directional_shadow_policy.csm_fallback);
+            }
+            return;
+        }
+
+        let pages_per_axis = self.virtual_shadow_cache.config().pages_per_axis();
+        let clipmaps =
+            std::array::from_fn::<_, { crate::shadow::NUM_CASCADES }, _>(|i| DirectionalClipmap {
+                view_proj: cascades[i].view_proj,
+                split_depth: cascades[i].split_depth,
+                pages_per_axis,
+            });
+        let light_revision = virtual_shadow_light_revision(self.light_direction, cascades);
+        let caster_revision = virtual_shadow_caster_revision(
+            self.draw_queue.iter().chain(self.shadow_only_queue.iter()),
+            self.virtual_shadow_caster_content_revision,
+        );
+        self.virtual_shadow_cache
+            .begin_frame(light_revision, caster_revision);
+
+        let stride = (self.draw_queue.len() / 4_096).max(1);
+        for command in self.draw_queue.iter().step_by(stride) {
+            // Demand is receiver-driven. A mesh that does not cast can still
+            // receive a shadow, so `casts_shadow` must not suppress its page.
+            let world = command.transform.transform_point3(glam::Vec3::ZERO);
+            let view_depth = -(self.view_matrix * world.extend(1.0)).z;
+            if let Some(page) = self.virtual_shadow_cache.request_screen_sample(
+                self.directional_shadow_policy.light_id,
+                world,
+                view_depth.max(0.0),
+                &clipmaps,
+            ) {
+                self.virtual_shadow_cache.request_neighbourhood(page, 1);
+            }
+        }
+        // Water shades in its forward pass, so it is not represented in the
+        // opaque draw queue above. Demand its receiver pages explicitly or a
+        // lake would always take the CSM fallback while its shore used VSM.
+        for (_, transform, _, _, _, _) in &self.water_queue {
+            let world = transform.transform_point3(glam::Vec3::ZERO);
+            let view_depth = -(self.view_matrix * world.extend(1.0)).z;
+            if let Some(page) = self.virtual_shadow_cache.request_screen_sample(
+                self.directional_shadow_policy.light_id,
+                world,
+                view_depth.max(0.0),
+                &clipmaps,
+            ) {
+                self.virtual_shadow_cache.request_neighbourhood(page, 1);
+            }
+        }
+        self.virtual_shadow_work = self.virtual_shadow_cache.resolve(&clipmaps);
+        self.profiler.counters.virtual_shadow_pages =
+            u32::try_from(self.virtual_shadow_work.len()).unwrap_or(u32::MAX);
+        self.profiler.counters.virtual_shadow_resident = self.virtual_shadow_cache.stats().resident;
+        if let Some(gpu) = &self.virtual_shadow_gpu {
+            gpu.upload_page_table(
+                queue,
+                &self.virtual_shadow_cache,
+                self.directional_shadow_policy.light_id,
+            );
+            gpu.set_enabled(queue, true, self.directional_shadow_policy.csm_fallback);
+        }
+    }
+
     fn rebuild_shadow_casters(&mut self) {
-        let threshold = self.shadow_radius_threshold;
+        let threshold = match self.directional_shadow_technique() {
+            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_radius_threshold,
+            crate::shadow::virtual_map::ShadowTechnique::Virtual => 0.0,
+        };
         let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
@@ -4166,6 +4637,49 @@ impl SomniumRenderer {
             );
         }
     }
+}
+
+fn virtual_shadow_light_revision(
+    direction: glam::Vec3,
+    cascades: &[crate::shadow::cascade::CascadeData; crate::shadow::NUM_CASCADES],
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |word: u32| {
+        hash ^= u64::from(word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for value in direction.to_array() {
+        mix(value.to_bits());
+    }
+    for cascade in cascades {
+        for value in cascade.view_proj.to_cols_array() {
+            mix(value.to_bits());
+        }
+        mix(cascade.split_depth.to_bits());
+    }
+    hash
+}
+
+fn virtual_shadow_caster_revision<'a>(
+    commands: impl IntoIterator<Item = &'a DrawCommand>,
+    content_revision: u64,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ content_revision;
+    let mut mix = |word: u32| {
+        hash ^= u64::from(word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for command in commands {
+        mix(command.vertex_offset);
+        mix(command.index_offset);
+        mix(command.index_count);
+        mix(command.material_id);
+        mix(u32::from(command.casts_shadow));
+        for value in command.transform.to_cols_array() {
+            mix(value.to_bits());
+        }
+    }
+    hash
 }
 
 /// Frozen per-frame instance-buffer partition.

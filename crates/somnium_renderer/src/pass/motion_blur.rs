@@ -35,6 +35,7 @@ pub struct MotionBlurPass {
 impl MotionBlurPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
@@ -83,7 +84,7 @@ impl MotionBlurPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Motion Blur Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/motion_blur.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("motion_blur.wgsl").into()),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Motion Blur PL"),

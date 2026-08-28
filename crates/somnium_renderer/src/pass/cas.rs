@@ -39,6 +39,7 @@ pub struct CasPass {
 impl CasPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
@@ -86,7 +87,7 @@ impl CasPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("CAS Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/cas.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("cas.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

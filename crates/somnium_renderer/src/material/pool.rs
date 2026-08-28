@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 
 /// Material structure that matches the GPU layout in shading.wgsl.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 /// **The WGSL mirror of this struct must not use `vec3<f32>`.** WGSL aligns a
 /// vec3 to 16 bytes; Rust's `repr(C)` aligns `[f32; 3]` to 4. `emissive` as a
 /// vec3 in the shader therefore sat at offset 64 with a 96-byte stride, against
@@ -162,6 +162,9 @@ impl MaterialPool {
         let Some(slot) = self.materials.get_mut(id as usize) else {
             return;
         };
+        if *slot == material {
+            return;
+        }
         *slot = material;
         self.revision = self.revision.wrapping_add(1);
         queue.write_buffer(

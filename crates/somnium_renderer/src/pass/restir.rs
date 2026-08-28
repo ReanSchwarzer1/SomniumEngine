@@ -45,7 +45,13 @@ pub struct RestirPass {
 }
 
 impl RestirPass {
-    pub fn new(device: &wgpu::Device, supported: bool, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        supported: bool,
+        width: u32,
+        height: u32,
+    ) -> Self {
         if !supported {
             // The visibility target is still allocated. wgpu zero-fills a new
             // texture, and alpha 0 is exactly the signal shading reads as "no
@@ -72,7 +78,7 @@ impl RestirPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("restir_di.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/restir_di.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("restir_di.wgsl").into()),
         });
 
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {

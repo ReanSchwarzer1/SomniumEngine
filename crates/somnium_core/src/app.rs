@@ -1,3 +1,5 @@
+//! Application lifecycle and editor/runtime orchestration.
+
 use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
@@ -26,15 +28,15 @@ use crate::editor_commands::{
 };
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
-use crate::jobs::{JobHandle, JobPriority, JobRegistry};
+use crate::jobs::{JobHandle, JobPriority, JobSystem};
 use crate::time::TimeState;
 use crate::{
     CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
     MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
-    TerrainComponent, Transform, VoxelTerrainComponent, WaterComponent, WorldTransform,
-    look_rotation_neg_z, simulate_particles,
+    TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
-use somnium_ecs::World;
+use somnium_ecs::{Entity, World};
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
 
 /// Maintain the scene-wide post-process component as an actual singleton.
@@ -187,7 +189,10 @@ mod shortcut_input_tests {
     #[test]
     fn an_unmodified_shortcut_stands_down_during_a_play_session() {
         let none = Modifiers::default();
-        assert_eq!(shortcut_action_for(KeyCode::KeyS, none, false), Some(CommandAction::SetGizmoMode(2)));
+        assert_eq!(
+            shortcut_action_for(KeyCode::KeyS, none, false),
+            Some(CommandAction::SetGizmoMode(2))
+        );
         assert_eq!(shortcut_action_for(KeyCode::KeyS, none, true), None);
     }
 
@@ -439,13 +444,77 @@ pub trait GameApp {
     fn on_fixed_update(&mut self, _ctx: &mut EngineContext) {}
 
     /// Called every frame for UI and debug rendering.
+    ///
+    /// This is where a game **builds** its widget trees, because it is the last
+    /// callback that carries the whole [`EngineContext`]. Drawing them is
+    /// [`Self::on_render_ui`], which runs later in the frame with the GPU open.
     fn on_render(&mut self, _ctx: &mut EngineContext) {}
+
+    /// Called inside the frame, after the world and before the editor shell,
+    /// with the encoder open. **Draw here; build in [`Self::on_render`].**
+    ///
+    /// MORROWIND-E2, and the sub-phase exists because this method did not:
+    /// MORROWIND-D through -G built a paint layer, canvases, anchors,
+    /// directional navigation and styled text, and a `GameApp` had no way to
+    /// put any of it on screen. `examples/vvardenfell` printed its HUD layout
+    /// to stdout for want of these six lines.
+    ///
+    /// ```ignore
+    /// fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
+    ///     frame.draw(&mut self.hud);
+    ///     frame.draw(&mut self.name_plate);
+    /// }
+    /// ```
+    ///
+    /// Deliberately carries no world, no physics and no time. A game that finds
+    /// it needs one of those here has found that it is building rather than
+    /// drawing, and the build belongs one callback earlier.
+    fn on_render_ui(&mut self, _frame: &mut somnium_ui::GameUiFrame) {}
+
+    /// Called for every raw OS window event the editor shell did not consume.
+    /// Return `true` to consume it before the editor's own viewport handling.
+    ///
+    /// MORROWIND-E2's other half. [`EngineEvent`](crate::EngineEvent) is a
+    /// translated, engine-shaped event and stays the thing most games want;
+    /// this is the untranslated one, because
+    /// [`UiCanvas::process_os_event`](somnium_ui::UiCanvas::process_os_event)
+    /// takes a `winit::event::WindowEvent` and a translation layer in front of
+    /// it would be a second event vocabulary for the runtime UI to disagree
+    /// with the editor UI in.
+    ///
+    /// **Ordering is the editor's, and that is a temporary answer.** The editor
+    /// shell gets first refusal today, which is right while the game is a thing
+    /// inside a viewport and wrong once there is a play mode with input focus
+    /// of its own. That is MORROWIND-N's call and it is named here so N does
+    /// not have to rediscover it.
+    fn on_os_event(
+        &mut self,
+        _ctx: &mut EngineContext,
+        _event: &winit::event::WindowEvent,
+    ) -> bool {
+        false
+    }
 
     /// Called just before the engine shuts down.
     fn on_shutdown(&mut self) {}
 
     /// Called after a version-2 map factory finishes (drawer double-click or tests).
     fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
+}
+
+/// Joins a boxed [`GameApp`] to the renderer's [`somnium_ui::GameUi`] seam.
+///
+/// MORROWIND-E2. `somnium_renderer` cannot name a `GameApp` — `somnium_core`
+/// depends on the renderer and not the other way round — so the renderer takes
+/// a trait object it *can* name and this is the six lines that satisfy it.
+struct GameUiAdapter<'g, G: GameApp + ?Sized> {
+    game: &'g mut G,
+}
+
+impl<G: GameApp + ?Sized> somnium_ui::GameUi for GameUiAdapter<'_, G> {
+    fn draw_ui(&mut self, frame: &mut somnium_ui::GameUiFrame) {
+        self.game.on_render_ui(frame);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,11 +595,30 @@ pub struct Engine<G: GameApp> {
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
     ui_manager: Option<UiManager>,
+    /// MORROWIND-I. The platform screen-reader adapter, attached to the window
+    /// before it is shown. `None` in a headless run.
+    a11y: Option<crate::a11y_bridge::A11yBridge>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
-    jobs: JobRegistry,
+    jobs: JobSystem,
+    /// MORROWIND-S production coordinator driven by the reflected component
+    /// attached to a terrain entity.
+    world_partition: Option<crate::world_partition::WorldPartition>,
+    world_partition_cell_size: f64,
+    world_partition_pin: Option<crate::world_partition::CellCoord>,
     asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
     next_asset_scan: std::time::Instant,
+    /// When shader files were last polled for hot reload (MORROWIND-C).
+    last_shader_poll: std::time::Instant,
+    /// This frame's background-work telemetry, folded by job name.
+    ///
+    /// MORROWIND-B. Refreshed by `pump_jobs` once per frame and read by the
+    /// profiler panel; `phase_MORROWIND.md` §8 makes job visibility a
+    /// requirement rather than a nicety, because a job system without it turns
+    /// one mystery (a stall) into a harder one (a stall inside a thread pool).
+    job_profile: Vec<crate::jobs::JobProfileRow>,
+    /// Zones the telemetry ring had to drop for capacity since the last frame.
+    job_zones_dropped: usize,
     preview_jobs: std::collections::HashMap<
         std::path::PathBuf,
         JobHandle<Option<somnium_asset::preview::PreparedPreview>>,
@@ -778,10 +866,17 @@ impl<G: GameApp + 'static> Engine<G> {
             render_ctx: None,
             renderer: None,
             ui_manager: None,
-            jobs: JobRegistry::default(),
+            a11y: None,
+            jobs: JobSystem::default(),
+            world_partition: None,
+            world_partition_cell_size: 0.0,
+            world_partition_pin: None,
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             next_asset_scan: std::time::Instant::now(),
+            last_shader_poll: std::time::Instant::now(),
+            job_profile: Vec::new(),
+            job_zones_dropped: 0,
             preview_jobs: std::collections::HashMap::new(),
             preview_ready: std::collections::VecDeque::new(),
             material_documents: std::collections::HashMap::new(),
@@ -861,6 +956,178 @@ impl<G: GameApp + 'static> Engine<G> {
 }
 
 impl<G: GameApp> Engine<G> {
+    /// Drive the production partition from the terrain attachment and the
+    /// scene camera. This is intentionally engine-owned: it needs both the ECS
+    /// and the one shared job system, neither of which a UI panel should own.
+    fn update_world_partition(&mut self) {
+        use crate::world_partition::{
+            CellCoord, CellLoadState, PartitionStore, StreamingSource, StreamingSourceKind,
+            WorldPartition,
+        };
+
+        let owner = self.world.entities().find(|entity| {
+            self.world.get::<TerrainComponent>(*entity).is_some()
+                && self.world.get::<WorldPartitionComponent>(*entity).is_some()
+        });
+        let Some(owner) = owner else {
+            // Deleting/reloading the terrain must not strand streamed actors
+            // in the ECS. Drain the coordinator before dropping it; empty
+            // partitions disappear immediately.
+            if let Some(partition) = self.world_partition.as_mut() {
+                partition.remove_source(1);
+                if let Some(pin) = self.world_partition_pin.take() {
+                    partition.unpin(pin);
+                }
+                let _ = partition.update(
+                    &mut self.world,
+                    &mut self.jobs,
+                    std::time::Instant::now() + std::time::Duration::from_millis(100),
+                );
+                let drained = partition.diagnostics().iter().all(|cell| {
+                    cell.actor_count == 0
+                        && !matches!(
+                            cell.state,
+                            CellLoadState::Loading | CellLoadState::Unloading
+                        )
+                });
+                if drained {
+                    self.world_partition = None;
+                }
+            }
+            return;
+        };
+        let settings = self
+            .world
+            .get::<WorldPartitionComponent>(owner)
+            .cloned()
+            .expect("owner query required component");
+        let requested_cell_size = f64::from(settings.cell_size);
+        if !requested_cell_size.is_finite() || requested_cell_size <= 0.0 {
+            if let Some(component) = self.world.get_mut::<WorldPartitionComponent>(owner) {
+                component.status = "Cell size must be finite and positive".into();
+            }
+            return;
+        }
+
+        let can_rebuild = self.world_partition.as_ref().is_none_or(|partition| {
+            partition
+                .diagnostics()
+                .iter()
+                .all(|cell| cell.actor_count == 0)
+        });
+        if (self.world_partition.is_none()
+            || (self.world_partition_cell_size - requested_cell_size).abs() > f64::EPSILON)
+            && can_rebuild
+        {
+            self.world_partition = Some(WorldPartition::new(
+                PartitionStore::new(self.config.content_root.join("world_partition")),
+                requested_cell_size,
+            ));
+            self.world_partition_cell_size = requested_cell_size;
+            self.world_partition_pin = None;
+        }
+        let Some(partition) = self.world_partition.as_mut() else {
+            return;
+        };
+        let cell_size_change_pending =
+            (self.world_partition_cell_size - requested_cell_size).abs() > f64::EPSILON;
+
+        // A cell-size edit changes every coordinate. Drain the old grid before
+        // rebuilding it, otherwise an enabled source keeps the old actors
+        // resident forever and the Details control appears to do nothing.
+        let desired_pin = (!cell_size_change_pending && settings.pin_cell).then_some(CellCoord {
+            x: settings.pin_x,
+            y: settings.pin_y,
+            z: settings.pin_z,
+        });
+        if self.world_partition_pin != desired_pin {
+            if let Some(old) = self.world_partition_pin.take() {
+                partition.unpin(old);
+            }
+            if let Some(coord) = desired_pin {
+                partition.pin(coord);
+                self.world_partition_pin = Some(coord);
+            }
+        }
+
+        // The view is game-owned. In Hello Engine the Camera entity is an
+        // authored settings object and its Transform is not the moving editor
+        // camera (and during Play it is not the player camera either). The
+        // renderer is the one production handoff shared by all games: after
+        // `GameApp::on_render` its camera is the exact view this frame draws.
+        let camera_position = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.camera_pos.as_dvec3().to_array());
+        if settings.enabled && !cell_size_change_pending {
+            if let Some(position) = camera_position {
+                partition.set_source(StreamingSource {
+                    id: 1,
+                    position,
+                    radius: f64::from(settings.load_radius.max(0.0)),
+                    priority: settings.source_priority.min(u32::from(u8::MAX)) as u8,
+                    kind: StreamingSourceKind::Camera,
+                });
+            }
+        } else {
+            partition.remove_source(1);
+        }
+
+        let update_error = partition
+            .update(
+                &mut self.world,
+                &mut self.jobs,
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            )
+            .err();
+        let diagnostics = partition.diagnostics();
+        let loaded = diagnostics
+            .iter()
+            .filter(|cell| cell.state == CellLoadState::Loaded)
+            .count();
+        let pending = diagnostics
+            .iter()
+            .filter(|cell| {
+                matches!(
+                    cell.state,
+                    CellLoadState::Loading | CellLoadState::Unloading
+                )
+            })
+            .count();
+        let wanted = diagnostics
+            .iter()
+            .filter(|cell| cell.priority.is_some())
+            .count();
+        let actors = diagnostics
+            .iter()
+            .map(|cell| cell.actor_count)
+            .sum::<usize>();
+        if let Some(component) = self.world.get_mut::<WorldPartitionComponent>(owner) {
+            component.wanted_cells = u32::try_from(wanted).unwrap_or(u32::MAX);
+            component.loaded_cells = u32::try_from(loaded).unwrap_or(u32::MAX);
+            component.pending_cells = u32::try_from(pending).unwrap_or(u32::MAX);
+            component.resident_actors = u32::try_from(actors).unwrap_or(u32::MAX);
+            component.status = update_error.map_or_else(
+                || {
+                    if cell_size_change_pending {
+                        format!(
+                            "Changing cell size to {requested_cell_size:.1} m; unloading old grid"
+                        )
+                    } else if !settings.enabled && settings.pin_cell {
+                        "Camera streaming disabled; manual pin remains active".into()
+                    } else if !settings.enabled {
+                        "Camera streaming disabled; unloading cells".into()
+                    } else if camera_position.is_none() {
+                        "Waiting for the active renderer camera".into()
+                    } else {
+                        format!("{loaded} loaded, {pending} pending, {wanted} wanted")
+                    }
+                },
+                |error| format!("Streaming job rejected: {error:?}"),
+            );
+        }
+    }
+
     fn load_material_document(&mut self, asset_id: somnium_asset::database::AssetId) -> bool {
         if self.material_documents.contains_key(&asset_id) {
             return true;
@@ -1449,7 +1716,7 @@ impl<G: GameApp> Engine<G> {
         if root != self.config.content_root {
             self.config.content_root = root;
             self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+            self.asset_scan_stamp = None;
         }
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.set_tooltip_delay_ms(self.settings.editor().tooltip_delay_ms);
@@ -2093,6 +2360,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             .with_title("Somnium Engine")
             .with_inner_size(size)
             .with_resizable(self.config.resizable)
+            // MORROWIND-I. Created invisible and shown at the end of this
+            // block. `accesskit_winit` *panics* if its adapter is attached to a
+            // window that has already been shown, so the accessibility adapter
+            // has to be built in the gap. It is a better startup regardless:
+            // the window appears painted rather than appearing and then
+            // painting.
+            .with_visible(false)
             .with_decorations(false);
         #[cfg(target_os = "windows")]
         {
@@ -2101,6 +2375,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
+                // MORROWIND-I, in the gap before the window is shown.
+                self.a11y = Some(crate::a11y_bridge::A11yBridge::new(event_loop, &window));
+
                 let window = Arc::new(window);
                 if std::env::var("SOMNIUM_MAXIMIZE").as_deref() == Ok("1") {
                     window.set_maximized(true);
@@ -2122,6 +2399,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
+
+                // MORROWIND-I. Everything is initialised; show the window.
+                window.set_visible(true);
 
                 self.state = LifecycleState::Running;
                 // Craft defect C11's other half: work that survived a crash is
@@ -2259,11 +2539,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
                 use winit::keyboard::PhysicalKey;
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
-                    let action = shortcut_action_for(
-                        code,
-                        self.shortcut_modifiers,
-                        game_owns_keyboard,
-                    );
+                    let action =
+                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard);
                     use somnium_ui::commands::CommandAction as A;
                     match action {
                         Some(A::NewScene) => {
@@ -2373,6 +2650,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        // ── 2.9 Accessibility (MORROWIND-I) ──────────────────────────────────
+        //
+        // Every event, not only the ones that look relevant: the adapter tracks
+        // window focus and geometry, and a reader whose idea of where the
+        // window is has gone stale points at the wrong place on screen. Before
+        // the early returns below for the same reason.
+        if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
+            a11y.process_event(window, &event);
+        }
+
         // ── 3. Route to native UI; return early if consumed ──────────────────
         let ui_consumed = if let Some(ui) = &mut self.ui_manager {
             ui.process_os_event(&event)
@@ -2381,6 +2668,32 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         };
         if ui_consumed {
             return;
+        }
+
+        // ── 3.2 Route to the game (MORROWIND-E2) ─────────────────────────────
+        //
+        // After the editor shell and before the editor's own viewport tools, so
+        // a game's HUD can take a click the shell did not want but the sculpt
+        // brush would have. See `GameApp::on_os_event` for why the order is
+        // MORROWIND-N's to revisit.
+        {
+            let mut ctx = EngineContext::new(
+                &self.time,
+                &self.config,
+                &mut self.world,
+                self.physics.as_mut().unwrap(),
+                self.audio.as_mut().unwrap(),
+                self.render_ctx.as_ref(),
+                self.renderer.as_mut(),
+                &mut self.selection.primary,
+                self.ui_manager.as_mut().unwrap(),
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
+                &mut self.scripts,
+            );
+            if self.game.on_os_event(&mut ctx, &event) {
+                return;
+            }
         }
 
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
@@ -2775,7 +3088,6 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             ctx.orbit_pivot = orbit_pivot;
             self.game.on_update(&mut ctx);
         }
-
         // Phase 16-C: the variable-rate script phase, and the one place
         // script output reaches the editor's Output Log.
         if self.simulation_clock.state == SimulationState::Playing {
@@ -3236,6 +3548,44 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             depth: 1,
                         });
                     }
+                    // MORROWIND-B: background work, folded by name and
+                    // sorted worst-wait first. Only shown when something ran,
+                    // so an idle editor does not carry an empty heading.
+                    if !self.job_profile.is_empty() {
+                        rows.push(somnium_ui::ProfilerRow {
+                            label: "— Jobs (CPU, background) —".to_string(),
+                            value: String::new(),
+                            depth: 0,
+                        });
+                        for job in &self.job_profile {
+                            rows.push(somnium_ui::ProfilerRow {
+                                label: format!("{} x{}", job.name, job.count),
+                                // Queue wait first, because it is the number
+                                // that explains a stall: run time says the work
+                                // was slow, queue wait says the pool was busy,
+                                // and those have different fixes.
+                                value: format!(
+                                    "wait {:.1} ms · ran {:.1} ms · {:?}{}",
+                                    job.worst_queued_ms,
+                                    job.ran_ms,
+                                    job.priority,
+                                    if job.expired > 0 {
+                                        format!(" · {} expired", job.expired)
+                                    } else {
+                                        String::new()
+                                    }
+                                ),
+                                depth: 1,
+                            });
+                        }
+                        if self.job_zones_dropped > 0 {
+                            rows.push(somnium_ui::ProfilerRow {
+                                label: format!("and {} more", self.job_zones_dropped),
+                                value: String::new(),
+                                depth: 1,
+                            });
+                        }
+                    }
                     rows.push(somnium_ui::ProfilerRow {
                         label: "— Graph —".to_string(),
                         value: String::new(),
@@ -3322,6 +3672,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.pump_shader_reload();
+        self.pump_jobs();
         self.update_asset_pipeline();
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
@@ -3351,6 +3703,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 return;
             }
         }
+
+        // `on_render` is where a game publishes its active editor/player view
+        // through `renderer.set_view`. Stream from that same-frame position,
+        // not from a stale ECS settings transform or last frame's renderer.
+        self.update_world_partition();
 
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
@@ -3406,7 +3763,49 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         ) {
             r.set_editor_overlays_enabled(!self.play_session_active);
             r.time = self.simulation_clock.elapsed_seconds;
-            r.render(c, ui, window);
+            // MORROWIND-E2. `self.game` is a disjoint field from the four
+            // borrowed above, so the game can be handed to the renderer as a
+            // callback without any of this becoming a `RefCell`.
+            let mut adapter = GameUiAdapter {
+                game: self.game.as_mut(),
+            };
+            r.render_with_game_ui(c, ui, window, Some(&mut adapter));
+        }
+
+        // ── Accessibility preferences (MORROWIND-I) ──────────────────────────
+        //
+        // The platform first, the preference over it. Applied every frame
+        // rather than on change because `set_a11y_settings` is two stores and a
+        // bool compare, and a change-detection path would be more code than the
+        // thing it avoids.
+        if let Some(ui) = self.ui_manager.as_mut() {
+            let editor = self.settings.editor();
+            let platform = somnium_ui::A11ySettings::from_platform();
+            let wanted = somnium_ui::A11ySettings {
+                reduced_motion: platform.reduced_motion || editor.reduced_motion,
+                high_contrast: platform.high_contrast || editor.high_contrast,
+            };
+            if ui.a11y_settings() != wanted {
+                ui.set_a11y_settings(wanted);
+            }
+        }
+
+        // ── Accessibility tree (MORROWIND-I) ─────────────────────────────────
+        //
+        // After the render call, because that is what ran layout: a tree
+        // published before layout carries last frame's bounds, and a reader
+        // pointing one frame behind is a reader pointing at the wrong control
+        // during exactly the interactions that move things.
+        //
+        // Gated on `is_active`, so a run with no screen reader attached — which
+        // is almost every run — pays one lock acquisition per frame and does
+        // not walk the widget tree at all.
+        if let Some(a11y) = self.a11y.as_mut() {
+            if a11y.is_active() {
+                if let Some(ui) = self.ui_manager.as_ref() {
+                    a11y.publish(ui.a11y_tree());
+                }
+            }
         }
 
         // ── Drain editor events and apply to ECS ──────────────────────────────
@@ -3699,7 +4098,7 @@ impl<G: GameApp> Engine<G> {
                         let _ = ui.deliver_thumbnail(&path, &preview);
                     }
                     self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                    self.asset_scan_stamp = None;
                 }
                 Err(error) => self.report_content_error(&path, &error),
             }
@@ -3709,6 +4108,58 @@ impl<G: GameApp> Engine<G> {
     /// Poll immutable asset scans and worker previews without doing file IO in
     /// the frame loop. A periodic 350 ms scan is the portable watcher fallback;
     /// the two-sample gate debounces partial external writes.
+    /// Poll for edited shader files and toast the result (MORROWIND-C).
+    ///
+    /// Throttled to four times a second. A shader edit is a human action and a
+    /// quarter-second is imperceptible against the time it takes to alt-tab;
+    /// polling fifty-odd modification times every frame would be a cost paid
+    /// 240 times per second for a benefit nobody could see.
+    ///
+    /// Release builds return immediately — `Shaders::poll_reload` is a no-op
+    /// there, and a shipped build needs no `.wgsl` files on disk at all.
+    fn pump_shader_reload(&mut self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_shader_poll) < INTERVAL {
+            return;
+        }
+        self.last_shader_poll = now;
+
+        let (Some(renderer), Some(ctx)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) else {
+            return;
+        };
+        // A toast, not a log line: the whole point of hot reload is that the
+        // author is looking at the viewport, not at a terminal. A failed edit
+        // that only writes to stderr is indistinguishable from an edit that
+        // did nothing.
+        if let Some(message) = renderer.reload_shaders(ctx)
+            && let Some(ui) = self.ui_manager.as_mut()
+        {
+            ui.push_toast(&message);
+        }
+    }
+
+    /// Apply finished background work and collect its telemetry. Once a frame.
+    ///
+    /// MORROWIND-B, Seam 1's third property: the worker produces data, the main
+    /// thread installs it, and the installation is budgeted. Two milliseconds
+    /// out of a 16.6 ms frame is the starting number — enough to install a
+    /// handful of decodes, small enough that a burst of sixty cannot become a
+    /// hitch. `drain_completions` returning with work outstanding is the
+    /// mechanism working, not a fault, and the remainder lands next frame.
+    fn pump_jobs(&mut self) {
+        const COMPLETION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        self.jobs.drain_completions(COMPLETION_BUDGET);
+        let (zones, dropped) = self.jobs.take_zones();
+        if !zones.is_empty() {
+            self.job_profile = crate::jobs::profile_rows(&zones);
+            self.job_zones_dropped = dropped;
+        }
+    }
+
     fn update_asset_pipeline(&mut self) {
         let finished_material_textures: Vec<_> = self
             .material_texture_jobs
@@ -3842,7 +4293,25 @@ impl<G: GameApp> Engine<G> {
                 JobPriority::Background
             };
             let key = request.path.clone();
-            match self.jobs.submit("Asset preview", priority, move |ctx| {
+            // MORROWIND-B, the deadline's first real customer.
+            //
+            // An off-screen preview is speculative prefetch: the drawer might
+            // scroll to it, and might not. One that is still queued five
+            // seconds after it was asked for is almost certainly for a tile
+            // nobody is looking at any more, and running it makes the queue
+            // *further* behind for the tiles somebody is looking at. Dropping
+            // it is what lets a fast scroll through a large folder settle.
+            //
+            // Visible previews get no deadline: somebody is waiting at a
+            // spinner, and late is better than never. Cancellation, not
+            // expiry, is the right tool when a visible tile scrolls away.
+            const SPECULATIVE_PREVIEW_BUDGET: std::time::Duration =
+                std::time::Duration::from_secs(5);
+            let mut desc = crate::jobs::JobDesc::new("Asset preview").priority(priority);
+            if !request.visible {
+                desc = desc.within(SPECULATIVE_PREVIEW_BUDGET);
+            }
+            match self.jobs.submit_with(desc, move |ctx| {
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
                 let result = somnium_asset::preview::prepare_preview(&record, &cache_root)?;
@@ -3908,7 +4377,7 @@ impl<G: GameApp> Engine<G> {
                         crate::editor_commands::FileImportCmd::new(destinations),
                     ));
                     self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                    self.asset_scan_stamp = None;
                     if let Some(ui) = self.ui_manager.as_mut() {
                         ui.push_toast("Files imported");
                     }
@@ -4635,6 +5104,8 @@ impl<G: GameApp> Engine<G> {
                 environment: false,
                 decal: None,
                 terrain: None,
+                world_partition: None,
+                ui_canvas: None,
                 voxel_terrain: None,
                 foliage: None,
                 water: None,
@@ -4671,11 +5142,11 @@ impl<G: GameApp> Engine<G> {
     /// before `apply_post_process` pushes the authored values they replace.
     fn apply_time_of_day(&mut self, dt: f32) {
         self.day_state = None;
-        let Some(entity) = self
-            .world
-            .entities()
-            .find(|e| self.world.get::<crate::time_of_day::TimeOfDayComponent>(*e).is_some())
-        else {
+        let Some(entity) = self.world.entities().find(|e| {
+            self.world
+                .get::<crate::time_of_day::TimeOfDayComponent>(*e)
+                .is_some()
+        }) else {
             return;
         };
         // The clock only runs during a play session. An editor that advanced
@@ -4769,10 +5240,7 @@ impl<G: GameApp> Engine<G> {
             // still honours `SOMNIUM_CLOUDS=1` for a capture.
             return;
         };
-        renderer.cloud_pass.enabled = renderer
-            .cloud_pass
-            .env_override
-            .unwrap_or(sky.enabled);
+        renderer.cloud_pass.enabled = renderer.cloud_pass.env_override.unwrap_or(sky.enabled);
         let mut settings = sky.to_settings();
         if let Some(coverage) = coverage_override {
             settings.coverage = coverage;
@@ -4824,28 +5292,35 @@ impl<G: GameApp> Engine<G> {
         renderer.decals.clear();
         for (transform, decal, material) in collected {
             let source = material.and_then(|id| renderer.materials_pool.get(id));
-            let (base, albedo, normal, orm) = source.map_or(
-                ([1.0, 1.0, 1.0, 1.0], -1, -1, -1),
-                |m| (m.base_color, m.albedo_map, m.normal_map, m.metallic_roughness_map),
-            );
-            renderer.decals.push(somnium_renderer::pass::decal::GpuDecal::new(
-                transform,
-                somnium_renderer::pass::decal::DecalLook {
-                    base_color: [
-                        base[0],
-                        base[1],
-                        base[2],
-                        base[3] * decal.opacity.clamp(0.0, 1.0),
-                    ],
-                    albedo_map: albedo,
-                    normal_map: normal,
-                    orm_map: orm,
-                    priority: decal.priority,
-                    angle_fade_degrees: decal.angle_fade_degrees,
-                    normal_strength: decal.normal_strength,
-                    roughness: decal.roughness,
-                },
-            ));
+            let (base, albedo, normal, orm) =
+                source.map_or(([1.0, 1.0, 1.0, 1.0], -1, -1, -1), |m| {
+                    (
+                        m.base_color,
+                        m.albedo_map,
+                        m.normal_map,
+                        m.metallic_roughness_map,
+                    )
+                });
+            renderer
+                .decals
+                .push(somnium_renderer::pass::decal::GpuDecal::new(
+                    transform,
+                    somnium_renderer::pass::decal::DecalLook {
+                        base_color: [
+                            base[0],
+                            base[1],
+                            base[2],
+                            base[3] * decal.opacity.clamp(0.0, 1.0),
+                        ],
+                        albedo_map: albedo,
+                        normal_map: normal,
+                        orm_map: orm,
+                        priority: decal.priority,
+                        angle_fade_degrees: decal.angle_fade_degrees,
+                        normal_strength: decal.normal_strength,
+                        roughness: decal.roughness,
+                    },
+                ));
         }
     }
 
@@ -4859,10 +5334,11 @@ impl<G: GameApp> Engine<G> {
     /// fields that are themselves saved, and a world that got dirty by raining
     /// would make "unsaved changes" meaningless.
     fn apply_weather(&mut self, dt: f32) {
-        let weather = self
-            .world
-            .entities()
-            .find_map(|e| self.world.get::<crate::weather::WeatherComponent>(e).copied());
+        let weather = self.world.entities().find_map(|e| {
+            self.world
+                .get::<crate::weather::WeatherComponent>(e)
+                .copied()
+        });
         let Some(weather) = weather else {
             self.weather_state = crate::weather::WeatherState::default();
             return;
@@ -4972,11 +5448,7 @@ impl<G: GameApp> Engine<G> {
             size_end: if snow { 0.09 } else { 0.035 },
             color_over_life: colour,
             gravity: 0.0,
-            velocity_bias: [
-                state.wind[0] * shear,
-                fall_speed,
-                state.wind[1] * shear,
-            ],
+            velocity_bias: [state.wind[0] * shear, fall_speed, state.wind[1] * shear],
             spawn_extents: extents,
             ..crate::ParticleEmitter::default()
         };
@@ -5036,7 +5508,10 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .find(|e| self.world.get::<crate::sky::SkyComponent>(*e).is_some())?;
-        let mut next = self.world.get::<crate::sky::SkyComponent>(entity).copied()?;
+        let mut next = self
+            .world
+            .get::<crate::sky::SkyComponent>(entity)
+            .copied()?;
         if !next.apply_preset(id) {
             return None;
         }
@@ -5082,14 +5557,11 @@ impl<G: GameApp> Engine<G> {
     /// a cycle you are about to scrub — while the driver must do nothing at
     /// all when it is off.
     fn publish_time_of_day(&mut self) {
-        let hour = self
-            .world
-            .entities()
-            .find_map(|e| {
-                self.world
-                    .get::<crate::time_of_day::TimeOfDayComponent>(e)
-                    .map(|tod| tod.hour.rem_euclid(24.0))
-            });
+        let hour = self.world.entities().find_map(|e| {
+            self.world
+                .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                .map(|tod| tod.hour.rem_euclid(24.0))
+        });
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.update_time_of_day(hour);
         }
@@ -5162,8 +5634,26 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled && !path_active;
-            r.restir_gi_pass.enabled =
+            let restir_gi_active =
                 pp.restir_gi_enabled && r.restir_gi_pass.supported() && !path_active;
+            r.restir_gi_pass.enabled = restir_gi_active;
+            // `probes` is the pre-AB scene field. Treat it as a compatibility
+            // request for the portable tier; ReSTIR remains the explicit
+            // higher-quality winner if both old/new fields are authored.
+            let ddgi_active = (pp.ddgi_enabled || pp.probes) && !restir_gi_active && !path_active;
+            r.ddgi_pass.configure(
+                ddgi_active,
+                somnium_renderer::pass::ddgi::DdgiConfig {
+                    spacing: pp.ddgi_probe_spacing_m,
+                    update_budget: pp.ddgi_update_budget,
+                    hysteresis: pp.ddgi_hysteresis,
+                    intensity: if pp.ddgi_enabled {
+                        pp.ddgi_intensity
+                    } else {
+                        pp.probe_intensity
+                    },
+                },
+            );
             r.water_reflection_pass.enabled =
                 pp.rt_reflect_enabled && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
@@ -5197,23 +5687,26 @@ impl<G: GameApp> Engine<G> {
                     // wastes work and risks cross-mode history contamination.
                     flags = FLAG_PATH;
                 } else {
-                    if pp.world_cache && rt {
+                    if pp.world_cache && rt && !ddgi_active {
                         flags |= FLAG_CACHE;
                     }
                     if pp.specular_gi && rt {
                         flags |= FLAG_SPECULAR;
                     }
-                    if pp.mesh_sdf && !pp.world_cache {
+                    if ddgi_active || (pp.mesh_sdf && !pp.world_cache) {
                         flags |= FLAG_SDF;
                     }
-                    if pp.probes && rt {
+                    if ddgi_active {
                         flags |= FLAG_PROBES;
                     }
                 }
                 r.lighting_extra_pass.flags = flags;
                 r.lighting_extra_pass.intensity = pp.cache_intensity;
-                r.lighting_extra_pass.probe_intensity = pp.probe_intensity;
-                r.lighting_extra_pass.cell_size = pp.cache_cell_size;
+                r.lighting_extra_pass.cell_size = if ddgi_active {
+                    pp.ddgi_probe_spacing_m
+                } else {
+                    pp.cache_cell_size
+                };
                 r.lighting_extra_pass.spec_rough = pp.spec_roughness;
                 r.lighting_extra_pass.path_bounces = pp.path_bounces;
             }
@@ -5366,7 +5859,15 @@ impl<G: GameApp> Engine<G> {
             .renderer
             .as_ref()
             .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
-        let terrains: Vec<(u32, glam::Mat4, f32, f32, f32, f32, somnium_ecs::curve::Curve)> = self
+        let terrains: Vec<(
+            u32,
+            glam::Mat4,
+            f32,
+            f32,
+            f32,
+            f32,
+            somnium_ecs::curve::Curve,
+        )> = self
             .world
             .entities()
             .filter_map(|e| {
@@ -5779,21 +6280,60 @@ impl<G: GameApp> Engine<G> {
 
     /// Queue every terrain entity for rendering this frame.
     fn submit_terrains(&mut self) {
-        let terrains: Vec<(u32, glam::Mat4)> = self
+        let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
             .world
             .entities()
             .filter_map(|e| {
-                let tc = self.world.get::<TerrainComponent>(e)?;
+                let tc = self.world.get::<TerrainComponent>(e).copied()?;
                 let model = self
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model))
+                Some((e, tc, model))
             })
             .collect();
+        let mut diagnostics = Vec::with_capacity(terrains.len());
         if let Some(r) = self.renderer.as_mut() {
-            for (id, model) in terrains {
-                r.submit_terrain(id, model);
+            for (entity, component, model) in terrains {
+                let mut virtual_texturing = false;
+                if let Some(terrain) = r.terrain_mut(component.terrain_id) {
+                    terrain.configure_virtual_texture(
+                        component.virtual_texturing,
+                        component.virtual_texture_cache_mib,
+                        component.virtual_texture_uploads_per_frame,
+                    );
+                    let stats = *terrain.virtual_texture.stats();
+                    virtual_texturing = terrain.virtual_texture_enabled;
+                    diagnostics.push((
+                        entity,
+                        stats,
+                        terrain.virtual_texture_enabled,
+                        terrain.virtual_texture_cache_mib,
+                    ));
+                }
+                if virtual_texturing
+                    && !somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off()
+                    && let Some(clipmap) = r.clipmaps.get_mut(component.terrain_id as usize)
+                    && !clipmap.enabled
+                {
+                    clipmap.enabled = true;
+                    clipmap.invalidate();
+                }
+                r.submit_terrain(component.terrain_id, model);
+            }
+        }
+        for (entity, stats, enabled, cache_mib) in diagnostics {
+            if let Some(component) = self.world.get_mut::<TerrainComponent>(entity) {
+                component.virtual_texturing = enabled;
+                if enabled {
+                    component.virtual_texture_cache_mib = cache_mib;
+                }
+                component.virtual_texture_resident_pages = stats.resident_pages;
+                component.virtual_texture_pending_pages = stats.pending_pages;
+                component.virtual_texture_hits = stats.hits.min(u64::from(u32::MAX)) as u32;
+                component.virtual_texture_misses = stats.misses.min(u64::from(u32::MAX)) as u32;
+                component.virtual_texture_evictions =
+                    stats.evictions.min(u64::from(u32::MAX)) as u32;
             }
         }
     }
@@ -6107,7 +6647,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(()) => {
                         self.config.content_root = folder;
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Project opened");
                         }
@@ -6363,6 +6903,23 @@ impl<G: GameApp> Engine<G> {
                 self.after_selection_change();
             }
 
+            EditorEvent::CreateEntity(CreateKind::UiCanvas) => {
+                let snapshot = EntitySnapshot {
+                    transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
+                    name: Some(Name::new("UI Canvas")),
+                    wt: Some(WorldTransform::identity()),
+                    ui_canvas: Some(UiCanvasComponent::default()),
+                    ..EntitySnapshot::default()
+                };
+                self.undo_stack.push(
+                    Box::new(CreateEntityCmd::new(snapshot)),
+                    &mut self.world,
+                    &mut self.selection.primary,
+                );
+                self.scene_dirty = true;
+                info!("Created runtime UI canvas entity");
+            }
+
             EditorEvent::CreateEntity(CreateKind::VoxelTerrain) => {
                 // The voxel world itself is owned by the game layer, which
                 // spins its streaming driver up when it sees this component
@@ -6379,6 +6936,8 @@ impl<G: GameApp> Engine<G> {
                     mesh_kind: None,
                     is_particle_emitter: false,
                     terrain: None,
+                    world_partition: None,
+                    ui_canvas: None,
                     voxel_terrain: Some(crate::VoxelTerrainComponent::default()),
                     foliage: None,
                     water: None,
@@ -6516,7 +7075,7 @@ impl<G: GameApp> Engine<G> {
                                     emissive_map: -1,
                                     terrain_index: -1,
                                     porosity: 0.5,
-                        _pad: 0.0,
+                                    _pad: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -6577,6 +7136,8 @@ impl<G: GameApp> Engine<G> {
                     mesh_kind,
                     is_particle_emitter: kind == CreateKind::Particle,
                     terrain: None,
+                    world_partition: None,
+                    ui_canvas: None,
                     voxel_terrain: None,
                     foliage: None,
                     water: None,
@@ -6780,10 +7341,9 @@ impl<G: GameApp> Engine<G> {
                     .find(|(preset, _)| *preset == id)
                     .map_or(id, |(_, label)| *label);
                 match self.sky_preset_command(id) {
-                    Some(command) => self.push_environment_preset(
-                        vec![command],
-                        format!("Sky preset: {label}"),
-                    ),
+                    Some(command) => {
+                        self.push_environment_preset(vec![command], format!("Sky preset: {label}"))
+                    }
                     None => warn!(%id, "no Sky component, or unknown sky preset"),
                 }
             }
@@ -6794,11 +7354,11 @@ impl<G: GameApp> Engine<G> {
                     .find(|(preset, _)| *preset == id)
                     .map_or(id, |(_, label)| *label);
                 let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> = Vec::new();
-                let Some(entity) = self
-                    .world
-                    .entities()
-                    .find(|e| self.world.get::<crate::weather::WeatherComponent>(*e).is_some())
-                else {
+                let Some(entity) = self.world.entities().find(|e| {
+                    self.world
+                        .get::<crate::weather::WeatherComponent>(*e)
+                        .is_some()
+                }) else {
                     warn!("no Weather component in the scene");
                     return;
                 };
@@ -6830,8 +7390,8 @@ impl<G: GameApp> Engine<G> {
                         return;
                     }
                 }
-                if let Some(command) = crate::weather::sky_preset_for(id)
-                    .and_then(|sky| self.sky_preset_command(sky))
+                if let Some(command) =
+                    crate::weather::sky_preset_for(id).and_then(|sky| self.sky_preset_command(sky))
                 {
                     commands.push(command);
                 }
@@ -7086,6 +7646,8 @@ impl<G: GameApp> Engine<G> {
                         // Terrains are not duplicated — two entities sharing
                         // one terrain_id would draw the same terrain twice.
                         terrain: None,
+                        world_partition: None,
+                        ui_canvas: None,
                         voxel_terrain: None,
                         foliage: None,
                         water,
@@ -7402,7 +7964,7 @@ impl<G: GameApp> Engine<G> {
                     Ok(_) => {
                         info!("Created {}", path.display());
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         self.after_content_change(&format!(
                             "Created {}",
                             path.file_name().unwrap_or_default().to_string_lossy()
@@ -7498,7 +8060,7 @@ impl<G: GameApp> Engine<G> {
                             live: false,
                         });
                         self.next_asset_scan = std::time::Instant::now();
-        self.asset_scan_stamp = None;
+                        self.asset_scan_stamp = None;
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.push_toast("Made unique asset copy");
                         }

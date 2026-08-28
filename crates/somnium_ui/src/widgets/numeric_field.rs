@@ -250,7 +250,11 @@ impl Control for NumericField {
         let b = widget.screen_bounds();
         let (slider, field) = Self::split_rects(b);
         let (lo, hi) = self.effective_range();
-        let t = if hi > lo { self.slider_travel(lo, hi) } else { 0.0 };
+        let t = if hi > lo {
+            self.slider_travel(lo, hi)
+        } else {
+            0.0
+        };
 
         // Phase 27-G: this embedded scrub slider was missed by the 27-D widget
         // sweep and still drew flat bars. It now matches the standalone

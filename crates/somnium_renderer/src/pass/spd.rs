@@ -31,7 +31,7 @@ pub struct SpdPass {
 }
 
 impl SpdPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
         let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -74,7 +74,7 @@ impl SpdPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("spd.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/spd.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("spd.wgsl").into()),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SPD PL"),

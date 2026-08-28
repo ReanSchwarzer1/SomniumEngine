@@ -501,6 +501,8 @@ impl TimingRun {
             ("terrain_cpu_culled", c.terrain_cpu_culled),
             ("tlas_instances", c.tlas_instances),
             ("shadow_casters", c.shadow_casters),
+            ("virtual_shadow_pages", c.virtual_shadow_pages),
+            ("virtual_shadow_resident", c.virtual_shadow_resident),
         ] {
             let _ = writeln!(s, "count\t{name}\t0\t{v}\t0\t{v}\t{v}\t1");
         }

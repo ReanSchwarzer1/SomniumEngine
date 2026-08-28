@@ -15,7 +15,16 @@ glam         = { workspace = true }
 tracing      = { workspace = true }
 pollster     = { workspace = true }
 somnium_ui   = { workspace = true }
+# MORROWIND-U. Seam 7: the renderer takes matrices, and the crate that produces
+# them has no renderer dependency of its own. This edge points one way.
+somnium_anim = { workspace = true }
 bytemuck     = { workspace = true }
+somnium_shader = { workspace = true }
+# wgpu's own front end, already in the graph through wgpu. A regular dependency
+# rather than a dev one because MORROWIND-C's hot reload has to produce naga's
+# diagnostic synchronously, and wgpu only surfaces shader errors through an
+# async error scope.
+naga = { version = "30", features = ["wgsl-in"] }
 somnium_asset = { workspace = true }
 rayon        = { workspace = true }
 # Phase 25K: decoding the packed terrain layer PNGs at load.
@@ -26,12 +35,12 @@ exr          = { workspace = true }
 wgpu-ffx     = { path = "../../third_party/wgpu-ffx" }
 
 [dev-dependencies]
-# Shader compilation happens at device-creation time, so a WGSL mistake used to
-# surface as a first-frame crash on a machine with a GPU and nowhere else.
-# naga is wgpu's own front end and is already in the dependency graph, so
-# parsing and validating each concatenated module in a test costs nothing and
-# catches the whole class before it ships.
-naga = { version = "29", features = ["wgsl-in"] }
+# `tests/shaders_validate.rs` uses the `naga` above, which MORROWIND-C promoted
+# to a regular dependency for hot reload. Leaving a second copy pinned here is
+# how the test ends up validating with a different front end from the one that
+# compiles the shaders — which is exactly what happened between MORROWIND-A2 and
+# MORROWIND-C, and it hid a real wgpu 30 incompatibility for a whole sub-phase.
+#
 # Offline BC7 encoder for `examples/encode_terrain_bc7.rs`. Precompiled ISPC
 # kernels (Traverse Research fork of Graham Wihlidal's intel_tex). Not linked
 # into the engine binary.

@@ -37,7 +37,9 @@
 use somnium_ecs::reflect::{FieldFlags, TypeRegistry};
 use somnium_ecs::{Entity, FieldId, PersistentId, ReflectObject, StableId, World};
 use somnium_script::ScriptAssetId;
-use somnium_script::command::{ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken};
+use somnium_script::command::{
+    AnimationParameterValue, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken,
+};
 use somnium_script::order::OrderKey;
 use somnium_script::snapshot::WorldView;
 use somnium_script::value::ScriptValue;
@@ -220,6 +222,8 @@ pub struct ApplyOutcome {
     pub despawned: Vec<Entity>,
     /// Forces for the caller to hand to physics.
     pub forces: Vec<(Entity, [f32; 3], ForceMode)>,
+    /// Typed animation parameters for the caller's installed animation router.
+    pub animation_parameters: Vec<(Entity, String, AnimationParameterValue)>,
     /// Sounds for the caller to hand to audio, tagged with the attachment
     /// that asked — a playing voice is an owned resource, and teardown can
     /// only stop it if it knows whose it is.
@@ -361,6 +365,23 @@ pub fn apply_commands(
                     outcome.reject(order, RejectReason::InvalidValue, "force is not finite");
                 } else {
                     outcome.forces.push((entity, force, mode));
+                    outcome.applied += 1;
+                }
+            }
+
+            ScriptCommand::SetAnimationParameter {
+                entity,
+                name,
+                value,
+            } => {
+                if !world.is_alive(entity) {
+                    outcome.reject(order, RejectReason::StaleEntity, "setAnimationParameter");
+                } else if name.trim().is_empty()
+                    || matches!(value, AnimationParameterValue::Float(number) if !number.is_finite())
+                {
+                    outcome.reject(order, RejectReason::InvalidValue, "animation parameter");
+                } else {
+                    outcome.animation_parameters.push((entity, name, value));
                     outcome.applied += 1;
                 }
             }
@@ -703,6 +724,29 @@ mod tests {
         );
         assert!(outcome.forces.is_empty());
         assert_eq!(outcome.rejected[0].reason, RejectReason::InvalidValue);
+    }
+
+    #[test]
+    fn animation_parameters_leave_apply_as_validated_typed_data() {
+        let registry = component_registry();
+        let mut world = World::new();
+        let entity = world.spawn((Transform::default(),));
+        let order = order_for(&mut world, entity);
+        let outcome = run(
+            &mut world,
+            &registry,
+            order,
+            vec![ScriptCommand::SetAnimationParameter {
+                entity,
+                name: "speed".into(),
+                value: AnimationParameterValue::Float(1.5),
+            }],
+        );
+        assert!(outcome.is_clean());
+        assert_eq!(
+            outcome.animation_parameters,
+            vec![(entity, "speed".into(), AnimationParameterValue::Float(1.5))]
+        );
     }
 
     #[test]

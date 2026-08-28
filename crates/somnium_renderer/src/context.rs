@@ -39,7 +39,7 @@ pub struct RenderContext {
 
 /// Optional features the GPU-driven renderer (Phase 15) needs.
 ///
-/// `multi_draw_indirect` itself is core in wgpu 29 (it only needs the
+/// `multi_draw_indirect` itself is core in wgpu 30 (it only needs the
 /// `INDIRECT_EXECUTION` downlevel flag, and wgpu emulates it where a backend
 /// lacks it). What *is* gated is `INDIRECT_FIRST_INSTANCE`: a non-zero
 /// `first_instance` in the draw args, which is how each indirect draw finds its
@@ -49,8 +49,11 @@ pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_I
 
 /// Feature needed to build and trace acceleration structures (Phase 24J).
 ///
-/// In wgpu 29 `EXPERIMENTAL_RAY_QUERY` covers both building acceleration
+/// In wgpu 30 `EXPERIMENTAL_RAY_QUERY` still covers both building acceleration
 /// structures and querying them; there is no separate flag for the former.
+/// wgpu 30 does add `ACCELERATION_STRUCTURE_BINDING_ARRAY` and
+/// `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN` beside it — neither is required here,
+/// and both are probed by `crate::capability` for MORROWIND-U's benefit.
 ///
 /// The gap to hardware ray tracing is genuinely just ray query: the binding
 /// arrays and non-uniform indexing that Bevy's Solari also requires are already
@@ -134,6 +137,12 @@ impl RenderContext {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                // wgpu 30. Limit bucketing rounds the adapter's reported limits
+                // to pre-defined buckets so untrusted content cannot fingerprint
+                // the GPU. Somnium is a native editor, not a browser, and it
+                // wants the real numbers: the terrain pack sizing and the
+                // bindless pool both read actual limits.
+                apply_limit_buckets: false,
             })
             .await
             .expect("No suitable GPU adapter found");
@@ -149,6 +158,10 @@ impl RenderContext {
             driver_info = %info.driver_info,
             "Selected GPU adapter"
         );
+
+        // MORROWIND-A2: probe, do not trust. Logs one summary line, and writes
+        // the full table when SOMNIUM_CAPABILITY_REPORT names a path.
+        crate::capability::report(&adapter);
 
         // We require specific features for modern rendering (Bindless).
         let required_features = wgpu::Features::TEXTURE_BINDING_ARRAY
@@ -328,6 +341,12 @@ impl RenderContext {
         let config = wgpu::SurfaceConfiguration {
             usage: surface_usage,
             format: surface_format,
+            // wgpu 30 made the presentation colour space explicit. `Auto` is
+            // supported for every format the surface reports and reproduces
+            // wgpu 29's behaviour exactly, so the bump does not change what
+            // reaches the display. Choosing an HDR space here is a rendering
+            // decision with its own evidence, and A2 adds no feature.
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,

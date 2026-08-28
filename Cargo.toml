@@ -3,6 +3,11 @@ resolver = "2"
 members = [
     "crates/somnium_core",
     "crates/somnium_ecs",
+    "crates/somnium_anim",
+    "crates/somnium_i18n",
+    "crates/somnium_input",
+    "crates/somnium_jobs",
+    "crates/somnium_shader",
     "crates/somnium_script",
     "crates/somnium_script_luau",
     "crates/somnium_renderer",
@@ -13,6 +18,8 @@ members = [
     "crates/somnium_asset",
     "crates/somnium_voxel",
     "examples/hello_engine",
+    "examples/vvardenfell",
+    "tools/assetcook",
 ]
 
 # The `example_repo/` directory contains reference source code from
@@ -39,6 +46,11 @@ authors = ["Somnium Engine Contributors"]
 # -- Internal crates --------------------------------------------------------
 somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }
+somnium_anim     = { path = "crates/somnium_anim" }
+somnium_i18n     = { path = "crates/somnium_i18n" }
+somnium_input    = { path = "crates/somnium_input" }
+somnium_jobs     = { path = "crates/somnium_jobs" }
+somnium_shader   = { path = "crates/somnium_shader" }
 somnium_script   = { path = "crates/somnium_script" }
 somnium_script_luau = { path = "crates/somnium_script_luau" }
 somnium_renderer = { path = "crates/somnium_renderer" }
@@ -53,7 +65,7 @@ somnium_voxel    = { path = "crates/somnium_voxel" }
 winit = "0.30"
 
 # -- Graphics (Phase 2) -----------------------------------------------------
-wgpu = "29.0"
+wgpu = "30.0"
 
 # -- Math --------------------------------------------------------------------
 glam = "0.29"

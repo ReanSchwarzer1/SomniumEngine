@@ -1,0 +1,22 @@
+[package]
+name        = "somnium_shader"
+description = "WGSL module composition, permutation keys, a pipeline cache, and hot reload."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# wgpu and nothing else (plan §7.9). Two absences are deliberate:
+#
+# - **No file-watcher crate.** `watch.rs` polls modification times over the
+#   registered module set. Fifty-odd `stat` calls on a background job is not a
+#   measurable cost, and the alternative is a dependency tree (inotify /
+#   ReadDirectoryChangesW / FSEvents shims) for a feature that only exists in
+#   debug builds.
+# - **No hashing crate.** `ShaderKey` is `(u32, u64)` and hashes with
+#   `std::hash::DefaultHasher`. The cache is per-process and never serialised,
+#   so a stable cross-version hash buys nothing. `tools/shadercook` is where a
+#   stable hash would matter, and it can choose its own.
+[dependencies]
+wgpu = { workspace = true }

@@ -20,9 +20,10 @@ use somnium_ecs::{Entity, World};
 
 use crate::{
     BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
-    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
-    PostProcessComponent, TerrainComponent, Tonemapper, Transform, VoxelTerrainComponent,
-    WaterComponent,
+    LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
+    ParticleEmitter, PostProcessComponent, TerrainComponent, Tonemapper, Transform,
+    UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent,
 };
 
 // `MeshComponent` and `MaterialComponent` derive `Default` at their
@@ -76,6 +77,14 @@ impl Default for TerrainComponent {
             grid_z: 1,
             cell_size: 1.0,
             height_scale: 1.0,
+            virtual_texturing: false,
+            virtual_texture_cache_mib: 64,
+            virtual_texture_uploads_per_frame: 8,
+            virtual_texture_resident_pages: 0,
+            virtual_texture_pending_pages: 0,
+            virtual_texture_hits: 0,
+            virtual_texture_misses: 0,
+            virtual_texture_evictions: 0,
         }
     }
 }
@@ -146,6 +155,40 @@ impl ReflectField for LightType {
     }
 }
 
+impl ReflectField for LightShadowTechnique {
+    fn field_type() -> FieldType {
+        // There are exactly two authored choices. Presenting them as an enum
+        // made the common per-light operation look like a hidden mode selector
+        // in Details; a checkbox is the honest control.
+        FieldType::Bool
+    }
+
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::Bool(matches!(self, Self::Virtual))
+    }
+
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::Bool(false) => Ok(Self::Cascaded),
+            ReflectValue::Bool(true) => Ok(Self::Virtual),
+            // Accept the one-release enum encoding so scenes authored by the
+            // original MORROWIND-Z UI migrate without losing their choice.
+            ReflectValue::I64(0) => Ok(Self::Cascaded),
+            ReflectValue::I64(1) => Ok(Self::Virtual),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(1.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "LightShadowTechnique".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
 /// Variant names for [`MeshKind`].
 const MESH_KIND_NAMES: &[&str] = &["Cube", "Sphere", "Plane", "Cylinder"];
 
@@ -175,6 +218,40 @@ impl ReflectField for MeshKind {
             other => Err(ReflectError::TypeMismatch {
                 field,
                 expected: "MeshKind".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
+const UI_CANVAS_SPACE_NAMES: &[&str] = &["Screen", "World", "Overlay"];
+
+impl ReflectField for UiCanvasSpace {
+    fn field_type() -> FieldType {
+        FieldType::Enum(UI_CANVAS_SPACE_NAMES)
+    }
+
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(match self {
+            Self::Screen => 0,
+            Self::World => 1,
+            Self::Overlay => 2,
+        })
+    }
+
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Screen),
+            ReflectValue::I64(1) => Ok(Self::World),
+            ReflectValue::I64(2) => Ok(Self::Overlay),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(2.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "UiCanvasSpace".into(),
                 found: other.kind(),
             }),
         }
@@ -420,6 +497,8 @@ pub fn component_registry() -> TypeRegistry {
     crate::character::register(&mut registry);
     registry.register(sky_schema());
     registry.register(terrain_schema());
+    registry.register(world_partition_schema());
+    registry.register(ui_canvas_schema());
     registry.register(time_of_day_schema());
     registry.register(transform_schema());
     registry.register(voxel_terrain_schema());
@@ -534,8 +613,22 @@ fn post_process_schema() -> ComponentSchema {
             cache_cell_size { min: 0.01, step: 0.1, unit: "m", group: "Global Illumination" },
             specular_gi { group: "Global Illumination" }, spec_roughness { min: 0.0, max: 1.0, step: 0.01, group: "Global Illumination" },
             path_tracer { group: "Path Tracing" }, path_bounces { min: 1, max: 8, group: "Path Tracing" },
-            mesh_sdf { group: "Global Illumination" }, probes { group: "Global Illumination" },
-            probe_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
+            mesh_sdf { group: "Global Illumination" },
+            // Pre-AB compatibility fields remain loadable/saveable but are no
+            // longer a second, ambiguous Details route to the same feature.
+            probes { flags: FieldFlags::SERIALIZE.union(FieldFlags::SCRIPT_READ) },
+            probe_intensity { min: 0.0, step: 0.01,
+                flags: FieldFlags::SERIALIZE.union(FieldFlags::SCRIPT_READ) },
+            ddgi_enabled { group: "Global Illumination", display_name: "Portable DDGI",
+                doc: "SDF-backed dynamic diffuse GI that does not require ray query." },
+            ddgi_intensity { min: 0.0, step: 0.01, group: "Global Illumination", display_name: "DDGI Intensity",
+                doc: "Strength of the portable diffuse probe contribution." },
+            ddgi_probe_spacing_m { min: 0.25, max: 64.0, step: 0.25, unit: "m", group: "Global Illumination", display_name: "DDGI Probe Spacing",
+                doc: "World-space distance between neighbouring probes." },
+            ddgi_update_budget { min: 1, max: 64, group: "Global Illumination", display_name: "DDGI Update Budget",
+                doc: "Number of the 64 probes refreshed per frame." },
+            ddgi_hysteresis { min: 0.0, max: 0.99, step: 0.01, group: "Global Illumination", display_name: "DDGI Hysteresis",
+                doc: "Previous radiance retained per update; higher is steadier but slower." },
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
             fsr_enabled { group: "Anti-aliasing" }, fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
@@ -623,6 +716,11 @@ pub fn editor_settings_schema() -> ComponentSchema {
             select_only { group: "Gizmo" },
             tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface" },
             show_statistics { group: "Interface" },
+            // MORROWIND-I. In the schema rather than in a hand-written panel,
+            // per CONTROL-B's property seam: a preference the editor can show
+            // and a game can read are the same declaration.
+            reduced_motion { group: "Accessibility" },
+            high_contrast { group: "Accessibility" },
         }
     }
 }
@@ -842,6 +940,8 @@ fn light_schema() -> ComponentSchema {
         LightComponent as "somnium.Light", display "Light", version 1,
         fields {
             light_type,
+            shadow_technique { group: "Shadows", display_name: "Virtual Shadows",
+                doc: "Off uses measured-default cascaded shadows. On lazily allocates virtual shadow pages and keeps CSM as the unavailable-page/adapter fallback." },
             color,
             intensity { min: 0.0 },
             color_temperature_k { min: 0.0, max: 20_000.0 },
@@ -903,8 +1003,20 @@ fn parent_schema() -> ComponentSchema {
 }
 
 fn terrain_schema() -> ComponentSchema {
-    component_schema! {
-        TerrainComponent as "somnium.Terrain", display "Terrain", version 1,
+    fn migrate_terrain(_fields: &mut ReflectObject, from: u32) -> Result<(), ReflectError> {
+        match from {
+            // Version 1 has no VT fields. Missing fields retain the component
+            // defaults installed before the saved record is applied.
+            1 => Ok(()),
+            found => Err(ReflectError::UnsupportedVersion {
+                component: StableId::new("somnium.Terrain"),
+                found,
+                current: 2,
+            }),
+        }
+    }
+    let mut schema = component_schema! {
+        TerrainComponent as "somnium.Terrain", display "Terrain", version 2,
         fields {
             terrain_id { scope: ChangeScope::Entity },
             chunk_cells { min: 1, scope: ChangeScope::Entity },
@@ -912,6 +1024,69 @@ fn terrain_schema() -> ComponentSchema {
             grid_z { min: 1, scope: ChangeScope::Entity },
             cell_size { min: 0.001, scope: ChangeScope::Entity },
             height_scale { scope: ChangeScope::Entity },
+            virtual_texturing { read_only: true, group: "Virtual Texturing", display_name: "Stream Source Pages",
+                doc: "Creation-time terrain resource mode. Enabled terrains stream 32-layer material source pages before runtime composition." },
+            virtual_texture_cache_mib { read_only: true, min: 64, max: 64, unit: "MiB", group: "Virtual Texturing", display_name: "Cache Budget",
+                doc: "Allocated paired BC7 source-page atlas budget. Fixed at terrain resource creation." },
+            virtual_texture_uploads_per_frame { min: 1, max: 64, group: "Virtual Texturing", display_name: "Uploads Per Frame",
+                doc: "Maximum page uploads admitted from feedback during one frame." },
+            virtual_texture_resident_pages { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Resident Pages",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_pending_pages { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Pending Pages",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_hits { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Cache Hits",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_misses { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Cache Misses",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_evictions { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Evictions",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+        }
+    };
+    schema.migrate = Some(migrate_terrain);
+    schema
+}
+
+fn world_partition_schema() -> ComponentSchema {
+    component_schema! {
+        WorldPartitionComponent as "somnium.WorldPartition", display "Actor World Partition", version 1,
+        fields {
+            enabled { group: "Actor Streaming", display_name: "Stream Actors" },
+            cell_size { min: 1.0, soft_max: 1024.0, unit: "m", group: "Actor Streaming", display_name: "Actor Cell Size" },
+            load_radius { min: 0.0, soft_max: 4096.0, unit: "m", group: "Actor Streaming", display_name: "Actor Load Radius" },
+            source_priority { min: 0, max: 255, group: "Actor Streaming" },
+            pin_cell { group: "Manual Pin" },
+            pin_x { group: "Manual Pin" },
+            pin_y { group: "Manual Pin" },
+            pin_z { group: "Manual Pin" },
+            // Live values belong in Details, but never in a scene. Keeping
+            // EDIT while marking the rows read-only makes them visible to the
+            // generated inspector; SCRIPT_READ makes diagnostics useful to
+            // tooling without creating another API.
+            wanted_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            loaded_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            pending_cells { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            resident_actors { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            status { read_only: true, group: "Diagnostics",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+        }
+    }
+}
+
+fn ui_canvas_schema() -> ComponentSchema {
+    component_schema! {
+        UiCanvasComponent as "somnium.UiCanvas", display "UI Canvas", version 1,
+        fields {
+            enabled { group: "Canvas" },
+            space { group: "Canvas" },
+            width { min: 0.01, soft_max: 3840.0, group: "Resolution" },
+            height { min: 0.01, soft_max: 2160.0, group: "Resolution" },
+            pixels_per_unit { min: 1.0, soft_max: 512.0, group: "World" },
+            billboard { group: "World" },
+            layer { min: -1000, max: 1000, group: "Canvas" },
         }
     }
 }
@@ -923,7 +1098,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 21);
+        assert_eq!(registry.len(), 23);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -946,9 +1121,11 @@ mod tests {
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",
+                "somnium.UiCanvas",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
                 "somnium.Weather",
+                "somnium.WorldPartition",
             ],
             "iteration is sorted by stable id, not by registration order"
         );
@@ -1014,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_fields_travel_as_named_variants() {
+    fn enum_and_shadow_toggle_fields_use_the_right_controls() {
         let registry = component_registry();
         let schema = registry.by_name("somnium.Light").unwrap();
         let field = schema.field_by_name("light_type").unwrap();
@@ -1024,10 +1201,73 @@ mod tests {
         assert_eq!(names[0], "Directional");
         assert_eq!(names[2], "Spot");
 
+        let shadow = schema.field_by_name("shadow_technique").unwrap();
+        assert_eq!(shadow.ty, FieldType::Bool);
+        assert_eq!(shadow.display_name, Some("Virtual Shadows"));
+
         let mut world = World::new();
-        let e = world.spawn((LightComponent::point(3.0, 10.0),));
+        let mut light = LightComponent::point(3.0, 10.0);
+        light.shadow_technique = LightShadowTechnique::Virtual;
+        let e = world.spawn((light,));
         let snap = (schema.snapshot)(&world, e).unwrap();
         assert_eq!(snap[&field.id], ReflectValue::I64(1), "Point is variant 1");
+        assert_eq!(
+            snap[&shadow.id],
+            ReflectValue::Bool(true),
+            "Virtual is the checked shadow toggle"
+        );
+        assert_eq!(
+            LightShadowTechnique::from_reflect(&ReflectValue::I64(1), "shadow_technique").unwrap(),
+            LightShadowTechnique::Virtual,
+            "the original enum encoding remains loadable"
+        );
+    }
+
+    #[test]
+    fn portable_ddgi_is_exposed_by_the_generated_details_schema() {
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.PostProcess").unwrap();
+        let enabled = schema.field_by_name("ddgi_enabled").unwrap();
+        assert_eq!(enabled.ty, FieldType::Bool);
+        assert_eq!(enabled.group, Some("Global Illumination"));
+        assert_eq!(enabled.display_name, Some("Portable DDGI"));
+
+        let spacing = schema.field_by_name("ddgi_probe_spacing_m").unwrap();
+        assert_eq!(spacing.min, Some(0.25));
+        assert_eq!(spacing.max, Some(64.0));
+        assert_eq!(spacing.unit, Some("m"));
+
+        let budget = schema.field_by_name("ddgi_update_budget").unwrap();
+        assert_eq!(budget.min, Some(1.0));
+        assert_eq!(budget.max, Some(64.0));
+    }
+
+    #[test]
+    fn terrain_virtual_texture_controls_and_diagnostics_are_in_details() {
+        let registry = component_registry();
+        let schema = registry
+            .by_name("somnium.Terrain")
+            .expect("terrain schema is registered");
+        assert_eq!(schema.version, 2);
+        let stream = schema
+            .field_by_name("virtual_texturing")
+            .expect("streaming toggle is reflected");
+        assert!(stream.read_only, "VT allocation is creation-time state");
+        let cache = schema
+            .field_by_name("virtual_texture_cache_mib")
+            .expect("physical cache budget is reflected");
+        assert!(cache.read_only);
+        assert_eq!(cache.min, Some(64.0));
+        assert_eq!(cache.max, Some(64.0));
+        let resident = schema
+            .field_by_name("virtual_texture_resident_pages")
+            .expect("resident-page diagnostics are reflected");
+        assert!(resident.read_only);
+        assert!(!TerrainComponent::default().virtual_texturing);
+
+        let mut version_one = ReflectObject::new();
+        (schema.migrate.expect("terrain v1 has a migration"))(&mut version_one, 1)
+            .expect("version-one terrain remains loadable");
     }
 
     #[test]

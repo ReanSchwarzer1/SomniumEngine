@@ -289,8 +289,12 @@ impl Curve {
     /// makes the sort itself ill-defined, so it is removed before ordering,
     /// not after.
     pub fn sanitize(&mut self) {
-        self.keys
-            .retain(|k| k.t.is_finite() && k.v.is_finite() && k.in_tangent.is_finite() && k.out_tangent.is_finite());
+        self.keys.retain(|k| {
+            k.t.is_finite()
+                && k.v.is_finite()
+                && k.in_tangent.is_finite()
+                && k.out_tangent.is_finite()
+        });
         self.keys
             .sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
     }
@@ -423,7 +427,10 @@ impl Curve {
     #[must_use]
     pub fn is_finite(&self) -> bool {
         self.keys.iter().all(|k| {
-            k.t.is_finite() && k.v.is_finite() && k.in_tangent.is_finite() && k.out_tangent.is_finite()
+            k.t.is_finite()
+                && k.v.is_finite()
+                && k.in_tangent.is_finite()
+                && k.out_tangent.is_finite()
         })
     }
 }
@@ -478,7 +485,10 @@ impl Gradient {
     /// A two-stop ramp.
     #[must_use]
     pub fn ramp(from: [f32; 4], to: [f32; 4]) -> Self {
-        Self::from_stops(vec![GradientStop::new(0.0, from), GradientStop::new(1.0, to)])
+        Self::from_stops(vec![
+            GradientStop::new(0.0, from),
+            GradientStop::new(1.0, to),
+        ])
     }
 
     /// Build from stops, sorting and sanitising them.
@@ -582,8 +592,9 @@ impl Gradient {
                 }
                 let along = (t - left.t) / span;
                 let mut out = [0.0_f32; 4];
-                for (slot, (lo, hi)) in
-                    out.iter_mut().zip(left.color.iter().zip(right.color.iter()))
+                for (slot, (lo, hi)) in out
+                    .iter_mut()
+                    .zip(left.color.iter().zip(right.color.iter()))
                 {
                     *slot = lo + (hi - lo) * along;
                 }

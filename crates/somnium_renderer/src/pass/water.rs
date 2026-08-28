@@ -72,6 +72,10 @@ pub struct WaterPass {
     roughness_view: wgpu::TextureView,
     dummy_reflection: wgpu::TextureView,
     reflection_sampler: wgpu::Sampler,
+    virtual_shadow_view: wgpu::TextureView,
+    virtual_shadow_sampler: wgpu::Sampler,
+    virtual_shadow_page_table: wgpu::Buffer,
+    virtual_shadow_params: wgpu::Buffer,
     frame_buffer: wgpu::Buffer,
     previous_view_proj: glam::Mat4,
     previous_time: f32,
@@ -265,13 +269,14 @@ pub fn create_default_texture_bind_group(
 impl WaterPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         target_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("water.wgsl").into()),
         });
 
         let view_bind_group_layout =
@@ -385,6 +390,42 @@ impl WaterPass {
                         binding: 10,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -523,7 +564,7 @@ impl WaterPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 32,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
@@ -531,7 +572,7 @@ impl WaterPass {
                         1 => Float32x3,
                         2 => Float32x2,
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -583,7 +624,7 @@ impl WaterPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 32,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
@@ -591,7 +632,7 @@ impl WaterPass {
                         1 => Float32x3,
                         2 => Float32x2,
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -641,7 +682,40 @@ impl WaterPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let spectrum = crate::pass::water_spectrum::WaterSpectrumPass::new(device);
+        let virtual_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Virtual Shadow Dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let virtual_shadow_view =
+            virtual_shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let virtual_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Water Virtual Shadow Dummy Sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let virtual_shadow_page_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Virtual Shadow Dummy Table"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let virtual_shadow_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Virtual Shadow Dummy Params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let spectrum = crate::pass::water_spectrum::WaterSpectrumPass::new(device, shaders);
         Self {
             prepass_pipeline,
             shade_pipeline,
@@ -655,6 +729,10 @@ impl WaterPass {
             roughness_view,
             dummy_reflection,
             reflection_sampler,
+            virtual_shadow_view,
+            virtual_shadow_sampler,
+            virtual_shadow_page_table,
+            virtual_shadow_params,
             frame_buffer,
             previous_view_proj: glam::Mat4::IDENTITY,
             previous_time: 0.0,
@@ -1037,8 +1115,34 @@ impl WaterPass {
                     binding: 10,
                     resource: wgpu::BindingResource::Sampler(&self.reflection_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&self.virtual_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::Sampler(&self.virtual_shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.virtual_shadow_page_table.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.virtual_shadow_params.as_entire_binding(),
+                },
             ],
         })
+    }
+
+    pub fn set_virtual_shadow_resources(
+        &mut self,
+        gpu: &crate::shadow::virtual_map::VirtualShadowGpu,
+    ) {
+        self.virtual_shadow_view = gpu.physical_atlas_view.clone();
+        self.virtual_shadow_sampler = gpu.comparison_sampler.clone();
+        self.virtual_shadow_page_table = gpu.page_table.clone();
+        self.virtual_shadow_params = gpu.params.clone();
     }
 
     fn bind_bodies(

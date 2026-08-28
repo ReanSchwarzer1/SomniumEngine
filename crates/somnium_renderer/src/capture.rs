@@ -568,7 +568,9 @@ impl FrameCapture {
             let slice = buf.slice(..);
             slice.map_async(wgpu::MapMode::Read, |_| {});
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
-            let data = slice.get_mapped_range();
+            let data = slice
+                .get_mapped_range()
+                .expect("capture staging mapped by the poll above");
             let row_bytes = if is_hdr { hdr_row } else { vis_row };
             for y in 0..height as usize {
                 let row = &data[y * row_bytes..];
@@ -718,7 +720,9 @@ impl FrameCapture {
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .expect("display staging mapped by the poll above");
         let bgra = matches!(
             format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb

@@ -68,6 +68,18 @@ impl Slider {
 }
 
 impl Control for Slider {
+    // MORROWIND-I. The value is spoken, so it is formatted here rather than
+    // left to the reader: two decimals is legible read aloud and a full f32 is
+    // not — "zero point four three nine nine nine nine nine" is a correct
+    // answer to the wrong question.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Slider
+    }
+
+    fn a11y_value(&self) -> Option<String> {
+        Some(format!("{:.2}", self.value))
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         // Fill the width it is given; fixed comfortable height.
         Vec2::new(available.x.min(200.0), 18.0)

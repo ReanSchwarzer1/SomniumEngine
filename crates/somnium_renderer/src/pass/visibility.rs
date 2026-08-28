@@ -36,6 +36,7 @@ pub struct VisibilityBufferPass {
 impl VisibilityBufferPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         width: u32,
         height: u32,
         global_bind_group_layout: &wgpu::BindGroupLayout,
@@ -87,7 +88,7 @@ impl VisibilityBufferPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Visibility Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/visibility.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("visibility.wgsl").into()),
         });
 
         // Phase 17D: alpha cutout samples the albedo map here, which needs a
@@ -233,10 +234,11 @@ impl VisibilityBufferPass {
     pub fn resize(
         &mut self,
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         width: u32,
         height: u32,
         global_bind_group_layout: &wgpu::BindGroupLayout,
     ) {
-        *self = Self::new(device, width, height, global_bind_group_layout);
+        *self = Self::new(device, shaders, width, height, global_bind_group_layout);
     }
 }

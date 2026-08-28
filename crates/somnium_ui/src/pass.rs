@@ -29,6 +29,13 @@ use std::borrow::Cow;
 /// smaller allocation than the buffers it replaces.
 const INIT_INSTANCE_CAP: u64 = 16384 * 100;
 
+/// 8 K shaped vertices before the first grow. A node graph with two hundred
+/// wires at default tolerance sits comfortably inside this.
+const INIT_SHAPED_VERTEX_CAP: u64 = 8192 * 20;
+
+/// 1 K shaped shapes before the first grow.
+const INIT_SHAPED_INSTANCE_CAP: u64 = 1024 * 64;
+
 /// Six vertices per instance: two triangles over the unit quad.
 const VERTS_PER_QUAD: u32 = 6;
 
@@ -54,6 +61,24 @@ const _: () = assert!(DEFAULT_TEXT_GAMMA > 1.0);
 
 fn shader_source_for_surface_format(format: wgpu::TextureFormat) -> Cow<'static, str> {
     let source = include_str!("ui_pass.wgsl");
+    if format.is_srgb() {
+        Cow::Borrowed(source)
+    } else {
+        debug_assert!(source.contains(SRGB_OUTPUT_DECLARATION));
+        Cow::Owned(source.replace(
+            SRGB_OUTPUT_DECLARATION,
+            "const OUTPUT_IS_SRGB: bool = false;",
+        ))
+    }
+}
+
+/// The shaped shader, with the same sRGB switch the quad shader gets.
+///
+/// Both pipelines must make the identical decode decision: one decoding and the
+/// other not produces two different colours from one token, and the seam shows
+/// exactly where a shaped shape meets a quad one.
+fn shaped_source_for_surface_format(format: wgpu::TextureFormat) -> Cow<'static, str> {
+    let source = include_str!("ui_shaped.wgsl");
     if format.is_srgb() {
         Cow::Borrowed(source)
     } else {
@@ -133,6 +158,23 @@ pub struct UiPass {
     // Instance buffer (recreated on overflow)
     inst_buf: wgpu::Buffer,
     inst_capacity: u64,
+    // ── MORROWIND-D: the shaped stream ───────────────────────────────────────
+    /// Second pipeline. Same pass, same target, same blend state; different
+    /// vertex layout and a storage array instead of a per-instance buffer.
+    shaped_pipeline: wgpu::RenderPipeline,
+    shaped_vbuf: wgpu::Buffer,
+    shaped_vcap: u64,
+    shaped_sbuf: wgpu::Buffer,
+    shaped_scap: u64,
+    bg2_layout: wgpu::BindGroupLayout,
+    bg2: wgpu::BindGroup,
+    /// Views for the texture slots a game registered, indexed from
+    /// [`crate::shaped::RESERVED_TEXTURE_SLOTS`].
+    registered: Vec<Option<wgpu::TextureView>>,
+    /// Set when `registered` changed and BG1 has to be rebuilt.
+    textures_dirty: bool,
+    /// Shaped vertices uploaded this frame, for the performance harness.
+    shaped_vertices: u32,
     // Draw list cached from the last prepare() call
     commands: Vec<DrawCommand>,
     text_gamma: f32,
@@ -171,29 +213,55 @@ impl UiPass {
             }],
         });
 
-        let atlas_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
+        // MORROWIND-D: three fixed texture bindings become one bindless array.
+        //
+        // This relies on `TEXTURE_BINDING_ARRAY`,
+        // `SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING` and
+        // `PARTIALLY_BOUND_BINDING_ARRAY`, and needs no fallback path: all
+        // three are already in `somnium_renderer::context`'s
+        // `required_features`, so a device that lacks them cannot create the
+        // renderer that owns this pass. The plan (Appendix A.3.3) expected a
+        // texture-atlas-page fallback would be needed; the engine already
+        // could not start without binding arrays, so it is not.
         let bg1_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("UiPass BGL1"),
             entries: &[
-                atlas_entry(0),
-                atlas_entry(1),
-                atlas_entry(3),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    // Partially bound: the array is declared at its full length
+                    // and only the occupied slots are supplied. An unbound slot
+                    // samples zero, which is the right answer for a texture a
+                    // game registered and has not uploaded yet.
+                    count: std::num::NonZeroU32::new(crate::shaped::MAX_TEXTURE_SLOTS),
+                },
             ],
+        });
+
+        // BG2 — the shaped stream's per-shape storage array.
+        let bg2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("UiPass BGL2 (shaped)"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
         });
 
         // ── Globals uniform buffer ────────────────────────────────────────────
@@ -279,6 +347,7 @@ impl UiPass {
             &icon_view,
             &thumb_view,
             &sampler,
+            &[],
         );
 
         // ── Instance buffer ───────────────────────────────────────────────────
@@ -301,6 +370,85 @@ impl UiPass {
             immediate_size: 0,
         });
 
+        let shaped_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("UiPass Shaped Pipeline Layout"),
+            bind_group_layouts: &[Some(&bg0_layout), Some(&bg1_layout), Some(&bg2_layout)],
+            immediate_size: 0,
+        });
+
+        // ── MORROWIND-D: shaped pipeline and its buffers ──────────────────────
+        let shaped_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("UiPass Shaped Shader"),
+            source: wgpu::ShaderSource::Wgsl(shaped_source_for_surface_format(surface_format)),
+        });
+        let shaped_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("UiPass Shaped Pipeline"),
+            layout: Some(&shaped_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shaped_shader,
+                entry_point: Some("vs_shaped"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: crate::shaped::ShapedVertex::STRIDE,
+                    // Vertex, not Instance: the geometry *is* per-vertex here,
+                    // which is the whole difference between the two streams.
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &crate::shaped::ShapedVertex::VERTEX_ATTRS,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shaped_shader,
+                entry_point: Some("fs_shaped"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    // Byte-for-byte the quad pipeline's blend state. Two
+                    // pipelines interleaving in one pass must agree here, or a
+                    // shaped shape and the quad shape beside it composite
+                    // differently against the same background.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // No culling: the tessellator emits whichever winding the input
+                // contour had, and rejecting half of them would drop every
+                // clockwise-authored shape.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+        });
+
+        let shaped_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UI Shaped Vertices"),
+            size: INIT_SHAPED_VERTEX_CAP,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shaped_sbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UI Shaped Instances"),
+            size: INIT_SHAPED_INSTANCE_CAP,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bg2 = Self::make_bg2(device, &bg2_layout, &shaped_sbuf);
+
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("UiPass Pipeline"),
             layout: Some(&pipeline_layout),
@@ -309,11 +457,11 @@ impl UiPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: Primitive::STRIDE,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &Primitive::VERTEX_ATTRS,
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -351,6 +499,16 @@ impl UiPass {
         Self {
             pipeline,
             bg1_layout,
+            shaped_pipeline,
+            shaped_vbuf,
+            shaped_vcap: INIT_SHAPED_VERTEX_CAP,
+            shaped_sbuf,
+            shaped_scap: INIT_SHAPED_INSTANCE_CAP,
+            bg2_layout,
+            bg2,
+            registered: Vec::new(),
+            textures_dirty: false,
+            shaped_vertices: 0,
             globals_buf,
             bg0,
             sampler,
@@ -373,6 +531,51 @@ impl UiPass {
         }
     }
 
+    fn make_bg2(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("UiPass BG2 (shaped)"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
+    }
+
+    /// Supply the view for a slot handed out by
+    /// [`crate::draw::DrawingContext::register_texture`].
+    ///
+    /// Rebuilds BG1 on the next `prepare`, not here, so a game registering ten
+    /// textures during load costs one rebuild rather than ten.
+    ///
+    /// Returns `false` for a slot below [`crate::shaped::RESERVED_TEXTURE_SLOTS`]
+    /// or past the array: the first three belong to the engine's own atlases and
+    /// letting a game overwrite the font atlas would be a very confusing way to
+    /// lose all text.
+    pub fn set_texture(&mut self, slot: u32, view: wgpu::TextureView) -> bool {
+        if slot < crate::shaped::RESERVED_TEXTURE_SLOTS || slot >= crate::shaped::MAX_TEXTURE_SLOTS
+        {
+            return false;
+        }
+        let index = (slot - crate::shaped::RESERVED_TEXTURE_SLOTS) as usize;
+        if self.registered.len() <= index {
+            self.registered.resize_with(index + 1, || None);
+        }
+        self.registered[index] = Some(view);
+        self.textures_dirty = true;
+        true
+    }
+
+    /// Build BG1: the shared sampler plus the bindless texture array.
+    ///
+    /// Slots 0, 1 and 2 are always the font, icon and thumbnail atlases.
+    /// `registered` supplies slots 3.. and may be shorter than the array; the
+    /// rest stay unbound, which `PARTIALLY_BOUND_BINDING_ARRAY` permits and
+    /// which samples zero rather than sampling somebody else's texture.
     fn make_bg1(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -380,26 +583,30 @@ impl UiPass {
         icon_view: &wgpu::TextureView,
         thumb_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        registered: &[Option<wgpu::TextureView>],
     ) -> wgpu::BindGroup {
+        let mut views: Vec<&wgpu::TextureView> = vec![font_view, icon_view, thumb_view];
+        // Stop at the first hole: a binding array is a contiguous prefix, so a
+        // registered-but-not-yet-uploaded slot ends the run rather than
+        // shifting every slot after it down by one — which would silently
+        // repoint every later texture at its neighbour.
+        for slot in registered {
+            match slot {
+                Some(view) => views.push(view),
+                None => break,
+            }
+        }
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("UiPass BG1"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(font_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(icon_view),
-                },
-                wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(thumb_view),
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureViewArray(&views),
                 },
             ],
         })
@@ -548,7 +755,7 @@ impl UiPass {
             atlases_changed = true;
         }
 
-        if atlases_changed {
+        if atlases_changed || self.textures_dirty {
             self.bg1 = Self::make_bg1(
                 device,
                 &self.bg1_layout,
@@ -556,7 +763,9 @@ impl UiPass {
                 &self.icon_view,
                 &self.thumb_view,
                 &self.sampler,
+                &self.registered,
             );
+            self.textures_dirty = false;
         }
 
         // Instances
@@ -574,8 +783,55 @@ impl UiPass {
             queue.write_buffer(&self.inst_buf, 0, bytemuck::cast_slice(&draw_ctx.instances));
         }
 
+        // ── MORROWIND-D: the shaped stream ───────────────────────────────────
+        //
+        // Uploaded whether or not the quad stream had anything, and skipped
+        // entirely when empty — which is every frame until a widget draws a
+        // path, so the cost of having this stream at all is one branch.
+        let vertex_bytes = (draw_ctx.shaped.vertices.len()
+            * std::mem::size_of::<crate::shaped::ShapedVertex>()) as u64;
+        if !draw_ctx.shaped.vertices.is_empty() {
+            if vertex_bytes > self.shaped_vcap {
+                self.shaped_vcap = vertex_bytes * 2;
+                self.shaped_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("UI Shaped Vertices"),
+                    size: self.shaped_vcap,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(
+                &self.shaped_vbuf,
+                0,
+                bytemuck::cast_slice(&draw_ctx.shaped.vertices),
+            );
+
+            let shape_bytes = (draw_ctx.shaped.instances.len()
+                * std::mem::size_of::<crate::shaped::ShapedInstance>())
+                as u64;
+            if shape_bytes > self.shaped_scap {
+                self.shaped_scap = shape_bytes * 2;
+                self.shaped_sbuf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("UI Shaped Instances"),
+                    size: self.shaped_scap,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                // The bind group names the buffer, so a reallocation invalidates
+                // it. Rebuilding here rather than every frame is the difference
+                // between a one-off cost on growth and a per-frame allocation.
+                self.bg2 = Self::make_bg2(device, &self.bg2_layout, &self.shaped_sbuf);
+            }
+            queue.write_buffer(
+                &self.shaped_sbuf,
+                0,
+                bytemuck::cast_slice(&draw_ctx.shaped.instances),
+            );
+        }
+
         self.commands.clear();
         self.commands.extend_from_slice(&draw_ctx.commands);
+        self.shaped_vertices = draw_ctx.shaped.vertices.len() as u32;
         self.stats = UiFrameStats {
             instances: draw_ctx.instances.len() as u32,
             batches: draw_ctx
@@ -610,12 +866,16 @@ impl UiPass {
             occlusion_query_set: None,
         });
 
-        rpass.set_pipeline(&self.pipeline);
-        rpass.set_vertex_buffer(0, self.inst_buf.slice(..));
         rpass.set_bind_group(0, &self.bg0, &[]);
-
-        // Bound once: every instance names its own atlas.
+        // Bound once: every instance names its own texture slot.
         rpass.set_bind_group(1, &self.bg1, &[]);
+
+        // MORROWIND-D. One ordered command list, two pipelines. The state is
+        // set lazily and only when the stream actually changes, so a frame that
+        // draws no paths issues exactly the calls it did before this landed,
+        // and a frame that interleaves them pays one switch per transition
+        // rather than one per command.
+        let mut bound: Option<crate::shaped::Stream> = None;
 
         let sw = self.surface_w;
         let sh = self.surface_h;
@@ -645,11 +905,42 @@ impl UiPass {
             }
             rpass.set_scissor_rect(x0, y0, cw, ch);
 
-            rpass.draw(
-                0..VERTS_PER_QUAD,
-                cmd.instance_offset..(cmd.instance_offset + cmd.instance_count),
-            );
+            if bound != Some(cmd.stream) {
+                match cmd.stream {
+                    crate::shaped::Stream::Quad => {
+                        rpass.set_pipeline(&self.pipeline);
+                        rpass.set_vertex_buffer(0, self.inst_buf.slice(..));
+                    }
+                    crate::shaped::Stream::Shaped => {
+                        rpass.set_pipeline(&self.shaped_pipeline);
+                        rpass.set_vertex_buffer(0, self.shaped_vbuf.slice(..));
+                        rpass.set_bind_group(2, &self.bg2, &[]);
+                    }
+                }
+                bound = Some(cmd.stream);
+            }
+
+            match cmd.stream {
+                // One instanced draw over the unit quad, unchanged.
+                crate::shaped::Stream::Quad => rpass.draw(
+                    0..VERTS_PER_QUAD,
+                    cmd.instance_offset..(cmd.instance_offset + cmd.instance_count),
+                ),
+                // One non-instanced draw over a run of tessellated vertices.
+                // Each vertex names its own shape, so a run of a hundred wires
+                // is still one draw call.
+                crate::shaped::Stream::Shaped => rpass.draw(
+                    cmd.instance_offset..(cmd.instance_offset + cmd.instance_count),
+                    0..1,
+                ),
+            }
         }
+    }
+
+    /// Shaped vertices uploaded on the last `prepare`.
+    #[must_use]
+    pub fn shaped_vertex_count(&self) -> u32 {
+        self.shaped_vertices
     }
 }
 

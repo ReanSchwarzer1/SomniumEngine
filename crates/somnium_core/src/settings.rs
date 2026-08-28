@@ -82,6 +82,19 @@ pub struct EditorSettings {
     pub tooltip_delay_ms: f32,
     /// Show the statistics overlay in the viewport.
     pub show_statistics: bool,
+    /// MORROWIND-I. Complete every motion track instantly.
+    ///
+    /// A preference rather than only a platform query, because the platform
+    /// query is one bit and the reasons people want this are several: vestibular
+    /// disorders, a slow machine, a screen recording, and simply not liking it.
+    /// `A11ySettings::from_platform` is consulted first and this overrides it.
+    pub reduced_motion: bool,
+    /// MORROWIND-I. Raise contrast using Zeta's certified pairs.
+    ///
+    /// Changes colour and nothing else — there is a test asserting layout is
+    /// identical in both modes, because a high-contrast build that relaid out
+    /// would be a second interface nobody tests.
+    pub high_contrast: bool,
 }
 
 impl Default for EditorSettings {
@@ -96,6 +109,8 @@ impl Default for EditorSettings {
             select_only: false,
             tooltip_delay_ms: 500.0,
             show_statistics: false,
+            reduced_motion: false,
+            high_contrast: false,
         }
     }
 }

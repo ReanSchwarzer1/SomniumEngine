@@ -44,7 +44,9 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_MESH_SDF": ("schema", "somnium.PostProcess.mesh_sdf"),
     "SOMNIUM_MOTION_BLUR": ("schema", "somnium.PostProcess.motion_blur_enabled"),
     "SOMNIUM_PATH_TRACER": ("schema", "somnium.PostProcess.path_tracer"),
-    "SOMNIUM_PROBES": ("schema", "somnium.PostProcess.probes"),
+    # MORROWIND-AB preserves the legacy process switch but routes it to the
+    # single visible DDGI control; the old `probes` field is load-only.
+    "SOMNIUM_PROBES": ("schema", "somnium.PostProcess.ddgi_enabled"),
     "SOMNIUM_RESTIR": ("schema", "somnium.PostProcess.restir_enabled"),
     "SOMNIUM_RESTIR_GI": ("schema", "somnium.PostProcess.restir_gi_enabled"),
     "SOMNIUM_RT_REFLECT": ("schema", "somnium.PostProcess.rt_reflect_enabled"),
@@ -119,6 +121,7 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_CAPTURE_PNG": ("harness", "Capture harness: output path for the scene image."),
     "SOMNIUM_CAPTURE_QUIT": ("harness", "Capture harness: exit after the capture completes."),
     "SOMNIUM_CAPTURE_UI_PNG": ("harness", "Capture harness: output path for the editor-surface image."),
+    "SOMNIUM_CAPABILITY_REPORT": ("harness", "Startup capability probe output path; the live capability summary is exposed by diagnostics, while this variable records machine evidence for a run."),
     "SOMNIUM_TIME": ("harness", "`.somtime` harness: enables frame timing collection."),
     "SOMNIUM_TIME_COMPARE": ("harness", "`.somtime` harness: the baseline row to compare against."),
     "SOMNIUM_TIME_FRAMES": ("harness", "`.somtime` harness: how many frames to measure."),
@@ -154,6 +157,8 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_WATER_VIEW": ("harness", "Places the camera at a water body for a recorded capture. The editor route is Focus Selection and the camera bookmarks."),
     "SOMNIUM_KIT_VIEW": ("harness", "Places the camera for an XV-J kit capture. The editor route is Focus Selection and the camera bookmarks."),
     "SOMNIUM_TIME_VIEW": ("harness", "Chooses the pose a `.somtime` run measures from. The editor route is the camera bookmarks."),
+    "SOMNIUM_VIRTUAL_SHADOWS": ("harness", "Forces the demo sun to Virtual for unattended CSM/VSM timing runs; authored lights use Details."),
     "SOMNIUM_SHADOWTEST": ("harness", "Spawns a synthetic shadow-test scene at startup, before any editor surface exists."),
     "SOMNIUM_SHADE_ABLATE": ("harness", "Disables shading stages for an A/B measurement; its own documentation says it is never set from the UI."),
+    "SOMNIUM_UI_SHAPER": ("harness", "A/B-only switch for the not-yet-available shaped-text implementation; exposing a selectable editor option would falsely imply that shaping works."),
 }

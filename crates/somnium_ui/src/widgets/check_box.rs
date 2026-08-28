@@ -28,6 +28,27 @@ pub struct CheckBox {
 }
 
 impl Control for CheckBox {
+    // MORROWIND-I. Three-valued on purpose: `mixed` is a state Somnium's
+    // property inspector produces for a multi-selection, and reporting it as
+    // unchecked would tell a reader the opposite of the truth.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::CheckBox
+    }
+
+    fn a11y_name(&self) -> Option<String> {
+        (!self.label.trim().is_empty()).then(|| self.label.clone())
+    }
+
+    fn a11y_toggled(&self) -> Option<crate::a11y::Toggled> {
+        Some(if self.mixed {
+            crate::a11y::Toggled::Mixed
+        } else if self.checked {
+            crate::a11y::Toggled::True
+        } else {
+            crate::a11y::Toggled::False
+        })
+    }
+
     fn is_keyboard_focusable(&self) -> bool {
         true
     }

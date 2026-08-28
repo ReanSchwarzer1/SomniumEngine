@@ -97,8 +97,24 @@ pub enum Easing {
     /// Slow out, fast in. For something leaving.
     Accelerate,
     /// Critically damped: approaches the target without overshoot.
+    ///
+    /// **Normalised over a duration**, which is why MORROWIND-H adds
+    /// [`Spring`] beside it rather than replacing it: this is a *shape*, and a
+    /// spring is a *system*. The editor's press feedback wants the shape.
     Spring,
+    /// An authored curve, from CONTROL-K's curve editor.
+    ///
+    /// MORROWIND-H. Holds an index rather than a [`Curve`](somnium_ecs::curve::Curve)
+    /// so `Easing` stays `Copy` — every widget in the editor passes it by
+    /// value, and boxing a curve into it would have been a change to all of
+    /// them. The curve lives in the [`Animator`]'s library; resolve through
+    /// [`Animator::ease`].
+    Curve(CurveId),
 }
+
+/// A curve registered with an [`Animator`], for [`Easing::Curve`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CurveId(pub u32);
 
 impl Easing {
     /// Map linear progress `t` in 0..=1 onto eased progress in 0..=1.
@@ -123,32 +139,309 @@ impl Easing {
                 let full = 1.0 - (1.0 + K) * (-K).exp();
                 (raw / full).clamp(0.0, 1.0)
             }
+            // An authored curve cannot be evaluated without the library that
+            // holds it. Linear is the honest answer here rather than a panic:
+            // this path is reachable only by a caller that took an `Easing` out
+            // of an `Animator` and evaluated it away from one, and a UI that
+            // eases linearly is wrong in a way somebody can see, where a UI
+            // that panics on a hover is not shippable at all.
+            Easing::Curve(_) => t,
+        }
+    }
+
+    /// Whether this easing needs an [`Animator`] to evaluate.
+    pub fn is_authored(self) -> bool {
+        matches!(self, Easing::Curve(_))
+    }
+}
+
+// ── MORROWIND-H: springs ────────────────────────────────────────────────────
+
+/// A spring, parameterised the way a spring is.
+///
+/// [`Easing::Spring`] is a *shape*: a critically damped step response
+/// normalised so it lands exactly on the target after a stated duration. That
+/// is right for press feedback, where the duration is the design token and the
+/// overshoot must be zero.
+///
+/// It is wrong for anything that gets **interrupted**. Retarget a duration
+/// tween mid-flight and it restarts from the current value with zero velocity —
+/// a drawer that was flying open and is told to close visibly stops dead first.
+/// A spring carries velocity across the retarget, which is the entire reason
+/// §8 says *"a spring model for the cases where duration is the wrong
+/// parameterisation"*.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    /// How hard it pulls toward the target. Higher is faster and tighter.
+    pub stiffness: f32,
+    /// How hard it resists motion. At `2 * sqrt(stiffness * mass)` the spring
+    /// is critically damped and will not overshoot.
+    pub damping: f32,
+    /// Larger mass, slower response, more overshoot for the same damping.
+    pub mass: f32,
+}
+
+impl Spring {
+    /// Critically damped at `stiffness` — the fastest approach with no
+    /// overshoot, and the default for anything the user is scrubbing.
+    pub fn critical(stiffness: f32) -> Self {
+        let mass = 1.0;
+        Self {
+            stiffness,
+            damping: 2.0 * (stiffness * mass).sqrt(),
+            mass,
+        }
+    }
+
+    /// Quick and tight, and **critically damped**: it will not overshoot.
+    ///
+    /// Menus, drawers, anything that should feel immediate. The damping is
+    /// `2 * sqrt(320)` rounded up rather than a round number, because rounding
+    /// it *down* is how a preset documented as tight quietly starts to wobble
+    /// — which is what the first draft of this constant did, and what
+    /// `overshoots()` exists to catch.
+    pub const SNAPPY: Self = Self {
+        stiffness: 320.0,
+        damping: 36.0,
+        mass: 1.0,
+    };
+
+    /// Slower, still critically damped. For something large moving.
+    pub const GENTLE: Self = Self {
+        stiffness: 120.0,
+        damping: 22.0,
+        mass: 1.0,
+    };
+
+    /// Deliberately underdamped: it overshoots and settles back.
+    ///
+    /// For a notification arriving or a badge popping — never for a control the
+    /// user is scrubbing, which Phase 27 §9.3 forbids. Named rather than
+    /// hand-tuned at the call site so `overshoots()` reads `true` on purpose
+    /// somewhere a reviewer can see it.
+    pub const WOBBLY: Self = Self {
+        stiffness: 300.0,
+        damping: 14.0,
+        mass: 1.0,
+    };
+
+    /// Whether this spring will overshoot its target.
+    ///
+    /// Phase 27 §9.3 forbids overshoot on a control the user is scrubbing, so
+    /// this is a question call sites need to be able to ask.
+    pub fn overshoots(&self) -> bool {
+        self.damping < 2.0 * (self.stiffness * self.mass).sqrt() - f32::EPSILON
+    }
+
+    /// One semi-implicit Euler step. Returns `(value, velocity)`.
+    ///
+    /// Sub-stepped by the caller: a 100 ms frame integrated in one go with a
+    /// stiff spring diverges, and a UI that explodes after a breakpoint is a UI
+    /// nobody debugs twice.
+    fn step(&self, value: f32, velocity: f32, target: f32, dt_s: f32) -> (f32, f32) {
+        let force = -self.stiffness * (value - target) - self.damping * velocity;
+        let velocity = velocity + (force / self.mass.max(f32::EPSILON)) * dt_s;
+        (value + velocity * dt_s, velocity)
+    }
+}
+
+/// How a track travels from `from` to `to`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Motion {
+    /// A fixed duration and a shape. Phase 27's model, and still the default:
+    /// a design system that states `hover_ms` wants a track that takes exactly
+    /// that long.
+    Timed { duration_ms: f32, easing: Easing },
+    /// A spring. No duration — it arrives when it arrives, and it carries its
+    /// velocity through a retarget.
+    Spring(Spring),
+}
+
+impl Motion {
+    /// The Phase 27 shape, which every existing call site means.
+    pub fn timed(duration_ms: f32, easing: Easing) -> Self {
+        Motion::Timed {
+            duration_ms,
+            easing,
         }
     }
 }
 
 /// One running animation.
+///
+/// MORROWIND-H replaced `duration_ms` + `easing` with [`Motion`] and added
+/// `velocity`, `delay_ms` and `current`. A spring has no duration and its state
+/// is not a function of elapsed time, so a value that used to be *derived* on
+/// every read is now *integrated* on every tick and cached here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Track {
     pub from: f32,
     pub to: f32,
     pub elapsed_ms: f32,
-    pub duration_ms: f32,
-    pub easing: Easing,
+    /// Time still to wait before this track starts moving. MORROWIND-H's
+    /// staggering: a list of eight rows entering together is a pop, and the
+    /// same eight at 30 ms apart is a cascade.
+    pub delay_ms: f32,
+    pub motion: Motion,
+    /// Units per second. Zero for a timed track; carried across a retarget for
+    /// a spring, which is the whole reason springs are here.
+    pub velocity: f32,
+    /// The value as of the last tick.
+    pub current: f32,
 }
 
 impl Track {
-    /// Current value, eased.
+    /// Current value. Written by [`Animator::tick`]; a track that has never
+    /// ticked reads as its origin.
     pub fn value(&self) -> f32 {
-        if self.duration_ms <= 0.0 {
-            return self.to;
-        }
-        let t = (self.elapsed_ms / self.duration_ms).clamp(0.0, 1.0);
-        self.from + (self.to - self.from) * self.easing.apply(t)
+        self.current
     }
 
     pub fn finished(&self) -> bool {
-        self.elapsed_ms >= self.duration_ms
+        if self.delay_ms > 0.0 {
+            return false;
+        }
+        match self.motion {
+            Motion::Timed { duration_ms, .. } => self.elapsed_ms >= duration_ms,
+            // A spring is done when it has arrived *and* stopped. Either test
+            // alone is wrong: a spring passing through its target at speed has
+            // arrived and is not done, and one creeping in from far away has
+            // stopped and is not done either.
+            Motion::Spring(_) => {
+                (self.current - self.to).abs() < SPRING_EPSILON
+                    && self.velocity.abs() < SPRING_VELOCITY_EPSILON
+                    || self.elapsed_ms >= MAX_SPRING_MS
+            }
+        }
+    }
+}
+
+/// Distance from the target below which a spring counts as arrived.
+///
+/// A quarter of a pixel at 1x. Tighter than this and a spring can hang for
+/// hundreds of milliseconds converging on a difference nobody can see, which is
+/// a frame cost with no visual return.
+const SPRING_EPSILON: f32 = 0.25 / 1000.0;
+
+/// Speed below which a spring counts as stopped, in units per second.
+const SPRING_VELOCITY_EPSILON: f32 = 0.01;
+
+/// Hard ceiling on a spring, as [`MAX_DURATION_MS`] is on a timed track.
+///
+/// A spring has no duration by construction, so this is not a design token —
+/// it is the bound that stops a mis-parameterised spring animating forever and
+/// keeping the shell awake. Four seconds is far past anything a UI should do
+/// and far short of "nobody noticed".
+pub const MAX_SPRING_MS: f32 = 4_000.0;
+
+/// The largest step a spring is integrated with, in seconds.
+///
+/// Semi-implicit Euler with a stiff spring diverges at large `dt`. A 100 ms
+/// frame after a breakpoint would otherwise send a widget to infinity, and a UI
+/// that explodes after a breakpoint is a UI nobody debugs twice.
+const SPRING_MAX_STEP_S: f32 = 1.0 / 240.0;
+
+/// One property's part of a [`Transition`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransitionStep {
+    pub property: MotionProperty,
+    /// The property's natural value, for a key that has never been driven.
+    pub rest: f32,
+    pub to: f32,
+    pub motion: Motion,
+    /// Offset within the transition, for a step that should trail the others.
+    pub delay_ms: f32,
+}
+
+/// A named state change: several properties moving together.
+///
+/// MORROWIND-H, and §8's *"state transitions"*. A card lifting is a scale, a
+/// shadow and a wash; writing that as three `start` calls is three chances to
+/// give one of them a different duration by accident, and the drift is the kind
+/// nobody sees in review and everybody sees on screen.
+///
+/// Built once — as a `const`-like value next to the design tokens — and played
+/// against a node, so *what a state looks like* lives in one place and *when it
+/// happens* lives at the call site.
+///
+/// ```
+/// # use somnium_ui::motion::{Easing, Motion, MotionProperty, Transition};
+/// let lifted = Transition::new()
+///     .with(MotionProperty::HoverWash, 0.0, 1.0, Motion::timed(120.0, Easing::Standard))
+///     .with(MotionProperty::Scale, 1.0, 1.02, Motion::timed(120.0, Easing::Decelerate));
+/// assert_eq!(lifted.len(), 2);
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Transition {
+    steps: Vec<TransitionStep>,
+}
+
+impl Transition {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a property to the transition.
+    #[must_use]
+    pub fn with(mut self, property: MotionProperty, rest: f32, to: f32, motion: Motion) -> Self {
+        self.steps.push(TransitionStep {
+            property,
+            rest,
+            to,
+            motion,
+            delay_ms: 0.0,
+        });
+        self
+    }
+
+    /// Add a property that trails the rest of the transition.
+    #[must_use]
+    pub fn with_delayed(
+        mut self,
+        property: MotionProperty,
+        rest: f32,
+        to: f32,
+        motion: Motion,
+        delay_ms: f32,
+    ) -> Self {
+        self.steps.push(TransitionStep {
+            property,
+            rest,
+            to,
+            motion,
+            delay_ms,
+        });
+        self
+    }
+
+    pub fn steps(&self) -> &[TransitionStep] {
+        &self.steps
+    }
+
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// The same transition with every target replaced by its rest value.
+    ///
+    /// The exit half of an enter/exit pair, without a second declaration to
+    /// keep in step with the first — which is the way these drift.
+    #[must_use]
+    pub fn reversed(&self) -> Self {
+        Self {
+            steps: self
+                .steps
+                .iter()
+                .map(|step| TransitionStep {
+                    to: step.rest,
+                    ..*step
+                })
+                .collect(),
+        }
     }
 }
 
@@ -160,6 +453,11 @@ pub struct Animator {
     /// settled state after the track is retired.
     settled: HashMap<MotionKey, f32>,
     reduced_motion: bool,
+    /// MORROWIND-H. Authored easings, indexed by [`CurveId`]. Registering is
+    /// append-only within an animator's life so an id handed to a widget stays
+    /// valid — a curve edited in CONTROL-K's editor is *replaced in place*
+    /// through [`Animator::replace_curve`], not re-registered.
+    curves: Vec<somnium_ecs::curve::Curve>,
 }
 
 impl Animator {
@@ -205,27 +503,181 @@ impl Animator {
     /// mid-fade does not snap. `duration_ms` is clamped to [`MAX_DURATION_MS`]:
     /// the ceiling belongs here, not at ~86 call sites.
     pub fn start(&mut self, key: MotionKey, rest: f32, to: f32, duration_ms: f32, easing: Easing) {
+        self.start_with(key, rest, to, Motion::timed(duration_ms, easing));
+    }
+
+    /// Begin (or retarget) a track with any [`Motion`].
+    ///
+    /// MORROWIND-H's general form; [`Animator::start`] is this with a
+    /// `Motion::Timed`. **Retargeting a spring carries its velocity**, which is
+    /// the difference that makes springs worth having: a drawer flying open and
+    /// then told to close reverses through its own momentum instead of stopping
+    /// dead and starting again.
+    pub fn start_with(&mut self, key: MotionKey, rest: f32, to: f32, motion: Motion) {
+        self.start_delayed(key, rest, to, motion, 0.0);
+    }
+
+    /// [`Animator::start_with`], beginning after `delay_ms`.
+    pub fn start_delayed(
+        &mut self,
+        key: MotionKey,
+        rest: f32,
+        to: f32,
+        motion: Motion,
+        delay_ms: f32,
+    ) {
+        let existing = self.tracks.get(&key).copied();
         let from = self.value_or(key, rest);
-        if (from - to).abs() < f32::EPSILON {
+
+        let instant = match motion {
+            Motion::Timed { duration_ms, .. } => duration_ms <= 0.0,
+            Motion::Spring(spring) => spring.stiffness <= 0.0,
+        };
+        if self.reduced_motion || instant || (from - to).abs() < f32::EPSILON {
             self.tracks.remove(&key);
             self.settled.insert(key, to);
             return;
         }
-        if self.reduced_motion || duration_ms <= 0.0 {
-            self.tracks.remove(&key);
-            self.settled.insert(key, to);
-            return;
-        }
+
+        // The one line springs exist for. A timed retarget starts from rest by
+        // construction — its shape is a function of elapsed time and nothing
+        // else — so velocity is carried only when both sides are springs.
+        let velocity = match (existing.map(|t| t.motion), motion) {
+            (Some(Motion::Spring(_)), Motion::Spring(_)) => existing.map_or(0.0, |t| t.velocity),
+            _ => 0.0,
+        };
+
+        let motion = match motion {
+            Motion::Timed {
+                duration_ms,
+                easing,
+            } => Motion::Timed {
+                duration_ms: duration_ms.min(MAX_DURATION_MS),
+                easing,
+            },
+            spring => spring,
+        };
+
         self.tracks.insert(
             key,
             Track {
                 from,
                 to,
                 elapsed_ms: 0.0,
-                duration_ms: duration_ms.min(MAX_DURATION_MS),
-                easing,
+                delay_ms: delay_ms.max(0.0),
+                motion,
+                velocity,
+                current: from,
             },
         );
+    }
+
+    /// Start the same motion on several keys, `stagger_ms` apart.
+    ///
+    /// MORROWIND-H. Eight rows entering together is a pop; the same eight at
+    /// 30 ms apart is a cascade, and the difference is one parameter. Order is
+    /// the caller's, because it is the visual order the cascade should follow
+    /// and no sort in here could know it.
+    ///
+    /// Under reduced motion every key settles immediately, stagger included:
+    /// staggering *is* timing, and the contract is that timing is the only
+    /// thing reduced motion changes.
+    pub fn start_staggered(
+        &mut self,
+        keys: impl IntoIterator<Item = MotionKey>,
+        rest: f32,
+        to: f32,
+        motion: Motion,
+        stagger_ms: f32,
+    ) {
+        for (index, key) in keys.into_iter().enumerate() {
+            self.start_delayed(key, rest, to, motion, stagger_ms * index as f32);
+        }
+    }
+
+    /// Play a [`Transition`] on one node.
+    ///
+    /// MORROWIND-H. A state change is rarely one property: a card lifting is a
+    /// scale, a shadow and a wash, and three `start` calls in a row is three
+    /// chances to give one of them a different duration by accident.
+    pub fn play(&mut self, node: u32, transition: &Transition) {
+        for step in &transition.steps {
+            self.start_delayed(
+                MotionKey::new(node, step.property),
+                step.rest,
+                step.to,
+                step.motion,
+                step.delay_ms,
+            );
+        }
+    }
+
+    /// Play a [`Transition`] across several nodes, `stagger_ms` apart.
+    pub fn play_staggered(&mut self, nodes: &[u32], transition: &Transition, stagger_ms: f32) {
+        for (index, node) in nodes.iter().enumerate() {
+            let offset = stagger_ms * index as f32;
+            for step in &transition.steps {
+                self.start_delayed(
+                    MotionKey::new(*node, step.property),
+                    step.rest,
+                    step.to,
+                    step.motion,
+                    step.delay_ms + offset,
+                );
+            }
+        }
+    }
+
+    // ── Authored easing, from CONTROL-K ──────────────────────────────────────
+
+    /// Register a curve from CONTROL-K's editor and get an [`Easing::Curve`].
+    ///
+    /// MORROWIND-H, and §8's *"easing curves that come from CONTROL-K's curve
+    /// editor"*. The curve is evaluated at `t` in 0..=1 and its output is used
+    /// directly as eased progress, **not normalised**: a curve that does not
+    /// pass through (0,0) and (1,1) will not land exactly on its target, and
+    /// that is deliberate. Normalising would make an authored ease-out-back
+    /// impossible, and overshoot is precisely what an author reaches for a
+    /// curve to get.
+    pub fn register_curve(&mut self, curve: somnium_ecs::curve::Curve) -> CurveId {
+        let id = CurveId(self.curves.len() as u32);
+        self.curves.push(curve);
+        id
+    }
+
+    /// Replace a registered curve in place, keeping every [`CurveId`] valid.
+    ///
+    /// What a live curve editor needs: dragging a tangent must change the
+    /// motion of the widgets already referencing it, without re-registering and
+    /// leaving the old curve behind to be animated by nothing.
+    pub fn replace_curve(&mut self, id: CurveId, curve: somnium_ecs::curve::Curve) -> bool {
+        match self.curves.get_mut(id.0 as usize) {
+            Some(slot) => {
+                *slot = curve;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The registered curve behind an id.
+    pub fn curve(&self, id: CurveId) -> Option<&somnium_ecs::curve::Curve> {
+        self.curves.get(id.0 as usize)
+    }
+
+    /// Evaluate an easing, resolving [`Easing::Curve`] through the library.
+    ///
+    /// A `Curve` id with nothing behind it eases linearly rather than
+    /// panicking: an animator rebuilt without its curves is a recoverable
+    /// state, and a hover that panics is not.
+    pub fn ease(&self, easing: Easing, t: f32) -> f32 {
+        match easing {
+            Easing::Curve(id) => match self.curve(id) {
+                Some(curve) => curve.evaluate(t.clamp(0.0, 1.0)),
+                None => t.clamp(0.0, 1.0),
+            },
+            other => other.apply(t),
+        }
     }
 
     /// Jump straight to a value with no animation, e.g. on scene load.
@@ -252,14 +704,39 @@ impl Animator {
             return false;
         }
         let mut finished: Vec<MotionKey> = Vec::new();
+        // The curve library is borrowed immutably below while the tracks are
+        // borrowed mutably, so it is split out rather than reached through
+        // `self`. A second `HashMap` pass to avoid it would cost more than the
+        // line.
+        let curves = &self.curves;
         for (key, track) in self.tracks.iter_mut() {
-            track.elapsed_ms += dt_ms;
+            // A delayed track burns its delay first and does not move. It also
+            // does not count as advancing for the redraw signal below — but the
+            // signal is per-tick rather than per-track, and a frame in which
+            // *something* is waiting to start is a frame that will need another
+            // one anyway.
+            if track.delay_ms > 0.0 {
+                track.delay_ms -= dt_ms;
+                if track.delay_ms > 0.0 {
+                    continue;
+                }
+                // Spend the remainder of the frame on the track itself, so a
+                // 30 ms stagger under a 16 ms frame does not quantise to 32.
+                let spent = dt_ms + track.delay_ms;
+                track.delay_ms = 0.0;
+                advance(track, dt_ms - spent, curves);
+            } else {
+                advance(track, dt_ms, curves);
+            }
             if track.finished() {
                 finished.push(*key);
             }
         }
         for key in finished {
             if let Some(track) = self.tracks.remove(&key) {
+                // A timed track lands exactly on its target; a spring lands
+                // wherever it stopped, which is within SPRING_EPSILON of the
+                // target and is snapped here so the settled value is exact.
                 self.settled.insert(key, track.to);
             }
         }
@@ -281,6 +758,55 @@ impl Animator {
     }
 }
 
+/// Advance one track by `dt_ms`.
+///
+/// MORROWIND-H. A free function rather than a method on [`Track`] because a
+/// timed track needs the curve library to resolve [`Easing::Curve`] and `Track`
+/// has no business owning one.
+fn advance(track: &mut Track, dt_ms: f32, curves: &[somnium_ecs::curve::Curve]) {
+    if dt_ms <= 0.0 {
+        return;
+    }
+    track.elapsed_ms += dt_ms;
+    match track.motion {
+        Motion::Timed {
+            duration_ms,
+            easing,
+        } => {
+            let t = if duration_ms <= 0.0 {
+                1.0
+            } else {
+                (track.elapsed_ms / duration_ms).clamp(0.0, 1.0)
+            };
+            let eased = match easing {
+                Easing::Curve(id) => match curves.get(id.0 as usize) {
+                    Some(curve) => curve.evaluate(t),
+                    None => t,
+                },
+                other => other.apply(t),
+            };
+            let previous = track.current;
+            track.current = track.from + (track.to - track.from) * eased;
+            // Reported so an interrupted timed track can hand a spring a
+            // sensible starting velocity if one is ever retargeted into one.
+            track.velocity = (track.current - previous) / (dt_ms / 1000.0);
+        }
+        Motion::Spring(spring) => {
+            // Sub-stepped: see SPRING_MAX_STEP_S. The loop is bounded by the
+            // spring ceiling rather than by the frame, so a pathological
+            // dt cannot turn into a pathological number of iterations.
+            let mut remaining = (dt_ms / 1000.0).min(MAX_SPRING_MS / 1000.0);
+            while remaining > 0.0 {
+                let step = remaining.min(SPRING_MAX_STEP_S);
+                let (value, velocity) = spring.step(track.current, track.velocity, track.to, step);
+                track.current = value;
+                track.velocity = velocity;
+                remaining -= step;
+            }
+        }
+    }
+}
+
 /// Interpolate two authored-sRGB colours.
 ///
 /// Blending happens on the **linear** values and the result is re-encoded, so a
@@ -296,6 +822,397 @@ pub fn lerp_color(a: crate::theme::Color, b: crate::theme::Color, t: f32) -> cra
         la[2] + (lb[2] - la[2]) * t,
         la[3] + (lb[3] - la[3]) * t,
     ])
+}
+
+// ── MORROWIND-H ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod morrowind_h_tests {
+    use super::*;
+    use somnium_ecs::curve::{Curve, CurveKey, Interpolation};
+
+    fn key() -> MotionKey {
+        MotionKey::new(1, MotionProperty::Scale)
+    }
+
+    /// Run a track to completion and report how long it took.
+    fn settle(animator: &mut Animator, key: MotionKey, step_ms: f32) -> f32 {
+        let mut elapsed = 0.0;
+        while !animator.is_idle() && elapsed < MAX_SPRING_MS * 2.0 {
+            animator.tick(step_ms);
+            elapsed += step_ms;
+        }
+        elapsed
+    }
+
+    // ── springs ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_spring_arrives_and_settles_exactly() {
+        let mut a = Animator::new();
+        a.start_with(key(), 0.0, 1.0, Motion::Spring(Spring::SNAPPY));
+        let took = settle(&mut a, key(), 1000.0 / 120.0);
+        assert!(took > 0.0 && took < MAX_SPRING_MS, "took {took} ms");
+        // Settled values are snapped: a spring stops within SPRING_EPSILON and
+        // a widget resting a fraction off its target is a permanent sub-pixel
+        // offset, which is the exact bug Easing::Spring's normalisation fixes.
+        assert_eq!(a.value_or(key(), -1.0), 1.0);
+    }
+
+    #[test]
+    fn a_critically_damped_spring_does_not_overshoot() {
+        let mut a = Animator::new();
+        let spring = Spring::critical(200.0);
+        assert!(!spring.overshoots());
+        a.start_with(key(), 0.0, 1.0, Motion::Spring(spring));
+        let mut peak: f32 = 0.0;
+        for _ in 0..2000 {
+            a.tick(1000.0 / 240.0);
+            peak = peak.max(a.value_or(key(), 0.0));
+            if a.is_idle() {
+                break;
+            }
+        }
+        // Phase 27 §9.3 forbids overshoot on a control being scrubbed. The
+        // tolerance is float noise, not slack: 1e-3 of a unit range.
+        assert!(peak <= 1.0 + 1e-3, "overshot to {peak}");
+    }
+
+    #[test]
+    fn an_underdamped_spring_says_so_before_it_is_used() {
+        assert!(Spring::WOBBLY.overshoots(), "WOBBLY is meant to overshoot");
+        assert!(!Spring::SNAPPY.overshoots());
+        assert!(!Spring::GENTLE.overshoots());
+        // The bug this predicate exists to catch: SNAPPY shipped its first
+        // draft at damping 32 against a critical damping of 2*sqrt(320) =
+        // 35.78, so a preset documented as tight would have wobbled.
+        assert!(
+            Spring {
+                damping: 32.0,
+                ..Spring::SNAPPY
+            }
+            .overshoots()
+        );
+    }
+
+    /// The reason springs are in this sub-phase at all.
+    #[test]
+    fn retargeting_a_spring_carries_velocity_and_a_tween_does_not() {
+        let mut spring_side = Animator::new();
+        spring_side.start_with(key(), 0.0, 1.0, Motion::Spring(Spring::GENTLE));
+        for _ in 0..6 {
+            spring_side.tick(1000.0 / 120.0);
+        }
+        let moving = spring_side.tracks.get(&key()).copied().expect("in flight");
+        assert!(moving.velocity > 0.0, "the spring is not moving yet");
+
+        // Reverse it mid-flight.
+        spring_side.start_with(key(), 0.0, 0.0, Motion::Spring(Spring::GENTLE));
+        let reversed = spring_side.tracks.get(&key()).copied().expect("retargeted");
+        assert!(
+            reversed.velocity > 0.0,
+            "a spring must reverse through its own momentum, not stop dead"
+        );
+
+        // The timed side, for contrast: a shape is a function of elapsed time,
+        // so a retarget starts from rest by construction.
+        let mut timed_side = Animator::new();
+        timed_side.start(key(), 0.0, 1.0, 120.0, Easing::Standard);
+        for _ in 0..3 {
+            timed_side.tick(1000.0 / 120.0);
+        }
+        timed_side.start(key(), 0.0, 0.0, 120.0, Easing::Standard);
+        let retimed = timed_side.tracks.get(&key()).copied().expect("retargeted");
+        assert_eq!(retimed.velocity, 0.0);
+        // ...but it does keep the current value, so it does not snap.
+        assert!(retimed.from > 0.0 && retimed.from < 1.0, "{}", retimed.from);
+    }
+
+    #[test]
+    fn a_stalled_frame_does_not_send_a_spring_to_infinity() {
+        let mut a = Animator::new();
+        a.start_with(
+            key(),
+            0.0,
+            1.0,
+            Motion::Spring(Spring {
+                stiffness: 4000.0,
+                damping: 20.0,
+                mass: 1.0,
+            }),
+        );
+        // 500 ms in one step: a breakpoint, or a minimised window. Without
+        // sub-stepping this diverges.
+        a.tick(500.0);
+        let value = a.value_or(key(), 0.0);
+        assert!(value.is_finite(), "diverged to {value}");
+        assert!(value.abs() < 10.0, "flung to {value}");
+    }
+
+    #[test]
+    fn a_spring_cannot_animate_forever() {
+        let mut a = Animator::new();
+        // Stiffness so low it would creep for minutes.
+        a.start_with(
+            key(),
+            0.0,
+            1.0,
+            Motion::Spring(Spring {
+                stiffness: 0.01,
+                damping: 8.0,
+                mass: 1.0,
+            }),
+        );
+        let took = settle(&mut a, key(), 1000.0 / 60.0);
+        assert!(a.is_idle(), "still running after {took} ms");
+        assert!(took <= MAX_SPRING_MS + 100.0, "took {took} ms");
+    }
+
+    // ── authored curves, from CONTROL-K ─────────────────────────────────────
+
+    #[test]
+    fn an_authored_curve_drives_the_track() {
+        let mut a = Animator::new();
+        // A curve that holds at 0 until half way, then jumps to 1: nothing any
+        // built-in easing does, which is the point of authoring one.
+        let id = a.register_curve(Curve::from_keys(vec![
+            CurveKey {
+                interpolation: Interpolation::Step,
+                ..CurveKey::new(0.0, 0.0)
+            },
+            CurveKey {
+                interpolation: Interpolation::Step,
+                ..CurveKey::new(0.5, 1.0)
+            },
+        ]));
+        a.start(key(), 0.0, 100.0, 100.0, Easing::Curve(id));
+        a.tick(25.0);
+        assert_eq!(a.value_or(key(), -1.0), 0.0, "should still be held at 0");
+        a.tick(35.0); // now past t = 0.5
+        assert_eq!(a.value_or(key(), -1.0), 100.0);
+    }
+
+    #[test]
+    fn editing_a_curve_moves_the_widgets_already_using_it() {
+        let mut a = Animator::new();
+        let id = a.register_curve(Curve::ramp(0.0, 1.0));
+        assert_eq!(a.ease(Easing::Curve(id), 0.5), 0.5);
+        // The curve editor drags a key. Same id, different motion.
+        assert!(a.replace_curve(id, Curve::constant(1.0)));
+        assert_eq!(a.ease(Easing::Curve(id), 0.5), 1.0);
+        assert!(!a.replace_curve(CurveId(99), Curve::constant(0.0)));
+    }
+
+    #[test]
+    fn an_unregistered_curve_eases_linearly_rather_than_panicking() {
+        let a = Animator::new();
+        assert_eq!(a.ease(Easing::Curve(CurveId(7)), 0.25), 0.25);
+        // And the library-free path agrees, so the two cannot disagree.
+        assert_eq!(Easing::Curve(CurveId(7)).apply(0.25), 0.25);
+        assert!(Easing::Curve(CurveId(0)).is_authored());
+        assert!(!Easing::Standard.is_authored());
+    }
+
+    #[test]
+    fn an_authored_curve_may_overshoot_on_purpose() {
+        let mut a = Animator::new();
+        // Ease-out-back: past the target, then home. Normalising this away
+        // would defeat the reason an author drew it.
+        let id = a.register_curve(Curve::from_keys(vec![
+            CurveKey::new(0.0, 0.0),
+            CurveKey::new(0.7, 1.2),
+            CurveKey::new(1.0, 1.0),
+        ]));
+        assert!(a.ease(Easing::Curve(id), 0.7) > 1.0);
+        assert!((a.ease(Easing::Curve(id), 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    // ── staggering ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_stagger_starts_rows_in_order_and_not_together() {
+        let mut a = Animator::new();
+        let keys: Vec<MotionKey> = (0..4)
+            .map(|n| MotionKey::new(n, MotionProperty::Scale))
+            .collect();
+        a.start_staggered(
+            keys.clone(),
+            0.0,
+            1.0,
+            Motion::timed(100.0, Easing::Linear),
+            30.0,
+        );
+        a.tick(16.0);
+        // Row 0 has started; rows 1..3 are still waiting out their delay.
+        assert!(
+            a.value_or(keys[0], 0.0) > 0.0,
+            "the first row did not start"
+        );
+        for k in &keys[1..] {
+            assert_eq!(a.value_or(*k, 0.0), 0.0, "a delayed row moved early");
+        }
+        // Everything arrives eventually, and in order.
+        settle(&mut a, keys[0], 16.0);
+        for k in &keys {
+            assert_eq!(a.value_or(*k, -1.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn a_stagger_does_not_quantise_to_the_frame() {
+        let mut a = Animator::new();
+        let k = MotionKey::new(5, MotionProperty::Scale);
+        // 20 ms delay under a 16 ms frame: the second tick crosses the delay
+        // 4 ms in and must spend the remaining 12 ms on the track, not 16 and
+        // not 0.
+        a.start_delayed(k, 0.0, 1.0, Motion::timed(120.0, Easing::Linear), 20.0);
+        a.tick(16.0);
+        assert_eq!(a.value_or(k, -1.0), 0.0);
+        a.tick(16.0);
+        let value = a.value_or(k, -1.0);
+        assert!(
+            (value - 12.0 / 120.0).abs() < 1e-3,
+            "expected 12 ms of a 120 ms track, got {value}"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_ignores_the_stagger_too() {
+        let mut a = Animator::new();
+        a.set_reduced_motion(true);
+        let keys: Vec<MotionKey> = (0..4)
+            .map(|n| MotionKey::new(n, MotionProperty::Scale))
+            .collect();
+        a.start_staggered(
+            keys.clone(),
+            0.0,
+            1.0,
+            Motion::timed(100.0, Easing::Standard),
+            30.0,
+        );
+        assert!(a.is_idle(), "reduced motion left a stagger in flight");
+        for k in &keys {
+            assert_eq!(a.value_or(*k, -1.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn reduced_motion_settles_a_spring_too() {
+        let mut a = Animator::new();
+        a.set_reduced_motion(true);
+        a.start_with(key(), 0.0, 1.0, Motion::Spring(Spring::GENTLE));
+        assert!(a.is_idle());
+        assert_eq!(a.value_or(key(), -1.0), 1.0);
+    }
+
+    // ── transitions ─────────────────────────────────────────────────────────
+
+    fn lifted() -> Transition {
+        Transition::new()
+            .with(
+                MotionProperty::HoverWash,
+                0.0,
+                1.0,
+                Motion::timed(120.0, Easing::Standard),
+            )
+            .with(
+                MotionProperty::Scale,
+                1.0,
+                1.02,
+                Motion::timed(120.0, Easing::Decelerate),
+            )
+    }
+
+    #[test]
+    fn a_transition_moves_every_property_it_names() {
+        let mut a = Animator::new();
+        a.play(7, &lifted());
+        assert_eq!(a.active_count(), 2);
+        settle(&mut a, MotionKey::new(7, MotionProperty::Scale), 16.0);
+        assert_eq!(
+            a.value_or(MotionKey::new(7, MotionProperty::HoverWash), -1.0),
+            1.0
+        );
+        assert_eq!(
+            a.value_or(MotionKey::new(7, MotionProperty::Scale), -1.0),
+            1.02
+        );
+    }
+
+    #[test]
+    fn reversing_a_transition_returns_every_property_to_rest() {
+        let mut a = Animator::new();
+        a.play(7, &lifted());
+        settle(&mut a, MotionKey::new(7, MotionProperty::Scale), 16.0);
+        a.play(7, &lifted().reversed());
+        settle(&mut a, MotionKey::new(7, MotionProperty::Scale), 16.0);
+        assert_eq!(
+            a.value_or(MotionKey::new(7, MotionProperty::HoverWash), -1.0),
+            0.0
+        );
+        assert_eq!(
+            a.value_or(MotionKey::new(7, MotionProperty::Scale), -1.0),
+            1.0
+        );
+    }
+
+    #[test]
+    fn a_staggered_transition_offsets_whole_nodes_not_properties() {
+        let mut a = Animator::new();
+        a.play_staggered(&[10, 11, 12], &lifted(), 40.0);
+        a.tick(16.0);
+        // Node 10's two properties both moved; nodes 11 and 12 are waiting.
+        assert!(a.value_or(MotionKey::new(10, MotionProperty::HoverWash), 0.0) > 0.0);
+        assert!(a.value_or(MotionKey::new(10, MotionProperty::Scale), 1.0) > 1.0);
+        assert_eq!(
+            a.value_or(MotionKey::new(11, MotionProperty::HoverWash), 0.0),
+            0.0
+        );
+        assert_eq!(
+            a.value_or(MotionKey::new(12, MotionProperty::HoverWash), 0.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn an_empty_transition_is_a_no_op_rather_than_an_error() {
+        let mut a = Animator::new();
+        let empty = Transition::new();
+        assert!(empty.is_empty());
+        a.play(1, &empty);
+        assert!(a.is_idle());
+    }
+
+    // ── the Phase 27 contract, restated against the new machinery ───────────
+
+    #[test]
+    fn timed_tracks_still_land_exactly_and_still_retire() {
+        let mut a = Animator::new();
+        for easing in [
+            Easing::Linear,
+            Easing::Standard,
+            Easing::Decelerate,
+            Easing::Accelerate,
+            Easing::Spring,
+        ] {
+            let k = MotionKey::new(1, MotionProperty::Scale);
+            a.start(k, 0.0, 1.0, 100.0, easing);
+            settle(&mut a, k, 16.0);
+            assert_eq!(a.value_or(k, -1.0), 1.0, "{easing:?} did not land");
+            assert!(a.is_idle(), "{easing:?} left a track running");
+        }
+    }
+
+    #[test]
+    fn a_spring_still_obeys_no_ceiling_but_a_tween_still_does() {
+        let mut a = Animator::new();
+        a.start(key(), 0.0, 1.0, 10_000.0, Easing::Linear);
+        let track = a.tracks.get(&key()).copied().expect("running");
+        match track.motion {
+            Motion::Timed { duration_ms, .. } => assert_eq!(duration_ms, MAX_DURATION_MS),
+            Motion::Spring(_) => panic!("a timed start produced a spring"),
+        }
+    }
 }
 
 #[cfg(test)]

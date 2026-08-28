@@ -531,9 +531,7 @@ fn sky_commands() -> Vec<Command> {
             label: Box::leak(format!("Sky: {label}").into_boxed_str()),
             category: "Environment",
             default_binding: None,
-            help: Box::leak(
-                format!("Set the scene's cloud layer to {label}.").into_boxed_str(),
-            ),
+            help: Box::leak(format!("Set the scene's cloud layer to {label}.").into_boxed_str()),
             action: CommandAction::SetSkyPreset(id),
             surfaces: VIEW_MENU,
             enabled: always,
@@ -550,9 +548,7 @@ fn weather_commands() -> Vec<Command> {
             label: Box::leak(format!("Weather: {label}").into_boxed_str()),
             category: "Environment",
             default_binding: None,
-            help: Box::leak(
-                format!("Transition the scene's weather to {label}.").into_boxed_str(),
-            ),
+            help: Box::leak(format!("Transition the scene's weather to {label}.").into_boxed_str()),
             action: CommandAction::SetWeatherPreset(id),
             surfaces: VIEW_MENU,
             enabled: always,
@@ -1010,6 +1006,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.workspace.animation",
+            "Workspace: Animation",
+            "Window",
+            None,
+            "Open the animation graph and state-machine authoring surface.",
+            A::SetWorkspace(W::Animation),
+            WINDOW,
+            always
+        ),
+        command!(
             "editor.workspace.debug",
             "Workspace: Debug",
             "Window",
@@ -1166,6 +1172,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Create a voxel terrain entity.",
             A::CreateEntity(C::VoxelTerrain),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.ui_canvas",
+            "Create UI Canvas",
+            "Create",
+            None,
+            "Create a runtime UI canvas root and attach it to a selectable entity.",
+            A::CreateEntity(C::UiCanvas),
             CREATE,
             always
         ),

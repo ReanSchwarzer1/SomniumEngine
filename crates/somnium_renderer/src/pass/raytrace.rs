@@ -373,7 +373,11 @@ struct RtParams {
 }
 
 impl RtDebugPass {
-    pub fn new(device: &wgpu::Device, accel_layout: Option<&wgpu::BindGroupLayout>) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        accel_layout: Option<&wgpu::BindGroupLayout>,
+    ) -> Self {
         let Some(_) = accel_layout else {
             return Self {
                 pipeline: None,
@@ -386,7 +390,7 @@ impl RtDebugPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rt_debug.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rt_debug.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("rt_debug.wgsl").into()),
         });
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

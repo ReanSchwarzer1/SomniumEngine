@@ -30,6 +30,8 @@ pub mod mesh;
 pub mod mips;
 pub mod splat;
 pub mod textures;
+/// MORROWIND-AD source-page feedback and bounded residency.
+pub mod virtual_texture;
 
 use std::collections::HashMap;
 
@@ -52,6 +54,9 @@ pub struct TerrainDescriptor {
     pub height_scale: f32,
     /// Camera distance at which LOD 0 ends; each further LOD doubles the range.
     pub lod_base_range: f32,
+    /// Allocate the bounded BC7 source-page atlas instead of full layer arrays.
+    /// This is creation-time because the choice changes GPU residency.
+    pub virtual_texturing: bool,
 }
 
 impl Default for TerrainDescriptor {
@@ -62,6 +67,7 @@ impl Default for TerrainDescriptor {
             cell_size: 1.0,
             height_scale: 1.0,
             lod_base_range: 96.0,
+            virtual_texturing: false,
         }
     }
 }
@@ -258,6 +264,9 @@ pub struct TerrainTextureIds {
     pub macro_map: i32,
     pub albedo: [i32; TERRAIN_LAYER_COUNT as usize],
     pub surface: [i32; TERRAIN_LAYER_COUNT as usize],
+    /// MORROWIND-AD clipmap source: albedo atlas, surface atlas, page table,
+    /// and physical atlas edge in texels. Sentinel disables virtual sampling.
+    pub virtual_texture: [i32; 4],
 }
 
 impl Default for TerrainTextureIds {
@@ -267,6 +276,7 @@ impl Default for TerrainTextureIds {
             macro_map: -1,
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
+            virtual_texture: [-1, -1, -1, 0],
         }
     }
 }
@@ -301,6 +311,14 @@ pub struct TerrainData {
     /// Global wetness 0..1 (XV-H). `SOMNIUM_TERRAIN_WETNESS` seeds it.
     pub wetness: f32,
     pub layer_textures: TerrainLayerTextures,
+    /// MORROWIND-AD bounded source-page residency feeding the material clipmap.
+    pub virtual_texture: virtual_texture::VirtualTextureCache,
+    /// Authored virtual-source switch mirrored from `TerrainComponent`.
+    pub virtual_texture_enabled: bool,
+    /// Configured physical source-page budget in MiB.
+    pub virtual_texture_cache_mib: u32,
+    /// Monotonic feedback frame used by deterministic LRU ordering.
+    virtual_texture_frame: u64,
     /// Phase 25D: the macro tier. Rewritten in place when the heightfield
     /// changes wholesale, so its bindless index is stable.
     pub macro_texture: wgpu::Texture,
@@ -410,6 +428,81 @@ pub struct TerrainData {
     pub edit_revision: u64,
 }
 
+/// Map one physical clipmap dirty interval through its toroidal origin into at
+/// most two monotonically increasing world-space intervals.
+fn feedback_axis_intervals(
+    start: u32,
+    length: u32,
+    size: f32,
+    origin_uv: f32,
+    center: f32,
+    extent: f32,
+) -> Vec<(f32, f32)> {
+    if length == 0 {
+        return Vec::new();
+    }
+    if length as f32 >= size {
+        return vec![(center - extent * 0.5, center + extent * 0.5)];
+    }
+    let q0 = start as f32 / size - origin_uv;
+    let q1 = (start + length) as f32 / size - origin_uv - f32::EPSILON;
+    let world = |logical: f32| center + (logical - 0.5) * extent;
+    if q0.floor() == q1.floor() {
+        let a = world(q0.rem_euclid(1.0));
+        let b = world(q1.rem_euclid(1.0));
+        vec![(a.min(b), a.max(b))]
+    } else {
+        vec![
+            (world(q0.rem_euclid(1.0)), world(1.0)),
+            (world(0.0), world(q1.rem_euclid(1.0))),
+        ]
+    }
+}
+
+fn feedback_world_rects(job: &clipmap::ClipmapGenJob) -> Vec<[f32; 4]> {
+    let extent = job.clipmap_size / job.texels_per_m.max(0.0001);
+    let xs = feedback_axis_intervals(
+        job.rect.x,
+        job.rect.w,
+        job.clipmap_size,
+        job.origin_uv[0],
+        job.center[0],
+        extent,
+    );
+    let zs = feedback_axis_intervals(
+        job.rect.y,
+        job.rect.h,
+        job.clipmap_size,
+        job.origin_uv[1],
+        job.center[1],
+        extent,
+    );
+    xs.iter()
+        .flat_map(|&(x0, x1)| zs.iter().map(move |&(z0, z1)| [x0, z0, x1, z1]))
+        .collect()
+}
+
+/// Physical page coordinates touched by one repeated source-UV interval.
+fn feedback_page_indices(uv0: f32, uv1: f32, mip_size: u32) -> Vec<u32> {
+    const PAGE: u32 = 128;
+    let pages = mip_size.div_ceil(PAGE).max(1);
+    let lo = uv0.min(uv1);
+    let hi = uv0.max(uv1);
+    if hi - lo >= 1.0 {
+        return (0..pages).collect();
+    }
+    let end = (hi - f32::EPSILON).max(lo);
+    let page_at =
+        |uv: f32| ((uv.rem_euclid(1.0) * mip_size as f32).floor() as u32 / PAGE).min(pages - 1);
+    let first = page_at(lo);
+    let last = page_at(end);
+    if lo.floor() == end.floor() {
+        (first..=last).collect()
+    } else {
+        (first..pages).chain(0..=last).collect()
+    }
+}
+
 impl TerrainData {
     /// Create a flat terrain with the default grass/dirt/rock/snow layers.
     ///
@@ -470,7 +563,16 @@ impl TerrainData {
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, 1.0);
-        let layer_textures = TerrainLayerTextures::load_or_generate(device, queue, bc_supported);
+        let layer_textures = TerrainLayerTextures::load_or_generate(
+            device,
+            queue,
+            bc_supported,
+            desc.virtual_texturing,
+        );
+        let virtual_capacity = layer_textures
+            .virtual_texture
+            .as_ref()
+            .map_or(0, textures::TerrainVirtualTextureGpu::capacity_pages);
 
         // Generated flat here and regenerated once relief lands (see
         // `macro_dirty`). Creating it now rather than on first use is what lets
@@ -500,6 +602,12 @@ impl TerrainData {
             splat_lock,
             wetness,
             layer_textures,
+            // A paired 128² BC7 albedo/surface page is 32 KiB. The default
+            // 64 MiB budget therefore owns 2,048 physical page slots.
+            virtual_texture: virtual_texture::VirtualTextureCache::new(virtual_capacity, 8),
+            virtual_texture_enabled: desc.virtual_texturing,
+            virtual_texture_cache_mib: 64,
+            virtual_texture_frame: 0,
             index_blocks: HashMap::new(),
             chunk_vertex_capacity: verts_per_chunk,
             texture_ids: TerrainTextureIds::default(),
@@ -553,6 +661,157 @@ impl TerrainData {
             painted_foliage: Vec::new(),
             edit_revision: 0,
         }
+    }
+
+    /// Apply the editable upload throttle and publish creation-time VT state.
+    pub fn configure_virtual_texture(&mut self, _enabled: bool, _cache_mib: u32, uploads: u32) {
+        let physical_capacity = self
+            .layer_textures
+            .virtual_texture
+            .as_ref()
+            .map_or(0, textures::TerrainVirtualTextureGpu::capacity_pages);
+        self.virtual_texture.set_upload_budget(uploads.max(1));
+        self.virtual_texture_enabled = physical_capacity > 0;
+        self.virtual_texture_cache_mib = physical_capacity / 32;
+    }
+
+    /// Convert runtime-clipmap dirty work into deterministic source-page demand.
+    ///
+    /// The clipmap generate pass is the consumer, so its exact world footprint
+    /// is more useful feedback than the final screen pixels: requests arrive
+    /// before composition and survive a frame that exhausts the upload budget.
+    pub fn feedback_virtual_texture(
+        &mut self,
+        queue: &wgpu::Queue,
+        jobs: &[clipmap::ClipmapGenJob],
+    ) -> bool {
+        if !self.virtual_texture_enabled || self.layer_textures.virtual_texture.is_none() {
+            return false;
+        }
+        let mut requested = Vec::new();
+        for job in jobs {
+            let world_rects = feedback_world_rects(job);
+            let layer_rects = self.layer_support_rects(&world_rects);
+            let texel_metres = 1.0 / job.texels_per_m.max(0.0001);
+            for (layer, material) in self
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(layer, _)| !layer_rects[*layer].is_empty())
+            {
+                let source_size: u32 = if layer < TERRAIN_HERO_LAYERS as usize {
+                    2048
+                } else {
+                    1024
+                };
+                let footprint = texel_metres * material.tiling * source_size as f32;
+                let mip = footprint.max(1.0).log2().floor() as u32;
+                let mip = mip.min(source_size.ilog2());
+                // Coarse ancestors are queued first, making the shader's
+                // parent fallback useful while the target pages stream in.
+                // Page coordinates come from the dirty rectangle's exact
+                // repeated-UV footprint; demand can therefore converge even
+                // when the authored layer set is larger than the cache.
+                for level in (mip..=source_size.ilog2()).rev() {
+                    let mip_size = (source_size >> level).max(1);
+                    let origin = self.model.w_axis;
+                    for &[x0, z0, x1, z1] in &layer_rects[layer] {
+                        let xs = feedback_page_indices(
+                            (x0 - origin.x) * material.tiling,
+                            (x1 - origin.x) * material.tiling,
+                            mip_size,
+                        );
+                        let ys = feedback_page_indices(
+                            (z0 - origin.z) * material.tiling,
+                            (z1 - origin.z) * material.tiling,
+                            mip_size,
+                        );
+                        for &y in &ys {
+                            for &x in &xs {
+                                requested.push(somnium_asset::virtual_texture::VirtualPageId::new(
+                                    layer as u8,
+                                    level as u8,
+                                    x as u16,
+                                    y as u16,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.virtual_texture_frame = self.virtual_texture_frame.saturating_add(1);
+        let uploads = self
+            .virtual_texture
+            .resolve_feedback(self.virtual_texture_frame, requested);
+        if let Some(gpu) = &self.layer_textures.virtual_texture {
+            if let Err(error) = gpu.apply_uploads(queue, &uploads) {
+                self.virtual_texture.reject_uploads(&uploads);
+                tracing::warn!("terrain VT page upload failed: {error}");
+                return false;
+            }
+        }
+        !uploads.is_empty()
+    }
+
+    /// Exact dirty support rectangles for each painted material layer.
+    fn layer_support_rects(
+        &self,
+        world_rects: &[[f32; 4]],
+    ) -> [Vec<[f32; 4]>; TERRAIN_LAYER_COUNT as usize] {
+        let mut support = std::array::from_fn(|_| Vec::new());
+        // Biplanar cliff material is independent of splat weights.
+        support[14].extend_from_slice(world_rects);
+        let [world_x, world_z] = self.desc.world_size();
+        let origin = self.model.w_axis;
+        for &[x0, z0, x1, z1] in world_rects {
+            let raw_x0 = x0 - origin.x;
+            let raw_x1 = x1 - origin.x;
+            let raw_z0 = z0 - origin.z;
+            let raw_z1 = z1 - origin.z;
+            if raw_x1 < 0.0 || raw_z1 < 0.0 || raw_x0 > world_x || raw_z0 > world_z {
+                continue;
+            }
+            let local_x0 = raw_x0.clamp(0.0, world_x);
+            let local_x1 = raw_x1.clamp(0.0, world_x);
+            let local_z0 = raw_z0.clamp(0.0, world_z);
+            let local_z1 = raw_z1.clamp(0.0, world_z);
+            let end_x = (local_x1 - f32::EPSILON * world_x.max(1.0)).max(local_x0);
+            let end_z = (local_z1 - f32::EPSILON * world_z.max(1.0)).max(local_z0);
+            let sx0 = ((local_x0 / world_x) * self.splatmap.width as f32).floor() as u32;
+            let sx1 = ((end_x / world_x) * self.splatmap.width as f32).floor() as u32;
+            let sz0 = ((local_z0 / world_z) * self.splatmap.height as f32).floor() as u32;
+            let sz1 = ((end_z / world_z) * self.splatmap.height as f32).floor() as u32;
+            for z in sz0.min(self.splatmap.height - 1)..=sz1.min(self.splatmap.height - 1) {
+                for x in sx0.min(self.splatmap.width - 1)..=sx1.min(self.splatmap.width - 1) {
+                    let texel = &self.splatmap.data[(z * self.splatmap.width + x) as usize];
+                    let cell = [
+                        origin.x + x as f32 / self.splatmap.width as f32 * world_x,
+                        origin.z + z as f32 / self.splatmap.height as f32 * world_z,
+                        origin.x + (x + 1) as f32 / self.splatmap.width as f32 * world_x,
+                        origin.z + (z + 1) as f32 / self.splatmap.height as f32 * world_z,
+                    ];
+                    let clipped = [
+                        x0.max(cell[0]),
+                        z0.max(cell[1]),
+                        x1.min(cell[2]),
+                        z1.min(cell[3]),
+                    ];
+                    for (layer, weight) in texel.iter().enumerate() {
+                        if *weight != 0 {
+                            support[layer].push(clipped);
+                        }
+                    }
+                }
+            }
+        }
+        support
+    }
+
+    /// Whether feedback already observed work that still needs upload budget.
+    #[must_use]
+    pub fn has_pending_virtual_texture(&self) -> bool {
+        self.virtual_texture.stats().pending_pages > 0
     }
 
     /// Reserve one rewritable vertex span per chunk in the global pool.
@@ -1301,6 +1560,7 @@ mod tests {
             cell_size: 1.0,
             height_scale: 2.0,
             lod_base_range: 24.0,
+            virtual_texturing: true,
         }
     }
 
@@ -1370,6 +1630,24 @@ mod tests {
     }
 
     #[test]
+    fn feedback_dirty_interval_splits_at_the_toroidal_wrap() {
+        let intervals = feedback_axis_intervals(900, 200, 1024.0, 0.0, 50.0, 100.0);
+        assert_eq!(intervals.len(), 2);
+        assert!(intervals[0].0 > 85.0 && intervals[0].1 == 100.0);
+        assert!(intervals[1].0 == 0.0 && intervals[1].1 < 10.0);
+    }
+
+    #[test]
+    fn feedback_page_coverage_handles_repeat_without_requesting_the_whole_mip() {
+        assert_eq!(feedback_page_indices(0.10, 0.20, 2048), vec![1, 2, 3]);
+        assert_eq!(feedback_page_indices(0.90, 1.10, 2048), vec![14, 15, 0, 1]);
+        assert_eq!(
+            feedback_page_indices(0.0, 1.0, 2048),
+            (0..16).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn only_overlapping_chunks_that_cross_the_water_surface_are_shoreline_chunks() {
         let water = crate::water_body::WaterBodyDescriptor {
             water_id: 0,
@@ -1432,6 +1710,7 @@ mod tests {
             macro_map: 9,
             albedo: [10; TERRAIN_LAYER_COUNT as usize],
             surface: [11; TERRAIN_LAYER_COUNT as usize],
+            ..TerrainTextureIds::default()
         };
         ids.unbind_extra_bank();
         assert_eq!(&ids.splat_maps[..4], &[0, 1, 2, 3]);
@@ -1454,6 +1733,7 @@ mod tests {
             macro_map: -1,
             albedo: [1; TERRAIN_LAYER_COUNT as usize],
             surface: [1; TERRAIN_LAYER_COUNT as usize],
+            ..TerrainTextureIds::default()
         };
         ids.unbind_extra_bank();
         let gpu_hex = u32::from(hex_tiling);

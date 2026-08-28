@@ -252,9 +252,7 @@ fn value_from_json(
         }
         FieldType::Gradient => {
             if json.is_null() {
-                return Some(ReflectValue::Gradient(
-                    somnium_ecs::curve::Gradient::empty(),
-                ));
+                return Some(ReflectValue::Gradient(somnium_ecs::curve::Gradient::empty()));
             }
             let flat = flat_floats(json.get("$gradient")?)?;
             Some(ReflectValue::Gradient(
@@ -404,14 +402,33 @@ fn attachment_from_json(
 /// minting the id now.
 pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::Value {
     let all: Vec<Entity> = world.entities().collect();
-    for entity in &all {
+    entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")
+}
+
+/// Serialize only the named live entities through the same registered schema
+/// and retained-unknown path as a complete scene.
+///
+/// This is the MORROWIND-S cell boundary: a streaming actor is not an opaque
+/// parallel DTO. It is the same entity document Save Scene writes.
+pub fn entities_to_json(
+    world: &mut World,
+    registry: &TypeRegistry,
+    selected: &[Entity],
+) -> Result<serde_json::Value, SceneError> {
+    let mut unique_entities = std::collections::HashSet::new();
+    for entity in selected {
+        if !world.is_alive(*entity) || !unique_entities.insert(*entity) {
+            return Err(SceneError::Malformed(
+                "cell selection contains a dead or duplicate entity".into(),
+            ));
+        }
         let _ = world.ensure_persistent_id(*entity);
     }
 
     // Sort by persistent id so the file is stable: two saves of an
     // unchanged world must produce the same bytes, or every scene diff is
     // noise.
-    let mut ordered: Vec<(PersistentId, Entity)> = all
+    let mut ordered: Vec<(PersistentId, Entity)> = selected
         .iter()
         .filter_map(|&e| world.persistent_id(e).map(|id| (id, e)))
         .collect();
@@ -479,10 +496,16 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         })
         .collect();
 
-    serde_json::json!({ "version": SCENE_VERSION, "entities": entities })
+    let ids: std::collections::BTreeSet<_> = ordered.iter().map(|(id, _)| *id).collect();
+    if ids.len() != ordered.len() {
+        return Err(SceneError::Malformed(
+            "cell selection contains duplicate persistent ids".into(),
+        ));
+    }
+    Ok(serde_json::json!({ "version": SCENE_VERSION, "entities": entities }))
 }
 
-/// Write a version-2 scene to disk.
+/// Write a version-3 schema scene to disk.
 ///
 /// # Errors
 ///
@@ -532,7 +555,7 @@ pub fn save_scene_schema_with_thumbnail(
 // Load
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// Rebuild a world from a version-2 scene document.
+/// Rebuild a world from a version-3 schema scene document.
 ///
 /// Two passes: every entity is created with its persistent id first, so
 /// that a component holding an entity reference can resolve it in the
@@ -566,24 +589,42 @@ pub fn scene_from_json(
     let mut report = LoadReport::default();
 
     // Pass one: identity only.
+    let existing: BTreeMap<PersistentId, Entity> = world
+        .entities()
+        .filter_map(|entity| world.persistent_id(entity).map(|id| (id, entity)))
+        .collect();
+    let ids: Vec<_> = entities_json
+        .iter()
+        .map(|entry| {
+            entry
+                .get("persistent_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(PersistentId::parse_hex)
+                .ok_or_else(|| SceneError::Malformed("entity without a persistent id".into()))
+        })
+        .collect::<Result<_, _>>()?;
+    let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    for id in &ids {
+        if id.is_none() || existing.contains_key(id) || unique.len() != ids.len() {
+            return Err(SceneError::Malformed(format!(
+                "duplicate persistent id {id}"
+            )));
+        }
+    }
     let mut by_id: BTreeMap<PersistentId, Entity> = BTreeMap::new();
-    for entry in entities_json {
-        let Some(id) = entry
-            .get("persistent_id")
-            .and_then(serde_json::Value::as_str)
-            .and_then(PersistentId::parse_hex)
-        else {
-            return Err(SceneError::Malformed(
-                "entity without a persistent id".into(),
-            ));
-        };
+    for id in ids {
         let entity = world.spawn((id,));
         by_id.insert(id, entity);
         report.entities.push(entity);
     }
 
     let resolved = by_id.clone();
-    let resolve = move |id: PersistentId| resolved.get(&id).copied();
+    let resolve = move |id: PersistentId| {
+        resolved
+            .get(&id)
+            .copied()
+            .or_else(|| existing.get(&id).copied())
+    };
 
     // Pass two: components and scripts.
     for (entry, &entity) in entities_json.iter().zip(&report.entities) {
@@ -724,7 +765,7 @@ pub fn scene_from_json(
     Ok(report)
 }
 
-/// Read a version-2 scene from disk.
+/// Read a version-3 schema scene from disk.
 ///
 /// # Errors
 ///
@@ -948,7 +989,10 @@ mod tests {
     use somnium_script::value::ScriptValue;
 
     use crate::reflect_registry::component_registry;
-    use crate::{LightComponent, MeshComponent, Name, Parent, Transform};
+    use crate::{
+        LightComponent, MeshComponent, Name, Parent, TerrainComponent, Transform,
+        UiCanvasComponent, UiCanvasSpace, WorldPartitionComponent,
+    };
 
     fn round_trip(world: &mut World, registry: &TypeRegistry) -> (World, LoadReport) {
         let document = scene_to_json(world, registry);
@@ -962,6 +1006,77 @@ mod tests {
             .entities()
             .find(|&e| world.get::<Name>(e).is_some_and(|n| n.as_str() == name))
             .unwrap_or_else(|| panic!("no entity named {name}"))
+    }
+
+    #[test]
+    fn ui_canvas_and_partition_authoring_round_trip_without_live_diagnostics() {
+        let registry = component_registry();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Streamed HUD Terrain"),
+            Transform::default(),
+            TerrainComponent::default(),
+            UiCanvasComponent {
+                space: UiCanvasSpace::Overlay,
+                width: 1600.0,
+                height: 900.0,
+                pixels_per_unit: 144.0,
+                billboard: false,
+                layer: 24,
+                ..UiCanvasComponent::default()
+            },
+            WorldPartitionComponent {
+                cell_size: 96.0,
+                load_radius: 384.0,
+                source_priority: 220,
+                pin_cell: true,
+                pin_x: -2,
+                pin_y: 1,
+                pin_z: 7,
+                wanted_cells: 81,
+                loaded_cells: 27,
+                pending_cells: 3,
+                resident_actors: 144,
+                status: "live test diagnostics".into(),
+                ..WorldPartitionComponent::default()
+            },
+        ));
+
+        let document = scene_to_json(&mut world, &registry);
+        let partition_fields =
+            &document["entities"][0]["components"]["somnium.WorldPartition"]["fields"];
+        assert_eq!(partition_fields["cell_size"], serde_json::json!(96.0));
+        for runtime_field in [
+            "wanted_cells",
+            "loaded_cells",
+            "pending_cells",
+            "resident_actors",
+            "status",
+        ] {
+            assert!(
+                partition_fields.get(runtime_field).is_none(),
+                "{runtime_field} is live diagnostics, not authored scene data"
+            );
+        }
+
+        let mut loaded = World::new();
+        let report = scene_from_json(&mut loaded, &registry, &document).expect("scene loads");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let entity = find(&loaded, "Streamed HUD Terrain");
+        let canvas = loaded.get::<UiCanvasComponent>(entity).unwrap();
+        assert_eq!(canvas.space, UiCanvasSpace::Overlay);
+        assert_eq!(
+            (canvas.width, canvas.height, canvas.layer),
+            (1600.0, 900.0, 24)
+        );
+        let partition = loaded.get::<WorldPartitionComponent>(entity).unwrap();
+        assert_eq!((partition.cell_size, partition.load_radius), (96.0, 384.0));
+        assert_eq!(
+            (partition.pin_x, partition.pin_y, partition.pin_z),
+            (-2, 1, 7)
+        );
+        assert_eq!(partition.loaded_cells, 0);
+        assert_eq!(partition.status, "Waiting for camera");
     }
 
     /// CONTROL-K's exit criterion, in one test: an authored curve and an
@@ -1022,6 +1137,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ddgi_settings_survive_a_scene_round_trip() {
+        let registry = component_registry();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("DDGI Look"),
+            Transform::default(),
+            crate::PostProcessComponent {
+                ddgi_enabled: true,
+                ddgi_intensity: 1.75,
+                ddgi_probe_spacing_m: 3.5,
+                ddgi_update_budget: 16,
+                ddgi_hysteresis: 0.8,
+                ..crate::PostProcessComponent::default()
+            },
+        ));
+        let (loaded, report) = round_trip(&mut world, &registry);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let settings = loaded
+            .get::<crate::PostProcessComponent>(find(&loaded, "DDGI Look"))
+            .unwrap();
+        assert!(settings.ddgi_enabled);
+        assert_eq!(settings.ddgi_intensity, 1.75);
+        assert_eq!(settings.ddgi_probe_spacing_m, 3.5);
+        assert_eq!(settings.ddgi_update_budget, 16);
+        assert_eq!(settings.ddgi_hysteresis, 0.8);
+    }
+
     /// A field that did not exist when the file was written must load as an
     /// empty curve rather than failing the entity.
     #[test]
@@ -1049,7 +1192,10 @@ mod tests {
                 rotation: glam::Quat::from_rotation_x(0.75),
                 scale: glam::Vec3::new(1.0, 2.0, 3.0),
             },
-            LightComponent::directional(50_000.0),
+            LightComponent {
+                shadow_technique: crate::LightShadowTechnique::Virtual,
+                ..LightComponent::directional(50_000.0)
+            },
         ));
 
         let (loaded, report) = round_trip(&mut world, &registry);
@@ -1069,6 +1215,7 @@ mod tests {
         let light = loaded.get::<LightComponent>(sun).unwrap();
         assert!((light.intensity - 50_000.0).abs() < 1.0e-2);
         assert_eq!(light.light_type, crate::LightType::Directional);
+        assert_eq!(light.shadow_technique, crate::LightShadowTechnique::Virtual);
     }
 
     #[test]

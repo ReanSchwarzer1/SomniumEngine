@@ -1,6 +1,6 @@
 //! CPU job helpers (Phase CR).
 //!
-//! wgpu 29 exposes one queue. Parallel work is CPU-side only: LOD classify,
+//! wgpu 30 exposes one queue. Parallel work is CPU-side only: LOD classify,
 //! frustum bits, instance CPU fill. Record still happens on the render thread.
 //!
 //! Rayon is used when a slice is large enough that fork-join beats a serial

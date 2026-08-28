@@ -8,6 +8,14 @@
 // @group(1) holds a per-cascade uniform (index 0..3) that selects which
 // light.view_proj[cascade.index] to apply.
 
+// wgpu 30 requires `binding_array<...>` to be behind an explicit enable
+// directive; wgpu 29 accepted it without one. Found by MORROWIND-C, because
+// MORROWIND-A2 bumped wgpu to 30 and left this crate's `naga` dev-dependency
+// on 29 — so the validation test was checking these files with the *old*
+// front end and passed. The resolver hoists and de-duplicates `enable`
+// lines, so a module that includes this one inherits it.
+enable wgpu_binding_array;
+
 struct Vertex {
     pos_x: f32, pos_y: f32, pos_z: f32,
     norm_x: f32, norm_y: f32, norm_z: f32,
@@ -37,9 +45,10 @@ struct DirectionalLight {
 
 struct CascadeUniform {
     index: u32,
-    _pad0: u32,
+    virtual_page: u32,
     _pad1: u32,
     _pad2: u32,
+    page_view_proj: mat4x4<f32>,
 }
 
 // @group(0) — GlobalResourcePool (bindings 0..6)
@@ -103,7 +112,10 @@ fn vs_main(
     let index     = indices[instance.index_offset + v_idx];
     let vert      = vertices[instance.vertex_offset + index];
     let world_pos = instance.model * vec4<f32>(vert.pos_x, vert.pos_y, vert.pos_z, 1.0);
-    let vp        = light.view_proj[cascade.index];
+    var vp        = light.view_proj[cascade.index];
+    if cascade.virtual_page != 0u {
+        vp = cascade.page_view_proj;
+    }
 
     var out: VOut;
     out.clip = vp * world_pos;

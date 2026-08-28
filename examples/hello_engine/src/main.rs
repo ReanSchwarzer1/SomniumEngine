@@ -23,10 +23,10 @@ use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
     BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
-    EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, InputState,
-    KeyCode, LightComponent, LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent,
-    MeshKind, Name, Parent, SimulationState, Transform, WorldTransform, camera_view_from_world,
-    propagate_transforms,
+    EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, GameUiFrame,
+    InputState, KeyCode, LightComponent, LightShadowTechnique, LightType, MapKind, MapLoadResult,
+    MaterialComponent, MeshComponent, MeshKind, Name, Parent, SimulationState, Transform,
+    UiCanvasComponent, UiCanvasSpace, WorldTransform, camera_view_from_world, propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -626,10 +626,17 @@ struct HelloGame {
     /// The character scripts, imported once at startup.
     controller_asset: Option<somnium_script::ids::ScriptAssetId>,
     camera_asset: Option<somnium_script::ids::ScriptAssetId>,
+    /// Visible proof that game code can own a retained canvas and submit it
+    /// through the public frame hook. The ECS component controls whether this
+    /// starter tree is drawn; the widget tree itself remains game-owned.
+    runtime_ui: somnium_core::UiCanvas,
+    runtime_ui_enabled: bool,
 }
 
 impl HelloGame {
     fn new() -> Self {
+        let mut runtime_ui = somnium_core::UiCanvas::new(640.0, 360.0);
+        runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
         Self {
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
@@ -643,6 +650,8 @@ impl HelloGame {
             was_playing: false,
             controller_asset: None,
             camera_asset: None,
+            runtime_ui,
+            runtime_ui_enabled: true,
         }
     }
 
@@ -1215,6 +1224,7 @@ impl GameApp for HelloGame {
                             grid_z: desc.grid_size[1],
                             cell_size: desc.cell_size,
                             height_scale: desc.height_scale,
+                            ..somnium_core::TerrainComponent::default()
                         },
                         // Phase 17E: painted foliage only submits when the
                         // terrain entity carries an enabled FoliageComponent.
@@ -1258,13 +1268,21 @@ impl GameApp for HelloGame {
                 -elevation.to_radians(),
                 0.0,
             );
+            let mut sun =
+                LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT);
+            // Track-7 timing harness. The authored/editor route remains the
+            // Light Details enum; this switch only makes unattended CSM/VSM
+            // A/B runs reproducible without rewriting a shipped scene.
+            if std::env::var("SOMNIUM_VIRTUAL_SHADOWS").as_deref() == Ok("1") {
+                sun.shadow_technique = LightShadowTechnique::Virtual;
+            }
             ctx.world.spawn((
                 Transform {
                     translation: Vec3::ZERO,
                     rotation: light_rot,
                     scale: Vec3::ONE,
                 },
-                LightComponent::directional(somnium_core::light_units::lux::DIRECT_SUNLIGHT),
+                sun,
                 Name::new("SunLight"),
                 WorldTransform::identity(),
             ));
@@ -1347,6 +1365,23 @@ impl GameApp for HelloGame {
                 Name::new("Camera"),
                 WorldTransform::identity(),
                 somnium_core::CameraSettingsComponent::from_env(),
+            ));
+        }
+
+        // A selectable authored root makes the runtime canvas discoverable in
+        // the Outliner and Details on first launch. Create > UI Canvas uses the
+        // same component, so delete/create/undo immediately controls the
+        // visible game-owned tree below without an editor-private UI path.
+        if !ctx
+            .world
+            .entities()
+            .any(|entity| ctx.world.get::<UiCanvasComponent>(entity).is_some())
+        {
+            ctx.world.spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Name::new("Hello UI Canvas"),
+                WorldTransform::identity(),
+                UiCanvasComponent::default(),
             ));
         }
 
@@ -1724,6 +1759,53 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        let authored_canvas = ctx.world.entities().find_map(|entity| {
+            let canvas = ctx.world.get::<UiCanvasComponent>(entity).copied()?;
+            let transform = ctx
+                .world
+                .get::<Transform>(entity)
+                .copied()
+                .unwrap_or_default();
+            canvas.enabled.then_some((canvas, transform))
+        });
+        self.runtime_ui_enabled = authored_canvas.is_some();
+        if let Some((settings, transform)) = authored_canvas {
+            use somnium_ui::runtime::{Canvas, CanvasMode, Layer};
+
+            let mut canvas = match settings.space {
+                UiCanvasSpace::Screen => {
+                    Canvas::scaled(glam::Vec2::new(settings.width, settings.height), 0.5)
+                }
+                UiCanvasSpace::World => {
+                    let mut canvas = Canvas::world(
+                        transform.to_matrix(),
+                        glam::Vec2::new(settings.width, settings.height),
+                    );
+                    if let CanvasMode::World { billboard, .. } = &mut canvas.mode {
+                        *billboard = settings.billboard;
+                    }
+                    canvas
+                }
+                UiCanvasSpace::Overlay => Canvas {
+                    mode: CanvasMode::Overlay {
+                        world_anchor: transform.translation,
+                    },
+                    ..Canvas::screen()
+                },
+            }
+            .on_layer(Layer(i32::try_from(settings.layer).unwrap_or(
+                if settings.layer < 0 {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                },
+            )));
+            canvas.visible = settings.enabled;
+            self.runtime_ui.set_canvas(canvas);
+            self.runtime_ui
+                .set_world_pixels_per_unit(settings.pixels_per_unit);
+        }
+
         if std::env::var("SOMNIUM_CAPTURE_QUIT").as_deref() == Ok("1")
             && somnium_renderer::capture::finished()
         {
@@ -1759,7 +1841,7 @@ impl GameApp for HelloGame {
                 )
             });
         let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
-        if let (Some(renderer), Some(_render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
+        if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
             let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
@@ -1798,6 +1880,25 @@ impl GameApp for HelloGame {
 
                         match light.light_type {
                             LightType::Directional => {
+                                let shadow_technique = if std::env::var("SOMNIUM_VIRTUAL_SHADOWS")
+                                    .as_deref()
+                                    == Ok("1")
+                                {
+                                    LightShadowTechnique::Virtual
+                                } else {
+                                    light.shadow_technique
+                                };
+                                if shadow_technique == LightShadowTechnique::Virtual
+                                    && renderer.virtual_shadow_gpu.is_none()
+                                {
+                                    if let Err(error) = renderer.enable_virtual_shadow_resources(
+                                        &render_ctx.device,
+                                        &render_ctx.queue,
+                                        somnium_renderer::shadow::virtual_map::VirtualShadowConfig::default(),
+                                    ) {
+                                        tracing::warn!(%error, "virtual shadow resources unavailable; using CSM");
+                                    }
+                                }
                                 // Phase 25M: the sun's illuminance is what
                                 // survives the trip through the atmosphere, so
                                 // it reddens as the sun drops and reaches zero
@@ -1814,6 +1915,16 @@ impl GameApp for HelloGame {
                                 renderer.set_directional_light(
                                     to_light,
                                     light.photometric_color() * survives,
+                                );
+                                renderer.set_directional_shadow_policy(
+                                    somnium_renderer::shadow::virtual_map::ShadowLightPolicy {
+                                        light_id: 0,
+                                        technique: match shadow_technique {
+                                            LightShadowTechnique::Cascaded => somnium_renderer::shadow::virtual_map::ShadowTechnique::Cascaded,
+                                            LightShadowTechnique::Virtual => somnium_renderer::shadow::virtual_map::ShadowTechnique::Virtual,
+                                        },
+                                        csm_fallback: true,
+                                    },
                                 );
                                 renderer.set_moon_intensity(light.moon_intensity);
                             }
@@ -2200,6 +2311,12 @@ impl GameApp for HelloGame {
         } else {
             ctx.ui
                 .send_message("update_selection", serde_json::Value::Null);
+        }
+    }
+
+    fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
+        if self.runtime_ui_enabled {
+            frame.draw(&mut self.runtime_ui);
         }
     }
 

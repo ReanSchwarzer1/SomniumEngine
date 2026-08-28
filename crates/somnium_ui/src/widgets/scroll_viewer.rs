@@ -54,6 +54,11 @@ impl ScrollViewer {
 }
 
 impl Control for ScrollViewer {
+    // MORROWIND-I.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::ScrollView
+    }
+
     fn scroll_into_view(&mut self, widget: &mut Widget, target: Rect) -> bool {
         let viewport = widget.screen_bounds();
         let old = self.scroll_y;

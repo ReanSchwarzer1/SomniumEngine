@@ -7,6 +7,16 @@
 
 use crate::terrain::clipmap::{ClipmapGenJob, GpuClipmapGen, TerrainClipmap};
 
+/// The stable Phase-DF dispatch followed by MORROWIND-AD bindless resources.
+/// Keeping these out of `GpuTerrainMaterial` preserves its 2032-byte ABI.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuClipmapGenVirtual {
+    base: GpuClipmapGen,
+    /// albedo atlas, surface atlas, page table, atlas edge (texels).
+    virtual_texture: [i32; 4],
+}
+
 /// wgpu uniform offset alignment. One slot per dirty rectangle.
 const PARAMS_STRIDE: u64 = 256;
 const MAX_JOBS: usize = 64;
@@ -20,7 +30,11 @@ pub struct TerrainClipmapPass {
 }
 
 impl TerrainClipmapPass {
-    pub fn new(device: &wgpu::Device, global_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        global_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain clipmap gen BGL"),
             entries: &[
@@ -30,9 +44,10 @@ impl TerrainClipmapPass {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<GpuClipmapGen>() as u64,
-                        ),
+                        min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
+                            GpuClipmapGenVirtual,
+                        >()
+                            as u64),
                     },
                     count: None,
                 },
@@ -45,13 +60,9 @@ impl TerrainClipmapPass {
             ],
         });
 
-        let source = format!(
-            "{}\n{}\n{}\n{}",
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/hextile.wgsl"),
-            include_str!("../shaders/terrain_material.wgsl"),
-            include_str!("../shaders/clipmap_gen.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `clipmap_gen.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("clipmap_gen.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain clipmap generate"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -113,27 +124,26 @@ impl TerrainClipmapPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Terrain clipmap gen"),
-                layout: &layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &params,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(
-                                std::mem::size_of::<GpuClipmapGen>() as u64
-                            ),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain clipmap gen"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<GpuClipmapGenVirtual>() as u64,
+                        ),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
 
         Self {
             pipeline,
@@ -154,6 +164,7 @@ impl TerrainClipmapPass {
         terrain_index: u32,
         jobs: &[ClipmapGenJob],
         is_detail: bool,
+        virtual_texture: [i32; 4],
     ) {
         if jobs.is_empty() {
             return;
@@ -161,9 +172,12 @@ impl TerrainClipmapPass {
         let n = jobs.len().min(MAX_JOBS);
         let mut bytes = vec![0u8; PARAMS_STRIDE as usize * n];
         for (i, job) in jobs.iter().take(n).enumerate() {
-            let params = GpuClipmapGen::from_job(terrain_index, job);
+            let params = GpuClipmapGenVirtual {
+                base: GpuClipmapGen::from_job(terrain_index, job),
+                virtual_texture,
+            };
             let start = i * PARAMS_STRIDE as usize;
-            bytes[start..start + std::mem::size_of::<GpuClipmapGen>()]
+            bytes[start..start + std::mem::size_of::<GpuClipmapGenVirtual>()]
                 .copy_from_slice(bytemuck::bytes_of(&params));
         }
         queue.write_buffer(&self.params, 0, &bytes);

@@ -24,17 +24,19 @@ pub enum Workspace {
     Foliage,
     Lighting,
     Materials,
+    Animation,
     Debug,
     Play,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 7] = [
+    pub const ALL: [Workspace; 8] = [
         Workspace::Layout,
         Workspace::Terrain,
         Workspace::Foliage,
         Workspace::Lighting,
         Workspace::Materials,
+        Workspace::Animation,
         Workspace::Debug,
         Workspace::Play,
     ];
@@ -46,6 +48,7 @@ impl Workspace {
             Workspace::Foliage => "Foliage",
             Workspace::Lighting => "Lighting",
             Workspace::Materials => "Materials",
+            Workspace::Animation => "Animation",
             Workspace::Debug => "Debug",
             Workspace::Play => "Play",
         }
@@ -95,6 +98,12 @@ impl Workspace {
                 tools: 120.0,
                 details: 400.0,
                 bottom: BottomPanel::Content,
+                ..base
+            },
+            Workspace::Animation => WorkspaceLayout {
+                tools: 120.0,
+                details: 400.0,
+                bottom: BottomPanel::None,
                 ..base
             },
             // Debug reads the log, so the bottom row shows it and is tall.

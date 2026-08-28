@@ -26,6 +26,23 @@ pub struct ShadowPass {
     pub cutout_bind_group: wgpu::BindGroup,
     // Kept alive so the bind groups remain valid.
     _cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES],
+    /// Dynamic 256-byte slices, one per physical page rendered this frame.
+    virtual_view_buffer: wgpu::Buffer,
+    virtual_view_bind_group: wgpu::BindGroup,
+    page_clear_pipeline: wgpu::RenderPipeline,
+}
+
+const SHADOW_VIEW_STRIDE: u64 = 256;
+const MAX_VIRTUAL_PAGES_PER_FRAME: usize =
+    crate::shadow::virtual_map::MAX_RENDER_PAGES_PER_FRAME as usize;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuShadowView {
+    index: u32,
+    virtual_page: u32,
+    _pad: [u32; 2],
+    page_view_proj: [[f32; 4]; 4],
 }
 
 /// One draw that survived shadow-caster culling (Phase 24AE).
@@ -61,6 +78,7 @@ pub fn casts_shadow(radius: f32, dist_sq: f32, threshold: f32) -> bool {
 impl ShadowPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         queue: &wgpu::Queue,
         global_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -73,8 +91,10 @@ impl ShadowPass {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: std::num::NonZeroU64::new(
+                            std::mem::size_of::<GpuShadowView>() as u64,
+                        ),
                     },
                     count: None,
                 }],
@@ -83,16 +103,21 @@ impl ShadowPass {
         // Create 4 small uniform buffers pre-initialized to cascade indices 0..3.
         // These are constant for the lifetime of the pass.
         let cascade_index_buffers: [wgpu::Buffer; NUM_CASCADES] = std::array::from_fn(|i| {
-            // 16-byte buffer: u32 index + 12 bytes padding (satisfies min uniform size).
+            // 80-byte buffer: header plus a dormant page matrix. CSM reads only
+            // the index, while VSM uses the same layout with `virtual_page=1`.
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Cascade Index Buffer"),
-                size: 16,
+                size: std::mem::size_of::<GpuShadowView>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let mut data = [0u8; 16];
-            data[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-            queue.write_buffer(&buf, 0, &data);
+            let view = GpuShadowView {
+                index: i as u32,
+                virtual_page: 0,
+                _pad: [0; 2],
+                page_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            };
+            queue.write_buffer(&buf, 0, bytemuck::bytes_of(&view));
             buf
         });
 
@@ -102,14 +127,18 @@ impl ShadowPass {
                 layout: &cascade_bind_group_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: cascade_index_buffers[i].as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &cascade_index_buffers[i],
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<GpuShadowView>() as u64),
+                    }),
                 }],
             })
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("shadow.wgsl").into()),
         });
 
         // Phase 17E: sampler for the alpha-cutout test, so foliage casts a
@@ -195,12 +224,71 @@ impl ShadowPass {
             cache: None,
         });
 
+        let virtual_view_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Virtual Shadow Page Views"),
+            size: SHADOW_VIEW_STRIDE * MAX_VIRTUAL_PAGES_PER_FRAME as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let virtual_view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Virtual Shadow Page View BG"),
+            layout: &cascade_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &virtual_view_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<GpuShadowView>() as u64),
+                }),
+            }],
+        });
+
+        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Virtual Shadow Page Clear Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs_clear(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32>{\n\
+                 let p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));\n\
+                 return vec4<f32>(p[i],1.0,1.0);\n}"
+                    .into(),
+            ),
+        });
+        let clear_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Virtual Shadow Page Clear Layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let page_clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Virtual Shadow Page Clear Pipeline"),
+            layout: Some(&clear_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &clear_shader,
+                entry_point: Some("vs_clear"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            cache: None,
+        });
+
         Self {
             pipeline,
             cascade_bind_group_layout,
             cascade_bind_groups,
             _cascade_index_buffers: cascade_index_buffers,
             cutout_bind_group,
+            virtual_view_buffer,
+            virtual_view_bind_group,
+            page_clear_pipeline,
         }
     }
 
@@ -243,11 +331,83 @@ impl ShadowPass {
         for cascade in 0..NUM_CASCADES {
             let (vx, vy, vw, vh) = CASCADE_VIEWPORTS[cascade];
             rpass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
-            rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[]);
+            rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[0]);
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
             for c in casters {
                 rpass.draw(0..c.index_count, c.instance_index..(c.instance_index + 1));
+            }
+        }
+    }
+
+    /// Rasterise newly allocated or invalidated virtual pages into the
+    /// persistent physical atlas. Each scheduled tile is cleared independently
+    /// so untouched cached pages survive the frame.
+    pub fn record_virtual(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &crate::shadow::virtual_map::VirtualShadowGpu,
+        global_bind_group: &wgpu::BindGroup,
+        casters: &[ShadowCaster],
+        work: &[crate::shadow::virtual_map::RenderPage],
+        clear_atlas: bool,
+    ) {
+        let count = work.len().min(MAX_VIRTUAL_PAGES_PER_FRAME);
+        for (i, page) in work[..count].iter().enumerate() {
+            let view = GpuShadowView {
+                index: u32::from(page.key.clip_level),
+                virtual_page: 1,
+                _pad: [0; 2],
+                page_view_proj: page.view_proj.to_cols_array_2d(),
+            };
+            queue.write_buffer(
+                &self.virtual_view_buffer,
+                i as u64 * SHADOW_VIEW_STRIDE,
+                bytemuck::bytes_of(&view),
+            );
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Virtual Shadow Physical Pages"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &gpu.physical_atlas_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: if clear_atlas {
+                        wgpu::LoadOp::Clear(1.0)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        for (i, page) in work[..count].iter().enumerate() {
+            let (x, y, width, height) = gpu.page_viewport(page.physical_page);
+            pass.set_viewport(x, y, width, height, 0.0, 1.0);
+            pass.set_scissor_rect(x as u32, y as u32, width as u32, height as u32);
+            pass.set_pipeline(&self.page_clear_pipeline);
+            pass.draw(0..3, 0..1);
+
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, global_bind_group, &[]);
+            pass.set_bind_group(
+                1,
+                &self.virtual_view_bind_group,
+                &[i as u32 * SHADOW_VIEW_STRIDE as u32],
+            );
+            pass.set_bind_group(2, &self.cutout_bind_group, &[]);
+            for caster in casters {
+                pass.draw(
+                    0..caster.index_count,
+                    caster.instance_index..caster.instance_index + 1,
+                );
             }
         }
     }

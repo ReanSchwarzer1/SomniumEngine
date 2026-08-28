@@ -14,7 +14,9 @@
 
 use crate::{
     draw::DrawingContext,
-    message::{MessageDirection, Modifiers, NodeHandle, UiMessage, WidgetMessage},
+    message::{
+        MessageDirection, Modifiers, NodeHandle, UiMessage, WHEEL_DELTA_PER_LINE, WidgetMessage,
+    },
     node::{Control, LayoutCtx, UiNode},
     pool::Pool,
     types::{HorizontalAlignment, Rect, VerticalAlignment},
@@ -54,6 +56,8 @@ fn to_nh(h: IH) -> NodeHandle {
 
 pub struct UserInterface {
     pub nodes: NodePool,
+    /// MORROWIND-I. Accessibility preferences in force for this interface.
+    a11y: crate::a11y::A11ySettings,
     root_ih: IH,
     pub screen_size: Vec2,
     message_queue: VecDeque<UiMessage>,
@@ -116,6 +120,7 @@ impl UserInterface {
         let root_ih = nodes.spawn(UiNode::new(root_widget, Box::new(RootControl)));
         Self {
             nodes,
+            a11y: crate::a11y::A11ySettings::default(),
             root_ih,
             screen_size: Vec2::new(screen_w, screen_h),
             message_queue: VecDeque::new(),
@@ -242,6 +247,78 @@ impl UserInterface {
             .try_borrow(to_ih(handle))
             .map(|node| node.widget.screen_bounds())
             .unwrap_or(Rect::ZERO)
+    }
+
+    /// Put a node at an explicit rectangle, overriding alignment.
+    ///
+    /// MORROWIND-E2. The write half of [`Self::screen_bounds`], and the thing
+    /// MORROWIND-E's anchoring had no way to reach: `Canvas::place` resolved an
+    /// `Anchoring` into a `Rect` and nothing applied it to a widget. Sets
+    /// position *and* size, and pins both alignments, because a node given a
+    /// rectangle it then centres itself inside of is not placed.
+    pub fn place_node(&mut self, handle: NodeHandle, rect: Rect) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            node.widget.desired_local_position = Vec2::new(rect.x, rect.y);
+            node.widget.width = rect.w;
+            node.widget.height = rect.h;
+            node.widget.horizontal_alignment = crate::types::HorizontalAlignment::Left;
+            node.widget.vertical_alignment = crate::types::VerticalAlignment::Top;
+        }
+        self.invalidate_ancestors(handle);
+    }
+
+    // ── MORROWIND-I: accessibility ──────────────────────────────────────────
+
+    /// Everything the accessibility tree needs about one node.
+    ///
+    /// Returns `None` for a handle that is not in the pool, which is what makes
+    /// [`crate::a11y::A11yTree::from_ui`] robust against a tree mutated between
+    /// the walk starting and a child being read.
+    pub fn a11y_probe(&self, handle: NodeHandle) -> Option<crate::a11y::A11yProbe> {
+        let node = self.nodes.try_borrow(to_ih(handle)).ok()?;
+        let name = node.control.a11y_name().unwrap_or_else(|| {
+            // The tooltip, for an icon-only control. The shell authors these
+            // already, for the same reason and without knowing it.
+            node.widget.tooltip.clone()
+        });
+        Some(crate::a11y::A11yProbe {
+            role: node.control.role(),
+            name,
+            value: node.control.a11y_value(),
+            bounds: node.widget.screen_bounds(),
+            visible: node.widget.visibility,
+            enabled: node.widget.enabled,
+            toggled: node.control.a11y_toggled(),
+            children: node.widget.children.clone(),
+        })
+    }
+
+    /// Build the accessibility tree for this interface.
+    pub fn a11y_tree(&self) -> crate::a11y::A11yTree {
+        crate::a11y::A11yTree::from_ui(self)
+    }
+
+    /// Apply accessibility preferences.
+    ///
+    /// MORROWIND-I. `reduced_motion` reaches MORROWIND-H's animator, which
+    /// already implements it — the sub-phase's job was to make it reachable
+    /// from a *setting* rather than only from editor code. `high_contrast` is
+    /// stored and read by the paint layer through
+    /// [`crate::a11y::high_contrast`].
+    ///
+    /// Neither setting changes layout, and there is a test that says so: an
+    /// interface with both on must be the same interface in the same places, or
+    /// the two modes are two products and only one of them gets tested.
+    pub fn set_a11y_settings(&mut self, settings: crate::a11y::A11ySettings) {
+        self.a11y = settings;
+        self.draw_ctx
+            .motion
+            .set_reduced_motion(settings.reduced_motion);
+    }
+
+    /// The accessibility preferences in force.
+    pub fn a11y_settings(&self) -> crate::a11y::A11ySettings {
+        self.a11y
     }
 
     /// Set the viewport handle so mouse events in the viewport area pass through to the game.
@@ -1574,7 +1651,7 @@ impl UserInterface {
                 }
                 if hit.is_some() {
                     let d = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => *y * 20.0,
+                        MouseScrollDelta::LineDelta(_, y) => *y * WHEEL_DELTA_PER_LINE,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32,
                     };
                     self.send(UiMessage::new(

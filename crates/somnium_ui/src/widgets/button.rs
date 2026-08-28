@@ -44,6 +44,14 @@ pub struct Button {
 }
 
 impl Control for Button {
+    // MORROWIND-I. A button's accessible name is its label if it has one and
+    // its tooltip otherwise — `UserInterface::a11y_probe` supplies the second,
+    // which is why this returns `None` rather than an empty string for an
+    // icon-only button. An empty name would *shadow* the tooltip.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Button
+    }
+
     fn is_keyboard_focusable(&self) -> bool {
         true
     }

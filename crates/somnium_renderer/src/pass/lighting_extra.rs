@@ -1,4 +1,4 @@
-//! World cache, scene specular GI, path tracer, mesh-SDF, probes (24M/N/O/P/Q).
+//! World cache, scene specular GI, path tracer and mesh-SDF (24M/N/O/P).
 //!
 //! One pass owns the 3-D clipmap and the 2-D aux target the shading pass binds.
 //! Individual features are flag-driven and default off except where the
@@ -15,16 +15,14 @@ pub const FLAG_PATH: u32 = 4;
 pub const FLAG_SDF: u32 = 8;
 pub const FLAG_PROBES: u32 = 16;
 
-pub const PROBE_GRID: u32 = 4;
-pub const SH_COEFFS: u32 = 9;
-const SH_BUFFER_BYTES: u64 = (PROBE_GRID * PROBE_GRID * PROBE_GRID * SH_COEFFS * 16) as u64;
-
 /// One mesh contribution to the world SDF clipmap.
 pub struct MeshSdfDraw {
     pub model: glam::Mat4,
     pub local_min: [f32; 3],
     pub local_max: [f32; 3],
     pub vertex_offset: u32,
+    /// Linear diffuse colour stored beside distance for portable DDGI hits.
+    pub base_color: [f32; 3],
     pub brick: Option<std::sync::Arc<crate::geometry::MeshSdfBrick>>,
 }
 
@@ -44,7 +42,7 @@ struct ExtraParams {
     /// Bit 0 = world-cache history, bit 1 = 2-D aux history.
     history_flags: u32,
     half_cells: f32,
-    probe_intensity: f32,
+    _pad_probe: f32,
     _pad: [f32; 3],
 }
 
@@ -64,18 +62,13 @@ mod tests {
     }
 
     #[test]
-    fn the_sh_probe_buffer_holds_a_4x4x4_l2_grid() {
-        assert_eq!(super::SH_BUFFER_BYTES, 64u64 * 9 * 16);
-        assert_eq!(super::SH_BUFFER_BYTES % 16, 0);
-    }
-
-    #[test]
     fn unique_meshes_are_not_starved_by_instanced_foliage() {
         let foliage = || super::MeshSdfDraw {
             model: glam::Mat4::IDENTITY,
             local_min: [-0.5; 3],
             local_max: [0.5; 3],
             vertex_offset: 10,
+            base_color: [0.5; 3],
             brick: None,
         };
         let cube = super::MeshSdfDraw {
@@ -83,6 +76,7 @@ mod tests {
             local_min: [-1.0; 3],
             local_max: [1.0; 3],
             vertex_offset: 20,
+            base_color: [0.5; 3],
             brick: None,
         };
         // Many copies of one mesh, then a unique cube. The cube must still land
@@ -120,6 +114,18 @@ mod tests {
             glam::Vec3::new(0.02, 0.0, -0.9998).normalize(),
         ));
     }
+
+    #[test]
+    fn an_sdf_revision_rebuilds_after_motion_settles_not_during_every_step() {
+        let mut pending = None;
+        assert!(!super::sdf_revision_settled(Some(1), &mut pending, 2));
+        assert_eq!(pending, Some(2));
+        assert!(!super::sdf_revision_settled(Some(1), &mut pending, 3));
+        assert_eq!(pending, Some(3));
+        assert!(super::sdf_revision_settled(Some(1), &mut pending, 3));
+        assert_eq!(pending, None);
+        assert!(!super::sdf_revision_settled(Some(3), &mut pending, 3));
+    }
 }
 
 fn aux_camera_changed(
@@ -134,15 +140,30 @@ fn aux_camera_changed(
     translated || rotated
 }
 
+/// Return true after a changed revision has remained unchanged for one frame.
+/// Continuous animation therefore does not trigger a 64^3 CPU rebuild every
+/// frame, while a transform or material edit becomes visible once it settles.
+fn sdf_revision_settled(built: Option<u64>, pending: &mut Option<u64>, requested: u64) -> bool {
+    if built == Some(requested) {
+        *pending = None;
+        return false;
+    }
+    if *pending == Some(requested) {
+        *pending = None;
+        true
+    } else {
+        *pending = Some(requested);
+        false
+    }
+}
+
 pub struct LightingExtraPass {
     cache_decay: Option<wgpu::ComputePipeline>,
     cache_splat: Option<wgpu::ComputePipeline>,
     specular: Option<wgpu::ComputePipeline>,
     path: Option<wgpu::ComputePipeline>,
-    bake_probes: Option<wgpu::ComputePipeline>,
     layout: Option<wgpu::BindGroupLayout>,
     params: Option<wgpu::Buffer>,
-    sh_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     volume: wgpu::Texture,
     volume_view: wgpu::TextureView,
@@ -163,13 +184,16 @@ pub struct LightingExtraPass {
     last_camera_forward: Option<[f32; 3]>,
     last_flags: u32,
     last_cache_origin: Option<[f32; 3]>,
+    last_sdf_origin: Option<[f32; 3]>,
+    last_sdf_scene_revision: Option<u64>,
+    pending_sdf_scene_revision: Option<u64>,
+    last_sdf_cell_bits: Option<u32>,
     last_aux_settings: Option<[u32; 3]>,
     last_projection: Option<[f32; 16]>,
     last_scene_revision: Option<u64>,
     pub flags: u32,
     pub cell_size: f32,
     pub intensity: f32,
-    pub probe_intensity: f32,
     pub spec_rough: f32,
     pub path_bounces: u32,
     sdf_cpu: Vec<[f32; 4]>,
@@ -178,6 +202,7 @@ pub struct LightingExtraPass {
 impl LightingExtraPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         global_layout: &wgpu::BindGroupLayout,
         supported: bool,
         width: u32,
@@ -201,22 +226,13 @@ impl LightingExtraPass {
             aux_tex(device, width, height, "Scene specular history");
         let (path_hist, path_hist_view) = aux_tex(device, width, height, "Path tracer history");
 
-        let sh_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("SH probes"),
-            size: SH_BUFFER_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let mut pass = Self {
             cache_decay: None,
             cache_splat: None,
             specular: None,
             path: None,
-            bake_probes: None,
             layout: None,
             params: None,
-            sh_buffer,
             sampler,
             volume,
             volume_view,
@@ -237,13 +253,16 @@ impl LightingExtraPass {
             last_camera_forward: None,
             last_flags: 0,
             last_cache_origin: None,
+            last_sdf_origin: None,
+            last_sdf_scene_revision: None,
+            pending_sdf_scene_revision: None,
+            last_sdf_cell_bits: None,
             last_aux_settings: None,
             last_projection: None,
             last_scene_revision: None,
             flags: 0,
             cell_size: 2.0,
             intensity: 1.0,
-            probe_intensity: 1.0,
             spec_rough: 0.15,
             path_bounces: 3,
             sdf_cpu: vec![[1.0e3; 4]; (VOLUME * VOLUME * VOLUME) as usize],
@@ -253,17 +272,9 @@ impl LightingExtraPass {
             return pass;
         }
 
-        let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            include_str!("../shaders/lighting_extra.wgsl"),
-            include_str!("../shaders/rt_hit.wgsl"),
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/brdf.wgsl"),
-            include_str!("../shaders/sampling.wgsl"),
-            include_str!("../shaders/atmosphere.wgsl"),
-            include_str!("../shaders/hextile.wgsl"),
-            include_str!("../shaders/terrain_material.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `lighting_extra.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("lighting_extra.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lighting_extra.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -284,7 +295,6 @@ impl LightingExtraPass {
                 storage_2d(9),
                 uniform_entry(10),
                 sampler_entry(11),
-                storage_rw(12),
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -306,7 +316,6 @@ impl LightingExtraPass {
         pass.cache_splat = Some(make("cache_from_screen", "World cache splat"));
         pass.specular = Some(make("specular_gi", "Scene specular GI"));
         pass.path = Some(make("path_trace", "Path tracer"));
-        pass.bake_probes = Some(make("bake_probes", "SH probes"));
         pass.layout = Some(layout);
         pass.params = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lighting extra params"),
@@ -329,8 +338,10 @@ impl LightingExtraPass {
         &self.volume_view
     }
 
-    pub fn sh_buffer(&self) -> &wgpu::Buffer {
-        &self.sh_buffer
+    /// Revision whose geometry and base colours are actually in the SDF.
+    #[must_use]
+    pub fn sdf_scene_revision(&self) -> Option<u64> {
+        self.last_sdf_scene_revision
     }
 
     pub fn flags_bits(&self) -> u32 {
@@ -386,6 +397,7 @@ impl LightingExtraPass {
         view: glam::Mat4,
         projection: glam::Mat4,
         scene_revision: u64,
+        sdf_scene_revision: u64,
         camera_pos: glam::Vec3,
         width: u32,
         height: u32,
@@ -448,7 +460,29 @@ impl LightingExtraPass {
         self.last_scene_revision = Some(scene_revision);
 
         if (self.flags & FLAG_SDF) != 0 && (self.flags & FLAG_CACHE) == 0 {
-            self.fill_sdf(queue, camera_pos, mesh_sdf);
+            let cell = self.cell_size.max(0.25);
+            let origin = ((camera_pos / cell).floor() * cell).to_array();
+            let force_rebuild = self.last_sdf_origin != Some(origin)
+                || self.last_sdf_scene_revision.is_none()
+                || self.last_sdf_cell_bits != Some(cell.to_bits());
+            let revision_ready = sdf_revision_settled(
+                self.last_sdf_scene_revision,
+                &mut self.pending_sdf_scene_revision,
+                sdf_scene_revision,
+            );
+            let dirty = force_rebuild || revision_ready;
+            if dirty {
+                self.fill_sdf(queue, camera_pos, mesh_sdf);
+                self.last_sdf_origin = Some(origin);
+                self.last_sdf_scene_revision = Some(sdf_scene_revision);
+                self.pending_sdf_scene_revision = None;
+                self.last_sdf_cell_bits = Some(cell.to_bits());
+            }
+        } else {
+            self.last_sdf_origin = None;
+            self.last_sdf_scene_revision = None;
+            self.pending_sdf_scene_revision = None;
+            self.last_sdf_cell_bits = None;
         }
 
         let Some(tlas) = tlas.filter(|_| self.supported) else {
@@ -507,7 +541,7 @@ impl LightingExtraPass {
                 inv_res: [1.0 / width as f32, 1.0 / height as f32],
                 history_flags,
                 half_cells: VOLUME as f32 * 0.5,
-                probe_intensity: self.probe_intensity,
+                _pad_probe: 0.0,
                 _pad: [0.0; 3],
             }),
         );
@@ -578,10 +612,6 @@ impl LightingExtraPass {
                     binding: 11,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: self.sh_buffer.as_entire_binding(),
-                },
             ],
         });
 
@@ -616,19 +646,9 @@ impl LightingExtraPass {
             self.cache_history_valid = true;
         }
 
-        if (self.flags & FLAG_PROBES) != 0 {
-            if let Some(bake) = self.bake_probes.as_ref() {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SH probes"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(bake);
-                cpass.set_bind_group(0, Some(global_bind), &[]);
-                cpass.set_bind_group(1, Some(&bind), &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
-                drop(cpass);
-            }
-        }
+        // MORROWIND-AB owns probe updates in the portable `DdgiPass`. Keep the
+        // flag bit because shading's stable ABI uses it to select SH gather,
+        // but do not run the old ray-query-only environment projection here.
 
         let hw = (width / 2).max(1);
         let hh = (height / 2).max(1);
@@ -746,7 +766,12 @@ impl LightingExtraPass {
                         let idx =
                             (z as u32 * VOLUME * VOLUME + y as u32 * VOLUME + x as u32) as usize;
                         if d < self.sdf_cpu[idx][3] {
-                            self.sdf_cpu[idx] = [0.0, 0.0, 0.0, d];
+                            self.sdf_cpu[idx] = [
+                                draw.base_color[0],
+                                draw.base_color[1],
+                                draw.base_color[2],
+                                d,
+                            ];
                         }
                     }
                 }
@@ -1007,18 +1032,6 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-fn storage_rw(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only: false },
             has_dynamic_offset: false,
             min_binding_size: None,
         },

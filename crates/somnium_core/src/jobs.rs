@@ -1,321 +1,55 @@
-//! Bounded editor job registry.
+//! Editor-side job helpers over [`somnium_jobs`].
 //!
-//! The public surface is intentionally narrow so Phase MORROWIND can move this
-//! module into `somnium_jobs` without changing call sites.
+//! **The scheduler used to live here.** Phase CONTROL wrote a `JobRegistry` in
+//! this file with a deliberately narrow public surface, and said so in its own
+//! first doc line, *"so Phase MORROWIND can move this module into
+//! `somnium_jobs` without changing call sites"*. MORROWIND-B did exactly that:
+//! the queue, the workers, the cancellation tokens and all five of CONTROL's
+//! tests now live in `crates/somnium_jobs/`, extended with declared deadlines,
+//! a budgeted main-thread drain and profiler telemetry.
+//!
+//! What is left here is the part that was never generic: two submissions that
+//! shell out to `cargo` inside *this workspace*. `somnium_jobs` has no
+//! dependencies and knows nothing about content roots, terrain packs or BC7
+//! encoders, and it should not — a scheduler that knows what it is scheduling
+//! has stopped being a scheduler.
+//!
+//! Everything else is re-exported, so `crate::jobs::JobPriority` and friends
+//! still resolve and the migration touched imports rather than call sites.
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap},
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering as AtomicOrdering},
-        mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
-    },
-    thread::JoinHandle,
+pub use somnium_jobs::{
+    DrainStats, JobContext, JobDesc, JobError, JobHandle, JobPriority, JobSnapshot, JobStatus,
+    JobSystem, JobZone,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-/// Scheduling class; larger values leave the heap first.
-pub enum JobPriority {
-    /// Maintenance not currently visible.
-    Background = 0,
-    /// Ordinary editor work.
-    #[default]
-    Normal = 1,
-    /// Work needed by the visible viewport/drawer range.
-    Visible = 2,
-    /// Explicit user action.
-    User = 3,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Observable lifecycle of a registered job.
-pub enum JobStatus {
-    /// Accepted but not started.
-    Queued,
-    /// Executing on a worker.
-    Running,
-    /// Finished successfully.
-    Completed,
-    /// Returned an error or panicked.
-    Failed,
-    /// Cancellation was observed.
-    Cancelled,
-}
-
-impl JobStatus {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            1 => Self::Running,
-            2 => Self::Completed,
-            3 => Self::Failed,
-            4 => Self::Cancelled,
-            _ => Self::Queued,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-/// Status-bar-safe job projection.
-pub struct JobSnapshot {
-    /// Registry identity.
-    pub id: u64,
-    /// Human-readable operation.
-    pub name: &'static str,
-    /// Current lifecycle state.
-    pub status: JobStatus,
-    /// Normalized progress in `0..=1`.
-    pub progress: f32,
-    /// Whether cancellation can still be requested.
-    pub cancellable: bool,
-    /// Scheduling class it was submitted with.
-    ///
-    /// Carried so a surface can tell work a person started from housekeeping
-    /// that runs on its own — the status bar's Cancel chip shows the former
-    /// and not the latter.
-    pub priority: JobPriority,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Failure returned by a job handle.
-pub enum JobError {
-    /// Cooperative cancellation.
-    Cancelled,
-    /// Task-provided failure text.
-    Failed(String),
-    /// Task unwound; the worker survived.
-    Panicked,
-    /// Bounded queue had no room.
-    QueueFull,
-    /// Result channel closed unexpectedly.
-    Disconnected,
-}
-
-struct JobState {
-    id: u64,
-    name: &'static str,
-    priority: JobPriority,
-    status: AtomicU8,
-    progress: AtomicU32,
-    cancelled: AtomicBool,
-}
-
-impl JobState {
-    fn new(id: u64, name: &'static str, priority: JobPriority) -> Self {
-        Self {
-            id,
-            name,
-            priority,
-            status: AtomicU8::new(0),
-            progress: AtomicU32::new(0),
-            cancelled: AtomicBool::new(false),
-        }
-    }
-
-    fn snapshot(&self) -> JobSnapshot {
-        let status = JobStatus::from_raw(self.status.load(AtomicOrdering::Acquire));
-        JobSnapshot {
-            id: self.id,
-            name: self.name,
-            status,
-            progress: self.progress.load(AtomicOrdering::Relaxed) as f32 / 10_000.0,
-            cancellable: !matches!(
-                status,
-                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
-            ),
-            priority: self.priority,
-        }
-    }
-}
-
-#[derive(Clone)]
-/// Cooperative cancellation and progress token passed to worker closures.
-pub struct JobContext {
-    state: Arc<JobState>,
-}
-
-impl JobContext {
-    /// Whether cancellation has been requested.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.state.cancelled.load(AtomicOrdering::Acquire)
-    }
-
-    /// Return a cancellation error when cancellation has been requested.
-    pub fn check_cancelled(&self) -> Result<(), JobError> {
-        if self.is_cancelled() {
-            Err(JobError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Publish normalized progress for status-bar observers.
-    pub fn set_progress(&self, progress: f32) {
-        let value = (progress.clamp(0.0, 1.0) * 10_000.0).round() as u32;
-        self.state.progress.store(value, AtomicOrdering::Release);
-    }
-}
-
-/// Typed result handle retained by the submitter.
-pub struct JobHandle<T> {
-    state: Arc<JobState>,
-    receiver: Receiver<Result<T, JobError>>,
-}
-
-impl<T> JobHandle<T> {
-    /// Registry id used by status-bar cancellation.
-    #[must_use]
-    pub fn id(&self) -> u64 {
-        self.state.id
-    }
-
-    /// Request cooperative cancellation.
-    pub fn cancel(&self) {
-        self.state.cancelled.store(true, AtomicOrdering::Release);
-    }
-
-    /// Read status without blocking.
-    #[must_use]
-    pub fn snapshot(&self) -> JobSnapshot {
-        self.state.snapshot()
-    }
-
-    /// Take a completed result without blocking.
-    pub fn try_take(&self) -> Option<Result<T, JobError>> {
-        match self.receiver.try_recv() {
-            Ok(value) => Some(value),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err(JobError::Disconnected)),
-        }
-    }
-}
-
-type JobTask = Box<dyn FnOnce(JobContext) + Send + 'static>;
-
-struct QueuedJob {
-    priority: JobPriority,
-    sequence: u64,
-    state: Arc<JobState>,
-    task: Option<JobTask>,
-}
-
-impl PartialEq for QueuedJob {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.sequence == other.sequence
-    }
-}
-impl Eq for QueuedJob {}
-impl PartialOrd for QueuedJob {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for QueuedJob {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .cmp(&other.priority)
-            // Earlier FIFO sequence wins within a priority.
-            .then_with(|| other.sequence.cmp(&self.sequence))
-    }
-}
-
-struct QueueState {
-    jobs: BinaryHeap<QueuedJob>,
-    capacity: usize,
-    shutdown: bool,
-}
-
-struct SharedQueue {
-    state: Mutex<QueueState>,
-    ready: Condvar,
-}
-
-/// Bounded priority scheduler with a fixed worker count.
-pub struct JobRegistry {
-    shared: Arc<SharedQueue>,
-    workers: Vec<JoinHandle<()>>,
-    states: BTreeMap<u64, Arc<JobState>>,
-    next_id: AtomicU64,
-    sequence: u64,
-}
-
-impl Default for JobRegistry {
-    fn default() -> Self {
-        let available = std::thread::available_parallelism().map_or(2, usize::from);
-        Self::with_workers_and_capacity(available.saturating_sub(1).clamp(1, 4), 128)
-    }
-}
-
-impl JobRegistry {
-    /// Construct a registry with explicit resource bounds.
-    #[must_use]
-    pub fn with_workers_and_capacity(workers: usize, capacity: usize) -> Self {
-        let shared = Arc::new(SharedQueue {
-            state: Mutex::new(QueueState {
-                jobs: BinaryHeap::new(),
-                capacity: capacity.max(1),
-                shutdown: false,
-            }),
-            ready: Condvar::new(),
-        });
-        let workers = (0..workers.max(1))
-            .map(|index| {
-                let queue = Arc::clone(&shared);
-                std::thread::Builder::new()
-                    .name(format!("somnium-job-{index}"))
-                    .spawn(move || worker_loop(&queue))
-                    .expect("job worker")
-            })
-            .collect();
-        Self {
-            shared,
-            workers,
-            states: BTreeMap::new(),
-            next_id: AtomicU64::new(1),
-            sequence: 0,
-        }
-    }
-
-    /// Submit typed worker work without blocking on execution.
-    pub fn submit<T, F>(
+/// Long editor operations that run an external `cargo` command.
+///
+/// An extension trait rather than inherent methods, because the alternative is
+/// `somnium_jobs` depending on the workspace layout.
+///
+/// **Neither has a caller yet.** They were written by Phase CONTROL against the
+/// terrain and BC7 tools and the editor never grew the buttons; MORROWIND-A's
+/// census names dead code as a category worth seeing rather than deleting on
+/// sight, and this is a two-method API waiting for a menu item, not rot. If
+/// Track 4's cook lands first and replaces both, delete them then.
+pub trait EditorJobs {
+    /// Run the existing terrain PNG bake through the shared scheduler.
+    fn submit_terrain_bake(
         &mut self,
-        name: &'static str,
-        priority: JobPriority,
-        task: F,
-    ) -> Result<JobHandle<T>, JobError>
-    where
-        T: Send + 'static,
-        F: FnOnce(JobContext) -> Result<T, String> + Send + 'static,
-    {
-        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
-        let state = Arc::new(JobState::new(id, name, priority));
-        let (sender, receiver) = sync_channel(1);
-        let task_state = Arc::clone(&state);
-        let wrapped = Box::new(move |context: JobContext| {
-            run_task(context, task_state, sender, task);
-        });
-        let mut queue = self.shared.state.lock().expect("job queue poisoned");
-        if queue.jobs.len() >= queue.capacity {
-            return Err(JobError::QueueFull);
-        }
-        queue.jobs.push(QueuedJob {
-            priority,
-            sequence: self.sequence,
-            state: Arc::clone(&state),
-            task: Some(wrapped),
-        });
-        self.sequence = self.sequence.wrapping_add(1);
-        self.states.insert(id, Arc::clone(&state));
-        drop(queue);
-        self.shared.ready.notify_one();
-        Ok(JobHandle { state, receiver })
-    }
+        workspace: std::path::PathBuf,
+        arguments: Vec<String>,
+    ) -> Result<JobHandle<()>, JobError>;
 
-    /// Run the existing terrain PNG bake through the shared bounded scheduler.
-    pub fn submit_terrain_bake(
+    /// Run the existing BC7 encoder through the shared scheduler.
+    fn submit_bc7_encode(
+        &mut self,
+        workspace: std::path::PathBuf,
+        fast: bool,
+    ) -> Result<JobHandle<()>, JobError>;
+}
+
+impl EditorJobs for JobSystem {
+    fn submit_terrain_bake(
         &mut self,
         workspace: std::path::PathBuf,
         arguments: Vec<String>,
@@ -333,11 +67,10 @@ impl JobRegistry {
                 "--",
             ])
             .args(arguments);
-        self.submit_process("Terrain bake", JobPriority::User, command)
+        submit_process(self, "Terrain bake", JobPriority::User, command)
     }
 
-    /// Run the existing BC7 encoder through the shared bounded scheduler.
-    pub fn submit_bc7_encode(
+    fn submit_bc7_encode(
         &mut self,
         workspace: std::path::PathBuf,
         fast: bool,
@@ -354,268 +87,160 @@ impl JobRegistry {
         if fast {
             command.arg("--").arg("--fast");
         }
-        self.submit_process("BC7 encode", JobPriority::User, command)
+        submit_process(self, "BC7 encode", JobPriority::User, command)
     }
+}
 
-    fn submit_process(
-        &mut self,
-        name: &'static str,
-        priority: JobPriority,
-        mut command: std::process::Command,
-    ) -> Result<JobHandle<()>, JobError> {
-        self.submit(name, priority, move |context| {
-            let mut child = command.spawn().map_err(|error| error.to_string())?;
-            loop {
-                if context.is_cancelled() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("cancelled".into());
-                }
-                match child.try_wait().map_err(|error| error.to_string())? {
-                    Some(status) if status.success() => return Ok(()),
-                    Some(status) => return Err(format!("process exited with {status}")),
-                    None => std::thread::sleep(std::time::Duration::from_millis(10)),
-                }
+/// Spawn `command` on a worker and poll it, so cancellation kills the child.
+///
+/// The 10 ms poll is a compromise and worth naming: `wait()` would block the
+/// worker uninterruptibly, and a bake that cannot be cancelled is worse than
+/// one that takes an extra 10 ms to notice it was.
+fn submit_process(
+    jobs: &mut JobSystem,
+    name: &'static str,
+    priority: JobPriority,
+    mut command: std::process::Command,
+) -> Result<JobHandle<()>, JobError> {
+    jobs.submit(name, priority, move |context| {
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        loop {
+            if context.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("cancelled".into());
             }
-        })
-    }
-
-    /// Cancel a registered job by id.
-    pub fn cancel(&self, id: u64) -> bool {
-        let Some(state) = self.states.get(&id) else {
-            return false;
-        };
-        state.cancelled.store(true, AtomicOrdering::Release);
-        true
-    }
-
-    /// Snapshot queued and running jobs.
-    #[must_use]
-    pub fn active(&self) -> Vec<JobSnapshot> {
-        self.states
-            .values()
-            .map(|state| state.snapshot())
-            .filter(|snapshot| matches!(snapshot.status, JobStatus::Queued | JobStatus::Running))
-            .collect()
-    }
-
-    /// Drop completed registry bookkeeping.
-    pub fn prune_finished(&mut self) {
-        self.states.retain(|_, state| {
-            matches!(
-                JobStatus::from_raw(state.status.load(AtomicOrdering::Acquire)),
-                JobStatus::Queued | JobStatus::Running
-            )
-        });
-    }
-}
-
-fn run_task<T, F>(
-    context: JobContext,
-    state: Arc<JobState>,
-    sender: SyncSender<Result<T, JobError>>,
-    task: F,
-) where
-    T: Send + 'static,
-    F: FnOnce(JobContext) -> Result<T, String> + Send + 'static,
-{
-    if context.is_cancelled() {
-        state.status.store(4, AtomicOrdering::Release);
-        let _ = sender.send(Err(JobError::Cancelled));
-        return;
-    }
-    state.status.store(1, AtomicOrdering::Release);
-    let outcome = catch_unwind(AssertUnwindSafe(|| task(context.clone())));
-    let result = match outcome {
-        Ok(Ok(_value)) if context.is_cancelled() => {
-            state.status.store(4, AtomicOrdering::Release);
-            Err(JobError::Cancelled)
-        }
-        Ok(Ok(value)) => {
-            state.progress.store(10_000, AtomicOrdering::Release);
-            state.status.store(2, AtomicOrdering::Release);
-            Ok(value)
-        }
-        Ok(Err(error)) => {
-            state.status.store(3, AtomicOrdering::Release);
-            Err(JobError::Failed(error))
-        }
-        Err(_) => {
-            state.status.store(3, AtomicOrdering::Release);
-            Err(JobError::Panicked)
-        }
-    };
-    let _ = sender.send(result);
-}
-
-fn worker_loop(shared: &SharedQueue) {
-    loop {
-        let mut queue = shared.state.lock().expect("job queue poisoned");
-        while queue.jobs.is_empty() && !queue.shutdown {
-            queue = shared.ready.wait(queue).expect("job queue poisoned");
-        }
-        if queue.shutdown {
-            return;
-        }
-        let mut job = queue.jobs.pop().expect("non-empty queue");
-        drop(queue);
-        let context = JobContext {
-            state: Arc::clone(&job.state),
-        };
-        if let Some(task) = job.task.take() {
-            task(context);
-        }
-    }
-}
-
-impl Drop for JobRegistry {
-    fn drop(&mut self) {
-        if let Ok(mut queue) = self.shared.state.lock() {
-            queue.shutdown = true;
-            for job in &queue.jobs {
-                job.state.cancelled.store(true, AtomicOrdering::Release);
+            match child.try_wait().map_err(|error| error.to_string())? {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => return Err(format!("process exited with {status}")),
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
         }
-        self.shared.ready.notify_all();
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
+    })
+}
+
+/// One job name's contribution to a frame, for the profiler panel.
+///
+/// `phase_MORROWIND.md` §8: *"every job reports to the Phase 29 profiler as a
+/// CPU zone with its priority and its queue wait. A job system without
+/// visibility is a source of mystery hitches."*
+///
+/// Aggregated by name rather than listed per job, because a folder open
+/// produces sixty identical decodes and sixty identical rows is not a report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobProfileRow {
+    /// The `&'static str` the submitter had to provide.
+    pub name: &'static str,
+    /// The class it was submitted with.
+    pub priority: JobPriority,
+    /// How many finished under this name.
+    pub count: u32,
+    /// Total time spent running.
+    pub ran_ms: f32,
+    /// **The longest single queue wait**, which is the number that explains a
+    /// stall. Totals hide it: sixty jobs waiting 1 ms each and one waiting
+    /// 60 ms sum identically and mean completely different things.
+    pub worst_queued_ms: f32,
+    /// How many expired in the queue without running.
+    ///
+    /// Streaming that quietly drops half its requests and a scheduler that is
+    /// keeping up look identical without this column.
+    pub expired: u32,
+}
+
+/// Fold a frame's zones into one row per job name, worst first.
+///
+/// Sorted by `worst_queued_ms` because the reason to open this panel is a
+/// hitch, and the row that explains a hitch is the one that waited longest.
+#[must_use]
+pub fn profile_rows(zones: &[JobZone]) -> Vec<JobProfileRow> {
+    let mut rows: Vec<JobProfileRow> = Vec::new();
+    for zone in zones {
+        let ran_ms = zone.ran_for.as_secs_f32() * 1000.0;
+        let queued_ms = zone.queued_for.as_secs_f32() * 1000.0;
+        let expired = u32::from(zone.outcome == JobStatus::Expired);
+        match rows.iter_mut().find(|row| row.name == zone.name) {
+            Some(row) => {
+                row.count += 1;
+                row.ran_ms += ran_ms;
+                row.worst_queued_ms = row.worst_queued_ms.max(queued_ms);
+                row.expired += expired;
+                // A name submitted at two classes reports the more urgent one:
+                // the panel's question is "what was the most important thing
+                // waiting", not "what was the average thing waiting".
+                row.priority = row.priority.max(zone.priority);
+            }
+            None => rows.push(JobProfileRow {
+                name: zone.name,
+                priority: zone.priority,
+                count: 1,
+                ran_ms,
+                worst_queued_ms: queued_ms,
+                expired,
+            }),
         }
     }
+    rows.sort_by(|a, b| {
+        b.worst_queued_ms
+            .total_cmp(&a.worst_queued_ms)
+            .then_with(|| a.name.cmp(b.name))
+    });
+    rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc::channel, time::Duration};
+    use std::time::Duration;
 
-    #[test]
-    fn a_slow_job_never_blocks_submit() {
-        let mut jobs = JobRegistry::with_workers_and_capacity(1, 4);
-        let start = std::time::Instant::now();
-        let handle = jobs
-            .submit("test.slow", JobPriority::Normal, |_| {
-                std::thread::sleep(Duration::from_millis(50));
-                Ok(7)
-            })
-            .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(20));
-        while handle.try_take().is_none() {
-            std::thread::yield_now();
+    fn zone(name: &'static str, priority: JobPriority, queued: u64, ran: u64) -> JobZone {
+        JobZone {
+            name,
+            priority,
+            queued_for: Duration::from_millis(queued),
+            ran_for: Duration::from_millis(ran),
+            outcome: JobStatus::Completed,
         }
     }
 
-    /// A snapshot carries the class it was submitted with.
-    ///
-    /// The status bar's Cancel chip reads this to tell work a person started
-    /// from housekeeping that runs on its own. Without it the chip blinked
-    /// three times a second on the background inventory sweep, which taught
-    /// people to ignore the one place an import reports itself.
     #[test]
-    fn a_snapshot_reports_the_priority_it_was_submitted_with() {
-        let mut jobs = JobRegistry::with_workers_and_capacity(1, 8);
-        let (release_tx, release_rx) = sync_channel::<()>(0);
-        let blocker = jobs
-            .submit("test.blocker", JobPriority::User, move |_| {
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-        let sweep = jobs
-            .submit("test.sweep", JobPriority::Background, |_| Ok(()))
-            .unwrap();
+    fn rows_aggregate_by_name_and_keep_the_worst_wait() {
+        let rows = profile_rows(&[
+            zone("thumbnail.decode", JobPriority::Background, 1, 200),
+            zone("thumbnail.decode", JobPriority::Visible, 60, 240),
+            zone("gltf.import", JobPriority::User, 2, 900),
+        ]);
+        assert_eq!(rows.len(), 2);
 
-        assert_eq!(blocker.snapshot().priority, JobPriority::User);
-        assert_eq!(sweep.snapshot().priority, JobPriority::Background);
-        assert!(
-            jobs.active()
-                .iter()
-                .any(|job| job.priority == JobPriority::Background),
-            "the panel still lists housekeeping even though the chip will not"
-        );
-
-        release_tx.send(()).unwrap();
-        drop(blocker);
-    }
-
-    #[test]
-    fn queued_work_is_priority_then_fifo() {
-        let mut jobs = JobRegistry::with_workers_and_capacity(1, 8);
-        let (release_tx, release_rx) = sync_channel::<()>(0);
-        let blocker = jobs
-            .submit("test.blocker", JobPriority::User, move |_| {
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-        while blocker.snapshot().status != JobStatus::Running {
-            std::thread::yield_now();
-        }
-        let (order_tx, order_rx) = channel();
-        let low_tx = order_tx.clone();
-        let _low = jobs
-            .submit("test.low", JobPriority::Background, move |_| {
-                low_tx.send("low").unwrap();
-                Ok(())
-            })
-            .unwrap();
-        let _high = jobs
-            .submit("test.high", JobPriority::Visible, move |_| {
-                order_tx.send("high").unwrap();
-                Ok(())
-            })
-            .unwrap();
-        release_tx.send(()).unwrap();
+        // Worst wait first: that is the row that explains the hitch.
+        assert_eq!(rows[0].name, "thumbnail.decode");
+        assert_eq!(rows[0].count, 2);
+        assert!((rows[0].worst_queued_ms - 60.0).abs() < 0.5);
+        assert!((rows[0].ran_ms - 440.0).abs() < 1.0);
         assert_eq!(
-            order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "high"
+            rows[0].priority,
+            JobPriority::Visible,
+            "a name submitted at two classes reports the more urgent one"
         );
+        assert_eq!(rows[1].name, "gltf.import");
+    }
+
+    #[test]
+    fn expired_jobs_are_counted_rather_than_hidden() {
+        let mut dropped = zone("cell.stream", JobPriority::Visible, 40, 0);
+        dropped.outcome = JobStatus::Expired;
+        let rows = profile_rows(&[zone("cell.stream", JobPriority::Visible, 3, 12), dropped]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, 2);
         assert_eq!(
-            order_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "low"
+            rows[0].expired, 1,
+            "streaming that drops half its requests must not look like \
+             streaming that is keeping up"
         );
     }
 
     #[test]
-    fn cancellation_and_progress_are_observable() {
-        let mut jobs = JobRegistry::with_workers_and_capacity(1, 4);
-        let handle = jobs
-            .submit("test.cancel", JobPriority::Normal, |ctx| {
-                ctx.set_progress(0.5);
-                while !ctx.is_cancelled() {
-                    std::thread::yield_now();
-                }
-                Ok(())
-            })
-            .unwrap();
-        while handle.snapshot().progress < 0.5 {
-            std::thread::yield_now();
-        }
-        handle.cancel();
-        loop {
-            if let Some(result) = handle.try_take() {
-                assert_eq!(result, Err(JobError::Cancelled));
-                break;
-            }
-            std::thread::yield_now();
-        }
-    }
-
-    #[test]
-    fn queue_is_bounded() {
-        let mut jobs = JobRegistry::with_workers_and_capacity(1, 1);
-        let (tx, rx) = sync_channel::<()>(0);
-        let running = jobs
-            .submit("test.running", JobPriority::Normal, move |_| {
-                rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-        while running.snapshot().status != JobStatus::Running {
-            std::thread::yield_now();
-        }
-        let _queued = jobs.submit("test.queued", JobPriority::Normal, |_| Ok::<_, String>(()));
-        let full = jobs.submit("test.full", JobPriority::Normal, |_| Ok::<_, String>(()));
-        assert_eq!(full.err(), Some(JobError::QueueFull));
-        tx.send(()).unwrap();
+    fn no_zones_means_no_rows() {
+        assert!(profile_rows(&[]).is_empty());
     }
 }

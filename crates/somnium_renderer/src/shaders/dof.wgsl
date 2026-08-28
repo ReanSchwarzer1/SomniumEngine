@@ -1,3 +1,9 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "sampling.wgsl"
+
 // Phase 24Z: depth of field.
 //
 // Nearly free once the camera is physical. Phase 24A gave it an aperture in

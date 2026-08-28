@@ -24,6 +24,11 @@ pub struct Image {
 }
 
 impl Control for Image {
+    // MORROWIND-I.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Image
+    }
+
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
         Vec2::splat(self.size)
     }

@@ -271,6 +271,7 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         Particle => IconId::Particle,
         Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
+        UiCanvas => IconId::Window,
         // CONTROL-L: the environment is the sun, so it takes the sun icon.
         Environment => IconId::DirectionalLight,
     }

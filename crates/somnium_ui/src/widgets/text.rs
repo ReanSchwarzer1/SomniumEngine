@@ -54,6 +54,18 @@ pub fn wrap_lines(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32)
 }
 
 impl Control for Text {
+    // MORROWIND-I. Static text is a label and *is* its own name. This is also
+    // where most of a UI's accessible names come from: a button whose label is
+    // a child text node has no name of its own, and the collapse rule in
+    // `A11yTree::from_ui` is what lifts this one onto it.
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Label
+    }
+
+    fn a11y_name(&self) -> Option<String> {
+        (!self.text.trim().is_empty()).then(|| self.text.clone())
+    }
+
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let line_h = ctx.measure_text("Ag", self.px, self.font_id).y.max(self.px);
         let max_w = if self.wrap && available.x.is_finite() {

@@ -161,7 +161,7 @@ SOMNIUM_RT_REFLECT=0 cargo run -p hello_engine  # SSR + sky cube only (no traced
 - **F9** — A/B the GPU-driven indirect draw path against the CPU path
 - **F10** — A/B GPU frustum culling (a correct cull is invisible). Camera Details **Frustum Cull** is the CPU early-out (default on; `SOMNIUM_CPU_FRUSTUM=0`). Hold RMB and look at empty sky to see profiler `cpu-cull` rise.
 - **File > Import Model…** — import any glTF/GLB into the scene at the origin
-- **Create menu** — spawn primitives, lights, particle emitter, heightmap terrain, or voxel terrain
+- **Create menu** — spawn primitives, lights, particle emitters, heightmap/voxel terrain, or a runtime UI Canvas root
 - Select a light to edit its intensity / range / cone angles / colour in the inspector
   (Iris swatches shipped as Metaphor 26-F; see `dev records/phase_26.md`)
 - **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`

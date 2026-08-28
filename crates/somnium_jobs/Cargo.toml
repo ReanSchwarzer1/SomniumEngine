@@ -1,0 +1,27 @@
+[package]
+name        = "somnium_jobs"
+description = "Background work with declared priorities, deadlines, cancellation, and a budgeted main-thread drain."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# No dependencies, and that is a design constraint rather than an accident
+# (plan §7.9: "No dependency on anything else in the workspace").
+#
+# Two consequences worth stating, because both look like omissions:
+#
+# - **No `tracing`.** Every job produces a `JobZone` the caller feeds to the
+#   Phase 29 profiler; the job system reports timings, it does not decide where
+#   they are displayed. Depending on a log crate here would make the *scheduler*
+#   opinionated about presentation, and the profiler integration is the thing
+#   that actually matters (plan §8: "A job system without visibility is a source
+#   of mystery hitches").
+#
+# - **No `rayon`.** `somnium_renderer::jobs::for_each_mut` keeps rayon for
+#   data-parallel loops over slices, which is a different problem: fork-join
+#   inside one frame, not background work with a deadline. Both existing, once
+#   each, is the intent — a *second thread pool for background work* is what
+#   §10's "one job system" row forbids, and GHOSTFENCE checks it.
+[dependencies]

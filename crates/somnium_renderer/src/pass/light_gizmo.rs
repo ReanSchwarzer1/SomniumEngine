@@ -245,6 +245,7 @@ impl LightGizmoPass {
     /// - `view_buffer`: the global view buffer (same one the transform gizmo uses).
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         surface_format: wgpu::TextureFormat,
         view_buffer: &wgpu::Buffer,
     ) -> Self {
@@ -280,7 +281,7 @@ impl LightGizmoPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Light Gizmo Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/light_gizmo.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("light_gizmo.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -296,7 +297,7 @@ impl LightGizmoPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: VERTEX_SIZE,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -311,7 +312,7 @@ impl LightGizmoPass {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

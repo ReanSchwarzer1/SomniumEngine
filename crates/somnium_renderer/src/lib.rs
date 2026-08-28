@@ -14,6 +14,7 @@
 //!   `shaders/rt_hit.wgsl`. Layer 1 is VV+1 refraction (default off). See ATTRIBUTION.md §1.7.
 
 pub mod bindless;
+pub mod capability;
 pub mod capture;
 pub mod cluster;
 pub mod command;
@@ -28,7 +29,9 @@ pub mod meshlet;
 pub mod pass;
 pub mod profiler;
 pub mod renderer;
+pub mod shaders;
 pub mod shadow;
+pub mod skinning;
 pub mod terrain;
 pub mod texture_pool;
 pub mod timing;

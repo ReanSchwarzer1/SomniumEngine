@@ -1,3 +1,9 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "atmosphere.wgsl"
+
 // Phase 19A: environment cubemap generation.
 //
 // Two entry points, run once at startup (and again if the sun moves):

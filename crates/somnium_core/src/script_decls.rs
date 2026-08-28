@@ -137,6 +137,12 @@ export type Context = {
 	--- finishes first.
 	despawn: (self: Context, entity: Entity) -> (),
 	applyForce: (self: Context, entity: Entity, force: Vec3, impulse: boolean?) -> (),
+	--- Set a typed animation-graph parameter. Changes are deferred to the
+	--- phase boundary and validated against the graph's parameter schema.
+	setAnimationBool: (self: Context, entity: Entity, name: string, value: boolean) -> (),
+	setAnimationFloat: (self: Context, entity: Entity, name: string, value: number) -> (),
+	setAnimationInt: (self: Context, entity: Entity, name: string, value: number) -> (),
+	triggerAnimation: (self: Context, entity: Entity, name: string) -> (),
 	emit: (self: Context, name: string) -> (),
 	log: (self: Context, ...any) -> (),
 	warn: (self: Context, ...any) -> (),

@@ -173,6 +173,12 @@ pub struct ShadingPass {
     /// CONTROL-O: the decal grid's four buffers, cloned so a resize can
     /// rebuild the bind group without threading the grid back through.
     decal_buffers: [wgpu::Buffer; 4],
+    /// MORROWIND-Z sparse shadow cache. Dummy/disabled until a scene asks for VSM.
+    virtual_shadow_view: wgpu::TextureView,
+    virtual_shadow_sampler: wgpu::Sampler,
+    virtual_shadow_page_table: wgpu::Buffer,
+    virtual_shadow_params: wgpu::Buffer,
+    _virtual_shadow_dummy: wgpu::Texture,
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
     clipmap_layout: wgpu::BindGroupLayout,
@@ -186,6 +192,7 @@ pub struct ShadingPass {
 impl ShadingPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         surface_format: wgpu::TextureFormat,
         visibility_view: &wgpu::TextureView,
@@ -456,6 +463,42 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 24,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 25,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 26,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 27,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -504,6 +547,40 @@ impl ShadingPass {
             mapped_at_creation: false,
         });
 
+        let virtual_shadow_dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Virtual Shadow Dummy"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let virtual_shadow_view =
+            virtual_shadow_dummy.create_view(&wgpu::TextureViewDescriptor::default());
+        let virtual_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Virtual Shadow Dummy Sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let virtual_shadow_page_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Virtual Shadow Dummy Page Table"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let virtual_shadow_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Virtual Shadow Dummy Params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
         let decal_buffers = [
             decals.decal_buffer.clone(),
             decals.offset_buffer.clone(),
@@ -535,28 +612,15 @@ impl ShadingPass {
             cloud_shadow_params,
             &weather,
             &decal_buffers,
+            &virtual_shadow_view,
+            &virtual_shadow_sampler,
+            &virtual_shadow_page_table,
+            &virtual_shadow_params,
         );
 
-        let shader_source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            // Phase 24L: the scene bindings, shared with the GI pass so a
-            // traced surface and a rasterised one resolve identically.
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/brdf.wgsl"),
-            // Phase 24G: Vogel disk and gradient noise, used by PCSS.
-            include_str!("../shaders/sampling.wgsl"),
-            // Phase 24C: the background samples the atmosphere-generated
-            // cubemap and adds sharp sky detail analytically.
-            include_str!("../shaders/atmosphere.wgsl"),
-            // Phase 25F: stochastic hex-tiling, used by the terrain material
-            // below to break the visible repetition of a tiled layer.
-            include_str!("../shaders/hextile.wgsl"),
-            // Phase 25A-2: terrain's splat/triplanar material, which is all
-            // that survives of the separate terrain pass.
-            include_str!("../shaders/terrain_material.wgsl"),
-            include_str!("../shaders/clipmap_shade.wgsl"),
-            include_str!("../shaders/shading.wgsl")
-        );
+        // MORROWIND-C: composition is declared in `shading.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let shader_source = shaders.source_or_panic("shading.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shading Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -675,12 +739,65 @@ impl ShadingPass {
             cloud_shadow_params: cloud_shadow_params.clone(),
             weather,
             decal_buffers,
+            virtual_shadow_view,
+            virtual_shadow_sampler,
+            virtual_shadow_page_table,
+            virtual_shadow_params,
+            _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
             clipmap_sampler,
             clipmap_bind_group,
             _clipmap_dummy_detail: dummy_detail,
             _clipmap_dummy_macro: dummy_macro,
         }
+    }
+
+    /// Rebuild the shader module and every pipeline built from it.
+    ///
+    /// MORROWIND-C's hot-reload swap, for the acceptance case: `brdf.wgsl` is
+    /// composed into `shading.wgsl`, so editing it lands here.
+    ///
+    /// **Nothing is mutated until the new module exists.** `shaders.source`
+    /// resolves and `create_shader_module` compiles before the first `self.`
+    /// assignment, so a composition failure returns with the pass exactly as it
+    /// was and the old pipeline still bound — which is the rule the plan is
+    /// emphatic about and the specific check Appendix A.7 names for this
+    /// sub-phase.
+    ///
+    /// Note what is *not* guarded here: naga rejecting the source. wgpu reports
+    /// that through an error scope rather than a `Result`, so the renderer
+    /// validates before calling this (see `SomniumRenderer::reload_shaders`),
+    /// and by the time control arrives the source is known to parse.
+    pub fn reload(
+        &mut self,
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+    ) -> Result<(), somnium_shader::ShaderError> {
+        let source = shaders.source("shading.wgsl", somnium_shader::Defines::NONE)?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shading Shader"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipeline = Self::make_pipeline(
+            device,
+            &shader,
+            &self.pipeline_layout,
+            self.hdr_format,
+            self.spec,
+            "vs_main",
+            None,
+        );
+
+        self.pipeline = pipeline;
+        self.shader = shader;
+        // The per-bin and split pipelines are built lazily from `self.shader`
+        // on first use, so dropping them is the whole of their reload. Rebuilding
+        // them eagerly would compile up to eight variants for a scene that may
+        // want none of them this frame.
+        self.bin_pipelines.clear();
+        self.split_near = None;
+        self.split_aerial = None;
+        Ok(())
     }
 
     fn make_pipeline(
@@ -1015,6 +1132,10 @@ impl ShadingPass {
         cloud_shadow_params: &wgpu::Buffer,
         weather: &wgpu::Buffer,
         decals: &[wgpu::Buffer; 4],
+        virtual_shadow_view: &wgpu::TextureView,
+        virtual_shadow_sampler: &wgpu::Sampler,
+        virtual_shadow_page_table: &wgpu::Buffer,
+        virtual_shadow_params: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -1115,6 +1236,22 @@ impl ShadingPass {
                 wgpu::BindGroupEntry {
                     binding: 23,
                     resource: decals[3].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(virtual_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::Sampler(virtual_shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: virtual_shadow_page_table.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 27,
+                    resource: virtual_shadow_params.as_entire_binding(),
                 },
             ],
         })
@@ -1308,13 +1445,65 @@ impl ShadingPass {
             &self.cloud_shadow_params,
             &self.weather,
             &self.decal_buffers,
+            &self.virtual_shadow_view,
+            &self.virtual_shadow_sampler,
+            &self.virtual_shadow_page_table,
+            &self.virtual_shadow_params,
+        );
+    }
+
+    /// Bind the renderer-owned sparse shadow cache into opaque/terrain shading.
+    pub fn set_virtual_shadow_resources(
+        &mut self,
+        device: &wgpu::Device,
+        visibility_view: &wgpu::TextureView,
+        gpu: &crate::shadow::virtual_map::VirtualShadowGpu,
+    ) {
+        self.virtual_shadow_view = gpu.physical_atlas_view.clone();
+        self.virtual_shadow_sampler = gpu.comparison_sampler.clone();
+        self.virtual_shadow_page_table = gpu.page_table.clone();
+        self.virtual_shadow_params = gpu.params.clone();
+        self.bind_group = Self::make_bind_group(
+            device,
+            &self.bind_group_layout,
+            visibility_view,
+            &self.sampler,
+            &self.shadow_atlas_view,
+            &self.shadow_sampler,
+            &self.env_view,
+            &self.env_sampler,
+            &self.gtao_view,
+            &self.depth_view,
+            &self.restir_view,
+            &self.restir_gi_view,
+            &self.volumetric_view,
+            &self.volumetric_sampler,
+            &self.volumetric_range,
+            &self.lighting_aux_view,
+            &self.world_volume_view,
+            &self.lighting_extra,
+            &self.sh_probes,
+            &self.cloud_shadow_view,
+            &self.cloud_shadow_params,
+            &self.weather,
+            &self.decal_buffers,
+            &self.virtual_shadow_view,
+            &self.virtual_shadow_sampler,
+            &self.virtual_shadow_page_table,
+            &self.virtual_shadow_params,
         );
     }
 
     /// Publish this frame's wetness. All zero leaves shading bit-identical to
     /// what it was before CONTROL-N, which is what "off by default" has to
     /// mean for a surface property.
-    pub fn set_weather(&self, queue: &wgpu::Queue, wet_diffuse: f32, wet_specular: f32, puddles: f32) {
+    pub fn set_weather(
+        &self,
+        queue: &wgpu::Queue,
+        wet_diffuse: f32,
+        wet_specular: f32,
+        puddles: f32,
+    ) {
         queue.write_buffer(
             &self.weather,
             0,

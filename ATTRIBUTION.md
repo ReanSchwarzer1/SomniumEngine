@@ -1981,3 +1981,489 @@ file-by-file mapping.
 | Unreal *Volumetric Cloud Component* docs and the UE 5.6 regression thread — <https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine>, <https://forums.unrealengine.com/t/volumetric-cloud-temporal-artifacts-from-volumetric-render-target-reconstruction/2649937> | Beer Shadow Maps vs ray-marched cloud shadows; the `r.VolumetricRenderTarget` trace/reconstruct/upsample trade-offs; and a shipped regression in exactly that reconstruction stage | CONTROL-M's shadow model, its quality modes, and its named fast-camera-occlusion capture case |
 | Lagarde, *Water drop 3a / 3b — Physically based wet surfaces* (2013) — <https://seblagarde.wordpress.com/2013/03/19/water-drop-3a-physically-based-wet-surfaces/> | Non-linear IOR-dependent albedo darkening; porosity as the discriminating authored channel; BRDF-parameter tweaking rather than separate wet texture sets, with an accumulated-water term flattening the normal; and **specular recovering faster than diffuse during drying** | CONTROL-N's two-time-constant wetness model. *Read via fxguide's summary; the original posts refused fetching and must be opened before implementation — plan §16* |
 | WCAG 2.4.3 Focus Order (Level A) and WCAG 2.2 SC 2.4.11 | Sequential focus preserving meaning; focus moving into new UI and **returning to the invoking control** on dismissal; a ≥ 3:1 focus indicator | CONTROL-A1's traversal, focus-into-view and modal focus trap |
+
+---
+
+## 13H. Phase MORROWIND — NetImmerse (the engine half, 2026-08-24)
+
+Opened by **MORROWIND-A**. §13E and §13F belong to Phase 27 and §13G to Phase
+CONTROL; **this phase edits none of them.**
+
+Phase MORROWIND builds the half of an engine Somnium does not have: a runtime
+UI, animation, a cook and a stream, prefabs, navigation, input, audio and a game
+framework. Its reconnaissance is recorded in `dev records/phase_MORROWIND.md`
+§6, and the two audits MORROWIND-A produced are
+`dev records/phase MORROWIND/MORROWIND-A_fyrox_diff.md` and
+`MORROWIND-A_license_audit.md`.
+
+### 13H.0 The provenance tier table, as measured rather than assumed
+
+MORROWIND-A read the license file at the root of every reference this phase
+names, and then the header of the specific files it intends to read. **That
+second step changed two verdicts**, and the rule it produced is the one worth
+carrying forward: *check the header of the file you are actually reading.*
+
+| Reference | Measured license | Tier | Consequence for this phase |
+|---|---|---|---|
+| `UnrealEngine-release` | Epic EULA, proprietary | **Strict** | Architecture only; implement from public literature; never cite a file path in shipped code. |
+| `FlaxEngine-master` | Flax EULA, proprietary — `LICENSE.md` is a pointer to <https://flaxengine.com/licensing> | **Strict — reclassified by MORROWIND-A** | The plan's §6.6 implied Flax was permissive. It is not. Seam 4a's canvas idea and Seam 8a's graph surface are both re-sourced to permissive references (Godot `GraphEdit`, Fyrox `absm/`), with Flax demoted to a secondary architectural read. |
+| `Daemon-master` | Root `LICENSE.txt` is BSD-3-Clause; `src/engine/renderer/gl_shader.cpp` carries its own **GPL-2.0-or-later** header | **Strict** | Readable for MORROWIND-C's permutation manager; nothing transcribed. `terra-main/rshader` (Apache-2.0) is the primary reference instead. |
+| `luanti-master` | LGPL-2.1+ | **Strict** | Track 4's block emerge and streaming. Read only. |
+| `defold-dev` | Defold License 1.0 | **Strict — classified by MORROWIND-Q** | Architecture only. Its engine-product commercialisation restriction is incompatible with treating the source as permissive; no code, identifiers, constants or layouts are copied. |
+| `korge-main` | Mixed, declared per-library at the root | **Strict until the subtree is checked** | MORROWIND-N checks the specific subtree it reads. |
+| `fyrox/Fyrox-master` | MIT | Permissive | The primary reference for Tracks 1 and 2. |
+| `Esoterica-main` | MIT | Permissive | Track 5's animation node list. |
+| `stride-master` | MIT | Permissive | GHOSTFENCE's golden-image model. |
+| `godot-4.7.1-stable`, `WickedEngine-master` | MIT | Permissive | |
+| `o3de-development` | Apache-2.0 or MIT | Permissive | Seam 1's deadline and priority contract. |
+| `terra-main`, `bevy/bevy-main` | Apache-2.0 (bevy: or MIT) | Permissive | Seams 1 and 3. |
+
+### 13H.1 Fyrox — the ancestor, diffed module by module
+
+*Read 2026-08-24; MIT (`fyrox/Fyrox-master/LICENSE.md`).* `somnium_ui` is a fork
+of Fyrox's widget architecture — the generational pool, the message bus and the
+widget/draw split, already cited in §13.13–§13.18. MORROWIND-A diffed all
+~66 modules of `fyrox-ui/src/` against `crates/somnium_ui/src/`.
+
+| Fyrox module | Concept taken forward | Somnium sub-phase |
+|---|---|---|
+| `screen.rs` | A UI root that owns a coordinate space rather than inheriting the window's | MORROWIND-E (Seam 4a) |
+| `vector_image.rs` | Vector paths as first-class widget-tree content | MORROWIND-D (Seam 4b) |
+| `nine_patch.rs` | The nine-slice *widget* Somnium's existing `push_nine_slice` draw call has never had | MORROWIND-D |
+| `bbcode.rs`, `formatted_text/` | Markup parsed into styled runs; run-based text layout | MORROWIND-G |
+| `font/` | Atlas eviction, so a fallback face cannot overflow a fixed atlas | MORROWIND-G |
+| `navigation.rs` | Directional focus navigation as pure geometry over widget bounds | MORROWIND-F |
+| `dock/`, `window.rs`, `messagebox.rs` | Tiles, splitters, floating windows, modal results | MORROWIND-J |
+| `list_view.rs`, `tree.rs` | Row recycling for virtualised lists | MORROWIND-M |
+| `absm/` | A state-machine editor built on the engine's own graph surface — the *second consumer* that proves Seam 8 | MORROWIND-K / V |
+| `animation.rs` | Track-based animation over widget properties | MORROWIND-H |
+| `test.rs` | Driving a UI tree headlessly | GHOSTFENCE |
+
+**Deliberately refused**, recorded so nobody re-opens them: `draw.rs` (Phase 27
+replaced the paint layer, and Fyrox's tessellated command list is the wrong
+mental model for a 100-byte analytic instance), `style/` (Phase 26-Zeta owns
+theming with certified contrast pairs), `file_browser/` (CONTROL-C shipped the
+asset seam), `input.rs` (Seam 5 puts input behind an action map), `uuid.rs`
+(Somnium identifies by `StableId`), `decorator.rs`, `brush.rs`, `bit.rs`,
+`utils.rs`, `loader.rs`.
+
+### 13H.2 Stride — the golden-image regression harness
+
+*Read 2026-08-24; MIT (`stride-master/LICENSE.md`).* Somnium had 1,211 tests and
+**zero image assertions**: every visual claim in every phase record rested on a
+human looking at a screenshot. Stride's
+`sources/engine/Stride.Graphics.Regression/` — `ImageTester.cs`,
+`ImageThreshold.cs`, `TestResultImage.cs`, `GameTestBase.cs`,
+`FrameGameSystem.cs` — is the shape of the fix.
+
+**Concept taken:** a fixed camera at a fixed frame index, a stored reference
+image, a *perceptual* threshold rather than byte equality, and a failure that
+writes the diff so a human sees *what* moved rather than being told a number
+changed.
+
+**Implemented independently** in `tools/ghostfence/golden.py` as
+`Threshold { channel_tolerance, failing_fraction, max_channel }`. The two-sided
+threshold is Somnium's own reasoning rather than Stride's: `max_channel` catches
+a small area moving a lot (a widget drifting a pixel), `failing_fraction`
+catches a large area moving a little (a tone-map or gamma drift), and either one
+alone sleeps through the other's case. The PNG codec in `tools/ghostfence/png.py`
+is written from the PNG specification, standard library only, so the gate cannot
+be skipped for a missing dependency.
+
+### 13H.3 O3DE — the deadline and priority contract for background work
+
+*Read 2026-08-24; Apache-2.0 or MIT (`o3de-development/LICENSE.txt`).*
+`AzCore/IO/Streamer/` is the reference for Seam 1: **priority and deadline are
+declared by the submitter, not inferred by the scheduler**, and a request whose
+deadline has passed while it was queued is dropped rather than run. That single
+property is what separates a job system from a thread pool, and it is what makes
+streaming thrash bounded when a camera turns around.
+
+**Concept taken:** declared priority + declared deadline + first-class
+cancellation. **Not taken:** O3DE's file-request model, its virtual filesystem
+layering, or any of its identifiers.
+
+### 13H.4 Bevy — the Rust shape of a task pool, and pipeline specialisation
+
+*Read 2026-08-24; Apache-2.0 or MIT (`bevy/bevy-main/LICENSE-APACHE`,
+`LICENSE-MIT`).* `crates/bevy_tasks/` for the idiomatic Rust shape of a scoped
+worker pool; `bevy_render`'s pipeline specialisation for Seam 3's "a variant is
+a key, and the key is hashed once" model.
+`bevy-plugins/bevy_mod_outline-master/src/pipeline_key.rs` is that key written
+as a small idiomatic Rust type and is the closest single file to what
+`somnium_shader`'s `ShaderKey` wants to be.
+
+### 13H.5 terra — hot shaders in development, baked variants in release
+
+*Read 2026-08-24; Apache-2.0 (`terra-main/LICENSE`).* `terra-main/rshader/src/`
+is three files — `lib.rs`, `dynamic_shaders.rs`, `static_shaders.rs` — and is
+MORROWIND-C's items 3 and 5 already working: a file-watching, recompiling
+implementation in development and a baked one in release, behind one interface,
+selected by `cfg`. **This is the primary reference for `somnium_shader`**, and
+it displaces Daemon's GPL `gl_shader.cpp` to a secondary read.
+
+### 13H.6 Ogre-Next HLMS — the architecture `hlms.rs` described and never built
+
+Already cited in §5. Recorded here because
+`crates/somnium_renderer/src/material/hlms.rs` was 29 lines under a doc comment
+describing Ogre's HLMS, with an unread `_pipeline_cache` field and a trailing
+comment beginning *"In a full implementation, this would…"*. **MORROWIND-C
+builds what that comment describes and deletes the file.**
+
+### 13H.7 Panda3D — the alternative answer, read before committing to a key
+
+*Read for pattern only; BSD-3-Clause.* `pgraph/renderState.cxx`,
+`renderAttribRegistry.cxx` and `stateMunger.cxx` are the *other* answer to
+Seam 3: interned, composed, cached state objects instead of a permutation key.
+Read and not taken — Somnium's pass list is explicit and small, and a key hashes
+to a pipeline in one step where an interned state graph has to be composed
+first. Recorded so the decision is visible rather than accidental.
+
+`pipeline/pipelineCyclerTrueImpl.cxx` + `cycleData.cxx` is the principled fix
+for single-threaded render recording: one copy of scene state per pipeline stage,
+so App, Cull and Draw read consistent snapshots without locks. It is a change to
+every piece of scene state in the engine and is **explicitly out of Phase
+MORROWIND** (plan §14.8), recorded here so it is not half-started.
+
+### 13H.8 Fyrox — the vector image, the BBCode parser, and what was refused
+
+*Read for pattern only; MIT.* Recorded late: **MORROWIND-D through -G shipped
+without an entry here**, which is the rule in this file's preamble being broken
+rather than a set of clean-room sub-phases. The entries below are written from
+the sub-phase records in `dev records/phase MORROWIND/` and are the honest
+account, not a retrospective tidy.
+
+- `fyrox-ui/src/vector_image.rs` — the in-architecture precedent for **MORROWIND-D**:
+  a widget whose content is a list of primitives (line, triangle, rectangle,
+  circle) rather than a rectangle with a texture. Somnium's second instance
+  stream is a different shape — one `ShapedInstance` with a 2x3 affine, stroke
+  parameters and a bindless texture slot, tessellated on the CPU — because
+  Somnium's paint layer is an instance buffer and Fyrox's is a command list.
+  The *idea* taken is that vector content is a first-class primitive kind
+  rather than a texture someone baked.
+- `fyrox-ui/src/bbcode.rs` and `fyrox-ui/src/formatted_text/` — the tag
+  vocabulary and the run model for **MORROWIND-G**. Somnium's `StyledRun` carries
+  a byte range into the source string rather than owning its text, so a shaper
+  can be substituted under it later without touching the rich-text parser. That
+  divergence is the point: Fyrox's formatted text owns its glyphs.
+- **Refused:** `bevy-plugins/bevy_vello-main` — a compute-based vector
+  rasteriser (Apache-2.0/MIT). Read for **MORROWIND-D** and explicitly **not
+  taken**: tessellated paths on the CPU feed the existing instance pipeline and
+  keep the frozen Hades contract intact, and a compute rasteriser would have
+  been a second paint path beside it. Recorded here so the question is not
+  reopened annually.
+
+### 13H.9 Flax and Unity — the canvas vocabulary, taken as vocabulary only
+
+**Flax is proprietary** (MORROWIND-A's license audit reclassified it; see
+`dev records/phase MORROWIND/MORROWIND-A_license_audit.md`). `Source/Engine/UI/UICanvas.cpp`
+was read for **MORROWIND-E** as *architecture description only* — it implements
+both world-space modes, render-to-texture and direct 3D submission, and reading
+that both exist is what made the trade-off decidable. Somnium chose
+render-to-texture, and the reason is Somnium's own: direct 3D submission would
+re-open the frozen Phase 27 paint contract.
+
+Unity's **RectTransform** anchor vocabulary — min/max anchor, offsets, pivot,
+stretch — is a *vocabulary*, adopted in **MORROWIND-E** as the names for
+`Anchors`/`Offsets`/`Pivot` and layered on Fyrox's measure/arrange pass rather
+than replacing it. No Unity source was read for this; the vocabulary is public
+API documentation.
+
+### 13H.10 Godot and Unity — directional navigation, both models, because each fails alone
+
+*Pattern only; Godot is MIT, Unity's input system is read below.* **MORROWIND-F**
+takes Godot's explicit neighbour links (`focus_neighbor_*`) **and** Unity's
+geometric search together, because the plan's §8 finding holds: explicit links
+are unmaintainable at scale and geometric search picks the wrong widget in dense
+layouts. Somnium's addition is its own — off-axis distance is weighted ten times
+on-axis distance, so a widget slightly off the direction of travel loses to one
+directly along it, which is the specific failure a naive nearest-centre search
+produces.
+
+### 13H.11 cosmic-text, harfrust, swash, parley — decided, not adopted
+
+*Evaluated, not vendored; all Apache-2.0/MIT.* **MORROWIND-G** chose
+`cosmic-text` (shaping via `harfrust`, rasterisation via `swash`) over `parley`
+and then **deliberately did not land it**, because Appendix A.5 requires the
+shaper to be A/B'd against a golden reference image and GHOSTFENCE had none. The
+decision, the comparison table and the reason for the deferral are in
+`dev records/phase MORROWIND/MORROWIND-G.md` §1; the flag is
+`SOMNIUM_UI_SHAPER`, default off, documented at
+`crates/somnium_ui/src/text/mod.rs:29`.
+
+### 13H.12 Unity Input System — the action-map vocabulary for MORROWIND-AE
+
+*Read for pattern only.* `Runtime/Actions/InputAction.cs`, `InputActionMap.cs`
+and `InputBinding.cs` are the reference for `somnium_input`'s shape: actions as
+named intents, bindings as control paths, processors between the device value
+and the action value, and interactions (hold, tap, multi-tap) as a separate axis
+from processors. Somnium's control-path syntax (`path.rs`) is its own parser and
+its rebinding conflict detection (`rebind.rs`) is its own; what is taken is the
+decomposition, which is the part that is hard to get right by inspection.
+
+### 13H.13 Kira, CLDR and Ren'Py — audio exposure and localisation
+
+- **Kira** (`kira`, Apache-2.0/MIT) is a *dependency*, not a reference:
+  **MORROWIND-AG** exposes its tracks, effects and spatial scene rather than
+  reimplementing them, per the plan's "exposure and design, not DSP".
+- **CLDR plural and gender categories** — the Unicode Common Locale Data
+  Repository's category names and rules (`zero`/`one`/`two`/`few`/`many`/`other`)
+  are the specification `somnium_i18n`'s `plural.rs` implements, including
+  Polish's last-two-digits rule and Arabic's six categories. Unicode license.
+- **Ren'Py** (`renpy-master/renpy/translation/`, MIT) is the reference for
+  **MORROWIND-AH**'s extraction and round-trip: the insight taken is that an
+  extractor must find the strings that *never became keys*, not only the keys
+  that exist, because a translation-file check cannot see the former.
+  `somnium_i18n/src/extract.rs` does both.
+
+### 13H.14 LyShine and the spring literature — MORROWIND-H
+
+*Read for pattern only; O3DE is Apache-2.0.* `Gems/LyShine/Code/Source/Animation/`
+(`AnimNode`, `AnimSequence`, `AnimSplineTrack`) is the plan's named reference for
+a **track-based** UI animation system. **MORROWIND-H did not build one**, and
+the entry is here to record that: §8 states the track-based variant is
+MORROWIND-L's fifth consumer, so building half a timeline in the motion
+sub-phase would have left L with two to reconcile. What was taken from reading
+it is the negative result — that a track model and a transition model are
+different things and that Somnium wants the second one first.
+
+The spring is not from a repository. Damped harmonic motion integrated with
+semi-implicit (symplectic) Euler is textbook, and the two Somnium-specific parts
+are its own: the sub-step ceiling that keeps a stiff spring stable across a
+stalled frame, and the arrived-*and*-stopped termination test. The
+critical-damping identity `c = 2 * sqrt(k * m)` is what `Spring::overshoots()`
+checks, and it caught a preset that had shipped its first draft underdamped.
+
+CONTROL-K's `Curve` (`crates/somnium_ecs/src/curve.rs`) is a Somnium type and is
+consumed, not referenced — `Easing::Curve` holds an index into an animator's
+library so the same curve an author drags in the editor is the one a widget
+eases along.
+
+### 13H.15 AccessKit and Godot 4.5 — MORROWIND-I
+
+**`accesskit` 0.24.1 and `accesskit_winit` 0.33.2 are dependencies, not
+references** (Apache-2.0/MIT). They are the cross-platform accessibility layer —
+UI Automation on Windows, NSAccessibility on macOS, AT-SPI on Linux — and
+Somnium consumes them the way `somnium_audio` consumes Kira: exposure and
+design, not reimplementation. `accesskit_winit` 0.33.2 requires `winit ^0.30.5`,
+which Somnium already satisfies at 0.30.13, so no windowing bump was needed.
+
+*Read for pattern only.* **Godot 4.5's AccessKit integration** is the precedent
+`phase_MORROWIND.md` §6.9.2 names, and its value is that it exists: it is the
+proof that a self-rendered UI can reach a screen reader through this layer, and
+it is what moved MORROWIND-I from speculative to precedented. No Godot source
+was copied; what was taken is the knowledge that the approach works and the
+shape of the problem it solves.
+
+*Read for pattern only; MIT.* `bevy/bevy-main/crates/bevy_a11y/` is the plan's
+named reference for the Rust integration shape. Somnium's answer diverges on the
+part that matters: Bevy models accessibility nodes as ECS components authored
+alongside widgets, and Somnium **derives** the tree from the widget tree through
+four defaulted `Control` hooks. The reason is Somnium-specific — its widgets are
+`dyn Control` in a pool rather than entities, and a parallel authored tree would
+be a second thing to keep in step with the first.
+
+The **collapse rule** (a node with no role, name or value contributes its
+children instead of itself) is not from a reference. It is the answer to a
+problem any retained-mode UI has and is stated here because it is the single
+decision that makes the output navigable rather than merely correct.
+
+WCAG's contrast ratio formula and its AA/AAA thresholds are a W3C specification;
+`theme.rs` already implements the ratio and Zeta already certifies against it.
+MORROWIND-I's `high_contrast` adds only the search that walks an existing
+certified colour to the enhanced threshold.
+
+### 13H.16 glTF, Esoterica and the skinning literature — MORROWIND-U
+
+**glTF 2.0** (Khronos, CC-BY 4.0 specification) is the format `somnium_asset`
+reads and the source of three constraints Somnium adopts rather than invents:
+four joint influences per vertex in one attribute set, an absent
+`inverseBindMatrices` accessor meaning identity, and a joint hierarchy given
+implicitly through the node graph. The `gltf` crate (MIT/Apache-2.0) was already
+a workspace dependency.
+
+*Read for pattern only; MIT.* **Esoterica**
+(`Esoterica-main/Code/Engine/Animation/`) is the plan's named reference for
+Track 5, and §6.3 calls its runtime node list *"the spec"*. MORROWIND-U used it
+for one thing: the confirmation that a pose is stored as **decomposed
+transforms** rather than matrices, because blending is defined on translation,
+rotation and scale and interpolating matrices componentwise shears anything that
+was rotated. Somnium's `Transform::blend` slerps rotation for the same reason.
+Its node list is MORROWIND-V's input, not this sub-phase's.
+
+The **skin-to-buffer versus skin-in-shader** decision is not from a reference.
+Both designs are common knowledge; what decided it is specific to Somnium's
+tree — that ray tracing reads positions straight out of the shared geometry pool
+(`geometry.rs:122`) and would trace a character's rest pose, and that eight
+shader modules besides the skinning kernel index `vertices[`. The reasoning and
+the measured cost are in `crates/somnium_renderer/src/skinning.rs` and in
+`dev records/phase MORROWIND/MORROWIND-U.md`.
+
+The **normal transform** shortcut — using the skinning matrix's upper 3x3 rather
+than its inverse transpose — is universal in real-time skinning and is exact for
+rigid joints. It is cited here because Appendix A.3.4 asks for it to be written
+down rather than left looking like an oversight.
+
+IEEE 754 binary16 conversion is written out in `skinning.rs` rather than taken
+from the `half` crate, because it has to agree bit for bit with WGSL's
+`pack2x16float` — which is a thing to test against rather than to trust a crate
+about.
+
+### 13H.17 Godot, Fyrox and O3DE — one graph surface, MORROWIND-K
+
+*Read for pattern only; MIT.* **Godot**
+(`scene/gui/graph_edit.{h,cpp}` and `scene/gui/graph_node.{h,cpp}`) was the
+primary permissive reference for keeping the view transform, selection and
+connection gestures in the control while keeping authored nodes and wires in a
+separate model. Somnium does not adopt Godot's object model, signal names or
+serialization; `Graph`, `GraphView` and `GraphEditor` are native retained-mode
+Rust types over Somnium's existing pool, messages and MORROWIND-D path stream.
+
+*Read for pattern only; MIT.* **Fyrox** (`editor/src/plugins/absm/`) was read
+because its editor sits on the same retained-mode ancestry as `somnium_ui`. It
+confirmed that an animation state-machine tool should be a catalogue and
+consumer of a shared authoring substrate, not a second graph widget. No source
+was copied; Somnium's catalogue, monotonic `NodeId`, transactional reconnect,
+and versioned JSON asset are independent implementations.
+
+*Read for pattern only; Apache-2.0.* **O3DE** (`Gems/GraphModel`,
+`Gems/GraphCanvas`, and the Material Canvas material-graph compiler) supplied
+the framework-versus-tool boundary and the compile-to-runtime-object pattern.
+Somnium's first consumer compiles the root-reachable portion of a graph into
+CONTROL-D's existing `MaterialAsset` plus generated WGSL registered with the
+single MORROWIND-C `ShaderSystem`; it does not introduce an editor-only
+material DTO or a second shader cache.
+
+**Flax was not used.** MORROWIND-A's license audit found the locally mirrored
+Flax source proprietary even though the phase plan had treated its graph
+surface as a permissive reference. Its architecture remains historical plan
+context only; the implementation was re-sourced to the three permissive
+references above before code was written.
+
+### 13H.18 Esoterica and Fyrox — animation graphs, MORROWIND-V
+
+*Read for pattern only; MIT.* **Esoterica**
+(`Code/Engine/Animation/`) was the phase plan's named runtime reference. Its
+compiled-node inventory and separation between graph definitions, graph
+instances and pose tasks informed Somnium's scope: clips, one- and two-axis
+blends, layers, state machines, synchronisation and cache nodes are runtime
+data, not editor widget types. Somnium's implementation is independent Rust:
+typed fallible constructors, authored triangulations with hull projection,
+stable sync leaders, recursively validated sync branches and cache identities
+containing generation, evaluation lane, graph id, graph version and node id.
+No Esoterica source was copied or translated.
+
+*Read for pattern only; MIT.* **Fyrox** (`editor/src/plugins/absm/`) was the
+permissive retained-mode reference for presenting animation states on a graph
+surface. MORROWIND-V reuses MORROWIND-K's `GraphSurface` for state layout and
+stores cyclic transition overlays separately, preserving the pose graph's DAG
+invariant. The authored document compiles to `somnium_anim::StateMachine`; it
+does not introduce a second widget, object model or serializer.
+
+### 13H.19 Defold — cook and resource architecture, MORROWIND-Q
+
+*Architecture-only read; Defold License 1.0, strict.* The standalone per-kind
+cooker boundary, manifest-selected resources and independently addressable
+content used by live update informed the questions MORROWIND-Q had to answer.
+The license forbids treating this source as a permissive implementation
+reference for a commercial game-engine product. Somnium therefore copies no
+Defold code, identifiers, constants, schemas, binary layouts or directory
+structure.
+
+Somnium's implementation is independent Rust over its existing path-derived
+`AssetId` and `somnium_jobs`: one versioned SHA-256 envelope, distinct native
+payload families, sorted dependency recipes, a deterministic JSON manifest and
+content-addressed cache entries. An artifact is a standalone immutable blob;
+replacing the manifest can select newly downloaded blobs later, so the format
+does not preclude live update, but MORROWIND-Q intentionally implements no
+network delivery or post-ship patch mechanism.
+
+### 13H.20 Residency and cooked hot reload, MORROWIND-R
+
+MORROWIND-R is an independent Rust policy layer over Q's cooked resolver and
+the existing `somnium_jobs` main-thread apply boundary. Least-recently-used
+eviction, explicit byte/upload budgets, per-LOD keys and stable atomic handles
+are conventional cache techniques; no third-party implementation was copied.
+The polling watcher follows Somnium's own MORROWIND-B debounced asset scan and
+MORROWIND-C transactional shader replacement precedent: a failed reload keeps
+the old complete value published.
+
+The phase plan cites Flax content streaming for secondary architectural
+context. Flax is proprietary under the audit in §13H.0 and supplied no code,
+identifiers, constants, layouts or file structure to this implementation.
+
+### 13H.21 Cell streaming and entity ownership, MORROWIND-S
+
+*Architecture-only reads, strict.* Unreal World Partition and Luanti's active
+versus static object lifecycle were used only to frame the ownership question.
+Unreal is proprietary and Luanti is LGPL-2.1+; Somnium copies neither source,
+identifiers, constants, layouts nor comments. UE data layers and content
+bundles are explicitly not implemented.
+
+Somnium's implementation is native Rust over its existing `World`,
+`PersistentId`, schema scene serializer and `somnium_jobs`. A cell index owns
+sorted derived `AssetId`s and separate schema-driven actor documents. Workers
+perform cancellable/deadlined I/O; main-thread completion installs entities or
+transactionally despawns them only after persistence succeeds. Camera, player
+and explicit-volume sources reduce to a deterministic spatial-hash want-state;
+editor pins are a separate undoable authored override.
+
+### 13H.22 HLOD, impostors and floating origin, MORROWIND-T
+
+*Read for pattern only; permissive.* Terra's Rust billboard work and the
+`bevy_terrain` big-space model informed the offline-octahedral-atlas and CPU
+integer-grid questions. Somnium's bakes, binary-neutral proxy data and
+`GlobalPosition` implementation are independent Rust and copy no code,
+constants or layouts.
+
+The alternative soft-double shader technique was evaluated and deliberately
+not selected: Somnium's shipped maps need kilometre-scale precision, not
+planet-scale coordinates. Integer cells plus small local floats keep authored
+positions reversible on the CPU and let every existing shader remain
+camera-relative. Shader double emulation remains a possible planet-scale tier.
+
+### 13H.23 One timeline and its retained curve child, MORROWIND-L
+
+*Framework vocabulary; independently implemented.* Flax Timeline was read for
+the track/group/media vocabulary and O3DE Maestro for the separation between a
+consumer catalogue and the shared sequencer. Flax is proprietary under
+§13H.0 and supplied no code, identifiers, constants, layouts or comments.
+O3DE is Apache-2.0; no O3DE code was copied.
+
+The retained control follows the same permissive Fyrox message/layout patterns
+already attributed for `somnium_ui`, while the numeric channel is the existing
+CONTROL-K `CurveEditor` and `somnium_ecs::curve::Curve`. The document,
+archetype catalogue, snapping/history rules, deterministic serialization,
+Animation workspace composition and Vvardenfell consumers are original Rust.
+
+### 13H.24 Sparse virtual shadow maps, MORROWIND-Z
+
+*Published implementation reference.* J. Stephano's public **Sparse Virtual
+Shadow Maps** write-up supplied the sparse page-table, frame-marker and page
+management model. Somnium's implementation is independent Rust/wgpu: a bounded
+deterministic allocator, directional clipmap projections, revision-based
+invalidation, a persistent physical depth atlas, page-table upload, per-page
+raster and shared opaque/terrain/water sampling with explicit CSM fallback.
+No source code was copied or translated.
+
+*Architecture-only read; proprietary.* Unreal Engine's
+`VirtualShadowMaps/` source was used only to frame cache invalidation and
+directional clipmap responsibilities. It supplied no code, identifiers,
+constants, layouts or comments. A fresh search on 2026-08-25 again found no
+mature production Rust/wgpu VSM implementation suitable for adaptation.
+
+### 13H.25 Portable diffuse probe GI, MORROWIND-AB
+
+*Architecture-only read; proprietary.* The phase plan named Flax's dynamic
+diffuse GI and global surface atlas only to frame the choice between a probe
+volume and a baked lightmapper. MORROWIND-A's licence audit classified that
+source as proprietary. It supplied no code, identifiers, constants, layouts,
+shader equations or comments to Somnium.
+
+Somnium's implementation is independent Rust/WGSL over engine-owned pieces:
+the existing camera-relative software SDF, a fixed 4×4×4 L2 spherical-harmonic
+buffer and the generated component schema. Fibonacci sphere sampling, signed
+distance-field sphere tracing and temporal exponential blending are standard
+published rendering techniques. The pass deliberately has no ray-query
+extension or acceleration-structure binding, and ReSTIR GI remains a separate
+hardware tier.

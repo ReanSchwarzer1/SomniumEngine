@@ -93,6 +93,7 @@ pub struct RestirGiPass {
 impl RestirGiPass {
     pub fn new(
         device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
         global_layout: &wgpu::BindGroupLayout,
         supported: bool,
         width: u32,
@@ -140,17 +141,9 @@ impl RestirGiPass {
         // order-independent, which is what lets the pool it depends on be
         // concatenated after it. `tests/shaders_validate.rs` pins this exact
         // concatenation.
-        let source = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-            include_str!("../shaders/restir_gi.wgsl"),
-            include_str!("../shaders/rt_hit.wgsl"),
-            include_str!("../shaders/global_pool.wgsl"),
-            include_str!("../shaders/brdf.wgsl"),
-            include_str!("../shaders/sampling.wgsl"),
-            include_str!("../shaders/atmosphere.wgsl"),
-            include_str!("../shaders/hextile.wgsl"),
-            include_str!("../shaders/terrain_material.wgsl"),
-        );
+        // MORROWIND-C: composition is declared in `restir_gi.wgsl` and
+        // resolved by `somnium_shader`; this site no longer knows the order.
+        let source = shaders.source_or_panic("restir_gi.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("restir_gi.wgsl"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

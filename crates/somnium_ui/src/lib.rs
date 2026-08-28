@@ -1,3 +1,4 @@
+pub mod a11y;
 pub mod color;
 pub mod commands;
 pub mod debug;
@@ -6,6 +7,7 @@ pub mod draw;
 pub mod editor;
 pub mod editor_event;
 pub mod font;
+pub mod graph;
 pub mod icon_svg;
 pub mod icons;
 pub mod layout_persist;
@@ -16,12 +18,16 @@ pub mod motion;
 pub mod node;
 pub mod outliner_filter;
 pub mod pass;
+pub mod path;
 pub mod pool;
 pub mod primitive;
 pub mod runtime;
+pub mod shaped;
 pub mod style;
+pub mod text;
 pub mod theme;
 pub mod thumbnail;
+pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
@@ -43,7 +49,14 @@ pub use editor_event::{
     ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
 };
 pub use node::CursorKind;
-pub use runtime::UiCanvas;
+pub use runtime::{GameUi, GameUiFrame, UiCanvas};
+// MORROWIND-H. The runtime motion vocabulary, at the top level beside the
+// canvas that drives it: a game reaching for a spring should not have to know
+// which module Phase 27 happened to put the animator in.
+pub use motion::{CurveId, Easing, Motion, Spring, Transition, TransitionStep};
+// MORROWIND-I. The accessibility vocabulary at the top level, because a game
+// setting a role on its own widget should not have to find the module.
+pub use a11y::{A11ySettings, A11yTree, Announcement, Politeness, Role, Toggled};
 
 pub use typography::{FontRole, TextRole};
 pub use workspace::{BottomPanel, Workspace, WorkspaceLayout};
@@ -58,11 +71,11 @@ use crate::{
         button::{ButtonBuilder, ButtonMessage},
         check_box::CheckBoxMessage,
         color_picker::{ColorPickerMessage, ColorSwatchMessage},
-        curve_editor::CurveEditorMessage,
-        gradient_editor::GradientEditorMessage,
         combo_box::ComboBoxMessage,
         command_palette::{CommandPaletteMessage, PaletteItem},
         context_menu::{ContextMenuMessage, MenuItem},
+        curve_editor::CurveEditorMessage,
+        gradient_editor::GradientEditorMessage,
         grid::GridMessage,
         image::ImageBuilder,
         menu::MenuMessage,
@@ -431,6 +444,14 @@ struct EditorLayout {
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
+    /// Hidden composite shown by the Animation workspace.
+    animation_workspace: NodeHandle,
+    /// Production animation graph/state-machine surface inside that composite.
+    animation_graph_editor: NodeHandle,
+    /// Production track timeline and its retained CONTROL-K child.
+    animation_timeline: crate::timeline::TimelineEditorHandles,
+    /// Last authored timeline emitted by the retained control.
+    animation_timeline_document: crate::timeline::TimelineDocument,
     /// Selection readout floating over the render, bottom-left.
     vp_overlay: NodeHandle,
     vp_overlay_text: NodeHandle,
@@ -643,6 +664,10 @@ pub struct UiManager {
     // Viewport area handle — mouse events here pass through to the game
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
+    animation_workspace: NodeHandle,
+    animation_graph_editor: NodeHandle,
+    animation_timeline: crate::timeline::TimelineEditorHandles,
+    animation_timeline_document: crate::timeline::TimelineDocument,
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
     profiler_toggle_lbl: NodeHandle,
@@ -1278,6 +1303,10 @@ impl UiManager {
             selected_entity: None,
             next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
+            animation_workspace: layout.animation_workspace,
+            animation_graph_editor: layout.animation_graph_editor,
+            animation_timeline: layout.animation_timeline,
+            animation_timeline_document: layout.animation_timeline_document,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
             profiler_toggle_lbl: layout.profiler_toggle_lbl,
@@ -1570,10 +1599,50 @@ impl UiManager {
     /// splitter drag, so the choice survives a restart.
     pub fn set_workspace(&mut self, workspace: crate::workspace::Workspace) {
         self.active_workspace = workspace;
+        self.native_ui.set_visibility(
+            self.animation_workspace,
+            workspace == crate::workspace::Workspace::Animation,
+        );
         let (w, h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let preset = workspace.preset(w, h);
         self.apply_workspace_layout(preset, w);
         self.push_toast(&format!("{} workspace", workspace.label()));
+    }
+
+    /// Open an authored animation state machine on the shipped graph surface.
+    ///
+    /// The graph control becomes the document owner; the shell does not mirror
+    /// the graph or transition overlay into a second editor-side model.
+    pub fn edit_animation_state_machine(
+        &mut self,
+        document: crate::graph::AnimationStateMachineDocument,
+    ) {
+        self.native_ui.send(
+            crate::graph::GraphEditorMessage::set_state_machine_document(
+                self.animation_graph_editor,
+                document,
+            ),
+        );
+        self.set_workspace(crate::workspace::Workspace::Animation);
+    }
+
+    /// Open a track document on MORROWIND-L's shared timeline in the shipped
+    /// Animation workspace.
+    pub fn edit_animation_timeline(&mut self, document: crate::timeline::TimelineDocument) {
+        self.animation_timeline_document = document.clone();
+        self.native_ui
+            .send(crate::timeline::TimelineEditorMessage::set_document(
+                self.animation_timeline.editor,
+                document,
+            ));
+        self.set_workspace(crate::workspace::Workspace::Animation);
+    }
+
+    /// Latest authored timeline, including live edits from the embedded curve
+    /// editor. The animation asset owner reads this when saving.
+    #[must_use]
+    pub fn animation_timeline_document(&self) -> &crate::timeline::TimelineDocument {
+        &self.animation_timeline_document
     }
 
     /// Return the current workspace to its shipped arrangement.
@@ -2192,16 +2261,15 @@ impl UiManager {
             return;
         };
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
-        let acceptance =
-            match crate::drag_drop::semantic_request(
-                &self.asset_db,
-                &payload,
-                &candidate,
-                self.native_ui.modifiers(),
-            ) {
-                Ok(_) => candidate,
-                Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
-            };
+        let acceptance = match crate::drag_drop::semantic_request(
+            &self.asset_db,
+            &payload,
+            &candidate,
+            self.native_ui.modifiers(),
+        ) {
+            Ok(_) => candidate,
+            Err(reason) => crate::drag_drop::DropAcceptance::rejected(target, reason),
+        };
         self.native_ui.set_drop_highlight(Some(highlight));
         self.native_ui.set_drop_acceptance(Some(acceptance));
     }
@@ -3935,9 +4003,7 @@ impl UiManager {
                 .push_back(EditorEvent::ToggleOrbitSelection),
             // CONTROL-L. The hour comes from the registry's own table, so a
             // preset row and the hour it means cannot disagree.
-            A::SetSkyPreset(id) => self
-                .editor_events
-                .push_back(EditorEvent::SetSkyPreset(id)),
+            A::SetSkyPreset(id) => self.editor_events.push_back(EditorEvent::SetSkyPreset(id)),
             A::SetWeatherPreset(id) => self
                 .editor_events
                 .push_back(EditorEvent::SetWeatherPreset(id)),
@@ -4690,6 +4756,25 @@ impl UiManager {
             .send(ButtonMessage::set_selected(self.pause_button, state == 2));
         self.native_ui
             .send(ButtonMessage::set_selected(self.stop_button, state == 0));
+    }
+
+    /// The editor shell's accessibility tree. MORROWIND-I.
+    ///
+    /// Built on demand rather than maintained: the shell rebuilds widgets
+    /// freely, and a cached tree would be one more thing that can be stale in a
+    /// system whose whole failure mode is staleness nobody sighted can see.
+    pub fn a11y_tree(&self) -> crate::a11y::A11yTree {
+        self.native_ui.a11y_tree()
+    }
+
+    /// Apply accessibility preferences to the shell. MORROWIND-I.
+    pub fn set_a11y_settings(&mut self, settings: crate::a11y::A11ySettings) {
+        self.native_ui.set_a11y_settings(settings);
+    }
+
+    /// The accessibility preferences in force.
+    pub fn a11y_settings(&self) -> crate::a11y::A11ySettings {
+        self.native_ui.a11y_settings()
     }
 
     pub fn is_immersive(&self) -> bool {
@@ -5617,6 +5702,24 @@ impl UiManager {
             (h.foliage_smax, FoliageBrushField::ScaleMax),
         ];
         for msg in msgs {
+            if msg.destination == self.animation_timeline.editor
+                && let Some(crate::timeline::TimelineEditorMessage::Changed(document)) =
+                    msg.data::<crate::timeline::TimelineEditorMessage>()
+            {
+                self.animation_timeline_document = document.clone();
+                self.set_scene_dirty(true);
+                continue;
+            }
+            if matches!(
+                msg.data::<crate::graph::GraphEditorMessage>(),
+                Some(
+                    crate::graph::GraphEditorMessage::Changed(_)
+                        | crate::graph::GraphEditorMessage::StateMachineChanged(_)
+                )
+            ) {
+                self.set_scene_dirty(true);
+                continue;
+            }
             if self.handle_preferences_message(&msg) {
                 continue;
             }
@@ -6648,7 +6751,8 @@ impl UiManager {
             // drag coalesces into a single undo entry, and the commit consumes
             // it. Nothing here knows what a keyframe is; the value that
             // travels is the whole `ReflectValue::Curve`.
-            if let Some(CurveEditorMessage::Value { curve, live }) = msg.data::<CurveEditorMessage>()
+            if let Some(CurveEditorMessage::Value { curve, live }) =
+                msg.data::<CurveEditorMessage>()
             {
                 if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned() {
                     let gesture = self.gesture_for(msg.destination, *live);
@@ -6664,7 +6768,8 @@ impl UiManager {
             if let Some(gmsg) = msg.data::<GradientEditorMessage>() {
                 match gmsg {
                     GradientEditorMessage::Value { gradient, live } => {
-                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        if let Some(binding) =
+                            self.generated_bindings.get(&msg.destination).cloned()
                         {
                             let gesture = self.gesture_for(msg.destination, *live);
                             self.queue_generated_binding(
@@ -6676,7 +6781,8 @@ impl UiManager {
                         }
                     }
                     GradientEditorMessage::StopActivated { index, color } => {
-                        if let Some(binding) = self.generated_bindings.get(&msg.destination).cloned()
+                        if let Some(binding) =
+                            self.generated_bindings.get(&msg.destination).cloned()
                         {
                             self.color_target = Some(ColorTarget::GradientStop {
                                 component: binding.component,
@@ -6817,6 +6923,64 @@ impl CollapseRules {
 #[cfg(test)]
 mod elysium_tests {
     use super::*;
+
+    #[test]
+    fn shipped_animation_workspace_contains_both_retained_editors() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        {
+            let workspace = ui
+                .nodes
+                .try_borrow(layout.animation_workspace.transmute())
+                .unwrap();
+            assert_eq!(workspace.widget.parent, layout.viewport_handle);
+            assert!(
+                !workspace.widget.visibility,
+                "Layout starts on the 3D viewport"
+            );
+        }
+
+        {
+            let graph = ui
+                .nodes
+                .try_borrow(layout.animation_graph_editor.transmute())
+                .unwrap();
+            assert_eq!(graph.widget.parent, layout.animation_workspace);
+            assert!(
+                graph.widget.visibility,
+                "the composite parent exclusively owns workspace visibility"
+            );
+        }
+
+        assert_eq!(
+            ui.parent_of(layout.animation_timeline.editor),
+            Some(layout.animation_workspace)
+        );
+        assert_eq!(
+            ui.parent_of(layout.animation_timeline.curve_editor),
+            Some(layout.animation_timeline.editor)
+        );
+        assert!(
+            ui.nodes
+                .try_borrow(layout.animation_timeline.editor.transmute())
+                .unwrap()
+                .widget
+                .visibility
+        );
+
+        ui.set_visibility(layout.animation_workspace, true);
+        ui.perform_layout();
+        assert!(ui.is_globally_visible(layout.animation_graph_editor));
+        assert!(ui.is_globally_visible(layout.animation_timeline.editor));
+        assert!(ui.is_globally_visible(layout.animation_timeline.curve_editor));
+        assert!(
+            crate::commands::registry()
+                .get("editor.workspace.animation")
+                .is_some(),
+            "the Window menu/palette can reveal the production graph control"
+        );
+    }
 
     #[test]
     fn details_shows_exactly_one_state_at_a_time() {
@@ -7345,7 +7509,17 @@ mod zeta_layout_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         let layout =
             build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
-        assert_eq!(layout.create_popup_items.len(), 15);
+        let expected_create_ids: Vec<_> = crate::commands::registry()
+            .menu(crate::commands::Menu::Create)
+            .into_iter()
+            .map(|command| command.id)
+            .collect();
+        let shell_create_ids: Vec<_> = layout
+            .create_popup_items
+            .iter()
+            .map(|(_, command_id)| *command_id)
+            .collect();
+        assert_eq!(shell_create_ids, expected_create_ids);
         for handle in [
             layout.save_button,
             layout.select_button,
@@ -7414,6 +7588,7 @@ mod must_not_break {
             CreateKind::Particle,
             CreateKind::Terrain,
             CreateKind::VoxelTerrain,
+            CreateKind::UiCanvas,
         ] {
             let command = crate::commands::registry()
                 .menu(crate::commands::Menu::Create)

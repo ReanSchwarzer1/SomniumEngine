@@ -1,0 +1,19 @@
+[package]
+name        = "somnium_i18n"
+description = "String tables, plural rules and runtime locale switching."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# No engine dependencies at all, deliberately. MORROWIND-G put the *hook* in
+# `somnium_ui` as a `Resolver` trait precisely so the implementation could live
+# somewhere that does not know what a widget is -- a translation table is data,
+# and a crate that resolves one should be usable by a server, a tool or a test.
+# `somnium_core` implements the trait, which is where the wiring belongs.
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

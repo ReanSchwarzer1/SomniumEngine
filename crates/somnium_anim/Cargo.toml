@@ -1,0 +1,18 @@
+[package]
+name        = "somnium_anim"
+description = "Skeletons, poses and skinning palettes. The animation data model."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# `glam` and nothing else, deliberately — Seam 7's whole point is that **the
+# renderer never sees a `Pose`**. A pose is maths over a skeleton; what reaches
+# the GPU is a flat array of matrices, and the crate that produces one should
+# be usable from a test, a tool, or a server that has no GPU at all.
+#
+# MORROWIND-V's blend trees and MORROWIND-X's agents will both land on top of
+# this, and both of them are also things that must be testable without a window.
+[dependencies]
+glam = { workspace = true }

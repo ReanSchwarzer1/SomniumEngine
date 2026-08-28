@@ -598,6 +598,275 @@ pub struct TerrainLayerTextures {
     /// within the layer's own variation, which is far below what a single
     /// diffuse bounce can carry.
     pub mean_albedo: [[f32; 4]; TERRAIN_LAYER_COUNT as usize],
+    /// MORROWIND-AD: bounded BC7 source-page residency. When present the
+    /// legacy arrays above are 4x4 placeholders and clipmap generation reads
+    /// this physical atlas through its page table instead.
+    pub virtual_texture: Option<TerrainVirtualTextureGpu>,
+}
+
+/// Fixed source-page geometry. 128 is block-aligned for BC7 and keeps one
+/// paired albedo/surface upload at 32 KiB.
+pub const VIRTUAL_PAGE_SIZE: u32 = 128;
+const VIRTUAL_ATLAS_PAGES: u32 = 2048;
+const VIRTUAL_ATLAS_COLUMNS: u32 = 64;
+const VIRTUAL_ATLAS_ROWS: u32 = VIRTUAL_ATLAS_PAGES / VIRTUAL_ATLAS_COLUMNS;
+const VIRTUAL_TABLE_WIDTH: u32 = 512;
+
+/// GPU resources and disk-backed BC7 source metadata for source-page streaming.
+pub struct TerrainVirtualTextureGpu {
+    pub albedo_atlas: wgpu::Texture,
+    pub albedo_view: wgpu::TextureView,
+    pub surface_atlas: wgpu::Texture,
+    pub surface_view: wgpu::TextureView,
+    pub page_table: wgpu::Texture,
+    pub page_table_view: wgpu::TextureView,
+    hero_resolution: u32,
+    extra_resolution: u32,
+}
+
+impl TerrainVirtualTextureGpu {
+    fn new(device: &wgpu::Device, hero_resolution: u32, extra_resolution: u32) -> Self {
+        let make_atlas = |label, format| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: VIRTUAL_ATLAS_COLUMNS * VIRTUAL_PAGE_SIZE,
+                    height: VIRTUAL_ATLAS_ROWS * VIRTUAL_PAGE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let albedo_atlas = make_atlas(
+            "Terrain VT physical albedo atlas",
+            wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        );
+        let surface_atlas = make_atlas(
+            "Terrain VT physical surface atlas",
+            wgpu::TextureFormat::Bc7RgbaUnorm,
+        );
+        let page_table = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Terrain VT page table"),
+            size: wgpu::Extent3d {
+                width: VIRTUAL_TABLE_WIDTH,
+                height: TERRAIN_LAYER_COUNT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        Self {
+            albedo_view: albedo_atlas.create_view(&Default::default()),
+            surface_view: surface_atlas.create_view(&Default::default()),
+            page_table_view: page_table.create_view(&Default::default()),
+            albedo_atlas,
+            surface_atlas,
+            page_table,
+            hero_resolution,
+            extra_resolution,
+        }
+    }
+
+    #[must_use]
+    pub const fn capacity_pages(&self) -> u32 {
+        VIRTUAL_ATLAS_PAGES
+    }
+
+    #[must_use]
+    pub const fn shader_atlas_size(&self) -> i32 {
+        (VIRTUAL_ATLAS_COLUMNS * VIRTUAL_PAGE_SIZE) as i32
+    }
+
+    /// Install cache-policy uploads into the physical atlases, publishing the
+    /// page-table entry only after both channel writes have been queued.
+    pub fn apply_uploads(
+        &self,
+        queue: &wgpu::Queue,
+        uploads: &[super::virtual_texture::PageUpload],
+    ) -> Result<(), String> {
+        // Read the complete batch before mutating the GPU mapping. If any
+        // source read fails the caller can roll the cache reservation back and
+        // the previously published page table remains valid.
+        let pages = uploads
+            .iter()
+            .map(|upload| {
+                Ok((
+                    self.read_bc7_page(upload.id, "albedo")?,
+                    self.read_bc7_page(upload.id, "surface")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (upload, (albedo, surface)) in uploads.iter().zip(pages) {
+            if let Some(old) = upload.evicted {
+                self.write_table(queue, old, [0, 0, 0, 0]);
+            }
+            let sx = upload.physical_slot % VIRTUAL_ATLAS_COLUMNS;
+            let sy = upload.physical_slot / VIRTUAL_ATLAS_COLUMNS;
+            self.write_atlas(queue, &self.albedo_atlas, sx, sy, &albedo);
+            self.write_atlas(queue, &self.surface_atlas, sx, sy, &surface);
+            self.write_table(queue, upload.id, [sx as u8, sy as u8, 255, 255]);
+        }
+        Ok(())
+    }
+
+    fn write_atlas(
+        &self,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        slot_x: u32,
+        slot_y: u32,
+        bytes: &[u8],
+    ) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: slot_x * VIRTUAL_PAGE_SIZE,
+                    y: slot_y * VIRTUAL_PAGE_SIZE,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(VIRTUAL_PAGE_SIZE / 4 * 16),
+                rows_per_image: Some(VIRTUAL_PAGE_SIZE / 4),
+            },
+            wgpu::Extent3d {
+                width: VIRTUAL_PAGE_SIZE,
+                height: VIRTUAL_PAGE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn write_table(
+        &self,
+        queue: &wgpu::Queue,
+        id: somnium_asset::virtual_texture::VirtualPageId,
+        rgba: [u8; 4],
+    ) {
+        let entry = virtual_table_entry(id, self.source_resolution(id.layer));
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.page_table,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: entry,
+                    y: u32::from(id.layer),
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: None,
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn source_resolution(&self, layer: u8) -> u32 {
+        if u32::from(layer) < TERRAIN_HERO_LAYERS {
+            self.hero_resolution
+        } else {
+            self.extra_resolution
+        }
+    }
+
+    fn read_bc7_page(
+        &self,
+        id: somnium_asset::virtual_texture::VirtualPageId,
+        suffix: &str,
+    ) -> Result<Vec<u8>, String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let material = LAYER_MATERIALS
+            .get(id.layer as usize)
+            .ok_or_else(|| format!("invalid terrain VT layer {}", id.layer))?;
+        let path = bc7_pack_path(material, suffix);
+        let mut file = std::fs::File::open(&path).map_err(|e| format!("{path}: {e}"))?;
+        let len = file.metadata().map_err(|e| format!("{path}: {e}"))?.len() as usize;
+        let mut encoded = self.source_resolution(id.layer);
+        while encoded <= 4096 && bc7_chain_bytes(encoded) != len {
+            encoded *= 2;
+        }
+        if encoded > 4096 {
+            return Err(format!("{path}: unrecognised BC7 mip chain length {len}"));
+        }
+        let runtime = self.source_resolution(id.layer);
+        let skip = encoded.ilog2() - runtime.ilog2();
+        let file_mip = skip + u32::from(id.mip);
+        let mut level_offset = 0usize;
+        let mut width = encoded;
+        for _ in 0..file_mip {
+            level_offset += bc7_mip_bytes(width, width);
+            width = (width / 2).max(1);
+        }
+        let runtime_width = (runtime >> u32::from(id.mip)).max(1);
+        let pages = runtime_width.div_ceil(VIRTUAL_PAGE_SIZE);
+        if u32::from(id.x) >= pages || u32::from(id.y) >= pages {
+            return Err(format!("{path}: invalid VT page {:?}", id));
+        }
+        let source_blocks_wide = runtime_width.max(4) / 4;
+        let page_blocks = VIRTUAL_PAGE_SIZE / 4;
+        let copy_blocks_x = (runtime_width - u32::from(id.x) * VIRTUAL_PAGE_SIZE)
+            .min(VIRTUAL_PAGE_SIZE)
+            .max(4)
+            / 4;
+        let copy_blocks_y = (runtime_width - u32::from(id.y) * VIRTUAL_PAGE_SIZE)
+            .min(VIRTUAL_PAGE_SIZE)
+            .max(4)
+            / 4;
+        let mut page = vec![0u8; (page_blocks * page_blocks * 16) as usize];
+        for row in 0..copy_blocks_y {
+            let source_block = (u32::from(id.y) * page_blocks + row) * source_blocks_wide
+                + u32::from(id.x) * page_blocks;
+            file.seek(SeekFrom::Start(
+                (level_offset + (source_block * 16) as usize) as u64,
+            ))
+            .map_err(|e| format!("{path}: {e}"))?;
+            let start = (row * page_blocks * 16) as usize;
+            let end = start + (copy_blocks_x * 16) as usize;
+            file.read_exact(&mut page[start..end])
+                .map_err(|e| format!("{path}: {e}"))?;
+        }
+        Ok(page)
+    }
+}
+
+fn virtual_table_entry(
+    id: somnium_asset::virtual_texture::VirtualPageId,
+    source_resolution: u32,
+) -> u32 {
+    let mut offset = 0;
+    for mip in 0..u32::from(id.mip) {
+        let pages = (source_resolution >> mip)
+            .max(1)
+            .div_ceil(VIRTUAL_PAGE_SIZE);
+        offset += pages * pages;
+    }
+    let pages = (source_resolution >> u32::from(id.mip))
+        .max(1)
+        .div_ceil(VIRTUAL_PAGE_SIZE);
+    offset + u32::from(id.y) * pages + u32::from(id.x)
 }
 
 /// Mean linear-space colour of an sRGB-encoded RGBA8 image.
@@ -770,6 +1039,22 @@ fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>
         }
     }
     parse_bc7_chain(&bytes, size, &path)
+}
+
+/// Validate a random-access BC7 source without reading its complete payload.
+fn validate_bc7_pack(material: &str, suffix: &str, runtime_size: u32) -> Result<(), String> {
+    let path = bc7_pack_path(material, suffix);
+    let len = std::fs::metadata(&path)
+        .map_err(|e| format!("{path}: {e}"))?
+        .len() as usize;
+    let mut encoded = runtime_size;
+    while encoded <= 4096 {
+        if len == bc7_chain_bytes(encoded) {
+            return Ok(());
+        }
+        encoded *= 2;
+    }
+    Err(format!("{path}: unrecognised BC7 mip chain length {len}"))
 }
 
 fn create_bc7_array_texture(
@@ -999,6 +1284,7 @@ impl TerrainLayerTextures {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         bc_supported: bool,
+        virtual_texturing: bool,
     ) -> Self {
         // A 4K RGBA8 array of four layers with mips is ~350 MB per array, and
         // there are two. 2K is the default because terrain is viewed from
@@ -1012,9 +1298,15 @@ impl TerrainLayerTextures {
         if force_rgba8() {
             tracing::info!("terrain: SOMNIUM_TERRAIN_FORCE_RGBA8=1; skipping BC7");
         }
-        let (mut hero, mut extra) = choose_runtime_resolutions(want_bc7);
+        let (mut hero, mut extra) = if want_bc7 && virtual_texturing {
+            // Physical residency is budgeted independently, so source quality
+            // no longer needs the old full-array memory downgrade.
+            (2048, 1024)
+        } else {
+            choose_runtime_resolutions(want_bc7)
+        };
 
-        if want_bc7 {
+        if want_bc7 && virtual_texturing {
             match Self::load_bc7_layers(device, queue, hero, extra) {
                 Ok(loaded) => {
                     tracing::info!(
@@ -1022,6 +1314,14 @@ impl TerrainLayerTextures {
                     );
                     return loaded;
                 }
+                Err(e) => {
+                    tracing::warn!("terrain: BC7 packs unusable ({e}); RGBA8 fallback");
+                    (hero, extra) = choose_runtime_resolutions(false);
+                }
+            }
+        } else if want_bc7 {
+            match Self::load_bc7_resident_layers(device, queue, hero, extra) {
+                Ok(loaded) => return loaded,
                 Err(e) => {
                     tracing::warn!("terrain: BC7 packs unusable ({e}); RGBA8 fallback");
                     (hero, extra) = choose_runtime_resolutions(false);
@@ -1122,10 +1422,87 @@ impl TerrainLayerTextures {
             resolution: hero,
             extra_resolution: extra,
             mean_albedo,
+            virtual_texture: None,
         })
     }
 
     fn load_bc7_layers(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        hero: u32,
+        extra: u32,
+    ) -> Result<Self, String> {
+        let hero_n = TERRAIN_HERO_LAYERS as usize;
+        // Validate every source chain by metadata only. Page payloads are read
+        // directly from these packs when feedback admits them; creation never
+        // transiently reads the full resident arrays.
+        for (i, material) in LAYER_MATERIALS.iter().enumerate() {
+            let size = if i < hero_n { hero } else { extra };
+            validate_bc7_pack(material, "albedo", size)?;
+            validate_bc7_pack(material, "surface", size)?;
+        }
+        // TerrainLayerTextures keeps its legacy fields so RGBA8 and devices
+        // without BC7 retain their exact path. In VT mode these tiny arrays are
+        // never registered; live shading sees -1 and uses mean-layer fallback
+        // until a runtime clipmap ring is ready.
+        let dummy = vec![vec![vec![0u8; 16]]; hero_n];
+        let dummy_extra = vec![vec![vec![0u8; 16]]; LAYER_MATERIALS.len() - hero_n];
+        let (albedo, albedo_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Albedo+Height Array BC7",
+            wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+            4,
+            &dummy,
+        );
+        let (surface, surface_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Surface Array BC7",
+            wgpu::TextureFormat::Bc7RgbaUnorm,
+            4,
+            &dummy,
+        );
+        let (albedo_extra, albedo_extra_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Albedo+Height Extra BC7",
+            wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+            4,
+            &dummy_extra,
+        );
+        let (surface_extra, surface_extra_view) = create_bc7_array_texture(
+            device,
+            queue,
+            "Terrain Surface Extra BC7",
+            wgpu::TextureFormat::Bc7RgbaUnorm,
+            4,
+            &dummy_extra,
+        );
+        tracing::info!(
+            "terrain: BC7 virtual source atlas resident at 64 MiB (hero {hero}, extra {extra})",
+        );
+        let virtual_texture = TerrainVirtualTextureGpu::new(device, hero, extra);
+        Ok(Self {
+            albedo,
+            albedo_view,
+            surface,
+            surface_view,
+            albedo_extra,
+            albedo_extra_view,
+            surface_extra,
+            surface_extra_view,
+            from_assets: true,
+            compressed: true,
+            resolution: hero,
+            extra_resolution: extra,
+            mean_albedo: mean_albedo_from_sources(),
+            virtual_texture: Some(virtual_texture),
+        })
+    }
+
+    /// Legacy fully-resident BC7 path, selected explicitly at creation time.
+    fn load_bc7_resident_layers(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         hero: u32,
@@ -1176,11 +1553,6 @@ impl TerrainLayerTextures {
             extra,
             &s1,
         );
-        tracing::info!(
-            "terrain: BC7 residency ~{:.0} MiB (hero {hero}, extra {extra})",
-            bc7_residency_mib(hero, hero_n as u32 * 2)
-                + bc7_residency_mib(extra, (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2),
-        );
         Ok(Self {
             albedo,
             albedo_view,
@@ -1195,6 +1567,7 @@ impl TerrainLayerTextures {
             resolution: hero,
             extra_resolution: extra,
             mean_albedo: mean_albedo_from_sources(),
+            virtual_texture: None,
         })
     }
 
@@ -1268,6 +1641,7 @@ impl TerrainLayerTextures {
             resolution: size,
             extra_resolution: size,
             mean_albedo,
+            virtual_texture: None,
         }
     }
 }

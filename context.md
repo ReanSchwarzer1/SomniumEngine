@@ -1,9 +1,14 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **COMPLETE 2026-08-23.
-> CONTROL-A through CONTROL-O are in tree; every track is finished, including
-> CONTROL-O's declared stretch.**
+> **Last updated:** 2026-08-28
+> **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
+> MORROWIND-AB supplies the portable GI tier: a ray-query-free, SDF-traced
+> 4×4×4 DDGI volume with budgeted temporal SH updates. MORROWIND-AD now streams
+> the terrain's existing BC7 mip chains as paired 128² source pages into an
+> exact 64 MiB physical atlas. Dirty runtime-clipmap rectangles are the feedback
+> surface; a deterministic LRU and per-frame upload throttle feed the existing
+> terrain composition clipmap without changing the frozen 2,032-byte material
+> ABI. Creation-time state and live cache diagnostics are generated in Details.
 >
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and opt-in completeness gates;
@@ -86,7 +91,10 @@
 > default **off**. Terrain hex/parallax now default **off** on both maps.
 > Previously: Phase CR (Crysis) **in engine** (2026-08-14) — CPU frustum default **on**; GPU 15B stays F10. Phase DF (Daggerfall) clipmap default **off**; **audit required** (`dev records/phase_DF.md` §12) before default-on. Phase IV complete; Phase XV **XV-A–J complete**; Phase 26 **26-A–I + Zeta-B–I shipped, phase remains open**; Phase VV **VV-A–H + VV+1 in tree**; FSR 3 default on; foliage LOD signed off.  
 > **Start-here:** `dev records/post_halcyon_audit_handoff.md`  
-> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu 29, winit 0.30  
+> **Toolchain:** rustc **1.88** (`rust-toolchain.toml`), wgpu **30**, winit 0.30  
+> *(wgpu 29 -> 30 by MORROWIND-A2, 2026-08-24. The frozen line is enforced by
+> `tools/ghostfence/run.py`'s `toolchain` row, which reads `FROZEN_TOOLCHAIN`
+> in that file and fails when a manifest disagrees with it.)*  
 >
 > Phase IV-K, the ocean fidelity pass against
 > [GodotOceanWaves](https://github.com/2Retr0/GodotOceanWaves), closed on
@@ -176,8 +184,265 @@
 >   the four parallel command lists are gone. The registry lives in
 >   `somnium_ui` because `somnium_core` already depends on UI and the Appendix
 >   A suggestion would create a Cargo cycle.
-> - **Phase MORROWIND — NetImmerse (PLAN ONLY, nothing in tree):**
+> - **Phase MORROWIND — NetImmerse (IN PROGRESS — Track 0 started 2026-08-24):**
 >   `dev records/phase_MORROWIND.md` — written 2026-08-23 against `7c0b66f`.
+>   **MORROWIND-A is complete:** the census is a script
+>   (`tools/census/generate.py` → `dev records/phase MORROWIND/MORROWIND-A_census.md`),
+>   GHOSTFENCE is a gate that can fail (`tools/ghostfence/`, with a
+>   standard-library PNG codec and a two-sided perceptual threshold — Somnium's
+>   first image assertions), the Fyrox diff and the license audit are in
+>   `dev records/phase MORROWIND/`, `ATTRIBUTION.md` §13H is open, §17.6's
+>   numbering is retired below, and `examples/vvardenfell` exists as the second
+>   example. **MORROWIND-A2 took the engine to wgpu 30** (29.0.3 -> 30.0.1);
+>   the plan's two predicted breaking changes applied to nothing in the tree and
+>   six others did, all mechanical. **MORROWIND-B promoted CONTROL's
+>   `JobRegistry` into `somnium_jobs`** and added declared deadlines, a budgeted
+>   main-thread completion drain and profiler telemetry; `JobRegistry` is gone
+>   from the tree. **MORROWIND-C built `somnium_shader` and deleted
+>   `material/hlms.rs`**: WGSL composes by `//!include` declared in the shader,
+>   all 51 modules go through one registry, variants are keyed and cached, and a
+>   debug build watches, recomposes, validates with naga and toasts the
+>   diagnostic without ever swapping in a broken shader. **C also found that
+>   A2 had left the `naga` dev-dependency on 29**, so the shader tests were
+>   validating with a different front end from the one that compiles them —
+>   which hid a real wgpu 30 incompatibility (`binding_array` now needs an
+>   explicit `enable`) that would have failed on the first frame. Fixed.
+>   Track 0 is complete. **Track 1 (VIVEC) is four sub-phases in.**
+>   **MORROWIND-D** added a second UI instance stream — a 2x3 affine, paths and
+>   strokes, radial and angular gradients, masks, and one bindless texture array
+>   replacing the three fixed bindings — without touching the frozen 100-byte
+>   `Primitive`. It also gave `somnium_ui` its first shader validation test,
+>   which immediately caught a WGSL/Rust struct mismatch (`vec4<f32>` aligns to
+>   16, `[f32; 4]` to 4) and a premultiplied-alpha shader under a comment
+>   claiming it matched the straight-alpha pipeline. **MORROWIND-E** added
+>   canvas roots, anchors and safe areas, and recorded the world-space decision:
+>   render-to-texture, because direct 3D submission would re-open the frozen
+>   paint contract. **MORROWIND-F** added directional navigation (authored links
+>   over geometry, off-axis distance weighted ten times on-axis), shaped
+>   hit-testing through the inverse transform, and an `InputSource` that says out
+>   loud that hover is a pointer concept. **MORROWIND-G** added the `StyledRun`
+>   model text never had, BBCode rich text, font fallback, IME composition and
+>   the localisation hook; the shaper is **decided (`cosmic-text`) and
+>   deliberately not adopted**, per Appendix A.5, because GHOSTFENCE has no
+>   golden reference to A/B the block-origin snapping rule against.
+>   **Track 8 (ALMSIVI) then went three sub-phases deep, out of track order,
+>   because each was cheap and unblocked.** **MORROWIND-AE** created
+>   `somnium_input` (Seam 5) — action maps, control paths, processors,
+>   interactions, composite bindings, hot-plug and rebinding with conflict
+>   detection — and **closed MORROWIND-F with it**, which was F's stated forward
+>   dependency. **MORROWIND-AG** took `somnium_audio` from 93 lines and zero
+>   tests to a crate with buses, a listener, attenuation curves, cones, occlusion
+>   and Doppler, a sound cache, and 40 tests; the volume argument
+>   `AudioEngine::play` had been silently discarding since it was written is
+>   fixed, and the test that would have caught it exists. **MORROWIND-AH item 1**
+>   created `somnium_i18n` — CLDR plural and gender rules, three number
+>   conventions, a `pt-BR -> pt -> en` fallback chain, and an extractor that finds
+>   the strings which never became keys. AH items 2 (video) and 3 (the playable
+>   slice) are open and stay open: item 3 needs Tracks 4, 5 and 6.
+>   **The record lapsed here and is reconciled rather than tidied.** AE, AG and
+>   AH shipped code without evidence files, `ATTRIBUTION.md` §13H entries or a
+>   `context.md` update — three of the five things §8 says a sub-phase closes
+>   with. §13H.8–13H.13 and `MORROWIND-AH.md` were written afterwards and say so
+>   at the top.
+>   **The finding that blocked Track 1: `EngineContext` had no UI hook.** A
+>   game got the world, physics, audio and the renderer, and no way to submit a
+>   widget tree — so it could neither draw a HUD nor receive input into one.
+>   Found by E, confirmed by F, and walked past by AE/AG/AH.
+>   **MORROWIND-E2 is the hook**, and it is not a sub-phase the plan contains —
+>   §8 lists six in Track 1 and none of them is *"let a game put the UI on
+>   screen"*, because the plan assumed a runtime UI framework implies a way to
+>   reach it. The engine owns the moment, the game owns the trees: build in
+>   `on_render` (which has the whole `EngineContext`), draw in `on_render_ui`
+>   (which has the open encoder), plus `on_os_event` for the raw `WindowEvent`
+>   the runtime UI's hit-testing needs. It runs at renderer pass 9, before the
+>   editor shell, in its own `Game UI` profiler zone. **`vvardenfell` draws its
+>   HUD instead of printing it.** E2 also found that MORROWIND-E's anchors had
+>   no output — `Canvas::place` resolved an `Anchoring` to a `Rect` and nothing
+>   consumed it, because E's tests asserted on the rectangles rather than on the
+>   tree — and that **GHOSTFENCE had never been able to run on Windows**: three
+>   `subprocess.run(text=True)` calls decoded cargo's UTF-8 as the ANSI code
+>   page and crashed the gate before it printed a row.
+>   **MORROWIND-E2b took the golden reference** GHOSTFENCE had been promising
+>   since MORROWIND-A. The capture is the whole swapchain after the UI pass, so
+>   it contains a stochastic viewport, an fps counter and whatever toast was up;
+>   a golden entry therefore names the **region** of chrome it is evidence for —
+>   `menu-bar`, `sculpt-panel`, `toolbar`. Verified across two independent GPU
+>   runs. **This unblocks MORROWIND-G's shaper**, which is the largest piece of
+>   unfinished Track 1 work and whose only blocker was Appendix A.5's demand for
+>   an A/B against a reference image. It also found that
+>   **`dev records/phase MORROWIND/` had been gitignored since MORROWIND-A** —
+>   the census, the Fyrox diff, the license audit, every sub-phase record and
+>   `phase_MORROWIND.md` itself existed on one disk and in no commit.
+>   **MORROWIND-H** generalised Phase 27's `motion.rs` into a runtime system:
+>   `Motion::Spring` beside `Motion::Timed` (a normalised eased curve is a
+>   *shape* and cannot carry velocity through a retarget, which is what an
+>   interrupted drawer needs), `Easing::Curve(CurveId)` resolving CONTROL-K
+>   curves, staggering, and `Transition`/`reversed()` so an enter and its exit
+>   are one declaration. It found the same class of bug as E2 — **`UiCanvas`
+>   never ticked motion**, so a game's tweens sat at their origin forever — and
+>   `Spring::overshoots()` caught a `SNAPPY` preset that had shipped its first
+>   draft underdamped.
+>   **MORROWIND-I closed Track 1** with an accessibility tree: four defaulted
+>   `Control` hooks (role, name, value, toggled), a collapse rule that turns a
+>   border-in-a-panel-in-a-text-node into `button → label`, focus announcements
+>   in name/role/value/state order, reduced motion and high contrast as
+>   `EditorSettings` fields with schema rows, and the real platform adapter —
+>   `accesskit_winit` 0.33.2 wants `winit ^0.30.5` and Somnium is on 0.30.13, so
+>   no windowing bump was needed. High contrast **reuses Zeta's certified pairs**
+>   rather than inventing a palette: it walks an existing foreground toward the
+>   pole its background is not until the ratio clears 7:1. The window is now
+>   created invisible and shown once initialised, because `accesskit_winit`
+>   panics on an already-shown window — a better startup regardless, and the
+>   golden capture still matching is what proves it. **Not claimed: that a real
+>   screen reader reads it well.** No NVDA/JAWS/VoiceOver session was run.
+>   **Track 1 (VIVEC) is closed.** One item stays open inside it and is recorded
+>   rather than dropped: MORROWIND-G's shaper, decided (`cosmic-text`) and behind
+>   `SOMNIUM_UI_SHAPER`, default off.
+>   **MORROWIND-U opened Track 5 (DWEMER).** `somnium_anim` now owns skeletons,
+>   decomposed poses and four-weight skin bindings; `somnium_asset` imports and
+>   remaps glTF skins; and one compute dispatch writes posed vertices back into
+>   the shared geometry pool before culling. The renderer sees only matrix
+>   palettes, preserving Seam 7. Skin-to-buffer is the chosen design, with a
+>   2,000,000-vertex default budget; the required thousand-character comparison
+>   remains explicitly unmeasured until V supplies animated crowds.
+>   **MORROWIND-K completed the shared graph surface.** `somnium_ui::graph`
+>   contains one archetype-driven graph model and one retained-mode
+>   `GraphEditor`: typed pins, transactional reconnect/reroute, cubic wires on
+>   MORROWIND-D's path stream, selection, pan/zoom, comments, nested groups,
+>   alignment, copy/paste, sub-graph breadcrumbs, versioned deterministic JSON,
+>   and CONTROL-A2 Edit-command routing with one history entry per gesture.
+>   Material and animation catalogues prove the substrate is feature-neutral.
+>   The first consumer compiles only material-root-reachable nodes into the
+>   existing `.sommat` `MaterialAsset` plus generated WGSL registered through
+>   the single MORROWIND-C `ShaderSystem`; `vvardenfell` exercises that public
+>   boundary without a renderer reach-through.
+>   **MORROWIND-V completed animation clips, blend graphs and state machines.**
+>   `somnium_anim` now has validated clip tracks with looping/time scale,
+>   authored `Blend1D` and triangulated `Blend2D`, masked layers, typed
+>   parameters and triggers, stable-leader sync tracks, state transitions and a
+>   bounded composite pose cache. Graph and machine versions reject stale live
+>   instances instead of indexing replacement definitions. Forced sync is
+>   validated through every nested blend/layer/cache leaf, and cached poses are
+>   separated by generation, evaluation lane, graph id, graph version and node.
+>   MORROWIND-K's animation catalogue compiles output- and state-reachable pose
+>   nodes into this UI-neutral asset, retaining a durable authored/runtime node
+>   map and caller-owned graph revision. The same surface owns versioned cyclic
+>   state-machine transition overlays and their undo/redo history, while pose
+>   wires remain a DAG. Its catalogue covers idle/walk/run blends,
+>   multi-triangle 2D blends, authored sync leaders, bone masks and
+>   parameter-driven layer weights. The shipped Animation workspace owns this
+>   real graph control: labelled/ranged literal fields, Alt-click initial state,
+>   Shift-drag transition creation, and a selectable in-canvas transition
+>   inspector for blend time, sync track, typed conditions and deletion.
+>   Luau reaches typed bool/float/int/trigger parameters through the existing
+>   deferred command boundary and a game-installed animation router. The
+>   `vvardenfell` slice attaches a real Luau script and evaluates a synced
+>   idle/walk/run graph from that same live parameter set using only public
+>   APIs. No rendered crowd or foot-slide PNG is claimed here; the
+>   thousand-character measurement left open by U still needs an authored
+>   skinned crowd scene rather than a synthetic runtime test.
+>   **MORROWIND-L completed the one reusable timeline.**
+>   `somnium_ui::timeline` is an archetype-driven, versioned track/media model
+>   with groups, clips, channels and CONTROL-K curves, markers, playhead,
+>   scrubbing, cursor-anchored zoom, snapping and bounded undo/redo. The shipped
+>   Animation workspace is now one splitter containing V's graph and L's
+>   timeline; its selected channel embeds the existing retained CurveEditor as
+>   a real child and routes values directly without shell forwarding. Animation
+>   and UI-motion catalogues prove it is not an animation-only sequencer.
+>   `vvardenfell` authors and byte-stably round-trips both consumers through
+>   public APIs and retains a deterministic evidence digest.
+>   **MORROWIND-Q opened Track 4 with a deterministic native asset cook.**
+>   `somnium_asset::cook` preserves the existing path-derived `AssetId` while
+>   producing versioned, integrity-checked mesh, texture, audio, scene, prefab,
+>   shader and material payload families. A sorted dependency graph and
+>   SHA-256 recipe key make the cache incremental: changing a texture recooks
+>   its material reverse-closure while an unrelated mesh remains cached.
+>   Artifact and manifest bytes exclude absolute paths and timestamps and are
+>   identical across clean output/cache roots. Development and build resolvers
+>   return the same native payload and id; build mode continues after the
+>   source tree is removed. `somnium_assetcook` is the thin standalone tool,
+>   and both it and the `vvardenfell` proof submit the cook through
+>   `somnium_jobs` with an explicit priority and deadline. Independent blobs
+>   plus a replaceable manifest leave a live-update seam without implementing
+>   delivery in this sub-phase. Defold was reclassified as strict under the
+>   Defold License 1.0 and used for architecture only.
+>   **MORROWIND-R added budgeted cooked-asset residency and hot reload.**
+>   `ResidencyManager` returns a typed placeholder immediately, performs
+>   resolver I/O through `somnium_jobs`, meters installation with a per-frame
+>   upload budget and atomically publishes only complete values. A deterministic
+>   LRU enforces the byte budget; mesh LODs are independent residency keys, so
+>   coarse geometry can remain while LOD 0 is absent. Stable handles swap back
+>   to placeholders on eviction. The unified cooked watcher covers every Q
+>   kind, and failed or stale reloads retain the old resident revision.
+>   `ResidencySnapshot` is the editor panel model and answers loaded state,
+>   bytes, reason and every requester without exposing policy to UI code.
+>   `vvardenfell` demonstrates the public Q/R path from cook job to immediate
+>   placeholder to budgeted build-artifact replacement.
+>   **MORROWIND-S added world partition and cell-owned entity streaming.**
+>   `WorldPartition` hashes double-precision positions into configurable
+>   integer cells. Camera, player and explicit-volume sources declare radius,
+>   shape and priority; their deterministic union is the only runtime
+>   want-state, while an undoable editor pin is the explicit authored override.
+>   Load and transactional unload I/O are named priority/deadline jobs and are
+>   cancelled when want-state reverses. A cell index owns sorted derived
+>   `AssetId`s and one file per actor. Those actor files use the existing
+>   schema scene serializer, retained unknowns and `PersistentId`, so real ECS
+>   components and cross-cell identity survive unload rather than passing
+>   through a streaming-only DTO. Despawn occurs only after persistence
+>   succeeds. The editor model exposes sorted load states and world-aligned grid
+>   segments plus undoable pin/unpin. The required 100 unload/reload loop keeps
+>   both loaded and unloaded entity-count baselines exact and restores `Name`
+>   and `Transform` through the registered schema on every iteration.
+>   **S's initial evidence was API-complete but Hello Engine-incomplete; that
+>   integration gap is corrected.** Terrain now carries a reflected World
+>   Partition block with authored cell/radius/priority/pin controls and
+>   read-only, non-serialized live diagnostics in generated Details. The
+>   production coordinator follows the renderer's same-frame active camera,
+>   drains actors on terrain deletion, and drains/rebuilds when cell size
+>   changes. Create → Terrain and the default landscape attach it. Create → UI
+>   Canvas likewise creates a selectable reflected attachment, and Hello Engine
+>   visibly draws a game-owned public `UiCanvas`; Vvardenfell remains the
+>   boundary proof, not the only place runtime UI works.
+>   **MORROWIND-Z completed sparse virtual shadow maps.** Directional lights
+>   expose a generated-Details Cascaded/Virtual selector. Virtual uses a
+>   four-level clipmap page table, bounded deterministic allocation, persistent
+>   physical depth atlas, light/caster invalidation and per-page raster;
+>   opaque/terrain and water sample the same cache with explicit CSM page-miss
+>   fallback. Matched 120-sample `.somtime` rows and display-referred captures
+>   exist for Coastal-ground and Island. CSM remains the measured default on
+>   those two small maps; Virtual rendered 21 and 45 pages respectively and is
+>   retained as an authored quality/scaling choice.
+>   **MORROWIND-AD completed terrain virtual texturing.** VT-created terrains
+>   keep the 32-layer authored material but do not allocate the two resident
+>   source arrays. A toroidal clipmap-feedback phase identifies splat layers for
+>   each dirty rectangle, requests coarse parents before the target mip, and
+>   streams paired BC7 pages through a deterministic 2,048-slot LRU. The
+>   64×32-page physical atlases total exactly 64 MiB; read failures roll their
+>   reservations back, pending work drains without new camera dirtiness, and
+>   each successful batch invalidates the runtime composition clipmap so a
+>   fallback cannot remain baked. The creation-time switch, fixed allocation,
+>   upload throttle and live counters are visible in generated Terrain Details.
+>   **MORROWIND-T closed Track 4 with HLOD, impostors and a floating origin.**
+>   The asset cook can merge per-cell proxy geometry, transform normals,
+>   enforce a triangle budget, merge representative material colour and retain
+>   sorted source dependencies. Offline square captures pack deterministically
+>   by signed octahedral direction into a billboard atlas. Large-world
+>   positions use exact CPU integer cells plus small local f32 offsets; a
+>   camera-aligned cell rebase changes only the render origin, never authored
+>   data. This CPU design was selected over shader soft-double because it is
+>   reversible, contains complexity outside every shader and preserves
+>   centimetre differences at 10,000 km; soft-double is deferred to a future
+>   planet-scale tier.
+>   GHOSTFENCE now runs and passes all seven rows — census, toolchain,
+>   shader-budget, one-job-system, no-second-system, golden-images, tests
+>   (**1,835 passed, 0 failed**, against a floor of 945).
+>   **The license audit reclassified Flax as proprietary**, which the
+>   plan's §6.6 had implied was permissive; MORROWIND-K's graph surface is
+>   re-sourced to Godot and Fyrox as a result.
+>   The census supersedes the measured figures in this entry: the tree is
+>   **141,221 lines and 1,211 tests**, not 113,892 and 945; the top three crates
+>   are 85.5%; there are 51 renderer WGSL files at 13,286 lines and 28 component
+>   schemas. Every *absence* below re-measured at zero.
 >   **The engine-half phase**, and the one that **retires §17.6's numbering**
 >   (see §1.3 there: Phase 26 shipped as the editor's IA and Phase 27 as its
 >   paint layer, so the numbers 26/27 are spent and 30–38 are absorbed into
@@ -488,7 +753,7 @@ hello_engine
         ├── somnium_ecs          (no external deps beyond std)
         ├── somnium_renderer
         │     ├── somnium_asset  (Vertex type, future glTF)
-        │     └── wgpu 29
+        │     └── wgpu 30
         ├── somnium_ui
         │     └── fontdue 0.7  (glyph atlas)
         ├── somnium_physics
@@ -2618,6 +2883,41 @@ Terrain makes the lighting work testable, so each sub-phase states its own check
 ---
 
 ## 17.6 Phases 26-33 — the systems Somnium does not have (plan)
+
+> ### RETIRED — the numbering, not the finding (MORROWIND-A, 2026-08-24)
+>
+> **The numbers below are spent and this section is history.** Phase 26 shipped
+> as *Metaphor*, the editor's information architecture, and Phase 27 shipped as
+> *Hades*, the editor's paint layer — neither is the UI framework or the
+> skeletal animation this section assigned those numbers to. Re-using 26 and 27
+> for animation and the asset pipeline now would make `dev records/` unreadable.
+>
+> **From here, systems work is planned under codenames**, as DOOM, CR, DF, VV,
+> XV, IV, PORTAL and CONTROL already are. The successor is
+> [`dev records/phase_MORROWIND.md`](dev%20records/phase_MORROWIND.md) — eight
+> tracks, thirty-six sub-phases — and every number below maps into it:
+>
+> | Old number | Absorbed by |
+> |---|---|
+> | 26 (runtime UI framework) | **Track 1 — VIVEC** (MORROWIND-D…I) |
+> | 27 (skeletal animation) | **Track 5 — DWEMER** (MORROWIND-U…W2) |
+> | 28 (cook, hot reload, streaming) | **Track 4 — SILT STRIDER** (MORROWIND-Q…T) |
+> | 29 (profiler) | Stays as shipped (§17.7); Track 7 extends it, Phase PORTAL owns the harness |
+> | 30 (navigation and AI) | **Track 6 — SIXTH HOUSE** (MORROWIND-X, Y) |
+> | 31 (GPU particles and VFX) | **Track 7 — RED MOUNTAIN**, MORROWIND-AA |
+> | 32 (networking) | **Explicitly out of scope** — MORROWIND §3.1. Seams 2 and 6 are chosen to be network-compatible so it stays possible. |
+> | 33 (input, localization, video) | **Track 8 — ALMSIVI** (MORROWIND-AE…AH) |
+> | 34 (prefabs) | **Track 3 — HLAALU**, MORROWIND-O |
+> | 35 (rule-driven scattering) | **Track 3 — HLAALU**, MORROWIND-P2 |
+> | 36 (cinematics and sequencer) | **Track 2 — CONSTRUCTION SET**, MORROWIND-L |
+> | 37 (cloth and hair) | Deferred — MORROWIND §14.3 states why |
+> | 38 (game framework) | **Track 8 — ALMSIVI** |
+>
+> **The finding below is not retired.** §26.1's imbalance — a renderer close to
+> Flax's beside nine subsystems at zero — is exactly what Phase MORROWIND
+> exists to close, and MORROWIND-A's regenerable census
+> (`dev records/phase MORROWIND/MORROWIND-A_census.md`, produced by
+> `tools/census/generate.py`) is the version of it that cannot rot.
 
 ### 26.1 What the survey actually showed
 

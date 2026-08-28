@@ -1,3 +1,9 @@
+// MORROWIND-C: composition is declared here rather than assembled by a
+// `format!` of `include_str!` calls at this pass's construction site. The
+// resolver (`somnium_shader`) emits each module once, in this order, and
+// hoists every `enable` above everything.
+//!include "atmosphere.wgsl"
+
 // Phase 24C: builds the transmittance and multiple-scattering LUTs.
 //
 // Concatenated after `atmosphere.wgsl`, which supplies the physics. Both LUTs

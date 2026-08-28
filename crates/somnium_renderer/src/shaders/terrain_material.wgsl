@@ -376,6 +376,9 @@ var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
 var<private> terrain_wet_f0: f32 = 0.0;
 /// Phase DF: which detail ring the clipmap path picked (debug mode 33).
 var<private> terrain_clipmap_ring: f32 = 0.0;
+/// MORROWIND-AD clipmap-generation-only bindings: albedo atlas, surface atlas,
+/// page table, physical atlas edge. Normal shading leaves the sentinel intact.
+var<private> terrain_virtual_texture: vec4<i32> = vec4<i32>(-1, -1, -1, 0);
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
@@ -421,6 +424,81 @@ struct TerrainLayerSample {
     occlusion: f32,
 }
 
+const TERRAIN_VT_PAGE_SIZE: u32 = 128u;
+
+fn terrain_vt_table_entry(mip: u32, page: vec2<u32>, source_size: u32) -> u32 {
+    var offset = 0u;
+    for (var level = 0u; level < mip; level = level + 1u) {
+        let pages = max(1u, (max(1u, source_size >> level) + TERRAIN_VT_PAGE_SIZE - 1u) / TERRAIN_VT_PAGE_SIZE);
+        offset += pages * pages;
+    }
+    let pages = max(1u, (max(1u, source_size >> mip) + TERRAIN_VT_PAGE_SIZE - 1u) / TERRAIN_VT_PAGE_SIZE);
+    return offset + page.y * pages + page.x;
+}
+
+/// Resolve a logical source sample through the bounded physical atlas. A
+/// missing fine page walks to a resident ancestor; an entirely cold cache uses
+/// the already-computed mean layer material.
+fn terrain_sample_virtual(
+    tm: TerrainMaterial,
+    layer: u32,
+    uv: vec2<f32>,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
+) -> TerrainLayerSample {
+    var out: TerrainLayerSample;
+    let source_size = select(1024u, 2048u, layer < 16u);
+    let max_mip = u32(log2(f32(source_size)));
+    let footprint = max(length(ddx_uv), length(ddy_uv)) * f32(source_size);
+    var mip = min(u32(max(floor(log2(max(footprint, 1.0))), 0.0)), max_mip);
+    let source_uv = fract(uv);
+    loop {
+        let mip_size = max(1u, source_size >> mip);
+        let pages = max(1u, (mip_size + TERRAIN_VT_PAGE_SIZE - 1u) / TERRAIN_VT_PAGE_SIZE);
+        let texel = min(vec2<u32>(source_uv * f32(mip_size)), vec2<u32>(mip_size - 1u));
+        let page = min(texel / TERRAIN_VT_PAGE_SIZE, vec2<u32>(pages - 1u));
+        let entry = terrain_vt_table_entry(mip, page, source_size);
+        let mapped = textureLoad(
+            textures[terrain_virtual_texture.z],
+            vec2<i32>(i32(entry), i32(layer)),
+            0,
+        );
+        if mapped.b > 0.5 {
+            let slot = vec2<f32>(round(mapped.rg * 255.0));
+            let local = vec2<f32>(texel - page * TERRAIN_VT_PAGE_SIZE) + 0.5;
+            // The paired physical atlases are exactly 64 MiB: 64x32 BC7
+            // pages. `w` carries the width; the fixed 2:1 shape avoids growing
+            // a square allocation past the authored budget.
+            let atlas_extent = vec2<f32>(
+                f32(terrain_virtual_texture.w),
+                f32(terrain_virtual_texture.w) * 0.5,
+            );
+            let atlas_uv = (slot * f32(TERRAIN_VT_PAGE_SIZE) + local) / atlas_extent;
+            let a = textureSampleLevel(
+                textures[terrain_virtual_texture.x], default_sampler, atlas_uv, 0.0);
+            let surf = textureSampleLevel(
+                textures[terrain_virtual_texture.y], default_sampler, atlas_uv, 0.0);
+            out.albedo = a.rgb;
+            out.height = a.a;
+            out.roughness = surf.b;
+            out.occlusion = surf.a;
+            let nxy = surf.rg * 2.0 - 1.0;
+            out.normal_ts = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
+            return out;
+        }
+        if mip >= max_mip {
+            break;
+        }
+        mip += 1u;
+    }
+    out.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+    out.height = 0.5;
+    out.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
+    out.roughness = 0.8;
+    out.occlusion = 1.0;
+    return out;
+}
+
 /// Sample one layer at `uv`, with `ddx`/`ddy` its screen-space derivatives.
 ///
 /// Phase 25F: albedo and normal go through the hex-tiled path, roughness does
@@ -436,6 +514,9 @@ fn terrain_sample_layer(
     ddy: vec2<f32>,
     hex: bool,
 ) -> TerrainLayerSample {
+    if terrain_virtual_texture.w > 0 {
+        return terrain_sample_virtual(tm, layer, uv, ddx, ddy);
+    }
     var s: TerrainLayerSample;
     let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
     let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
@@ -591,6 +672,9 @@ fn terrain_sample_projected_maps(
     ddx: vec2<f32>,
     ddy: vec2<f32>,
 ) -> TerrainLayerSample {
+    if terrain_virtual_texture.w > 0 {
+        return terrain_sample_virtual(tm, layer, uv, ddx, ddy);
+    }
     var s: TerrainLayerSample;
     let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
     let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
