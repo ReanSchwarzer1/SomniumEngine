@@ -36,7 +36,7 @@ use crate::{
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
     WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
-use somnium_ecs::World;
+use somnium_ecs::{Entity, World};
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
 
 /// Maintain the scene-wide post-process component as an actual singleton.
@@ -6280,21 +6280,60 @@ impl<G: GameApp> Engine<G> {
 
     /// Queue every terrain entity for rendering this frame.
     fn submit_terrains(&mut self) {
-        let terrains: Vec<(u32, glam::Mat4)> = self
+        let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
             .world
             .entities()
             .filter_map(|e| {
-                let tc = self.world.get::<TerrainComponent>(e)?;
+                let tc = self.world.get::<TerrainComponent>(e).copied()?;
                 let model = self
                     .world
                     .get::<Transform>(e)
                     .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
-                Some((tc.terrain_id, model))
+                Some((e, tc, model))
             })
             .collect();
+        let mut diagnostics = Vec::with_capacity(terrains.len());
         if let Some(r) = self.renderer.as_mut() {
-            for (id, model) in terrains {
-                r.submit_terrain(id, model);
+            for (entity, component, model) in terrains {
+                let mut virtual_texturing = false;
+                if let Some(terrain) = r.terrain_mut(component.terrain_id) {
+                    terrain.configure_virtual_texture(
+                        component.virtual_texturing,
+                        component.virtual_texture_cache_mib,
+                        component.virtual_texture_uploads_per_frame,
+                    );
+                    let stats = *terrain.virtual_texture.stats();
+                    virtual_texturing = terrain.virtual_texture_enabled;
+                    diagnostics.push((
+                        entity,
+                        stats,
+                        terrain.virtual_texture_enabled,
+                        terrain.virtual_texture_cache_mib,
+                    ));
+                }
+                if virtual_texturing
+                    && !somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off()
+                    && let Some(clipmap) = r.clipmaps.get_mut(component.terrain_id as usize)
+                    && !clipmap.enabled
+                {
+                    clipmap.enabled = true;
+                    clipmap.invalidate();
+                }
+                r.submit_terrain(component.terrain_id, model);
+            }
+        }
+        for (entity, stats, enabled, cache_mib) in diagnostics {
+            if let Some(component) = self.world.get_mut::<TerrainComponent>(entity) {
+                component.virtual_texturing = enabled;
+                if enabled {
+                    component.virtual_texture_cache_mib = cache_mib;
+                }
+                component.virtual_texture_resident_pages = stats.resident_pages;
+                component.virtual_texture_pending_pages = stats.pending_pages;
+                component.virtual_texture_hits = stats.hits.min(u64::from(u32::MAX)) as u32;
+                component.virtual_texture_misses = stats.misses.min(u64::from(u32::MAX)) as u32;
+                component.virtual_texture_evictions =
+                    stats.evictions.min(u64::from(u32::MAX)) as u32;
             }
         }
     }

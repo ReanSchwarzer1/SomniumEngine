@@ -64,7 +64,8 @@ use somnium_asset::cook::{
 use somnium_asset::residency::{AssetHandle, AssetRequest, ResidencyConfig, ResidencyManager};
 use somnium_core::world_partition::{ActorRecord, CellCoord, PartitionStore, WorldPartition};
 use somnium_core::{
-    Engine, EngineConfig, EngineContext, GameApp, GameUiFrame, Name, PostProcessComponent,
+    DefaultLandscapePreset, Engine, EngineConfig, EngineContext, GameApp, GameUiFrame, Name,
+    PostProcessComponent, TerrainComponent, Transform, WorldTransform,
 };
 use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
@@ -135,6 +136,35 @@ impl GameApp for Vvardenfell {
             },
         ));
         println!("  portable DDGI -> 4x4x4 probes, 8 updates/frame");
+
+        // MORROWIND-AD. The authored component is the public boundary for the
+        // streaming source cache; the renderer owns pages and diagnostics.
+        if let (Some(renderer), Some(render_ctx)) = (ctx.renderer.as_deref_mut(), ctx.render_ctx) {
+            let mut preset = DefaultLandscapePreset::island();
+            preset.terrain.virtual_texturing = true;
+            let terrain_id = renderer.create_terrain_hero_bank(render_ctx, preset.terrain);
+            if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                terrain.generate_island_relief(1337, preset.relief_metres);
+            }
+            ctx.world.spawn((
+                Transform::from_translation(preset.terrain_translation),
+                Name::new("AD streamed island"),
+                WorldTransform::identity(),
+                TerrainComponent {
+                    terrain_id,
+                    chunk_cells: preset.terrain.chunk_cells,
+                    grid_x: preset.terrain.grid_size[0],
+                    grid_z: preset.terrain.grid_size[1],
+                    cell_size: preset.terrain.cell_size,
+                    height_scale: preset.terrain.height_scale,
+                    virtual_texturing: true,
+                    virtual_texture_cache_mib: 64,
+                    virtual_texture_uploads_per_frame: 8,
+                    ..TerrainComponent::default()
+                },
+            ));
+            println!("  terrain VT -> real 512 m island, 64 MiB cache, 8 uploads/frame");
+        }
 
         // A real safe area comes from the platform. Nothing in the tree reports
         // one yet, so the slice hard-codes a phone-shaped inset: the value is a

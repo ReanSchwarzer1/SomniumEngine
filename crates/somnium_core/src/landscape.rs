@@ -185,6 +185,7 @@ fn landscape_snapshots(
             grid_z: preset.terrain.grid_size[1],
             cell_size: preset.terrain.cell_size,
             height_scale: preset.terrain.height_scale,
+            ..TerrainComponent::default()
         }),
         world_partition: Some(crate::WorldPartitionComponent::default()),
         ui_canvas: None,
@@ -302,6 +303,7 @@ mod tests {
             macro_map: 0,
             albedo: [1; 32],
             surface: [1; 32],
+            virtual_texture: [-1, -1, -1, 0],
         };
         ids.unbind_extra_bank();
         assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));

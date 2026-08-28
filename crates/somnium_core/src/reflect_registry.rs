@@ -77,6 +77,14 @@ impl Default for TerrainComponent {
             grid_z: 1,
             cell_size: 1.0,
             height_scale: 1.0,
+            virtual_texturing: false,
+            virtual_texture_cache_mib: 64,
+            virtual_texture_uploads_per_frame: 8,
+            virtual_texture_resident_pages: 0,
+            virtual_texture_pending_pages: 0,
+            virtual_texture_hits: 0,
+            virtual_texture_misses: 0,
+            virtual_texture_evictions: 0,
         }
     }
 }
@@ -995,8 +1003,20 @@ fn parent_schema() -> ComponentSchema {
 }
 
 fn terrain_schema() -> ComponentSchema {
-    component_schema! {
-        TerrainComponent as "somnium.Terrain", display "Terrain", version 1,
+    fn migrate_terrain(_fields: &mut ReflectObject, from: u32) -> Result<(), ReflectError> {
+        match from {
+            // Version 1 has no VT fields. Missing fields retain the component
+            // defaults installed before the saved record is applied.
+            1 => Ok(()),
+            found => Err(ReflectError::UnsupportedVersion {
+                component: StableId::new("somnium.Terrain"),
+                found,
+                current: 2,
+            }),
+        }
+    }
+    let mut schema = component_schema! {
+        TerrainComponent as "somnium.Terrain", display "Terrain", version 2,
         fields {
             terrain_id { scope: ChangeScope::Entity },
             chunk_cells { min: 1, scope: ChangeScope::Entity },
@@ -1004,8 +1024,26 @@ fn terrain_schema() -> ComponentSchema {
             grid_z { min: 1, scope: ChangeScope::Entity },
             cell_size { min: 0.001, scope: ChangeScope::Entity },
             height_scale { scope: ChangeScope::Entity },
+            virtual_texturing { read_only: true, group: "Virtual Texturing", display_name: "Stream Source Pages",
+                doc: "Creation-time terrain resource mode. Enabled terrains stream 32-layer material source pages before runtime composition." },
+            virtual_texture_cache_mib { read_only: true, min: 64, max: 64, unit: "MiB", group: "Virtual Texturing", display_name: "Cache Budget",
+                doc: "Allocated paired BC7 source-page atlas budget. Fixed at terrain resource creation." },
+            virtual_texture_uploads_per_frame { min: 1, max: 64, group: "Virtual Texturing", display_name: "Uploads Per Frame",
+                doc: "Maximum page uploads admitted from feedback during one frame." },
+            virtual_texture_resident_pages { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Resident Pages",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_pending_pages { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Pending Pages",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_hits { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Cache Hits",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_misses { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Cache Misses",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
+            virtual_texture_evictions { read_only: true, group: "Virtual Texture Diagnostics", display_name: "Evictions",
+                flags: FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ) },
         }
-    }
+    };
+    schema.migrate = Some(migrate_terrain);
+    schema
 }
 
 fn world_partition_schema() -> ComponentSchema {
@@ -1202,6 +1240,34 @@ mod tests {
         let budget = schema.field_by_name("ddgi_update_budget").unwrap();
         assert_eq!(budget.min, Some(1.0));
         assert_eq!(budget.max, Some(64.0));
+    }
+
+    #[test]
+    fn terrain_virtual_texture_controls_and_diagnostics_are_in_details() {
+        let registry = component_registry();
+        let schema = registry
+            .by_name("somnium.Terrain")
+            .expect("terrain schema is registered");
+        assert_eq!(schema.version, 2);
+        let stream = schema
+            .field_by_name("virtual_texturing")
+            .expect("streaming toggle is reflected");
+        assert!(stream.read_only, "VT allocation is creation-time state");
+        let cache = schema
+            .field_by_name("virtual_texture_cache_mib")
+            .expect("physical cache budget is reflected");
+        assert!(cache.read_only);
+        assert_eq!(cache.min, Some(64.0));
+        assert_eq!(cache.max, Some(64.0));
+        let resident = schema
+            .field_by_name("virtual_texture_resident_pages")
+            .expect("resident-page diagnostics are reflected");
+        assert!(resident.read_only);
+        assert!(!TerrainComponent::default().virtual_texturing);
+
+        let mut version_one = ReflectObject::new();
+        (schema.migrate.expect("terrain v1 has a migration"))(&mut version_one, 1)
+            .expect("version-one terrain remains loadable");
     }
 
     #[test]

@@ -35,6 +35,23 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 Dbg **32** is clipmap albedo, **33** is ring index (0 = finest).
 
+## Virtual texture streaming
+
+Terrains created with **Stream Source Pages** use the existing runtime material
+clipmap as their runtime virtual texture. Its feedback step follows each dirty
+clipmap rectangle, reads only material layers present in the covered splatmap
+region (plus the cliff layer), and streams paired albedo/surface BC7 pages into
+an exact **64 MiB** physical cache. The 32 authored material slots therefore do
+not require 32 full-resolution GPU texture layers.
+
+**Stream Source Pages** and **Cache Budget** are read-only because the physical
+resources are chosen when the terrain is created; an ordinary existing terrain
+continues to use its resident arrays. **Uploads Per Frame** is the live throttle.
+The **Virtual Texture Diagnostics** group reports resident and pending pages,
+hits, misses, and evictions. A cold page uses a resident parent mip and finally
+the layer mean; page arrival automatically recomposes the affected runtime
+clipmap rather than leaving that fallback baked in.
+
 ## Maps
 
 **Game / Maps** in the Content Drawer. **Coastal** is the 1 km, 32-layer Appalachia launch landscape (256 chunks). **Island** is a 512 m ocean tile with a 16-layer hero bank (hex and parallax off; GPU splat format still 32 slots with 16–31 empty). Island shade is cheaper because fewer pixels hit ground and the compact pipeline scans 16 layers. Coastal stays heavier on the ground with the same options off — that is tile size and 32 published layers, not leftover POM. Soft Shadows on Post FX is PCSS (Help → **Lighting**).

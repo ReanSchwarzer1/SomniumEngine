@@ -100,6 +100,9 @@ pub fn save_scene(world: &World, path: &str) -> Result<(), String> {
                     "grid_size":    [tc.grid_x, tc.grid_z],
                     "cell_size":    tc.cell_size,
                     "height_scale": tc.height_scale,
+                    "virtual_texturing": tc.virtual_texturing,
+                    "virtual_texture_cache_mib": tc.virtual_texture_cache_mib,
+                    "virtual_texture_uploads_per_frame": tc.virtual_texture_uploads_per_frame,
                 })
             });
 
@@ -188,6 +191,10 @@ mod tests {
                 grid_z: 16,
                 cell_size: 1.0,
                 height_scale: 1.0,
+                virtual_texturing: true,
+                virtual_texture_cache_mib: 96,
+                virtual_texture_uploads_per_frame: 12,
+                ..TerrainComponent::default()
             },
             Children::empty(),
         ));
@@ -204,6 +211,11 @@ mod tests {
         save_scene(&world, path.to_str().unwrap()).unwrap();
         let scene = parse_scene(path.to_str().unwrap()).unwrap();
         let entities = scene["entities"].as_array().unwrap();
+        let terrain = entities.iter().find(|e| e["name"] == "Terrain").unwrap();
+        assert_eq!(terrain["terrain"]["virtual_texturing"], true);
+        assert_eq!(terrain["terrain"]["virtual_texture_cache_mib"], 96);
+        assert_eq!(terrain["terrain"]["virtual_texture_uploads_per_frame"], 12);
+        assert!(terrain["terrain"].get("virtual_texture_hits").is_none());
         let water = entities.iter().find(|e| e["name"] == "Water").unwrap();
         assert_eq!(water["parent_local_idx"], 0);
         assert_eq!(water["water"]["preset"], 1);

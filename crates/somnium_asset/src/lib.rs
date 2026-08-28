@@ -10,6 +10,8 @@ pub mod material;
 pub mod preview;
 pub mod residency;
 pub mod scene_file;
+/// Logical terrain source-page addresses used by MORROWIND-AD virtual texturing.
+pub mod virtual_texture;
 /// MORROWIND-T offline HLOD and octahedral-impostor baking.
 pub mod world_bake;
 

@@ -29,6 +29,7 @@ struct ClipmapGenParams {
     hex: u32,
     _pad: u32,
     _pad2: vec2<u32>,
+    virtual_texture: vec4<i32>,
 }
 
 @group(1) @binding(0) var<uniform> clipmap_gen: ClipmapGenParams;
@@ -63,6 +64,7 @@ fn clipmap_generate(@builtin(position) pos: vec4<f32>) -> ClipmapFsOut {
     let extent = size / clipmap_gen.texels_per_m;
     let world_xz = clipmap_gen.center + (logical - vec2<f32>(0.5)) * extent;
     let texel_m = 1.0 / clipmap_gen.texels_per_m;
+    terrain_virtual_texture = clipmap_gen.virtual_texture;
     let packed = terrain_generate_texel(
         clipmap_gen.terrain_index,
         world_xz,

@@ -2035,45 +2035,59 @@ impl SomniumRenderer {
         });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-        for layer in 0..hero {
-            let i = layer as usize;
-            ids.albedo[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.albedo,
-                    layer,
-                    "Terrain Layer Albedo+Height",
-                ),
-            ) as i32;
-            ids.surface[i] = self.add_texture(
-                ctx,
-                layer_view(
-                    &terrain.layer_textures.surface,
-                    layer,
-                    "Terrain Layer Surface",
-                ),
-            ) as i32;
-        }
-        if !hero_bank_only {
-            for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
-                let i = (hero + layer) as usize;
+        // Virtual mode deliberately leaves every legacy layer id at -1. The
+        // 4x4 arrays only keep the struct/fallback shape valid; publishing
+        // them would make live shading sample black placeholders instead of
+        // the mean-colour cold-cache fallback.
+        if terrain.layer_textures.virtual_texture.is_none() {
+            for layer in 0..hero {
+                let i = layer as usize;
                 ids.albedo[i] = self.add_texture(
                     ctx,
                     layer_view(
-                        &terrain.layer_textures.albedo_extra,
+                        &terrain.layer_textures.albedo,
                         layer,
-                        "Terrain Layer Albedo+Height Extra",
+                        "Terrain Layer Albedo+Height",
                     ),
                 ) as i32;
                 ids.surface[i] = self.add_texture(
                     ctx,
                     layer_view(
-                        &terrain.layer_textures.surface_extra,
+                        &terrain.layer_textures.surface,
                         layer,
-                        "Terrain Layer Surface Extra",
+                        "Terrain Layer Surface",
                     ),
                 ) as i32;
             }
+            if !hero_bank_only {
+                for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
+                    let i = (hero + layer) as usize;
+                    ids.albedo[i] = self.add_texture(
+                        ctx,
+                        layer_view(
+                            &terrain.layer_textures.albedo_extra,
+                            layer,
+                            "Terrain Layer Albedo+Height Extra",
+                        ),
+                    ) as i32;
+                    ids.surface[i] = self.add_texture(
+                        ctx,
+                        layer_view(
+                            &terrain.layer_textures.surface_extra,
+                            layer,
+                            "Terrain Layer Surface Extra",
+                        ),
+                    ) as i32;
+                }
+            }
+        }
+        if let Some(gpu) = &terrain.layer_textures.virtual_texture {
+            ids.virtual_texture = [
+                self.add_texture(ctx, gpu.albedo_view.clone()) as i32,
+                self.add_texture(ctx, gpu.surface_view.clone()) as i32,
+                self.add_texture(ctx, gpu.page_table_view.clone()) as i32,
+                gpu.shader_atlas_size(),
+            ];
         }
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
@@ -3185,7 +3199,7 @@ impl SomniumRenderer {
             let Some(terrain) = self.terrains.get(i) else {
                 continue;
             };
-            if !self.clipmaps[i].has_dirty() {
+            if !self.clipmaps[i].has_dirty() && !terrain.has_pending_virtual_texture() {
                 continue;
             }
             work.push((i, terrain.terrain_index));
@@ -3195,6 +3209,19 @@ impl SomniumRenderer {
             for (i, terrain_index) in work {
                 let detail = self.clipmaps[i].take_jobs(true, &mut budget);
                 let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                let mut feedback_jobs = Vec::with_capacity(detail.len() + macro_jobs.len());
+                feedback_jobs.extend_from_slice(&detail);
+                feedback_jobs.extend_from_slice(&macro_jobs);
+                let vt_uploaded = self.terrains.get_mut(i).is_some_and(|terrain| {
+                    terrain.feedback_virtual_texture(&ctx.queue, &feedback_jobs)
+                });
+                let virtual_texture = self
+                    .terrains
+                    .get(i)
+                    .filter(|terrain| terrain.virtual_texture_enabled)
+                    .map_or([-1, -1, -1, 0], |terrain| {
+                        terrain.texture_ids.virtual_texture
+                    });
                 if let Some(terrain) = self.terrains.get(i) {
                     let model = self
                         .terrain_queue
@@ -3217,6 +3244,7 @@ impl SomniumRenderer {
                     terrain_index,
                     &detail,
                     true,
+                    virtual_texture,
                 );
                 self.clipmap_pass.record(
                     &ctx.device,
@@ -3227,7 +3255,14 @@ impl SomniumRenderer {
                     terrain_index,
                     &macro_jobs,
                     false,
+                    virtual_texture,
                 );
+                // A later feedback batch can replace mean/ancestor samples
+                // baked by an earlier batch. Recompose after the current jobs
+                // have rendered so page arrival cannot leave stale texels.
+                if vt_uploaded {
+                    self.clipmaps[i].invalidate();
+                }
             }
         }
         self.profiler.end(&mut encoder);

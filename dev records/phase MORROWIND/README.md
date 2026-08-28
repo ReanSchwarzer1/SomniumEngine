@@ -19,6 +19,7 @@ folder has a generator and a gate in it before it has a single image.
 | `MORROWIND-S.md` | world partition, cell jobs and durable actor ownership | — |
 | `MORROWIND-T.md` | HLOD/impostor cook and CPU floating-origin decision | — |
 | `MORROWIND-AB.md` | portable SDF-backed DDGI and generated Details | — |
+| `MORROWIND-AD.md` | terrain source-page streaming and runtime virtual texture | — |
 | `golden/` | a windowed GPU capture, once one has been taken | see below |
 
 ## The rule this folder runs on

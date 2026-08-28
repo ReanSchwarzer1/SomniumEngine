@@ -521,6 +521,22 @@ pub struct TerrainComponent {
     pub cell_size: f32,
     /// World-space multiplier applied to raw heightmap values.
     pub height_scale: f32,
+    /// Stream material source pages into a bounded cache before composing the runtime clipmap.
+    pub virtual_texturing: bool,
+    /// GPU budget for paired albedo/surface source pages, in MiB.
+    pub virtual_texture_cache_mib: u32,
+    /// Maximum source pages uploaded during one frame.
+    pub virtual_texture_uploads_per_frame: u32,
+    /// Source pages currently mapped by the runtime cache.
+    pub virtual_texture_resident_pages: u32,
+    /// Requested pages still waiting for an upload slot.
+    pub virtual_texture_pending_pages: u32,
+    /// Resident-page feedback hits since the cache was created.
+    pub virtual_texture_hits: u32,
+    /// Non-resident page requests since the cache was created.
+    pub virtual_texture_misses: u32,
+    /// Physical slots reused since the cache was created.
+    pub virtual_texture_evictions: u32,
 }
 impl somnium_ecs::Component for TerrainComponent {}
 

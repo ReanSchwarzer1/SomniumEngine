@@ -1224,6 +1224,7 @@ impl GameApp for HelloGame {
                             grid_z: desc.grid_size[1],
                             cell_size: desc.cell_size,
                             height_scale: desc.height_scale,
+                            ..somnium_core::TerrainComponent::default()
                         },
                         // Phase 17E: painted foliage only submits when the
                         // terrain entity carries an enabled FoliageComponent.

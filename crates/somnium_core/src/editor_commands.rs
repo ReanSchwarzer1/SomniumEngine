@@ -2598,6 +2598,7 @@ mod landscape_tests {
                 grid_z: 16,
                 cell_size: 1.0,
                 height_scale: 1.0,
+                ..TerrainComponent::default()
             }),
             world_partition: Some(WorldPartitionComponent {
                 load_radius: 320.0,

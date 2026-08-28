@@ -2,10 +2,13 @@
 
 > **Last updated:** 2026-08-28
 > **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
-> MORROWIND-AB now supplies the portable GI tier: a ray-query-free,
-> SDF-traced 4×4×4 DDGI volume with budgeted temporal SH updates. Its authored
-> controls are generated from `PostProcessComponent`; ReSTIR GI remains the
-> higher-quality tier and wins when both are requested. MORROWIND-AD is next.
+> MORROWIND-AB supplies the portable GI tier: a ray-query-free, SDF-traced
+> 4×4×4 DDGI volume with budgeted temporal SH updates. MORROWIND-AD now streams
+> the terrain's existing BC7 mip chains as paired 128² source pages into an
+> exact 64 MiB physical atlas. Dirty runtime-clipmap rectangles are the feedback
+> surface; a deterministic LRU and per-frame upload throttle feed the existing
+> terrain composition clipmap without changing the frozen 2,032-byte material
+> ABI. Creation-time state and live cache diagnostics are generated in Details.
 >
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and opt-in completeness gates;
@@ -409,6 +412,16 @@
 >   exist for Coastal-ground and Island. CSM remains the measured default on
 >   those two small maps; Virtual rendered 21 and 45 pages respectively and is
 >   retained as an authored quality/scaling choice.
+>   **MORROWIND-AD completed terrain virtual texturing.** VT-created terrains
+>   keep the 32-layer authored material but do not allocate the two resident
+>   source arrays. A toroidal clipmap-feedback phase identifies splat layers for
+>   each dirty rectangle, requests coarse parents before the target mip, and
+>   streams paired BC7 pages through a deterministic 2,048-slot LRU. The
+>   64×32-page physical atlases total exactly 64 MiB; read failures roll their
+>   reservations back, pending work drains without new camera dirtiness, and
+>   each successful batch invalidates the runtime composition clipmap so a
+>   fallback cannot remain baked. The creation-time switch, fixed allocation,
+>   upload throttle and live counters are visible in generated Terrain Details.
 >   **MORROWIND-T closed Track 4 with HLOD, impostors and a floating origin.**
 >   The asset cook can merge per-cell proxy geometry, transform normals,
 >   enforce a triangle budget, merge representative material colour and retain
