@@ -79,6 +79,9 @@ dev records/phase CONTROL/CONTROL-A_baseline/*
 dev records/phase MORROWIND/*
 !dev records/phase MORROWIND/README.md
 !dev records/phase MORROWIND/MORROWIND-*.md
+# Sub-phase measurements are source evidence; screenshots stay local unless
+# promoted into the reviewed golden manifest below.
+!dev records/phase MORROWIND/MORROWIND-AB_*.somtime
 !dev records/phase MORROWIND/golden/
 dev records/phase MORROWIND/golden/*
 !dev records/phase MORROWIND/golden/manifest.json

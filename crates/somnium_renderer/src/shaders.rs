@@ -102,6 +102,7 @@ impl Shaders {
             "clouds_noise.wgsl",
             "cull.wgsl",
             "dof.wgsl",
+            "ddgi.wgsl",
             "fsr_sanitize.wgsl",
             "fsr_untonemap.wgsl",
             "fxaa.wgsl",

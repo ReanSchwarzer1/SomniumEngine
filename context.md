@@ -1,9 +1,11 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-23
-> **Current phase:** Phase CONTROL (Northlight) — **COMPLETE 2026-08-23.
-> CONTROL-A through CONTROL-O are in tree; every track is finished, including
-> CONTROL-O's declared stretch.**
+> **Last updated:** 2026-08-28
+> **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
+> MORROWIND-AB now supplies the portable GI tier: a ray-query-free,
+> SDF-traced 4×4×4 DDGI volume with budgeted temporal SH updates. Its authored
+> controls are generated from `PostProcessComponent`; ReSTIR GI remains the
+> higher-quality tier and wins when both are requested. MORROWIND-AD is next.
 >
 > CONTROL-A has a regenerable source audit, exact two-width surface captures,
 > a measured terrain-thumbnail baseline, and opt-in completeness gates;

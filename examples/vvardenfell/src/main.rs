@@ -63,7 +63,9 @@ use somnium_asset::cook::{
 };
 use somnium_asset::residency::{AssetHandle, AssetRequest, ResidencyConfig, ResidencyManager};
 use somnium_core::world_partition::{ActorRecord, CellCoord, PartitionStore, WorldPartition};
-use somnium_core::{Engine, EngineConfig, EngineContext, GameApp, GameUiFrame};
+use somnium_core::{
+    Engine, EngineConfig, EngineContext, GameApp, GameUiFrame, Name, PostProcessComponent,
+};
 use somnium_jobs::{JobPriority, JobSystem};
 use somnium_ui::graph::{Graph, catalogues, compile_animation, material};
 use somnium_ui::runtime::canvas::SafeArea;
@@ -120,6 +122,20 @@ struct Vvardenfell {
 
 impl GameApp for Vvardenfell {
     fn on_init(&mut self, ctx: &mut EngineContext) {
+        // MORROWIND-AB. The game selects the portable GI tier through the
+        // public reflected scene component, exactly as an editor-authored
+        // Post Processing entity does. No renderer/pass access is required.
+        ctx.world.spawn((
+            Name::new("Portable DDGI"),
+            PostProcessComponent {
+                ddgi_enabled: true,
+                ddgi_probe_spacing_m: 2.5,
+                ddgi_update_budget: 8,
+                ..PostProcessComponent::default()
+            },
+        ));
+        println!("  portable DDGI -> 4x4x4 probes, 8 updates/frame");
+
         // A real safe area comes from the platform. Nothing in the tree reports
         // one yet, so the slice hard-codes a phone-shaped inset: the value is a
         // placeholder, the *path* is not, and a HUD that has never been laid

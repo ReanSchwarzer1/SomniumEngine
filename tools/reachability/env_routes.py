@@ -44,7 +44,9 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_MESH_SDF": ("schema", "somnium.PostProcess.mesh_sdf"),
     "SOMNIUM_MOTION_BLUR": ("schema", "somnium.PostProcess.motion_blur_enabled"),
     "SOMNIUM_PATH_TRACER": ("schema", "somnium.PostProcess.path_tracer"),
-    "SOMNIUM_PROBES": ("schema", "somnium.PostProcess.probes"),
+    # MORROWIND-AB preserves the legacy process switch but routes it to the
+    # single visible DDGI control; the old `probes` field is load-only.
+    "SOMNIUM_PROBES": ("schema", "somnium.PostProcess.ddgi_enabled"),
     "SOMNIUM_RESTIR": ("schema", "somnium.PostProcess.restir_enabled"),
     "SOMNIUM_RESTIR_GI": ("schema", "somnium.PostProcess.restir_gi_enabled"),
     "SOMNIUM_RT_REFLECT": ("schema", "somnium.PostProcess.rt_reflect_enabled"),

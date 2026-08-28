@@ -605,8 +605,22 @@ fn post_process_schema() -> ComponentSchema {
             cache_cell_size { min: 0.01, step: 0.1, unit: "m", group: "Global Illumination" },
             specular_gi { group: "Global Illumination" }, spec_roughness { min: 0.0, max: 1.0, step: 0.01, group: "Global Illumination" },
             path_tracer { group: "Path Tracing" }, path_bounces { min: 1, max: 8, group: "Path Tracing" },
-            mesh_sdf { group: "Global Illumination" }, probes { group: "Global Illumination" },
-            probe_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
+            mesh_sdf { group: "Global Illumination" },
+            // Pre-AB compatibility fields remain loadable/saveable but are no
+            // longer a second, ambiguous Details route to the same feature.
+            probes { flags: FieldFlags::SERIALIZE.union(FieldFlags::SCRIPT_READ) },
+            probe_intensity { min: 0.0, step: 0.01,
+                flags: FieldFlags::SERIALIZE.union(FieldFlags::SCRIPT_READ) },
+            ddgi_enabled { group: "Global Illumination", display_name: "Portable DDGI",
+                doc: "SDF-backed dynamic diffuse GI that does not require ray query." },
+            ddgi_intensity { min: 0.0, step: 0.01, group: "Global Illumination", display_name: "DDGI Intensity",
+                doc: "Strength of the portable diffuse probe contribution." },
+            ddgi_probe_spacing_m { min: 0.25, max: 64.0, step: 0.25, unit: "m", group: "Global Illumination", display_name: "DDGI Probe Spacing",
+                doc: "World-space distance between neighbouring probes." },
+            ddgi_update_budget { min: 1, max: 64, group: "Global Illumination", display_name: "DDGI Update Budget",
+                doc: "Number of the 64 probes refreshed per frame." },
+            ddgi_hysteresis { min: 0.0, max: 0.99, step: 0.01, group: "Global Illumination", display_name: "DDGI Hysteresis",
+                doc: "Previous radiance retained per update; higher is steadier but slower." },
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
             fsr_enabled { group: "Anti-aliasing" }, fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
@@ -1169,6 +1183,25 @@ mod tests {
             LightShadowTechnique::Virtual,
             "the original enum encoding remains loadable"
         );
+    }
+
+    #[test]
+    fn portable_ddgi_is_exposed_by_the_generated_details_schema() {
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.PostProcess").unwrap();
+        let enabled = schema.field_by_name("ddgi_enabled").unwrap();
+        assert_eq!(enabled.ty, FieldType::Bool);
+        assert_eq!(enabled.group, Some("Global Illumination"));
+        assert_eq!(enabled.display_name, Some("Portable DDGI"));
+
+        let spacing = schema.field_by_name("ddgi_probe_spacing_m").unwrap();
+        assert_eq!(spacing.min, Some(0.25));
+        assert_eq!(spacing.max, Some(64.0));
+        assert_eq!(spacing.unit, Some("m"));
+
+        let budget = schema.field_by_name("ddgi_update_budget").unwrap();
+        assert_eq!(budget.min, Some(1.0));
+        assert_eq!(budget.max, Some(64.0));
     }
 
     #[test]

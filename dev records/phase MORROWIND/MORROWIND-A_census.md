@@ -18,10 +18,10 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 57,843 | +7,637 | 31.4% | 387 | +59 | 86 | 52 |
-| `somnium_ui` | 57,204 | +29,674 | 31.1% | 579 | +364 | 98 | 2 |
-| `somnium_core` | 31,468 | +12,248 | 17.1% | 356 | +139 | 42 | 0 |
-| `somnium_asset` | 6,183 | +4,544 | 3.4% | 47 | +41 | 11 | 0 |
+| `somnium_renderer` | 58,380 | +8,174 | 31.6% | 392 | +64 | 87 | 53 |
+| `somnium_ui` | 57,203 | +29,673 | 31.0% | 579 | +364 | 98 | 2 |
+| `somnium_core` | 31,567 | +12,347 | 17.1% | 358 | +141 | 42 | 0 |
+| `somnium_asset` | 6,183 | +4,544 | 3.3% | 47 | +41 | 11 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.8% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,878 | +63 | 2.6% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,754 | +297 | 2.6% | 59 | +1 | 9 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **184,102** | +70,210 | | **1825** | +880 | | |
+| **Total** | **184,737** | +70,845 | | **1832** | +887 | | |
 
-The top three crates are **79.6%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **79.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,874 lines** (+228 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1131 | 237 | 104 | 8 | 10 | 173 | 95 | **1758** |
-| `somnium_renderer` | 588 | 143 | 8 | 1 | 2 | 114 | 83 | **939** |
+| `somnium_renderer` | 599 | 146 | 8 | 1 | 2 | 115 | 84 | **955** |
 | `somnium_core` | 300 | 103 | 19 | 3 | 3 | 58 | 39 | **525** |
 | `somnium_script` | 125 | 34 | 9 | 3 | 3 | 18 | 11 | **203** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
@@ -68,13 +68,13 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **52 WGSL files, 13,664 lines** (+4 files, +1,585 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **54 files, 14,133 lines**.
+`somnium_renderer` ships **53 WGSL files, 13,732 lines** (+5 files, +1,653 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **55 files, 14,201 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
 | Shader | Lines |
 |---|---:|
-| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,067 |
+| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,079 |
 | `crates/somnium_renderer/src/shaders/water.wgsl` | 1,171 |
 | `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,081 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
@@ -82,8 +82,8 @@ Ten largest, because these are the files a permutation system has to survive:
 | `crates/somnium_renderer/src/shaders/atmosphere.wgsl` | 462 |
 | `crates/somnium_renderer/src/shaders/taa.wgsl` | 415 |
 | `crates/somnium_renderer/src/shaders/water_reflection.wgsl` | 397 |
-| `crates/somnium_renderer/src/shaders/lighting_extra.wgsl` | 379 |
 | `crates/somnium_renderer/src/shaders/water_spectrum.wgsl` | 379 |
+| `crates/somnium_renderer/src/shaders/clipmap_shade.wgsl` | 362 |
 
 ## 4. What is absent, by grep (plan §4.6)
 

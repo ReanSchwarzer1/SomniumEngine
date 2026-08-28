@@ -5634,8 +5634,26 @@ impl<G: GameApp> Engine<G> {
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
             r.restir_pass.enabled = pp.restir_enabled && !path_active;
-            r.restir_gi_pass.enabled =
+            let restir_gi_active =
                 pp.restir_gi_enabled && r.restir_gi_pass.supported() && !path_active;
+            r.restir_gi_pass.enabled = restir_gi_active;
+            // `probes` is the pre-AB scene field. Treat it as a compatibility
+            // request for the portable tier; ReSTIR remains the explicit
+            // higher-quality winner if both old/new fields are authored.
+            let ddgi_active = (pp.ddgi_enabled || pp.probes) && !restir_gi_active && !path_active;
+            r.ddgi_pass.configure(
+                ddgi_active,
+                somnium_renderer::pass::ddgi::DdgiConfig {
+                    spacing: pp.ddgi_probe_spacing_m,
+                    update_budget: pp.ddgi_update_budget,
+                    hysteresis: pp.ddgi_hysteresis,
+                    intensity: if pp.ddgi_enabled {
+                        pp.ddgi_intensity
+                    } else {
+                        pp.probe_intensity
+                    },
+                },
+            );
             r.water_reflection_pass.enabled =
                 pp.rt_reflect_enabled && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
@@ -5669,23 +5687,26 @@ impl<G: GameApp> Engine<G> {
                     // wastes work and risks cross-mode history contamination.
                     flags = FLAG_PATH;
                 } else {
-                    if pp.world_cache && rt {
+                    if pp.world_cache && rt && !ddgi_active {
                         flags |= FLAG_CACHE;
                     }
                     if pp.specular_gi && rt {
                         flags |= FLAG_SPECULAR;
                     }
-                    if pp.mesh_sdf && !pp.world_cache {
+                    if ddgi_active || (pp.mesh_sdf && !pp.world_cache) {
                         flags |= FLAG_SDF;
                     }
-                    if pp.probes && rt {
+                    if ddgi_active {
                         flags |= FLAG_PROBES;
                     }
                 }
                 r.lighting_extra_pass.flags = flags;
                 r.lighting_extra_pass.intensity = pp.cache_intensity;
-                r.lighting_extra_pass.probe_intensity = pp.probe_intensity;
-                r.lighting_extra_pass.cell_size = pp.cache_cell_size;
+                r.lighting_extra_pass.cell_size = if ddgi_active {
+                    pp.ddgi_probe_spacing_m
+                } else {
+                    pp.cache_cell_size
+                };
                 r.lighting_extra_pass.spec_rough = pp.spec_roughness;
                 r.lighting_extra_pass.path_bounces = pp.path_bounces;
             }

@@ -145,6 +145,8 @@ pub struct SomniumRenderer {
     pub restir_gi_pass: crate::pass::restir_gi::RestirGiPass,
     /// Phase 24M–Q: world cache, scene specular, path tracer, SDF, probes.
     pub lighting_extra_pass: crate::pass::lighting_extra::LightingExtraPass,
+    /// MORROWIND-AB: portable SDF-backed diffuse probe volume.
+    pub ddgi_pass: crate::pass::ddgi::DdgiPass,
     /// Phase VV: ray-traced water reflections (Halcyon).
     pub water_reflection_pass: crate::pass::water_reflection::WaterReflectionPass,
     /// Phase 24AC: contrast adaptive sharpening, the last pass of the frame.
@@ -545,6 +547,7 @@ impl SomniumRenderer {
             ctx.config.width,
             ctx.config.height,
         );
+        let ddgi_pass = crate::pass::ddgi::DdgiPass::new(&ctx.device, &shaders);
         let clipmap_pass = crate::pass::terrain_clipmap::TerrainClipmapPass::new(
             &ctx.device,
             &shaders,
@@ -700,7 +703,7 @@ impl SomniumRenderer {
             &volumetric_pass.sampler,
             lighting_extra_pass.aux_view(),
             lighting_extra_pass.volume_view(),
-            lighting_extra_pass.sh_buffer(),
+            ddgi_pass.sh_buffer(),
             &cloud_pass.shadow_view,
             &cloud_pass.shadow_params,
             &decal_grid,
@@ -803,6 +806,7 @@ impl SomniumRenderer {
             restir_pass,
             restir_gi_pass,
             lighting_extra_pass,
+            ddgi_pass,
             water_reflection_pass,
             velocity_pass,
             motion_blur_pass: crate::pass::motion_blur::MotionBlurPass::new(
@@ -2989,6 +2993,16 @@ impl SomniumRenderer {
                         local_min: min,
                         local_max: max,
                         vertex_offset: cmd.vertex_offset,
+                        base_color: self.materials_pool.get(cmd.material_id).map_or(
+                            [0.5; 3],
+                            |material| {
+                                [
+                                    material.base_color[0],
+                                    material.base_color[1],
+                                    material.base_color[2],
+                                ]
+                            },
+                        ),
                         brick: self.geometry.mesh_sdf(cmd.vertex_offset),
                     })
                 })
@@ -3002,6 +3016,11 @@ impl SomniumRenderer {
                 self.traced_scene_revision()
             } else {
                 0
+            };
+            let sdf_scene_revision = if self.ddgi_pass.enabled() {
+                self.sdf_scene_revision()
+            } else {
+                traced_scene_revision
             };
             self.lighting_extra_pass.record(
                 &ctx.device,
@@ -3020,6 +3039,7 @@ impl SomniumRenderer {
                 self.view_matrix,
                 self.proj_matrix,
                 traced_scene_revision,
+                sdf_scene_revision,
                 self.camera_pos,
                 self.render_width,
                 self.render_height,
@@ -3027,8 +3047,33 @@ impl SomniumRenderer {
             );
             self.profiler.end(&mut encoder);
             self.profiler.cpu_end();
+
+            // MORROWIND-AB: this pass is deliberately outside the ray-query
+            // guard. It consumes the portable software SDF populated above.
+            self.profiler.begin(&mut encoder, "DDGI");
+            self.ddgi_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                self.lighting_extra_pass.volume_view(),
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                self.camera_pos,
+                self.light_direction,
+                self.light_color,
+                self.lighting_extra_pass
+                    .sdf_scene_revision()
+                    .unwrap_or(sdf_scene_revision),
+            );
+            self.profiler.end(&mut encoder);
+
+            let mut lighting_params = self.lighting_extra_pass.shading_params();
+            // The existing SH gather interprets z/w as cell size and
+            // half-grid extent. Publish the actual DDGI lattice rather than
+            // the 64^3 SDF volume's dimensions.
+            self.ddgi_pass.publish_shading_lattice(&mut lighting_params);
             self.shading_pass
-                .set_lighting_extra(&ctx.queue, self.lighting_extra_pass.shading_params());
+                .set_lighting_extra(&ctx.queue, lighting_params);
         }
 
         // Outside the ray-tracing guards on purpose: a pass that stopped running
@@ -4365,6 +4410,31 @@ impl SomniumRenderer {
             mix(&mut hash, u64::from(terrain.parallax_scale.to_bits()));
             mix(&mut hash, u64::from(terrain.hex_tiling));
             mix(&mut hash, u64::from(terrain.height_blend));
+        }
+        hash
+    }
+
+    /// Revision of geometry/material inputs that require rebuilding the SDF.
+    /// Lighting is deliberately absent: DDGI handles light changes in probe
+    /// history, while rebuilding 64³ geometry for a moving sun is pure waste.
+    /// The SDF pass waits for a changed revision to settle for one frame, so a
+    /// continuous animation does not force a 64³ CPU rebuild every frame.
+    fn sdf_scene_revision(&self) -> u64 {
+        fn mix(hash: &mut u64, value: u64) {
+            *hash ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        mix(&mut hash, self.virtual_shadow_caster_content_revision);
+        mix(&mut hash, self.materials_pool.revision());
+        for cmd in &self.draw_queue {
+            mix(&mut hash, u64::from(cmd.vertex_offset));
+            mix(&mut hash, u64::from(cmd.index_offset));
+            mix(&mut hash, u64::from(cmd.index_count));
+            mix(&mut hash, u64::from(cmd.material_id));
+            for value in cmd.transform.to_cols_array() {
+                mix(&mut hash, u64::from(value.to_bits()));
+            }
         }
         hash
     }

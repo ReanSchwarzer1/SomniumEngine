@@ -520,6 +520,18 @@ fn sample_sh_probes(pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return mix(y0, y1, f.z);
 }
 
+fn sh_probe_volume_weight(pos: vec3<f32>) -> f32 {
+    let uvw = world_volume_uvw(pos);
+    let g = uvw * 4.0 - 0.5;
+    // Coverage is horizontal. Terrain height crossing a narrow Y extent must
+    // not draw contour rings; Y still selects/clamps the vertical probes.
+    let edge = min(min(g.x, g.z), min(3.0 - g.x, 3.0 - g.z));
+    // Fade through the outer probe cell instead of clamping its lighting over
+    // the whole world. Clamped edge probes produced visible horizontal bands
+    // on Island terrain outside the 4x4x4 camera-relative volume.
+    return smoothstep(-0.25, 0.5, edge);
+}
+
 /// Image-based ambient: diffuse irradiance + split-sum specular.
 /// Phase 24L: `traced_diffuse` replaces the diffuse half when the GI pass has a
 /// result for this pixel. Only the diffuse half — the specular lobe still comes
@@ -1806,12 +1818,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (extra_flags & 16u) != 0u {
             let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
             let gather_n = normalize(mix(surface.normal, surface.bent_normal, 0.75));
-            // Probes replace the environment diffuse lobe; adding them on top
-            // evaluates the same sky twice and is the white veil seen when the
-            // checkbox is enabled. Specular IBL remains cubemap-driven.
+            // Probe misses carry no environment energy, so this is only the
+            // bounced diffuse term. Base diffuse/specular IBL remains intact.
             let probe_diffuse = max(sample_sh_probes(hit_point, gather_n), vec3<f32>(0.0))
                 * surface.albedo * kd * surface.occlusion;
-            ambient = (probe_diffuse + evaluate_ibl_specular(surface)) * light.ibl_intensity;
+            ambient += probe_diffuse * light.ibl_intensity
+                * sh_probe_volume_weight(hit_point);
         } else if (extra_flags & 1u) != 0u {
             let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
             ambient += vol_sample.rgb * surface.albedo * kd * lighting_extra.y * surface.occlusion;

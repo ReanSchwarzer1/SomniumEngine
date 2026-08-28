@@ -1068,6 +1068,16 @@ pub struct PostProcessComponent {
     pub probes: bool,
     /// Probe contribution; scales the SH bake.
     pub probe_intensity: f32,
+    /// MORROWIND-AB portable SDF-backed dynamic diffuse GI.
+    pub ddgi_enabled: bool,
+    /// Scene-wide DDGI diffuse contribution.
+    pub ddgi_intensity: f32,
+    /// Distance between neighbouring DDGI probes, in metres.
+    pub ddgi_probe_spacing_m: f32,
+    /// Probe records refreshed per frame (the volume contains 64).
+    pub ddgi_update_budget: u32,
+    /// Fraction of the previous probe value retained during an update.
+    pub ddgi_hysteresis: f32,
     /// Analytic UV gradients in vis-buffer shading (Phase 25N). Default on.
     pub analytic_grad: bool,
     /// Light-shaft shadow contrast. 0 is neutral; 1 (or greater) is full.
@@ -1179,8 +1189,15 @@ impl Default for PostProcessComponent {
             // Cache RGB and SDF distance share one volume whose alpha has
             // incompatible meanings. Cache wins if both audit env vars are set.
             mesh_sdf: !world_cache && std::env::var("SOMNIUM_MESH_SDF").as_deref() == Ok("1"),
-            probes: std::env::var("SOMNIUM_PROBES").as_deref() == Ok("1"),
+            // MORROWIND-AB keeps the old audit switch but routes it to the
+            // authored DDGI field. `probes` remains deserialize-only legacy.
+            probes: false,
             probe_intensity: 1.0,
+            ddgi_enabled: std::env::var("SOMNIUM_PROBES").as_deref() == Ok("1"),
+            ddgi_intensity: 1.0,
+            ddgi_probe_spacing_m: 2.0,
+            ddgi_update_budget: 8,
+            ddgi_hysteresis: 0.95,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
             fsr_enabled,

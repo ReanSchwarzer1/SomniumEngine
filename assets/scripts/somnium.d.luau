@@ -218,8 +218,13 @@ export type SomniumPostProcess = {
 	path_tracer: boolean,
 	path_bounces: number,
 	mesh_sdf: boolean,
-	probes: boolean,
-	probe_intensity: number,
+	probes: boolean, -- engine-owned; reading only
+	probe_intensity: number, -- engine-owned; reading only
+	ddgi_enabled: boolean,
+	ddgi_intensity: number,
+	ddgi_probe_spacing_m: number,
+	ddgi_update_budget: number,
+	ddgi_hysteresis: number,
 	analytic_grad: boolean,
 	shaft_intensity: number,
 	fsr_enabled: boolean,

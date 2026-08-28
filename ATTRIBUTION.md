@@ -2451,3 +2451,19 @@ No source code was copied or translated.
 directional clipmap responsibilities. It supplied no code, identifiers,
 constants, layouts or comments. A fresh search on 2026-08-25 again found no
 mature production Rust/wgpu VSM implementation suitable for adaptation.
+
+### 13H.25 Portable diffuse probe GI, MORROWIND-AB
+
+*Architecture-only read; proprietary.* The phase plan named Flax's dynamic
+diffuse GI and global surface atlas only to frame the choice between a probe
+volume and a baked lightmapper. MORROWIND-A's licence audit classified that
+source as proprietary. It supplied no code, identifiers, constants, layouts,
+shader equations or comments to Somnium.
+
+Somnium's implementation is independent Rust/WGSL over engine-owned pieces:
+the existing camera-relative software SDF, a fixed 4×4×4 L2 spherical-harmonic
+buffer and the generated component schema. Fibonacci sphere sampling, signed
+distance-field sphere tracing and temporal exponential blending are standard
+published rendering techniques. The pass deliberately has no ray-query
+extension or acceleration-structure binding, and ReSTIR GI remains a separate
+hardware tier.

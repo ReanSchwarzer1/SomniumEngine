@@ -6,6 +6,7 @@ pub mod census;
 pub mod classify;
 pub mod clouds;
 pub mod cull;
+pub mod ddgi;
 pub mod decal;
 pub mod dof;
 pub mod fsr;

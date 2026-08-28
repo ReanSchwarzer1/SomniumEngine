@@ -20,9 +20,11 @@ It adds a 64³ clipmap splat of this frame's GI so shading can pick up extra bou
 
 **Path Tracer** replaces the image with an accumulating 1-spp reference. **Bounces** is 1–8. History resets if the camera moves more than a few centimetres. Default off (`SOMNIUM_PATH_TRACER=1`). Needs ray query.
 
-## Mesh SDF / probes (24P / 24Q)
+## Mesh SDF / portable DDGI (24P / MORROWIND-AB)
 
-**Mesh SDF** cone-traces a 64³ clipmap. Static meshes bake a packed 16³ triangle SDF at upload (AABB fallback for voxels). Do not combine it with World Cache — they share the volume's alpha. Create a cube (it spawns in front of the camera) and leave World Cache off; contact darkens the ground around the mesh. **Probes** bakes a 4×4×4 SH L2 grid from the environment (and the world cache when that is on); **Probe Amt** scales the bake. Scrub it on a shadowed face — sunlight drowns the mix. Both default off (`SOMNIUM_MESH_SDF=1`, `SOMNIUM_PROBES=1`).
+**Mesh SDF** cone-traces a 64³ clipmap. Static meshes bake a packed 16³ triangle SDF at upload (AABB fallback for voxels). Do not combine it with World Cache — they share the volume's alpha. Create a cube (it spawns in front of the camera) and leave World Cache off; contact darkens the ground around the mesh.
+
+**Portable DDGI** traces that software SDF from a camera-relative 4×4×4 probe volume, so it works without ray query. **DDGI Intensity** controls the diffuse contribution; **Probe Spacing** is metres between probes; **Update Budget** is how many of the 64 probes refresh per frame; **Hysteresis** trades responsiveness for stability. It defaults off. ReSTIR GI wins if both GI tiers are checked, and the path tracer disables both. The old `SOMNIUM_PROBES=1` capture switch maps to DDGI for compatibility but is not a second authored control.
 
 ## Area lights (24R)
 

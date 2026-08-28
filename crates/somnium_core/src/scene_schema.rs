@@ -1137,6 +1137,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ddgi_settings_survive_a_scene_round_trip() {
+        let registry = component_registry();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("DDGI Look"),
+            Transform::default(),
+            crate::PostProcessComponent {
+                ddgi_enabled: true,
+                ddgi_intensity: 1.75,
+                ddgi_probe_spacing_m: 3.5,
+                ddgi_update_budget: 16,
+                ddgi_hysteresis: 0.8,
+                ..crate::PostProcessComponent::default()
+            },
+        ));
+        let (loaded, report) = round_trip(&mut world, &registry);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let settings = loaded
+            .get::<crate::PostProcessComponent>(find(&loaded, "DDGI Look"))
+            .unwrap();
+        assert!(settings.ddgi_enabled);
+        assert_eq!(settings.ddgi_intensity, 1.75);
+        assert_eq!(settings.ddgi_probe_spacing_m, 3.5);
+        assert_eq!(settings.ddgi_update_budget, 16);
+        assert_eq!(settings.ddgi_hysteresis, 0.8);
+    }
+
     /// A field that did not exist when the file was written must load as an
     /// empty curve rather than failing the entity.
     #[test]
