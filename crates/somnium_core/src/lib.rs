@@ -966,8 +966,23 @@ pub struct PostProcessComponent {
     pub dof_enabled: bool,
     /// Camera-space focus distance in metres.
     pub dof_focus_distance: f32,
-    /// Temporal anti-aliasing (Phase 24F).
-    pub taa_enabled: bool,
+    /// Which anti-aliasing runs (MORROWIND-AC).
+    ///
+    /// One authored value replacing `fxaa_enabled` / `taa_enabled` /
+    /// `fsr_enabled`, which described eight states of which five were
+    /// reachable. See [`AntiAliasing`].
+    pub aa: AntiAliasing,
+    /// SMAA quality preset. Only read when [`Self::aa`] uses SMAA.
+    pub smaa_preset: SmaaPreset,
+    /// Order-independent transparency (MORROWIND-AC).
+    ///
+    /// Off by default. The sorted path is correct for separated panes and
+    /// wrong only where two blended surfaces of the same object intersect;
+    /// weighted-blended is right there and approximate everywhere else, so this
+    /// is an authored trade rather than a strict upgrade. Turning it on changes
+    /// what an existing scene draws, which `phase_MORROWIND.md` §3 does not
+    /// allow a sub-phase to do silently.
+    pub oit_enabled: bool,
     /// Ray-traced direct lighting (Phase 24K).
     ///
     /// Only has an effect where the device granted ray query; the renderer
@@ -1043,12 +1058,6 @@ pub struct PostProcessComponent {
     pub ca_enabled: bool,
     /// Chromatic-aberration offset (UV units at the screen edge) when enabled.
     pub ca_strength: f32,
-    /// Whether FXAA anti-aliasing is applied (Phase 15A2).
-    ///
-    /// Unlike the stylistic effects above this defaults **on** — it is an image
-    /// quality feature, and the visibility-buffer pipeline has no MSAA, so
-    /// edges are otherwise hard-aliased.
-    pub fxaa_enabled: bool,
     /// Percentage-closer soft shadows in the shading pass. Default on.
     ///
     /// When ray-traced direct lighting has a result for the pixel, PCSS is
@@ -1098,18 +1107,47 @@ pub struct PostProcessComponent {
     pub analytic_grad: bool,
     /// Light-shaft shadow contrast. 0 is neutral; 1 (or greater) is full.
     pub shaft_intensity: f32,
-    /// AMD FSR 3 temporal reconstruct to the window. Default on; `SOMNIUM_FSR=0`.
-    ///
-    /// Replaces Somnium TAA and the bilinear present blit while enabled. RCAS
-    /// sharpness lives in `fsr_sharpness`; Somnium CAS stays off on this path.
-    pub fsr_enabled: bool,
     /// FSR RCAS sharpness, 0..=1. Default 0.8.
     pub fsr_sharpness: f32,
 }
 
 impl Default for PostProcessComponent {
     fn default() -> Self {
-        let fsr_enabled = std::env::var("SOMNIUM_FSR").as_deref() != Ok("0");
+        // `SOMNIUM_FSR=0` used to clear one of three booleans and leave the
+        // other two to a precedence chain. It now selects the next rung down
+        // the ladder, which is what a user turning FSR off actually wants.
+        //
+        // `SOMNIUM_AA` names a rung outright, which `SOMNIUM_FSR` cannot: it is
+        // the Seam 4 override of the one authored value, and it exists because
+        // an A/B across six modes from a timing harness must not require six
+        // clicks in Details. It wins over `SOMNIUM_FSR` when both are set,
+        // because it is the more specific statement.
+        let aa = match std::env::var("SOMNIUM_AA")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "none" => AntiAliasing::Off,
+            "fxaa" => AntiAliasing::Fxaa,
+            "smaa" | "smaa1x" => AntiAliasing::Smaa1x,
+            "smaa_t2x" | "smaat2x" | "t2x" => AntiAliasing::SmaaT2x,
+            "taa" => AntiAliasing::Taa,
+            "fsr" => AntiAliasing::Fsr,
+            _ if std::env::var("SOMNIUM_FSR").as_deref() == Ok("0") => AntiAliasing::Taa,
+            _ => AntiAliasing::Fsr,
+        };
+        let smaa_preset = match std::env::var("SOMNIUM_SMAA_PRESET")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "low" => SmaaPreset::Low,
+            "medium" => SmaaPreset::Medium,
+            "high" => SmaaPreset::High,
+            _ => SmaaPreset::Ultra,
+        };
         let world_cache = std::env::var("SOMNIUM_WORLD_CACHE").as_deref() == Ok("1");
         Self {
             ibl_intensity: 1.0,
@@ -1154,7 +1192,8 @@ impl Default for PostProcessComponent {
             rt_refract_enabled: false,
             // FSR already owns RCAS. Keep the authored checkboxes truthful:
             // two mutually-exclusive sharpeners must not both start checked.
-            cas_enabled: !fsr_enabled && std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
+            cas_enabled: aa != AntiAliasing::Fsr
+                && std::env::var("SOMNIUM_CAS").as_deref() != Ok("0"),
             cas_sharpness: 0.5,
             cas_strength: 1.0,
             motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
@@ -1173,7 +1212,6 @@ impl Default for PostProcessComponent {
             dof_focus_distance: 10.0,
             // FSR is temporal AA/reconstruction, so this is the fallback used
             // when FSR is disabled rather than a second checked no-op.
-            taa_enabled: !fsr_enabled,
             // Seeded from the environment so the debug switch and the Post FX
             // toggle agree. The component is the single source of truth and is
             // copied into the pass every frame, so a pass-side default would be
@@ -1192,7 +1230,6 @@ impl Default for PostProcessComponent {
             vignette_strength: 1.0,
             ca_enabled: false,
             ca_strength: 0.004,
-            fxaa_enabled: true,
             pcss_enabled: true,
             contact_shadows_enabled: true,
             world_cache,
@@ -1216,8 +1253,154 @@ impl Default for PostProcessComponent {
             ddgi_hysteresis: 0.95,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
-            fsr_enabled,
+            aa,
+            smaa_preset,
+            // Off unless asked for. `SOMNIUM_OIT=1` is the A/B route; the
+            // authored control is the Details checkbox.
+            oit_enabled: std::env::var("SOMNIUM_OIT").as_deref() == Ok("1"),
             fsr_sharpness: 0.8,
+        }
+    }
+}
+
+/// Which anti-aliasing runs, as **one** authored value (MORROWIND-AC).
+///
+/// Before AC this was three independent booleans — `fxaa_enabled`,
+/// `taa_enabled`, `fsr_enabled` — resolved at
+/// `renderer.rs` by a precedence chain:
+///
+/// ```text
+/// fxaa_active = fxaa_enabled && !taa.enabled() && !fsr_ok
+/// ```
+///
+/// FSR defaults **on**, so that expression is false in the shipped
+/// configuration and **FXAA has never run by default** — while presenting a
+/// checked box in Details claiming otherwise. Three booleans describe eight
+/// states of which only five are reachable and one is a lie. This enum is the
+/// five reachable states and nothing else, which is the whole reason it exists:
+/// a value the user sets is a value that takes effect.
+///
+/// Order is the quality/cost ladder, and [`Self::as_index`] pins it to the
+/// generated Details row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AntiAliasing {
+    /// No resolve. The visibility buffer has no MSAA, so this is hard-aliased
+    /// and is here as the honest reference point for the others.
+    Off,
+    /// Timothy Lottes' FXAA 3.11, one LDR pass. Cheapest; softens text-adjacent
+    /// detail because it cannot tell an edge from a glyph.
+    Fxaa,
+    /// SMAA 1x — morphological, spatial only (MORROWIND-AC).
+    ///
+    /// Three LDR passes. Better edge reconstruction than FXAA and markedly less
+    /// texture softening, because blend weights come from a reconstructed edge
+    /// geometry rather than from a luma gradient.
+    Smaa1x,
+    /// SMAA T2x — SMAA 1x plus the existing temporal resolve.
+    ///
+    /// Two-sample subpixel jitter reusing 24F's `jitter_ndc` and 24AD's
+    /// velocity buffer, with SMAA 1x run on each resolved frame. This is the
+    /// highest-quality *non-upscaling* option.
+    SmaaT2x,
+    /// Somnium's own TAA (Phase 24F), no morphological pass.
+    Taa,
+    /// AMD FSR 3 temporal reconstruction to the window (Phase VV). Default.
+    ///
+    /// Also the upscaler, so it is not merely an AA choice: selecting anything
+    /// else means the viewport Resolution preset is blitted rather than
+    /// reconstructed.
+    #[default]
+    Fsr,
+}
+
+impl AntiAliasing {
+    /// Stable index for serialization and the generated Details row.
+    #[must_use]
+    pub fn as_index(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::Fxaa => 1,
+            Self::Smaa1x => 2,
+            Self::SmaaT2x => 3,
+            Self::Taa => 4,
+            Self::Fsr => 5,
+        }
+    }
+
+    /// Whether this mode runs an SMAA morphological pass.
+    #[must_use]
+    pub fn uses_smaa(self) -> bool {
+        matches!(self, Self::Smaa1x | Self::SmaaT2x)
+    }
+
+    /// Whether this mode needs a temporal history and a jittered projection.
+    ///
+    /// `SmaaT2x` is in here and `Smaa1x` is not: that difference *is* the
+    /// difference between them.
+    #[must_use]
+    pub fn uses_temporal(self) -> bool {
+        matches!(self, Self::SmaaT2x | Self::Taa)
+    }
+}
+
+/// SMAA quality preset (MORROWIND-AC).
+///
+/// The four presets of Jimenez et al.'s original formulation, which trade edge
+/// detection sensitivity and search distance against cost. They are exposed
+/// because SMAA's useful range is genuinely wide — `Low` is close to FXAA's
+/// cost, `Ultra` finds edges FXAA cannot see at all.
+///
+/// **What is deliberately absent: SMAA S2x and SMAA 4x.** Both require
+/// multisample coverage — S2x resolves two MSAA subsamples, and 4x is S2x plus
+/// T2x. Somnium shades from a visibility buffer
+/// (`renderer.rs`, `pass/visibility.rs`), which stores one triangle
+/// per pixel and has no subsample coverage to resolve; every render target in
+/// the frame is created with `sample_count: 1`. Offering either would be a
+/// control that cannot work, which is the exact defect [`AntiAliasing`] exists
+/// to remove. They are named here so the absence reads as a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmaaPreset {
+    /// Threshold 0.15, 4 search steps. Roughly FXAA's cost.
+    Low,
+    /// Threshold 0.10, 8 search steps.
+    Medium,
+    /// Threshold 0.10, 16 search steps.
+    High,
+    /// Threshold 0.05, 32 search steps. The default.
+    #[default]
+    Ultra,
+}
+
+impl SmaaPreset {
+    /// Stable index for serialization and the generated Details row.
+    #[must_use]
+    pub fn as_index(self) -> u32 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::Ultra => 3,
+        }
+    }
+
+    /// Relative luma contrast that marks a pixel as an edge.
+    #[must_use]
+    pub fn threshold(self) -> f32 {
+        match self {
+            Self::Low => 0.15,
+            Self::Medium | Self::High => 0.10,
+            Self::Ultra => 0.05,
+        }
+    }
+
+    /// How far along an edge the search walks, in pixels.
+    #[must_use]
+    pub fn max_search_steps(self) -> u32 {
+        match self {
+            Self::Low => 4,
+            Self::Medium => 8,
+            Self::High => 16,
+            Self::Ultra => 32,
         }
     }
 }
@@ -1268,28 +1451,51 @@ impl Tonemapper {
 }
 
 impl PostProcessComponent {
-    /// Enable standalone CAS, disabling FSR's built-in RCAS when necessary.
+    // ── Derived AA state (MORROWIND-AC) ─────────────────────────────────────
+    //
+    // These replace three authored booleans. Nothing outside this block decides
+    // which passes run together: the mutual exclusions that used to live in
+    // `set_taa_enabled` / `set_fsr_enabled` are now consequences of the enum
+    // having one value, so there is no combination to keep consistent and no
+    // setter that can leave the component in a state Details cannot show.
+
+    /// Whether the FXAA pass runs.
+    #[must_use]
+    pub fn fxaa_enabled(&self) -> bool {
+        self.aa == AntiAliasing::Fxaa
+    }
+
+    /// Whether an SMAA morphological pass runs, and at which preset.
+    #[must_use]
+    pub fn smaa_enabled(&self) -> bool {
+        self.aa.uses_smaa()
+    }
+
+    /// Whether Somnium's own temporal resolve runs.
+    ///
+    /// True for `SmaaT2x` as well as `Taa`: T2x *is* SMAA 1x over a temporally
+    /// resolved image, and it reuses 24F's history rather than growing a
+    /// second one.
+    #[must_use]
+    pub fn taa_enabled(&self) -> bool {
+        self.aa.uses_temporal()
+    }
+
+    /// Whether FSR 3 reconstruction runs.
+    #[must_use]
+    pub fn fsr_enabled(&self) -> bool {
+        self.aa == AntiAliasing::Fsr
+    }
+
+    /// Enable standalone CAS.
+    ///
+    /// FSR's RCAS already sharpens, so asking for CAS while FSR is selected
+    /// drops to the next non-upscaling rung rather than stacking two
+    /// sharpeners — the same intent the old boolean version had.
     pub fn set_cas_enabled(&mut self, enabled: bool) {
         self.cas_enabled = enabled;
-        if enabled {
-            self.fsr_enabled = false;
-        }
-    }
-
-    /// Enable the engine TAA path, disabling the mutually-exclusive FSR path.
-    pub fn set_taa_enabled(&mut self, enabled: bool) {
-        self.taa_enabled = enabled;
-        if enabled {
-            self.fsr_enabled = false;
-        }
-    }
-
-    /// Enable FSR temporal reconstruction and its RCAS stage.
-    pub fn set_fsr_enabled(&mut self, enabled: bool) {
-        self.fsr_enabled = enabled;
-        if enabled {
-            self.taa_enabled = false;
-            self.cas_enabled = false;
+        if enabled && self.aa == AntiAliasing::Fsr {
+            self.aa = AntiAliasing::Taa;
         }
     }
 
@@ -1370,35 +1576,96 @@ impl somnium_ecs::Component for PostProcessComponent {}
 
 #[cfg(test)]
 mod post_process_tests {
-    use super::PostProcessComponent;
+    use super::{AntiAliasing, PostProcessComponent, SmaaPreset};
+
+    /// MORROWIND-AC. Three tests used to live here proving that
+    /// `set_taa_enabled` / `set_fsr_enabled` / `set_cas_enabled` restored a
+    /// mutual exclusion between three booleans. There is one value now, so the
+    /// exclusion is not something that can be violated and then repaired — it
+    /// is arithmetic. What is worth asserting instead is that every mode
+    /// resolves to exactly one active resolve.
+    #[test]
+    fn exactly_one_resolve_is_active_in_every_mode() {
+        for (mode, fxaa, smaa, temporal, fsr) in [
+            (AntiAliasing::Off, false, false, false, false),
+            (AntiAliasing::Fxaa, true, false, false, false),
+            (AntiAliasing::Smaa1x, false, true, false, false),
+            (AntiAliasing::SmaaT2x, false, true, true, false),
+            (AntiAliasing::Taa, false, false, true, false),
+            (AntiAliasing::Fsr, false, false, false, true),
+        ] {
+            let pp = PostProcessComponent {
+                aa: mode,
+                ..Default::default()
+            };
+            assert_eq!(pp.fxaa_enabled(), fxaa, "{mode:?} fxaa");
+            assert_eq!(pp.smaa_enabled(), smaa, "{mode:?} smaa");
+            assert_eq!(pp.taa_enabled(), temporal, "{mode:?} temporal");
+            assert_eq!(pp.fsr_enabled(), fsr, "{mode:?} fsr");
+        }
+    }
+
+    /// The defect this sub-phase exists to remove, pinned so it cannot return.
+    ///
+    /// `fxaa_enabled` and `fsr_enabled` both defaulted to `true`, and
+    /// `renderer.rs` resolved that with `fxaa_enabled && !taa && !fsr_ok` — so
+    /// the shipped default showed a checked FXAA box that never ran a pass.
+    #[test]
+    fn the_default_does_not_claim_an_anti_aliasing_that_never_runs() {
+        let pp = PostProcessComponent::default();
+        let claimed = [
+            pp.fxaa_enabled(),
+            pp.smaa_enabled(),
+            pp.taa_enabled(),
+            pp.fsr_enabled(),
+        ];
+        assert_eq!(
+            claimed.iter().filter(|on| **on).count(),
+            1,
+            "exactly one resolve may be claimed, got {claimed:?}"
+        );
+    }
 
     #[test]
-    fn enabling_cas_makes_it_effective_by_disabling_fsr() {
-        let mut pp = PostProcessComponent::default();
-        pp.set_fsr_enabled(true);
+    fn enabling_cas_steps_off_fsr_rather_than_stacking_two_sharpeners() {
+        let mut pp = PostProcessComponent {
+            aa: AntiAliasing::Fsr,
+            ..Default::default()
+        };
         pp.set_cas_enabled(true);
         assert!(pp.cas_enabled);
-        assert!(!pp.fsr_enabled);
+        assert!(!pp.fsr_enabled(), "FSR RCAS and CAS must not both run");
+        assert!(pp.taa_enabled(), "the step-down must keep a temporal resolve");
     }
 
     #[test]
-    fn enabling_fsr_disables_the_redundant_taa_and_cas_paths() {
-        let mut pp = PostProcessComponent::default();
-        pp.set_taa_enabled(true);
-        pp.set_cas_enabled(true);
-        pp.set_fsr_enabled(true);
-        assert!(pp.fsr_enabled);
-        assert!(!pp.taa_enabled);
-        assert!(!pp.cas_enabled);
+    fn smaa_presets_are_ordered_by_cost() {
+        let presets = [
+            SmaaPreset::Low,
+            SmaaPreset::Medium,
+            SmaaPreset::High,
+            SmaaPreset::Ultra,
+        ];
+        for pair in presets.windows(2) {
+            assert!(pair[0].max_search_steps() < pair[1].max_search_steps());
+            assert!(pair[0].threshold() >= pair[1].threshold());
+        }
     }
 
+    /// Every index the Details combo can produce must round-trip, or a saved
+    /// scene silently reopens on a different mode.
     #[test]
-    fn enabling_taa_disables_fsr() {
-        let mut pp = PostProcessComponent::default();
-        pp.set_fsr_enabled(true);
-        pp.set_taa_enabled(true);
-        assert!(pp.taa_enabled);
-        assert!(!pp.fsr_enabled);
+    fn every_authored_index_round_trips() {
+        for mode in [
+            AntiAliasing::Off,
+            AntiAliasing::Fxaa,
+            AntiAliasing::Smaa1x,
+            AntiAliasing::SmaaT2x,
+            AntiAliasing::Taa,
+            AntiAliasing::Fsr,
+        ] {
+            assert_eq!(mode.as_index() as usize, mode as usize);
+        }
     }
 
     #[test]
@@ -2075,7 +2342,7 @@ impl WaterComponent {
     }
 
     /// Open ocean filling `bounds`. Same frozen look as [`Self::great_lakes`]
-    /// (datum 16.1 / optical 18.6 / Gerstner 0.85); coverage is a wet rectangle
+    /// (bake datum / optical 18.6 / Gerstner 0.85); coverage is a wet rectangle
     /// so the island can sit in surrounding sea instead of a lake mask.
     pub fn ocean(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
         Self {

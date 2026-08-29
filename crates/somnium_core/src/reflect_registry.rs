@@ -19,10 +19,11 @@ use somnium_ecs::reflect::{
 use somnium_ecs::{Entity, World};
 
 use crate::{
-    BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
+    AntiAliasing, BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent,
+    LightComponent,
     LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
     ParticleEmitter, PostProcessComponent, TerrainComponent, Tonemapper, Transform,
-    UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
+    SmaaPreset, UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
     WorldPartitionComponent,
 };
 
@@ -259,6 +260,73 @@ impl ReflectField for UiCanvasSpace {
 }
 
 const TONEMAPPER_NAMES: &[&str] = &["AgX", "ACES", "Reinhard"];
+
+/// MORROWIND-AC. The order is [`AntiAliasing::as_index`], and the labels are
+/// what the Details combo shows — so "SMAA 1x" and "SMAA T2x" name the two
+/// SMAA variants this pipeline can actually run. S2x and 4x are absent because
+/// they need MSAA subsample coverage a visibility buffer does not have; see
+/// [`SmaaPreset`].
+const ANTI_ALIASING_NAMES: &[&str] =
+    &["Off", "FXAA", "SMAA 1x", "SMAA T2x", "TAA", "FSR 3"];
+
+/// MORROWIND-AC. Order is [`SmaaPreset::as_index`].
+const SMAA_PRESET_NAMES: &[&str] = &["Low", "Medium", "High", "Ultra"];
+
+impl ReflectField for AntiAliasing {
+    fn field_type() -> FieldType {
+        FieldType::Enum(ANTI_ALIASING_NAMES)
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(i64::from(self.as_index()))
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Off),
+            ReflectValue::I64(1) => Ok(Self::Fxaa),
+            ReflectValue::I64(2) => Ok(Self::Smaa1x),
+            ReflectValue::I64(3) => Ok(Self::SmaaT2x),
+            ReflectValue::I64(4) => Ok(Self::Taa),
+            ReflectValue::I64(5) => Ok(Self::Fsr),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(5.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "enum".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
+
+impl ReflectField for SmaaPreset {
+    fn field_type() -> FieldType {
+        FieldType::Enum(SMAA_PRESET_NAMES)
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(i64::from(self.as_index()))
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Low),
+            ReflectValue::I64(1) => Ok(Self::Medium),
+            ReflectValue::I64(2) => Ok(Self::High),
+            ReflectValue::I64(3) => Ok(Self::Ultra),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(3.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "enum".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
 
 impl ReflectField for Tonemapper {
     fn field_type() -> FieldType {
@@ -590,7 +658,7 @@ fn post_process_schema() -> ComponentSchema {
             bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },
             gtao_enabled { group: "Ambient Occlusion" }, dof_enabled { group: "Depth of Field" },
             dof_focus_distance { min: 0.0, step: 0.1, unit: "m", group: "Depth of Field" },
-            taa_enabled { group: "Anti-aliasing" }, restir_enabled { group: "Ray Tracing" },
+            aa { group: "Anti-aliasing" }, restir_enabled { group: "Ray Tracing" },
             restir_gi_enabled { group: "Ray Tracing" }, rt_reflect_enabled { group: "Ray Tracing" },
             rt_refract_enabled { group: "Ray Tracing" }, cas_enabled { group: "Sharpening" },
             cas_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Sharpening" },
@@ -607,7 +675,7 @@ fn post_process_schema() -> ComponentSchema {
             cel_shading { group: "Stylization" }, vignette_enabled { group: "Lens" },
             vignette_strength { min: 0.0, step: 0.01, group: "Lens" }, ca_enabled { group: "Lens" },
             ca_strength { min: 0.0, step: 0.001, precision: 4, group: "Lens" },
-            fxaa_enabled { group: "Anti-aliasing" }, pcss_enabled { group: "Shadows" },
+            smaa_preset { group: "Anti-aliasing" }, oit_enabled { group: "Transparency" }, pcss_enabled { group: "Shadows" },
             contact_shadows_enabled { group: "Shadows" }, ibl_intensity { min: 0.0, step: 0.01, group: "Lighting" },
             world_cache { group: "Global Illumination" }, cache_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
             cache_cell_size { min: 0.01, step: 0.1, unit: "m", group: "Global Illumination" },
@@ -630,7 +698,7 @@ fn post_process_schema() -> ComponentSchema {
             ddgi_hysteresis { min: 0.0, max: 0.99, step: 0.01, group: "Global Illumination", display_name: "DDGI Hysteresis",
                 doc: "Previous radiance retained per update; higher is steadier but slower." },
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
-            fsr_enabled { group: "Anti-aliasing" }, fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
+             fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
     }
 }

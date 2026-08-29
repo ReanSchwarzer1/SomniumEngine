@@ -18,6 +18,7 @@ use crate::{
         check_box::CheckBoxBuilder,
         color_picker::ColorSwatchBuilder,
         combo_box::ComboBoxBuilder,
+        grid::{Column, GridBuilder, Row},
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         curve_editor::CurveEditorBuilder,
         gradient_editor::GradientEditorBuilder,
@@ -359,14 +360,32 @@ pub(crate) fn build_generated_details(
                         }
                         _ => Vec::new(),
                     };
-                    let lane_panel = StackPanelBuilder::new(widget)
-                        .with_orientation(Orientation::Horizontal)
-                        .build();
-                    let lane_panel = ui.add_node(lane_panel, row_handle);
+                    // MORROWIND-AC: a Grid of equal stretch columns, not a
+                    // horizontal StackPanel of fixed 58 px lanes.
+                    //
+                    // The old form pinned each lane at 58 px regardless of how
+                    // much room the row had. `NumericField::split_rects` then
+                    // laid out a 56 px text field starting 46 px in, so 44 px
+                    // of every number fell outside the widget and was clipped —
+                    // one digit survived, and a Translation of 14 read as 1.
+                    // A stretch column gives each lane an equal share of what
+                    // the panel actually has, so the number grows with the
+                    // Details width instead of being decided at build time.
+                    let lane_count = lane_values.len().max(1);
+                    let mut lane_grid = GridBuilder::new(widget).add_row(Row::auto());
+                    for _ in 0..lane_count {
+                        lane_grid = lane_grid.add_column(Column::stretch());
+                    }
+                    let lane_panel = ui.add_node(lane_grid.build(), row_handle);
                     for (lane, value) in lane_values.into_iter().enumerate() {
                         let handle = ui.add_node(
-                            NumericFieldBuilder::new(WidgetBuilder::new().with_width(58.0))
-                                .with_value(value)
+                            NumericFieldBuilder::new(
+                                WidgetBuilder::new()
+                                    .with_row(0)
+                                    .with_column(lane)
+                                    .with_margin(Thickness::axes(1.0, 0.0)),
+                            )
+                            .with_value(value)
                                 .with_mixed(model.mixed)
                                 .with_drag_step(model.step.unwrap_or(0.05) as f32)
                                 .with_unit(if model.editor == PropertyEditorKind::Euler {

@@ -85,6 +85,14 @@ fn every_composed_root_validates() {
         "ibl_gen.wgsl",
         "dof.wgsl",
         "gtao.wgsl",
+        // MORROWIND-AC: three entry points in one module, and the one that
+        // matters is `fs_weights` — its two search loops are the shape naga
+        // is fussiest about.
+        "smaa.wgsl",
+        // MORROWIND-AC: `transparent.wgsl` now has two fragment entry points
+        // sharing one `shade`, and this is what proves the MRT one composes.
+        "transparent.wgsl",
+        "oit_composite.wgsl",
         // MORROWIND-U. Composes global_pool.wgsl for `Vertex`, which is the
         // point: the posed vertices it writes have the same layout as every
         // other vertex in the pool, because they are in the same pool.

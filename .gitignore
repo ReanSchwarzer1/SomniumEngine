@@ -79,6 +79,13 @@ dev records/phase CONTROL/CONTROL-A_baseline/*
 dev records/phase MORROWIND/*
 !dev records/phase MORROWIND/README.md
 !dev records/phase MORROWIND/MORROWIND-*.md
+# MORROWIND-AC evidence. Added with the sub-phase, per PORTAL-0-C's note that
+# an allowlist silently swallows a phase whose entries were added afterwards.
+!dev records/phase MORROWIND/AC/
+dev records/phase MORROWIND/AC/*
+!dev records/phase MORROWIND/AC/README.md
+!dev records/phase MORROWIND/AC/AC_*.somtime
+!dev records/phase MORROWIND/AC/AC_*.png
 # Sub-phase measurements are source evidence; screenshots stay local unless
 # promoted into the reviewed golden manifest below.
 !dev records/phase MORROWIND/MORROWIND-AB_*.somtime
@@ -86,6 +93,24 @@ dev records/phase MORROWIND/*
 dev records/phase MORROWIND/golden/*
 !dev records/phase MORROWIND/golden/manifest.json
 !dev records/phase MORROWIND/golden/*.png
+
+# ── Phase PORTAL-0 (Source) ──────────────────────────────────────────────────
+# Same allowlist shape, and added in the same commit as the phase rather than
+# after it: MORROWIND-E2b found that `dev records/phase MORROWIND/` had been
+# ignored since MORROWIND-A, so the census, every sub-phase record and the plan
+# itself existed on one disk and in no commit. A measurement phase whose
+# evidence is untracked is a phase nobody can disagree with.
+#
+# The `.somtime` runs and the clipmap A/B captures are both source evidence
+# here: `phase_PORTAL-0.md` §F's decision rests on the PNGs, not only on the
+# timings, and a luminance gate quoted without the images it was computed from
+# is an assertion.
+!dev records/phase_PORTAL-0.md
+!dev records/phase PORTAL-0/
+dev records/phase PORTAL-0/*
+!dev records/phase PORTAL-0/README.md
+!dev records/phase PORTAL-0/PORTAL-0-*.somtime
+!dev records/phase PORTAL-0/PORTAL-0-F_*.png
 
 # Stray build output from a cargo invocation with the wrong working
 # directory. `target/` at the root is already ignored; this catches the

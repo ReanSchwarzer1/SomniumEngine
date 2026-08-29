@@ -183,7 +183,7 @@ export type SomniumPostProcess = {
 	gtao_enabled: boolean,
 	dof_enabled: boolean,
 	dof_focus_distance: number,
-	taa_enabled: boolean,
+	aa: number --[[ Off | FXAA | SMAA 1x | SMAA T2x | TAA | FSR 3 ]],
 	restir_enabled: boolean,
 	restir_gi_enabled: boolean,
 	rt_reflect_enabled: boolean,
@@ -206,7 +206,8 @@ export type SomniumPostProcess = {
 	vignette_strength: number,
 	ca_enabled: boolean,
 	ca_strength: number,
-	fxaa_enabled: boolean,
+	smaa_preset: number --[[ Low | Medium | High | Ultra ]],
+	oit_enabled: boolean,
 	pcss_enabled: boolean,
 	contact_shadows_enabled: boolean,
 	ibl_intensity: number,
@@ -227,7 +228,6 @@ export type SomniumPostProcess = {
 	ddgi_hysteresis: number,
 	analytic_grad: boolean,
 	shaft_intensity: number,
-	fsr_enabled: boolean,
 	fsr_sharpness: number,
 }
 
@@ -266,7 +266,7 @@ export type SomniumSky = {
 	temporal_jitter: boolean,
 }
 
---- `somnium.Terrain` (schema version 1).
+--- `somnium.Terrain` (schema version 2).
 export type SomniumTerrain = {
 	terrain_id: number,
 	chunk_cells: number,
@@ -274,6 +274,14 @@ export type SomniumTerrain = {
 	grid_z: number,
 	cell_size: number,
 	height_scale: number,
+	virtual_texturing: boolean,
+	virtual_texture_cache_mib: number,
+	virtual_texture_uploads_per_frame: number,
+	virtual_texture_resident_pages: number, -- engine-owned; reading only
+	virtual_texture_pending_pages: number, -- engine-owned; reading only
+	virtual_texture_hits: number, -- engine-owned; reading only
+	virtual_texture_misses: number, -- engine-owned; reading only
+	virtual_texture_evictions: number, -- engine-owned; reading only
 }
 
 --- `somnium.TimeOfDay` (schema version 1).

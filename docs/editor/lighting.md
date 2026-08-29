@@ -2,9 +2,36 @@
 
 These controls live on the **Post Processing** entity unless noted. Select that entity in the Outliner, then use Details. Expensive paths default **off**; turn them on from Details.
 
-## FSR (temporal upscale)
+## Anti-aliasing
 
-**FSR** is **on by default**. It reconstructs the viewport **Resolution** preset to the window (including Native, where it is the AA). Somnium TAA and CAS stay off while it is on — **FSR Sharp** is AMD RCAS (0–1, default 0.8). `SOMNIUM_FSR=0` kills it at startup. Frame generation is not in the engine. Water and transparents may ghost under camera motion; that is a missing reactive mask, not a water shading bug.
+One control, **Anti-aliasing**, with six values. It used to be three separate checkboxes; the FXAA box was checked by default and never ran a pass, because FSR was also on and took precedence. There is one value now, and whatever it says is what runs.
+
+| Value | What it does | Cost |
+|---|---|---|
+| **Off** | Nothing. The visibility buffer has no MSAA, so edges are hard-aliased. Useful as the reference when judging the others. | — |
+| **FXAA** | One LDR pass over the tone-mapped image. Cheapest. Cannot tell an edge from a glyph, so it softens detail as well as edges. | 1 pass |
+| **SMAA 1x** | Morphological. Finds edges, reconstructs how much of each pixel the silhouette covers, blends only that. Much less texture softening than FXAA. | 3 passes |
+| **SMAA T2x** | SMAA 1x over a temporally resolved image — the subpixel jitter and velocity buffer TAA already uses. Best non-upscaling option. | 3 passes + TAA |
+| **TAA** | Somnium's own temporal resolve, no morphological pass. | 1 pass |
+| **FSR 3** | AMD FSR 3. **Default.** Also the upscaler: it reconstructs the viewport **Resolution** preset to the window, and picking anything else means that preset is blitted instead. **FSR Sharp** is RCAS (0–1, default 0.8). | 1 pass |
+
+**SMAA Quality** — Low / Medium / High / Ultra (default) — only does anything on the two SMAA values. It trades edge sensitivity and how far the search walks along an edge: Low is roughly FXAA's cost, Ultra finds edges FXAA cannot see.
+
+**There is no SMAA S2x or SMAA 4x**, and there will not be: both resolve MSAA subsamples, and shading from a visibility buffer means one triangle per pixel with no subsample coverage to resolve. They are named here so their absence reads as a decision rather than an omission.
+
+Somnium CAS stays off while FSR is selected — RCAS already sharpens, and stacking the two rings edges. Checking **CAS** steps the mode down to TAA rather than leaving a control that does nothing.
+
+`SOMNIUM_FSR=0` starts on TAA instead of FSR. Frame generation is not in the engine. Water and transparents may ghost under camera motion; that is a missing reactive mask, not a water shading bug, and no anti-aliasing choice fixes it.
+
+## Transparency
+
+**Order-Independent Transparency** is **off by default**, on the Post Processing entity.
+
+Off, blended surfaces are sorted back-to-front by object origin and blended in that order. That is correct for separated panes of glass and wrong where two blended surfaces *of the same object* intersect — a per-object sort key cannot answer a per-pixel question.
+
+On, the engine uses weighted-blended OIT (McGuire and Bavoil, 2013): every blended fragment accumulates into two targets with a depth-derived weight, and one resolve composites them. Draw order stops mattering. It is **approximate** — the weight function decides which fragment dominates, and it can be wrong for a nearly-opaque surface behind a transparent one — so this is a trade, not a strict upgrade. That is why it is authored and why it defaults off: turning it on changes what an existing scene draws.
+
+Costs two extra full-resolution targets, 10 bytes per pixel (20.7 MB at 1080p, 82.9 MB at 4K), fixed regardless of how many layers overlap.
 
 ## World cache (24M)
 

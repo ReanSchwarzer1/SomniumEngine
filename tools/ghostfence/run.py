@@ -57,6 +57,15 @@ FROZEN_TOOLCHAIN = {
 # second thread pool; anything not listed here fails the row.
 SPAWN_EXEMPTIONS = {
     "crates/somnium_jobs/": "the job system itself — this is the one place a pool is allowed.",
+    "crates/somnium_voxel/src/world.rs": (
+        "PORTAL-0-C: `rayon::spawn` detaches chunk meshing onto rayon's global "
+        "pool, which is a second background scheduler and is exactly what this "
+        "row exists to forbid. Exempted rather than fixed here because routing "
+        "it through `somnium_jobs` means threading a `&mut JobSystem` through "
+        "`VoxelWorld::update`, and that is a public API change that belongs at "
+        "a MORROWIND seam, not inside a performance commit. Owed work, not an "
+        "accepted design."
+    ),
     "crates/somnium_ui/src/theme.rs": "a single-shot test asserting the theme is visible from another thread.",
     "crates/somnium_core/src/a11y_bridge.rs": (
         "a single-shot test proving AccessKit handlers work off the main thread "
@@ -209,7 +218,16 @@ def row_toolchain(args: argparse.Namespace) -> Result:
 def row_one_job_system(args: argparse.Namespace) -> Result:
     """No second thread pool, no bare `thread::spawn` outside the job system."""
     offenders = []
-    pattern = re.compile(r"\bthread::spawn\b")
+    # PORTAL-0-C widened this. It matched `thread::spawn` only, so
+    # `rayon::spawn` — a detached task on rayon's *global* pool, which is a
+    # second background scheduler by any reading of the rule — passed the gate
+    # unnoticed for the whole of MORROWIND. `thread::Builder` is here for the
+    # same reason: it is the spelling somebody reaches for when `thread::spawn`
+    # is the thing being checked. Data-parallel rayon (`par_iter`,
+    # `for_each_mut`) is deliberately *not* matched: fork-join inside one frame
+    # is a different problem from background work with a deadline, and
+    # `somnium_jobs/Cargo.toml` says so.
+    pattern = re.compile(r"\b(?:thread::spawn|thread::Builder|rayon::spawn|ThreadPoolBuilder)\b")
     for path in rust_sources():
         relative = rel(path)
         # Exemptions are matched as prefixes, so an entry can name one file or
@@ -231,7 +249,7 @@ def row_one_job_system(args: argparse.Namespace) -> Result:
         return Result(
             "one-job-system",
             Outcome.FAIL,
-            "thread::spawn outside somnium_jobs at "
+            "a second thread pool or detached spawn outside somnium_jobs at "
             + ", ".join(offenders[:8])
             + (f" (+{len(offenders) - 8} more)" if len(offenders) > 8 else "")
             + " - route it through somnium_jobs, or add a stated exemption",

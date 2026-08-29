@@ -373,6 +373,31 @@ pub struct GpuProfiler {
     cpu_open: Vec<(&'static str, std::time::Instant, u8)>,
     cpu_acc: Vec<ScopeResult>,
     cpu_results: Vec<ScopeResult>,
+    /// The same CPU zones before smoothing (PORTAL-0-B).
+    ///
+    /// `cpu_end` writes an EMA into `cpu_acc` because the overlay is unreadable
+    /// without one. `timing.rs` needs the opposite for exactly the reason
+    /// `raw_results` exists beside `results`: a standard deviation taken over a
+    /// smoothed signal is the standard deviation of the smoother, not of the
+    /// work, and every `.somtime` written before this field understated the CPU
+    /// spread by roughly the smoothing factor.
+    cpu_raw_acc: Vec<ScopeResult>,
+    cpu_raw_results: Vec<ScopeResult>,
+    /// Wall-clock milliseconds the engine's frame body spent on the CPU,
+    /// excluding the frame limiter's sleep (PORTAL-0-B).
+    ///
+    /// Written by the application once per frame for the frame *before* it, so
+    /// it is never a scope left open across [`GpuProfiler::end_frame`]. This is
+    /// the row that was missing: `Frame wall` is a tick-to-tick interval under
+    /// `PresentMode::AutoVsync` and therefore includes the presentation block,
+    /// so it has never been able to answer "is this frame CPU-bound".
+    pub frame_cpu_ms: f32,
+    /// Milliseconds blocked in `Surface::get_current_texture` (PORTAL-0-B).
+    ///
+    /// Under Fifo this is where the vsync wait lands, so it is the term that
+    /// reconciles a small GPU `Frame` with a large `Frame wall`. Kept separate
+    /// from [`Self::frame_cpu_ms`], which contains it.
+    pub surface_acquire_ms: f32,
     /// The frame most recently collected, for the "is this stale" question the
     /// overlay would otherwise have to guess at.
     collected: u64,
@@ -482,6 +507,10 @@ impl GpuProfiler {
             cpu_open: Vec::new(),
             cpu_acc: Vec::new(),
             cpu_results: Vec::new(),
+            cpu_raw_acc: Vec::new(),
+            cpu_raw_results: Vec::new(),
+            frame_cpu_ms: 0.0,
+            surface_acquire_ms: 0.0,
             collected: 0,
             frame_index: 0,
             counters: FrameCounters::default(),
@@ -535,9 +564,18 @@ impl GpuProfiler {
         &self.results
     }
 
-    /// CPU scopes from the last completed frame (Phase 29).
+    /// CPU scopes from the last completed frame (Phase 29). EMA-smoothed.
     pub fn cpu_results(&self) -> &[ScopeResult] {
         &self.cpu_results
+    }
+
+    /// The same scopes, unsmoothed (PORTAL-0-B).
+    ///
+    /// Use this and not [`Self::cpu_results`] anywhere a spread is being
+    /// reported. There is no serial here because CPU zones close once per
+    /// rendered frame, unlike GPU readback.
+    pub fn cpu_raw_results(&self) -> &[ScopeResult] {
+        &self.cpu_raw_results
     }
 
     /// The last harvested frame **before** smoothing, and a serial that
@@ -580,6 +618,8 @@ impl GpuProfiler {
             depth,
             ms: prev * 0.8 + ms * 0.2,
         });
+        // PORTAL-0-B: the same zone, unsmoothed, for the timing harness.
+        self.cpu_raw_acc.push(ScopeResult { name, depth, ms });
     }
 
     /// Total of the top-level scopes — the GPU frame, without double-counting
@@ -713,6 +753,7 @@ impl GpuProfiler {
                 self.cpu_open.clear();
             }
             self.cpu_results = std::mem::take(&mut self.cpu_acc);
+            self.cpu_raw_results = std::mem::take(&mut self.cpu_raw_acc);
         }
         if !self.recording() {
             return;

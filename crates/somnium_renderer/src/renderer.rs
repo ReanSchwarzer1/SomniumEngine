@@ -198,6 +198,10 @@ pub struct SomniumRenderer {
     pub chromatic_aberration: f32,
     /// Phase 15A2: FXAA anti-aliasing pass (runs before editor overlays).
     fxaa_pass: crate::pass::fxaa::FxaaPass,
+    /// Weighted-blended OIT (MORROWIND-AC). Default off.
+    pub oit_pass: crate::pass::oit::OitPass,
+    /// SMAA 1x / T2x (MORROWIND-AC). Owns whether it runs.
+    pub smaa_pass: crate::pass::smaa::SmaaPass,
     /// Whether FXAA is applied. When off, post-processing writes straight to
     /// the swapchain and the pass costs nothing.
     pub fxaa_enabled: bool,
@@ -379,6 +383,17 @@ pub struct SomniumRenderer {
     cascade_view_projs: [glam::Mat4; crate::shadow::NUM_CASCADES],
     /// Terrain chunks rebuilt this frame; capacity is kept across frames (CR-F).
     rebuilt_chunks: Vec<u32>,
+    /// This frame's packed terrain LOD word, keyed by chunk vertex offset
+    /// (PORTAL-0-D).
+    ///
+    /// `gpu_instance_from_cmd` used to recover this by scanning every chunk
+    /// of every terrain for each draw command — O(draws x chunks), which is
+    /// quadratic in terrain size and was measurable as a cross-scene ratio:
+    /// Coastal (256 chunks / 89 draws) against Island (64 / 56) predicts
+    /// 6.4x and the `Instances` zone measured 5.4x. The terrain loop below
+    /// already holds the chunk when it builds the draw, so the word is
+    /// recorded there instead of searched for afterwards.
+    terrain_lod_by_vertex: std::collections::HashMap<u32, u32>,
     /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
     /// so they skip vis / GPU 15B, but they occupy instance slots after the
     /// opaque vis draws so the shadow pass can find their transforms.
@@ -868,6 +883,20 @@ impl SomniumRenderer {
                 ctx.config.height,
             ),
             fxaa_enabled: true,
+            oit_pass: crate::pass::oit::OitPass::new(
+                &ctx.device,
+                &shaders,
+                HDR_FORMAT,
+                ctx.config.width,
+                ctx.config.height,
+            ),
+            smaa_pass: crate::pass::smaa::SmaaPass::new(
+                &ctx.device,
+                &shaders,
+                ctx.config.format,
+                ctx.config.width,
+                ctx.config.height,
+            ),
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
@@ -906,6 +935,7 @@ impl SomniumRenderer {
             cascade_caster_cull: !cascade_cull_env_off(),
             cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
             rebuilt_chunks: Vec::with_capacity(32),
+            terrain_lod_by_vertex: std::collections::HashMap::new(),
             shadow_only_queue: Vec::with_capacity(256),
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
@@ -1775,7 +1805,13 @@ impl SomniumRenderer {
                 self.lighting_extra_pass.volume_view(),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
+            // Scene-sized, not window-sized: OIT accumulates at the resolution
+            // the transparent pass rasterises at, which dynamic resolution and
+            // the viewport preset both change.
+            self.oit_pass.resize(&ctx.device, width, height);
             self.fxaa_pass
+                .resize(&ctx.device, ctx.config.format, width, height);
+            self.smaa_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.cas_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
@@ -1829,6 +1865,8 @@ impl SomniumRenderer {
             return;
         }
         self.fxaa_pass
+            .resize(&ctx.device, ctx.config.format, width, height);
+        self.smaa_pass
             .resize(&ctx.device, ctx.config.format, width, height);
         self.cas_pass
             .resize(&ctx.device, ctx.config.format, width, height);
@@ -2457,6 +2495,7 @@ impl SomniumRenderer {
         // contract). CR-E cascade-culls that list; never the camera frustum.
         self.profiler.cpu_begin("Terrain");
         self.shadow_only_queue.clear();
+        self.terrain_lod_by_vertex.clear();
         let cam_planes = crate::culling::frustum_planes(self.view_proj_unjittered);
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
@@ -2526,6 +2565,24 @@ impl SomniumRenderer {
                 // `submit`, which would need a second mutable borrow of self —
                 // terrain's material is registered opaque, so the routing
                 // `submit` does would be a no-op anyway.
+                //
+                // PORTAL-0-D: record the packed LOD word here, where the chunk
+                // and its terrain are both in hand, rather than recovering it
+                // by search once per draw command later.
+                {
+                    let verts = terrain.desc.chunk_cells + 1;
+                    let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
+                    let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
+                    let morph_on = u32::from(terrain.lod_morph);
+                    self.terrain_lod_by_vertex.insert(
+                        chunk.vertex_offset,
+                        (u32::from(chunk.lod) & 15)
+                            | ((verts & 511) << 4)
+                            | (morph_on << 13)
+                            | ((lod_base & 255) << 14)
+                            | ((start & 1023) << 22),
+                    );
+                }
                 let cmd = DrawCommand {
                     casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
@@ -2604,11 +2661,11 @@ impl SomniumRenderer {
         self.instances.clear();
         for cmd in &self.draw_queue {
             self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
+                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
         }
         for cmd in &self.shadow_only_queue {
             self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
+                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
         }
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones (vis + shadow-only). The visibility pass only
@@ -2737,6 +2794,14 @@ impl SomniumRenderer {
         }
 
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
+        //
+        // PORTAL-0-B times this rather than wrapping it in a CPU scope: under
+        // `PresentMode::AutoVsync` the presentation block lands here, and a
+        // scope would have to close before `end_frame` to be reported in the
+        // same frame, which this one does — but the row belongs beside
+        // `Frame wall` and `Frame CPU` rather than among the engine's own
+        // zones, because it is a wait and not work.
+        let acquire_started = std::time::Instant::now();
         let output = match ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex) => tex,
             wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -2751,6 +2816,7 @@ impl SomniumRenderer {
                 return;
             }
         };
+        self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
         let surface_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -3790,13 +3856,31 @@ impl SomniumRenderer {
         // blended surfaces composite over a complete image. Depth-tested
         // against the opaque depth, never writing it.
         self.profiler.begin(&mut encoder, "Transparent");
-        self.transparent_pass.record(
-            &mut encoder,
-            &self.postprocess_pass.hdr_view,
-            &self.vis_pass.depth_view,
-            &self.global_pool.bind_group,
-            &transparent_draws,
-        );
+        if self.oit_pass.enabled {
+            // MORROWIND-AC. Same queue, same depth, same shading — the draws
+            // are simply not required to be in any order, so the sort above is
+            // wasted work rather than wrong work and is left in place: turning
+            // OIT off mid-session must not need a re-sort.
+            self.oit_pass.begin(&mut encoder);
+            self.transparent_pass.record_weighted(
+                &mut encoder,
+                self.oit_pass.accum_view(),
+                self.oit_pass.reveal_view(),
+                &self.vis_pass.depth_view,
+                &self.global_pool.bind_group,
+                &transparent_draws,
+            );
+            self.oit_pass
+                .composite(&mut encoder, &self.postprocess_pass.hdr_view);
+        } else {
+            self.transparent_pass.record(
+                &mut encoder,
+                &self.postprocess_pass.hdr_view,
+                &self.vis_pass.depth_view,
+                &self.global_pool.bind_group,
+                &transparent_draws,
+            );
+        }
 
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.editor_overlays_enabled && self.grid_enabled {
@@ -4077,6 +4161,12 @@ impl SomniumRenderer {
         // and there is nothing left for FXAA to usefully do once TAA is on.
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Post + present");
+        // MORROWIND-AC. `AntiAliasing` is one authored value, so these are
+        // consequences rather than a precedence chain over three booleans. FSR
+        // still wins when it is *effective* — the pass declines itself on a
+        // device without the features, and the authored value must not override
+        // a decline — which is the one piece of precedence that survives.
+        let smaa_active = self.smaa_pass.active() && !fsr_ok;
         let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled() && !fsr_ok;
         // Phase 24AC: when CAS is running it owns the swapchain, and whatever
         // would have written there writes into its input instead. Placed here
@@ -4102,7 +4192,15 @@ impl SomniumRenderer {
             } else {
                 scene_present
             };
-            if fxaa_active {
+            if smaa_active {
+                self.profiler.begin(&mut encoder, "SMAA");
+                self.smaa_pass
+                    .update(&ctx.queue, self.ldr_width, self.ldr_height);
+                self.postprocess_pass
+                    .record(&mut encoder, &self.smaa_pass.ldr_view);
+                self.smaa_pass.record(&mut encoder, ldr_target);
+                self.profiler.end(&mut encoder);
+            } else if fxaa_active {
                 self.fxaa_pass
                     .update(&ctx.queue, self.ldr_width, self.ldr_height);
                 self.postprocess_pass
@@ -4715,29 +4813,16 @@ fn cascade_cull_env_off() -> bool {
     std::env::var("SOMNIUM_CASCADE_CULL").as_deref() == Ok("0")
 }
 
+/// PORTAL-0-D: `packed` is this frame's `terrain_lod_by_vertex`, built by the
+/// terrain loop. A non-terrain draw is simply absent from it, which is the same
+/// answer the old scan gave by falling off the end of every chunk list — but in
+/// one hash lookup instead of one pass over every chunk of every terrain.
 fn gpu_instance_from_cmd(
-    terrains: &[crate::terrain::TerrainData],
+    packed: &std::collections::HashMap<u32, u32>,
     cmd: &DrawCommand,
     shadow_debug: f32,
 ) -> crate::instance::GpuInstanceData {
-    let terrain_packed = terrains.iter().find_map(|terrain| {
-        terrain.chunks.iter().find_map(|chunk| {
-            if chunk.vertex_offset != cmd.vertex_offset {
-                return None;
-            }
-            let verts = terrain.desc.chunk_cells + 1;
-            let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
-            let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
-            let morph_on = u32::from(terrain.lod_morph);
-            Some(
-                (u32::from(chunk.lod) & 15)
-                    | ((verts & 511) << 4)
-                    | (morph_on << 13)
-                    | ((lod_base & 255) << 14)
-                    | ((start & 1023) << 22),
-            )
-        })
-    });
+    let terrain_packed = packed.get(&cmd.vertex_offset).copied();
     let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
         terrain_packed.map(|p| (p & 15) + 1).unwrap_or(0)
     } else {
@@ -5079,7 +5164,7 @@ mod frame_instance_layout_tests {
         let shadow_only = draw(22, 202, 2, 20.0);
         let transparent = draw(33, 303, 3, 30.0);
         let uploaded =
-            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&[], cmd, 0.0));
+            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
         let layout = frame_instance_layout(1, 1);
 
         for gpu_driven in [false, true] {

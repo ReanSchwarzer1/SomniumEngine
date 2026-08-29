@@ -103,6 +103,16 @@ pub struct NumericField {
 /// a threshold, the hand tremor in an ordinary click would nudge the value.
 const SCRUB_THRESHOLD: f32 = 3.0;
 const FIELD_W: f32 = 72.0;
+/// Narrowest the text field may be before the scrub track is dropped entirely.
+///
+/// Sized to hold a sign, four digits, a decimal point and two more — `-1234.56`
+/// — at the field's own text size. A number the user cannot read is not a
+/// control, so this floor wins over the track every time.
+const MIN_FIELD_W: f32 = 52.0;
+/// Narrowest a scrub track may be and still be worth drawing. Below this the
+/// handle has no meaningful travel and the widget is better off as a plain
+/// drag-scrub field.
+const MIN_SLIDER_W: f32 = 36.0;
 const SLIDER_GAP: f32 = 6.0;
 const HANDLE_W: f32 = 8.0;
 const TRACK_H: f32 = 4.0;
@@ -167,12 +177,38 @@ impl NumericField {
         (lo, hi)
     }
 
-    fn split_rects(b: Rect) -> (Rect, Rect) {
-        let field = FIELD_W.min(b.w * 0.45).max(56.0);
-        let slider_w = (b.w - field - SLIDER_GAP).max(40.0);
+    /// Split the widget into an optional scrub track and the text field.
+    ///
+    /// **The track is optional, and that is the fix for a real defect.** The
+    /// previous form was
+    ///
+    /// ```text
+    /// field    = FIELD_W.min(b.w * 0.45).max(56.0)
+    /// slider_w = (b.w - field - SLIDER_GAP).max(40.0)
+    /// ```
+    ///
+    /// where both `.max()` floors are unconditional. At the 58 px a vector lane
+    /// in generated Details was given, that yields `field = 56` and
+    /// `slider_w = 40`: the two rects total 102 px inside a 58 px widget, so the
+    /// text field started at `x + 46` and 44 of its 56 px lay outside the
+    /// widget's own bounds. Roughly twelve pixels survived clipping, which is
+    /// **one digit** — a Translation of `14` read as `1`, and no amount of
+    /// typing could make it readable.
+    ///
+    /// Now the field is sized first and the track gets only what is genuinely
+    /// left over. Below [`MIN_SLIDER_W`] there is no track at all and the field
+    /// takes the whole width. Nothing is lost by that: `MouseDown` outside the
+    /// track already starts a drag-scrub, so a trackless field still scrubs —
+    /// it is the affordance every DCC tool uses for a narrow numeric cell.
+    fn split_rects(b: Rect) -> (Option<Rect>, Rect) {
+        let field = FIELD_W.min(b.w).max(MIN_FIELD_W.min(b.w));
+        let track = b.w - field - SLIDER_GAP;
+        if track < MIN_SLIDER_W {
+            return (None, b);
+        }
         (
-            Rect::new(b.x, b.y, slider_w, b.h),
-            Rect::new(b.x + slider_w + SLIDER_GAP, b.y, field, b.h),
+            Some(Rect::new(b.x, b.y, track, b.h)),
+            Rect::new(b.x + track + SLIDER_GAP, b.y, field, b.h),
         )
     }
 
@@ -225,8 +261,13 @@ impl Control for NumericField {
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let text = self.display_text();
         let sz = ctx.measure_text(&text, self.px, self.font_id);
+        // The lower bound is what the *text* needs, not what a track would
+        // like. Demanding 140 here while a caller pinned the width at 58 is how
+        // the clipping above went unnoticed: the widget asked for room it was
+        // never going to get, and drew as if it had it.
+        let min = (sz.x + MIN_FIELD_W - 36.0).max(MIN_FIELD_W);
         Vec2::new(
-            available.x.min(220.0).max(140.0),
+            available.x.min(220.0).max(min),
             sz.y.max(self.px + 6.0).max(theme::ROW_HEIGHT),
         )
     }
@@ -237,9 +278,13 @@ impl Control for NumericField {
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
         let (slider, field) = Self::split_rects(widget.screen_bounds());
-        if self.slider_dragging || slider.contains(pos) {
+        let on_track = slider.is_some_and(|s| s.contains(pos));
+        if self.slider_dragging || on_track {
             CursorKind::EwResize
         } else if field.contains(pos) {
+            // A trackless field still scrubs, but the text cursor is the right
+            // hint: clicking types, dragging scrubs, and the drag is discovered
+            // rather than advertised — same as a spinner in Blender.
             CursorKind::Text
         } else {
             CursorKind::Default
@@ -256,52 +301,59 @@ impl Control for NumericField {
             0.0
         };
 
+        let tk = theme::active();
         // Phase 27-G: this embedded scrub slider was missed by the 27-D widget
         // sweep and still drew flat bars. It now matches the standalone
         // `Slider` exactly — recessed capsule track, accent-gradient fill,
         // lifted handle — so a scrub control reads the same wherever it appears.
-        let tk = theme::active();
-        let mid_y = slider.y + slider.h * 0.5;
-        let track_r = TRACK_H * 0.5;
-        let track = Rect::new(slider.x, mid_y - track_r, slider.w, TRACK_H);
-        ctx.push_primitive(
-            crate::primitive::Primitive::fill(track, tk.semantic.surface.input.bytes())
-                .with_radius(track_r),
-            None,
-        );
-        ctx.push_primitive(
-            crate::primitive::Primitive::inset_shadow(
-                track,
-                [track_r; 4],
-                tk.inset.input.blur,
-                tk.inset.input.color.bytes(),
-            ),
-            None,
-        );
-
-        let usable = (slider.w - HANDLE_W).max(1.0);
-        let handle_x = slider.x + t * usable;
-        let filled_w = (handle_x - slider.x).max(0.0);
-        if filled_w > 0.0 {
-            let g = tk.gradient.rail_accent;
+        //
+        // MORROWIND-AC made the track optional. When the widget is too narrow
+        // to hold both, the whole width is the field and none of this runs —
+        // drawing a track that `split_rects` did not allocate is what put a
+        // handle on top of the digits.
+        if let Some(slider) = slider {
+            let mid_y = slider.y + slider.h * 0.5;
+            let track_r = TRACK_H * 0.5;
+            let track = Rect::new(slider.x, mid_y - track_r, slider.w, TRACK_H);
             ctx.push_primitive(
-                crate::primitive::Primitive::fill(
-                    Rect::new(slider.x, mid_y - track_r, filled_w, TRACK_H),
-                    g.from.bytes(),
-                )
-                .with_radius(track_r)
-                .with_gradient(g.to.bytes(), g.axis),
+                crate::primitive::Primitive::fill(track, tk.semantic.surface.input.bytes())
+                    .with_radius(track_r),
+                None,
+            );
+            ctx.push_primitive(
+                crate::primitive::Primitive::inset_shadow(
+                    track,
+                    [track_r; 4],
+                    tk.inset.input.blur,
+                    tk.inset.input.color.bytes(),
+                ),
+                None,
+            );
+
+            let usable = (slider.w - HANDLE_W).max(1.0);
+            let handle_x = slider.x + t * usable;
+            let filled_w = (handle_x - slider.x).max(0.0);
+            if filled_w > 0.0 {
+                let g = tk.gradient.rail_accent;
+                ctx.push_primitive(
+                    crate::primitive::Primitive::fill(
+                        Rect::new(slider.x, mid_y - track_r, filled_w, TRACK_H),
+                        g.from.bytes(),
+                    )
+                    .with_radius(track_r)
+                    .with_gradient(g.to.bytes(), g.axis),
+                    None,
+                );
+            }
+            let handle = Rect::new(handle_x, slider.y + 3.0, HANDLE_W, slider.h - 6.0);
+            let handle_r = (HANDLE_W * 0.5).min(tk.geometry.radius_popup);
+            ctx.push_drop_shadow_rounded(handle, [handle_r; 4], tk.elevation.raised);
+            ctx.push_primitive(
+                crate::primitive::Primitive::fill(handle, tk.semantic.accent.default.bytes())
+                    .with_radius(handle_r),
                 None,
             );
         }
-        let handle = Rect::new(handle_x, slider.y + 3.0, HANDLE_W, slider.h - 6.0);
-        let handle_r = (HANDLE_W * 0.5).min(tk.geometry.radius_popup);
-        ctx.push_drop_shadow_rounded(handle, [handle_r; 4], tk.elevation.raised);
-        ctx.push_primitive(
-            crate::primitive::Primitive::fill(handle, tk.semantic.accent.default.bytes())
-                .with_radius(handle_r),
-            None,
-        );
 
         let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
         ctx.push_paint(field, &paint);
@@ -367,7 +419,7 @@ impl Control for NumericField {
                     self.mixed = false;
                     self.gesture_origin = Some(self.value);
                     let (slider, _field) = Self::split_rects(widget.screen_bounds());
-                    if slider.contains(pos) {
+                    if let Some(slider) = slider.filter(|s| s.contains(pos)) {
                         self.slider_dragging = true;
                         self.focused = false;
                         self.select_all = false;
@@ -385,8 +437,10 @@ impl Control for NumericField {
                     msg.handled = true;
                 }
                 WidgetMessage::MouseMove { pos, mods } => {
-                    if self.slider_dragging {
-                        let (slider, _) = Self::split_rects(widget.screen_bounds());
+                    if let (true, (Some(slider), _)) = (
+                        self.slider_dragging,
+                        Self::split_rects(widget.screen_bounds()),
+                    ) {
                         let (lo, hi) = self.effective_range();
                         let v = self.value_from_slider(slider, pos.x, lo, hi);
                         if v != self.value {
@@ -671,6 +725,55 @@ mod tests {
 
     /// CONTROL-K. The same track, read exponentially: half the travel reaches
     /// the geometric mean, which is what makes a lux slider usable at all.
+    /// MORROWIND-AC. Whatever `split_rects` returns must fit inside the
+    /// widget, at **every** width — this is the invariant the old form broke.
+    ///
+    /// It computed the field and the track independently, each with its own
+    /// unconditional `.max()` floor, so at 58 px it produced a 40 px track and
+    /// a 56 px field: 102 px of content in a 58 px box. The field started at
+    /// `x + 46`, leaving about twelve visible pixels, and a generated Details
+    /// vector lane showed exactly one digit of its value.
+    #[test]
+    fn the_split_always_fits_inside_the_widget() {
+        for w in 20..=400 {
+            let b = Rect::new(10.0, 0.0, w as f32, 22.0);
+            let (slider, field) = NumericField::split_rects(b);
+            let right = field.x + field.w;
+            assert!(
+                right <= b.x + b.w + 0.01,
+                "w={w}: field ends at {right}, widget ends at {}",
+                b.x + b.w
+            );
+            assert!(field.x >= b.x - 0.01, "w={w}: field starts left of the widget");
+            if let Some(s) = slider {
+                assert!(
+                    s.x + s.w + SLIDER_GAP <= field.x + 0.01,
+                    "w={w}: the track overlaps the field"
+                );
+                assert!(s.w >= MIN_SLIDER_W - 0.01, "w={w}: a track too small to use");
+            }
+        }
+    }
+
+    /// The number is never sacrificed for the track.
+    #[test]
+    fn a_narrow_field_keeps_its_digits_and_drops_the_track() {
+        // 58 px is the width generated Details used to pin a vector lane to,
+        // and is why this test names it.
+        let (slider, field) = NumericField::split_rects(Rect::new(0.0, 0.0, 58.0, 22.0));
+        assert!(slider.is_none(), "58 px has no room for a usable track");
+        assert_eq!(field.w, 58.0, "the field should take the whole width");
+    }
+
+    /// And a wide one keeps both, so nothing regressed for ordinary rows.
+    #[test]
+    fn a_wide_field_still_gets_its_scrub_track() {
+        let (slider, field) = NumericField::split_rects(Rect::new(0.0, 0.0, 200.0, 22.0));
+        let slider = slider.expect("200 px is plenty for a track");
+        assert!(slider.w >= MIN_SLIDER_W);
+        assert_eq!(field.w, FIELD_W);
+    }
+
     #[test]
     fn an_exponential_track_is_geometric_in_its_travel() {
         let r = Rect::new(0.0, 0.0, 108.0, 18.0);

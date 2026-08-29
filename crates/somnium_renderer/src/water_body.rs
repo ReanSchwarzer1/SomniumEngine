@@ -179,6 +179,183 @@ fn upload_r32_float(
     (texture, view)
 }
 
+/// The surface datum the baked Great Lakes coverage was authored against.
+///
+/// `assets/terrain/great_lakes/{mask,depth,shore_sdf}.png` are not a heightmap —
+/// they are a *shoreline*, solved once for a water plane at this height. The
+/// depth texel is metres of water below it and the SDF is the contour where
+/// that reaches zero.
+pub const BAKED_DATUM_METRES: f32 = crate::terrain::GREAT_LAKES_BAKE_DATUM_METRES;
+
+/// The depth the baked texture is normalised against, from the same
+/// `recipe.json` (`"max_depth_metres": 12`).
+///
+/// **This is not `WaterBodyDescriptor::max_depth`**, and conflating the two is
+/// the trap here. The descriptor's 18.6 is an *optical* path length, chosen
+/// deliberately deeper than the bed so open water reaches full absorption
+/// instead of staying thin and grey; `WaterBodyData::load` decodes the texel
+/// with it, so the depth the shader reads is the true depth scaled by
+/// 18.6/12 ≈ 1.55. That is fine for an extinction integral and wrong for
+/// geometry: a datum shift is in real metres, so it has to be applied to real
+/// depth. [`reproject_to_datum`] divides the scaling out, shifts, and puts it
+/// back.
+pub const BAKED_MAX_DEPTH_METRES: f32 = crate::terrain::DEFAULT_WATER_DEPTH_METRES;
+
+/// Move baked coverage from [`BAKED_DATUM_METRES`] to the authored datum.
+///
+/// **The defect this fixes:** `surface_level` is an editable field, and moving
+/// it moved the water *plane* while the mask, depth and SDF stayed where they
+/// were baked. Lower the datum and the plane drops below a shoreline that still
+/// thinks it is at the bake datum, so the surface ends in the wrong place and
+/// gets an edge that does not follow the terrain it is supposedly meeting.
+/// Raise it and water draws over ground that is now above it. Either way the
+/// number in Details and the picture on screen disagree, which is the same
+/// class of defect as a checked box that runs no pass.
+///
+/// The baked depth field is exactly what is needed to fix it, because depth
+/// below one datum is depth below another plus a constant. Subtracting the
+/// shift gives the true depth for the authored plane, and the wet set is where
+/// that is still positive. The SDF is then re-solved for that set with an exact
+/// Euclidean transform, so the antialiased contour `water.wgsl` reads keeps its
+/// sub-cell quality instead of degrading to a stair-stepped mask.
+///
+/// **At the default datum this returns the baked data untouched.** That is
+/// deliberate and load-bearing: `terrain_shading_occupancy_2026-08-14.md`
+/// froze the Great Lakes look, so authoring the shipped datum must be
+/// bit-identical, and it is — the work happens only once someone authors a
+/// different number, which is exactly when the old behaviour was wrong.
+fn reproject_to_datum(
+    size: [u32; 2],
+    mask: Vec<u8>,
+    depth_metres: Vec<f32>,
+    sdf_cells: Vec<f32>,
+    surface_level: f32,
+    optical_max_depth: f32,
+) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let shift = BAKED_DATUM_METRES - surface_level;
+    if shift.abs() < 1.0e-3 {
+        return (mask, depth_metres, sdf_cells);
+    }
+    // `depth_metres` arrives scaled by the optical/bake ratio — see
+    // [`BAKED_MAX_DEPTH_METRES`]. The shift is in real metres, so undo the
+    // scaling, shift, and reapply it; the optics are then unchanged and only
+    // the waterline has moved.
+    let optical = if BAKED_MAX_DEPTH_METRES > 0.0 {
+        optical_max_depth / BAKED_MAX_DEPTH_METRES
+    } else {
+        1.0
+    };
+    let optical = if optical.is_finite() && optical > 0.0 {
+        optical
+    } else {
+        1.0
+    };
+    let shifted: Vec<f32> = depth_metres.iter().map(|d| d / optical - shift).collect();
+    let wet: Vec<bool> = shifted.iter().map(|d| *d > 0.0).collect();
+    let mask = wet.iter().map(|w| if *w { 255u8 } else { 0 }).collect();
+    // The shader reads depth as a positive optical path; a negative one is dry
+    // ground it discards anyway, and clamping keeps the extinction integral
+    // from being handed a negative length.
+    let depth = shifted.iter().map(|d| d.max(0.0) * optical).collect();
+    let sdf = signed_distance_cells(size, &wet);
+    (mask, depth, sdf)
+}
+
+/// Exact Euclidean signed distance to the wet/dry boundary, in cells.
+///
+/// Positive inside the water and negative outside, which is the sign convention
+/// `water.wgsl` reads: `coverage` rises with it, and `shore_distance` clamps it
+/// at zero to measure foam *into* the body.
+///
+/// Felzenszwalb and Huttenlocher's lower-envelope transform, one pass per axis.
+/// A chamfer approximation would be fewer lines and is what a shoreline this
+/// smooth would usually tolerate, but the contour feeds an `fwidth`
+/// antialiasing band — a third of a cell of error there becomes a visibly
+/// wobbling waterline, so the exact transform is the cheaper choice in the end.
+fn signed_distance_cells(size: [u32; 2], wet: &[bool]) -> Vec<f32> {
+    let inside = squared_distance_to(size, wet, false);
+    let outside = squared_distance_to(size, wet, true);
+    wet.iter()
+        .zip(inside.iter().zip(outside.iter()))
+        .map(|(w, (d_in, d_out))| {
+            let d = if *w { d_in.sqrt() } else { -d_out.sqrt() };
+            d.clamp(-128.0, 128.0)
+        })
+        .collect()
+}
+
+/// Squared Euclidean distance from every cell to the nearest cell whose `wet`
+/// flag equals `target`.
+fn squared_distance_to(size: [u32; 2], wet: &[bool], target: bool) -> Vec<f32> {
+    let (w, h) = (size[0] as usize, size[1] as usize);
+    const FAR: f32 = 1.0e12;
+    let mut grid: Vec<f32> = wet
+        .iter()
+        .map(|v| if *v == target { 0.0 } else { FAR })
+        .collect();
+    if w == 0 || h == 0 {
+        return grid;
+    }
+    // Columns first, then rows: the 2D transform is separable, which is the
+    // whole reason this is linear rather than quadratic.
+    let mut column = vec![0.0f32; h];
+    for x in 0..w {
+        for y in 0..h {
+            column[y] = grid[y * w + x];
+        }
+        let out = envelope(&column);
+        for y in 0..h {
+            grid[y * w + x] = out[y];
+        }
+    }
+    for y in 0..h {
+        let out = envelope(&grid[y * w..y * w + w]);
+        grid[y * w..y * w + w].copy_from_slice(&out);
+    }
+    grid
+}
+
+/// 1D squared-distance transform: the lower envelope of the parabolas
+/// `(x - i)^2 + f[i]`.
+fn envelope(f: &[f32]) -> Vec<f32> {
+    let n = f.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f32; n + 1];
+    let mut k = 0usize;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    for q in 1..n {
+        loop {
+            let p = v[k];
+            let s = ((f[q] + (q * q) as f32) - (f[p] + (p * p) as f32))
+                / (2.0 * q as f32 - 2.0 * p as f32);
+            if s <= z[k] && k > 0 {
+                k -= 1;
+            } else {
+                k += 1;
+                v[k] = q;
+                z[k] = s;
+                z[k + 1] = f32::INFINITY;
+                break;
+            }
+        }
+    }
+    let mut out = vec![0.0f32; n];
+    let mut k = 0usize;
+    for q in 0..n {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let p = v[k];
+        let d = q as f32 - p as f32;
+        out[q] = d * d + f[p];
+    }
+    out
+}
+
 impl WaterBodyData {
     fn load(ctx: &RenderContext, descriptor: WaterBodyDescriptor) -> Result<Self, String> {
         let (size, mask, depth_raw, sdf_raw) = load_assets(descriptor)?;
@@ -190,6 +367,20 @@ impl WaterBodyData {
             .iter()
             .map(|&v| (v as f32 / u16::MAX as f32 * 2.0 - 1.0) * 128.0)
             .collect();
+        // Make `surface_level` mean something. Preset 2 is a wet rectangle with
+        // no baked shoreline to move, so it is exempt.
+        let (mask, depth_metres, shore_distance_cells) = if descriptor.preset == 1 {
+            reproject_to_datum(
+                size,
+                mask,
+                depth_metres,
+                shore_distance_cells,
+                descriptor.surface_level,
+                descriptor.max_depth,
+            )
+        } else {
+            (mask, depth_metres, shore_distance_cells)
+        };
         let (mask_texture, mask_view) = upload_r8(ctx, "Water body mask", size, &mask);
         let (depth_texture, depth_view) =
             upload_r32_float(ctx, "Water body depth", size, &depth_metres);
@@ -579,7 +770,7 @@ mod tests {
             water_id: 0,
             terrain_id: 0,
             preset: 2,
-            surface_level: 16.1,
+            surface_level: BAKED_DATUM_METRES,
             max_depth: 18.6,
             bounds: [0.0, 0.0, 512.0, 512.0],
             amplitude: 0.57,
@@ -620,5 +811,182 @@ mod tests {
         assert!(displacement.is_finite() && normal.is_finite() && velocity.is_finite());
         assert!(normal.y > 0.5);
         assert!(displacement.y.abs() <= descriptor.amplitude + 1.0e-5);
+    }
+}
+
+#[cfg(test)]
+mod datum_tests {
+    use super::*;
+
+    /// Brute force, for the transform to be checked against. O(n^2) and
+    /// obviously correct, which is the only property wanted of it.
+    fn brute_force(size: [u32; 2], wet: &[bool], target: bool) -> Vec<f32> {
+        let (w, h) = (size[0] as usize, size[1] as usize);
+        let mut out = vec![f32::INFINITY; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let mut best = f32::INFINITY;
+                for yy in 0..h {
+                    for xx in 0..w {
+                        if wet[yy * w + xx] == target {
+                            let dx = x as f32 - xx as f32;
+                            let dy = y as f32 - yy as f32;
+                            best = best.min(dx * dx + dy * dy);
+                        }
+                    }
+                }
+                out[y * w + x] = best;
+            }
+        }
+        out
+    }
+
+    fn checker(w: usize, h: usize, seed: u64) -> Vec<bool> {
+        // Deterministic pseudo-random blobs: a lattice of sines, thresholded.
+        // Random-looking without a dependency, and reproducible.
+        (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32;
+                let y = (i / w) as f32;
+                let s = seed as f32 * 0.37;
+                ((x * 0.31 + s).sin() + (y * 0.23 - s).cos() + (x * 0.07 * y * 0.05).sin()) > 0.2
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_distance_transform_matches_brute_force() {
+        // The transform is separable and easy to get subtly wrong in a way that
+        // still looks like a distance field. Only an exact comparison catches
+        // that, and a shoreline contour is read through `fwidth`, so "subtly
+        // wrong" is "visibly wobbling".
+        for (w, h, seed) in [(13usize, 9usize, 1u64), (16, 16, 7), (9, 21, 3)] {
+            let wet = checker(w, h, seed);
+            for target in [true, false] {
+                let fast = squared_distance_to([w as u32, h as u32], &wet, target);
+                let slow = brute_force([w as u32, h as u32], &wet, target);
+                for (i, (f, s)) in fast.iter().zip(slow.iter()).enumerate() {
+                    if s.is_finite() {
+                        assert!(
+                            (f - s).abs() < 1.0e-3,
+                            "{w}x{h} seed {seed} target {target} cell {i}: {f} vs {s}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_datum_returns_the_baked_data_untouched() {
+        // The freeze in `terrain_shading_occupancy_2026-08-14.md` is the reason
+        // this test exists: the shipped Great Lakes look must not move by one
+        // texel because this function now exists.
+        let size = [8u32, 8u32];
+        let mask: Vec<u8> = (0..64).map(|i| (i * 3 % 256) as u8).collect();
+        let depth: Vec<f32> = (0..64).map(|i| i as f32 * 0.25).collect();
+        let sdf: Vec<f32> = (0..64).map(|i| i as f32 - 32.0).collect();
+        let (m, d, s) = reproject_to_datum(
+            size,
+            mask.clone(),
+            depth.clone(),
+            sdf.clone(),
+            BAKED_DATUM_METRES,
+            BAKED_MAX_DEPTH_METRES,
+        );
+        assert_eq!(m, mask);
+        assert_eq!(d, depth);
+        assert_eq!(s, sdf);
+    }
+
+    #[test]
+    fn lowering_the_datum_shrinks_the_wet_set_by_exactly_the_shift() {
+        // A ramp from 0 m to 7 m of baked depth. Dropping the plane two metres
+        // must dry out precisely the cells shallower than two metres — that
+        // equivalence is the whole argument for reusing the baked depth field.
+        let size = [8u32, 1u32];
+        let depth: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let (mask, out_depth, sdf) = reproject_to_datum(
+            size,
+            vec![255; 8],
+            depth,
+            vec![0.0; 8],
+            BAKED_DATUM_METRES - 2.0,
+            BAKED_MAX_DEPTH_METRES,
+        );
+        // Baked depths 0,1,2 are at or above the new plane; 3..7 stay wet.
+        assert_eq!(
+            mask,
+            vec![0, 0, 0, 255, 255, 255, 255, 255],
+            "the waterline should land between 2 m and 3 m of baked depth"
+        );
+        assert_eq!(out_depth[3], 1.0, "a 3 m cell is 1 m deep two metres down");
+        assert!(out_depth[0] >= 0.0, "dry cells must not report negative depth");
+        // Sign convention: positive inside the water, negative outside.
+        assert!(sdf[0] < 0.0 && sdf[7] > 0.0, "sdf = {sdf:?}");
+    }
+
+    #[test]
+    fn raising_the_datum_grows_the_wet_set() {
+        let size = [8u32, 1u32];
+        let depth: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let (mask, _, _) = reproject_to_datum(
+            size,
+            vec![0; 8],
+            depth,
+            vec![0.0; 8],
+            BAKED_DATUM_METRES + 1.5,
+            BAKED_MAX_DEPTH_METRES,
+        );
+        // Everything from the 0 m cell up is now under water.
+        assert!(mask.iter().all(|m| *m == 255), "mask = {mask:?}");
+    }
+
+    /// The two constants above are claims about files on disk, so they are
+    /// checked against those files rather than trusted.
+    ///
+    /// This is the test that would have caught the original defect: the runtime
+    /// datum was 16.1 while `recipe.json` said the shoreline was baked at 15,
+    /// and nothing anywhere compared the two.
+    #[test]
+    fn the_bake_constants_match_the_shipped_recipe() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/terrain/great_lakes/recipe.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // A clone without the assets still builds; the asset tests beside
+            // this one already skip on the same condition.
+            return;
+        };
+        let number = |key: &str| -> f32 {
+            let at = text.find(key).expect("recipe key");
+            let rest = &text[at + key.len()..];
+            let start = rest.find(|c: char| c.is_ascii_digit()).expect("digit");
+            let end = start
+                + rest[start..]
+                    .find(|c: char| !c.is_ascii_digit() && c != '.')
+                    .unwrap_or(rest.len() - start);
+            rest[start..end].parse().expect("number")
+        };
+        assert_eq!(
+            number("\"water_level_metres\""),
+            BAKED_DATUM_METRES,
+            "the runtime datum must be the one the shoreline was baked at"
+        );
+        assert_eq!(
+            number("\"max_depth_metres\""),
+            BAKED_MAX_DEPTH_METRES,
+            "the depth texture's normalisation must match what decodes it"
+        );
+    }
+
+    #[test]
+    fn the_signed_field_is_zero_crossing_at_the_waterline() {
+        let size = [6u32, 1u32];
+        let wet = [false, false, false, true, true, true];
+        let sdf = signed_distance_cells(size, &wet);
+        assert!(sdf[2] < 0.0 && sdf[3] > 0.0);
+        // One cell either side of the boundary is one cell from it.
+        assert!((sdf[3] - 1.0).abs() < 1.0e-3, "sdf = {sdf:?}");
+        assert!((sdf[2] + 1.0).abs() < 1.0e-3, "sdf = {sdf:?}");
     }
 }

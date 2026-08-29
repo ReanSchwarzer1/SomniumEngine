@@ -1,7 +1,55 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-28
+> **Last updated:** 2026-08-29
 > **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
+>
+> **MORROWIND-AC shipped 2026-08-29** — `dev records/phase MORROWIND/MORROWIND-AC.md`.
+> Of its five planned items three were already done (decals CONTROL-O, contact
+> shadows 24X, transmission 24S); a skin-diffusion profile is **declined**.
+> **The blocker was the AA state model:** `fxaa_enabled` and `fsr_enabled` both
+> defaulted true and `renderer.rs` resolved them with
+> `fxaa && !taa && !fsr_ok`, so **FXAA had never run by default** behind a
+> checked box. One `aa: AntiAliasing` value now replaces three booleans —
+> **Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3** — as a generated Details
+> enum, with an **SMAA Quality** row (Low/Medium/High/Ultra). Measured: every
+> value runs a pass and Off runs none. **SMAA S2x and 4x are refused** — both
+> resolve MSAA subsamples and a visibility buffer has none. SMAA's reference
+> `AreaTex`/`SearchTex` are **not vendored** (analytic coverage instead), so the
+> diagonal pass and corner rounding are absent and said so. **OIT is
+> weighted-blended, default off**; the plan's "PPLL likely" is recorded as
+> wrong (needs `FRAGMENT_WRITABLE_STORAGE`, which the engine has never queried,
+> and a ~796 MB-at-4K node pool sized from a guess).
+> **The visual gate is not met and the captures proved it:** a control of two
+> identical runs moves 4.48% of coastal-ground where SMAA moves 4.43%, and
+> 63.50% of island where OIT moves 63.49%. A deterministic fixture is owed.
+>
+> **Phase PORTAL-0 (Source) ran 2026-08-29, before MORROWIND-AC** —
+> `dev records/phase_PORTAL-0.md`, evidence in `dev records/phase PORTAL-0/`.
+> A measurement phase, and two of its seven sub-phases are **negative results
+> that are deliberately not in tree**: the audit's terrain-CPU-variance finding
+> was an artefact of a 20-frame warm-up (0.031 ms at the documented 180, not
+> 1.39), and a WGSL terrain micro-pass measured **4% slower** over three
+> back-to-back repetitions and was reverted. In tree: an honest frame
+> decomposition (`cpu Frame CPU` and `cpu Surface acquire` beside `Frame wall`,
+> which is a **vsync-inclusive interval and never was CPU work**), unsmoothed
+> CPU samples in `.somtime`, five new engine CPU zones, **nine dead
+> dependencies plus the dead `egui` triple removed** (census: 0 unreferenced),
+> a `one-job-system` gate widened to see `rayon::spawn`, and two confirmed CPU
+> mechanisms fixed — the terrain instance lookup was O(draws × chunks) and the
+> UI cloned every node's child list twice a frame (1,042 nodes; shell
+> layout+draw 0.054 → 0.043 ms).
+> **The headline is a decision, not a change: the Phase DF terrain clipmap
+> takes Coastal ground from 21.4 to 9.4 ms a frame (Shading 11.46 → 1.72) and
+> passes DF §6.4's eye-level luminance gate on all three views (≤ 0.49% against
+> a 1% budget).** DF-E's default-on has been blocked on exactly that remeasure
+> since 2026-08-15. **The default is still off** — flipping it changes what an
+> existing scene draws and two documents carry a standing instruction against
+> it — and taking it is recommended and owed.
+> **Also found, and older than this phase:** GHOSTFENCE's `golden-images` row
+> fails on `sculpt-panel` (5.33% of pixels, budget 0.2%) on a clean `439b6b6`;
+> the row had been reporting `SKIP` because no candidate was ever generated.
+> `assets/scripts/somnium.d.luau` was stale for the same reason — MORROWIND-AD
+> changed the Terrain schema to version 2 and regenerated neither.
 > MORROWIND-AB supplies the portable GI tier: a ray-query-free, SDF-traced
 > 4×4×4 DDGI volume with budgeted temporal SH updates. MORROWIND-AD now streams
 > the terrain's existing BC7 mip chains as paired 128² source pages into an

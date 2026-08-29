@@ -13,7 +13,6 @@ wgpu         = { workspace = true }
 winit        = { workspace = true }
 glam         = { workspace = true }
 tracing      = { workspace = true }
-pollster     = { workspace = true }
 somnium_ui   = { workspace = true }
 # MORROWIND-U. Seam 7: the renderer takes matrices, and the crate that produces
 # them has no renderer dependency of its own. This edge points one way.

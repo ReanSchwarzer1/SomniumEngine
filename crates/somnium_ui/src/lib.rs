@@ -7234,6 +7234,69 @@ mod styx_budget_tests {
         ui
     }
 
+    /// PORTAL-0-D: what a frame of the real editor shell costs on the CPU.
+    ///
+    /// There was no such number. `.somtime`'s `UI` row is the GPU pass, and the
+    /// two whole-tree CPU traversals — `update_global_visibility` and
+    /// `draw_node` — ran inside the renderer's frame with no zone around them,
+    /// so the editor's per-frame layout and paint cost had never been measured
+    /// at all.
+    ///
+    /// The shape follows `somnium_script_luau/tests/budgets.rs`: report always,
+    /// assert only in release, and quote a p95 rather than a mean, because the
+    /// question a budget answers is about the bad frames.
+    ///
+    /// The ceiling is deliberately loose. It is a tripwire against something
+    /// going quadratic in the widget count, not a target — a tight bound taken
+    /// from one machine would fail on a slower one and teach whoever hits it to
+    /// delete the test.
+    #[test]
+    fn measured_cpu_cost_of_a_shell_frame() {
+        let mut ui = shell_frame(1920.0, 1080.0);
+        let nodes = ui.nodes.alive_count();
+
+        let mut samples = Vec::new();
+        for _ in 0..60 {
+            // Steady state on purpose: `perform_layout` short-circuits on
+            // nodes whose measure is still valid, which is what a real
+            // unchanged frame does, and `draw` walks the whole tree every time
+            // regardless. That pair is exactly the two traversals this
+            // sub-phase touched.
+            let t0 = std::time::Instant::now();
+            ui.perform_layout();
+            ui.draw();
+            samples.push(t0.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+        let median = samples[samples.len() / 2];
+
+        println!(
+            "shell frame: {nodes} nodes, median {:.3} ms, p95 {:.3} ms{}",
+            median.as_secs_f64() * 1000.0,
+            p95.as_secs_f64() * 1000.0,
+            if cfg!(debug_assertions) {
+                "  (debug: not enforced)"
+            } else {
+                ""
+            }
+        );
+
+        // Both traversals allocated one `Vec<NodeHandle>` per node per frame
+        // before PORTAL-0-D — two per node, so `2 * nodes` heap allocations a
+        // frame that now do not happen. Recorded here because it is the part of
+        // the change that is exact, where the timing is not.
+        assert!(nodes > 100, "the shell should be a real tree, got {nodes}");
+
+        if !cfg!(debug_assertions) {
+            assert!(
+                p95 < std::time::Duration::from_millis(8),
+                "shell frame p95 {:.3} ms — layout+draw should not approach a frame budget",
+                p95.as_secs_f64() * 1000.0
+            );
+        }
+    }
+
     #[test]
     fn measured_instance_budget_for_the_real_shell() {
         for (w, h) in [(1920.0, 1080.0), (2560.0, 1440.0)] {

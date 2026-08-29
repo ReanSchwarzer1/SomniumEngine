@@ -220,7 +220,13 @@ mod tests {
         assert_eq!(water["parent_local_idx"], 0);
         assert_eq!(water["water"]["preset"], 1);
         let surface_level = water["water"]["surface_level"].as_f64().unwrap();
-        assert!((surface_level - 16.1).abs() < 1.0e-5);
+        // Against the constant, not a literal: this test is about the round
+        // trip preserving the value, and pinning the number here made it fail
+        // when the datum was corrected from 16.1 to the 15.0 its shoreline was
+        // actually baked at.
+        let expected =
+            f64::from(somnium_renderer::terrain::DEFAULT_WATER_LEVEL_METRES);
+        assert!((surface_level - expected).abs() < 1.0e-5);
         let max_depth = water["water"]["max_depth"].as_f64().unwrap();
         assert!((max_depth - 18.6).abs() < 1.0e-5);
         assert_eq!(

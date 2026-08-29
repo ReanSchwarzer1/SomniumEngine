@@ -97,9 +97,6 @@ ABSENCE_TERMS: list[tuple[str, int, str]] = [
 DEPENDENCY_EXEMPTIONS: dict[str, str] = {
     "cc": "build-dependency; used from build.rs to compile Jolt.",
     "tracing-subscriber": "installed once at startup; referenced as `tracing_subscriber`.",
-    "egui": "DEAD — plan §4.7. Left for Phase PORTAL's CI gates to remove.",
-    "egui-wgpu": "DEAD — plan §4.7.",
-    "egui-winit": "DEAD — plan §4.7.",
 }
 
 TEST_ATTR = re.compile(r"^\s*#\[(?:\w+::)*test\b")
@@ -457,9 +454,15 @@ def render() -> str:
     w(
         f"**{len(unjustified)} unreferenced**, "
         f"**{len([r for r in deps if r[2] == 'exempt'])} exempt with a stated reason.** "
-        "The `egui` triple is exempt-and-dead: the plan (§4.7) found it declared and "
-        "unreferenced, and left its removal to Phase PORTAL's CI gates rather than "
-        "smuggling a cleanup into a census."
+        "PORTAL-0-C removed the nine unreferenced rows this column was reporting "
+        "— `rayon` from `somnium_ecs`, `pollster` from `somnium_renderer`, "
+        "`base64` from `somnium_core`, `tracing` from `somnium_audio`, "
+        "`somnium_voxel` and `somnium_script_luau`, `anyhow` and `rand` from "
+        "`hello_engine`, and `anyhow` from the workspace — together with the "
+        "dead `egui` / `egui-wgpu` / `egui-winit` triple the plan (§4.7) had "
+        "left for this phase. Each was verified to appear in no source file "
+        "under any spelling before it was deleted, and `cargo check "
+        "--workspace --all-targets` passes without them."
     )
     w("")
 

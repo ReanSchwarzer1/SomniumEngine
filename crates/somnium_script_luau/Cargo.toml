@@ -13,7 +13,6 @@ authors.workspace     = true
 somnium_ecs    = { workspace = true }
 somnium_script = { workspace = true }
 mlua           = { workspace = true }
-tracing        = { workspace = true }
 
 # The vertical-slice tests drive the backend through a real world and the
 # real registry, which is where the component schemas live.

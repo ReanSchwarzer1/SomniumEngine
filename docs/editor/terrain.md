@@ -65,3 +65,63 @@ Select the **Camera** entity for **Frustum Cull** (default on). Off-screen terra
 Terrain **Dbg** 0–23 are material / shadow / splat probes. **24–31** are lighting: luminance, GI, cluster occupancy, world cache, specular aux, SDF, analytic mips, path-tracer aux.
 
 Water is a separate child entity. Reflection knobs live on that Water, not on Terrain — Help → **Water**.
+
+## Water surface level
+
+**Surface Level** on a Water entity is the height of the water plane in
+terrain-local metres. The Great Lakes preset defaults to **15.0 m**, which is
+the datum its shoreline was baked at — `assets/terrain/great_lakes/recipe.json`
+records it as `"water_level_metres": 15`.
+
+It defaulted to **16.1 m** until 2026-08-29, and that was 1.1 m above the bake.
+Measured over all 4,194,304 mask cells against the shipped heightmap at the
+default 105 m of relief:
+
+| Datum | Dry cells under water | Wet cells above it |
+|---|---:|---:|
+| 14.0 | 0 | 235,688 |
+| **15.0** | **3,545** | **3,625** |
+| 16.1 | **108,719** | 1 |
+
+At 16.1 a hundred and nine thousand cells of ground the shoreline calls dry sat
+under the plane, which is why the water read as lying *on* the beach instead of
+meeting it. At 14.0 the error just reverses. The residual few thousand cells at
+15.0 are the antialiasing band.
+
+Moving it now moves the shoreline with it. That is worth saying because it did
+not used to: `assets/terrain/great_lakes/{mask,depth,shore_sdf}.png` are a
+*shoreline*, solved once for a plane at 16.1 m, and editing Surface Level moved
+the plane while leaving that coverage where it was baked. Lowering the datum put
+the surface below a waterline that still thought it was at 16.1; raising it drew
+water over ground that was now above it. Either way the number in Details and
+the picture disagreed, and the beach got an edge that did not follow the terrain
+it was meeting.
+
+The baked depth field is what fixes it: depth below one datum is depth below
+another plus a constant, so the wet set is re-derived by subtracting the shift
+and the shoreline contour is re-solved from it. At **16.1 exactly** the baked
+data is used untouched, so the shipped look is unchanged to the byte.
+
+`SOMNIUM_WATER_LEVEL=14` overrides the datum on the default landscape for an
+A/B.
+
+**Open ocean** (`WaterComponent::ocean`, preset 2) is exempt: it is a fully wet
+rectangle with no baked shoreline, and terrain depth already owns where it meets
+the island.
+
+### Where the water meets the shore
+
+The surface fades out over the last **0.9 m** of depth difference against
+whatever is behind it, rather than being cut off by the depth test.
+
+That fade is not cosmetic polish, it is the shoreline. Coverage deliberately
+extends the water **1.5 m under** the terrain and lets the depth test own the
+visible intersection, so the waterline you see is the terrain's rasterised
+silhouette against a flat plane — and a binary depth test against LOD-reduced
+terrain gives that silhouette hard, axis-aligned steps. Before the fade the
+shore was visibly staircased.
+
+Worth knowing if you go looking for that staircase again: it is **not** the
+water mesh (rebuilding it at 0.5 m instead of 2 m changes nothing) and **not**
+the shore SDF (coverage cuts 1.5 m further out, under the terrain, so the
+contour never draws that edge). Both were checked.

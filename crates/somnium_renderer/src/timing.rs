@@ -274,10 +274,21 @@ pub struct TimingRun {
     last_serial: u64,
     gpu: BTreeMap<(String, u8), Accum>,
     cpu: BTreeMap<(String, u8), Accum>,
-    /// Wall-clock interval between presented frames. Unlike GPU scopes this
-    /// includes UI-thread work, which is the quantity CONTROL-A/C need for the
-    /// shipped synchronous thumbnail decoder's hitch baseline.
+    /// Wall-clock interval between presented frames.
+    ///
+    /// **This is not CPU work, and was read as CPU work before PORTAL-0-B.**
+    /// The swap chain is configured `PresentMode::AutoVsync`
+    /// (`context.rs`), so this interval contains the presentation block as well
+    /// as everything the engine did. A run whose GPU `Frame` is 10 ms and whose
+    /// wall is 19 ms is not evidence of 9 ms of CPU work; `Frame CPU` and
+    /// `Surface acquire` below are what answer that. It remains the right
+    /// number for a hitch baseline — CONTROL-A/C use it for the synchronous
+    /// thumbnail decoder — because a hitch is an interval, whatever caused it.
     wall_frame: Accum,
+    /// Engine frame body on the CPU, excluding the frame limiter (PORTAL-0-B).
+    frame_cpu: Accum,
+    /// Of which, blocked acquiring the swap-chain texture (PORTAL-0-B).
+    surface_acquire: Accum,
     last_tick_at: Option<Instant>,
     counters: FrameCounters,
     stats: Vec<StatsResult>,
@@ -309,6 +320,8 @@ impl TimingRun {
             gpu: BTreeMap::new(),
             cpu: BTreeMap::new(),
             wall_frame: Accum::default(),
+            frame_cpu: Accum::default(),
+            surface_acquire: Accum::default(),
             last_tick_at: None,
             counters: FrameCounters::default(),
             stats: Vec::new(),
@@ -348,6 +361,15 @@ impl TimingRun {
         if let Some(ms) = wall_ms {
             self.wall_frame.push(ms);
         }
+        // PORTAL-0-B: pushed beside the wall interval rather than with the GPU
+        // zones, because both are produced once per rendered frame and neither
+        // waits on readback. `frame_cpu` lags by one frame by construction —
+        // see `GpuProfiler::frame_cpu_ms` — which is invisible in a mean over
+        // hundreds of stationary frames and is stated here rather than hidden.
+        if profiler.frame_cpu_ms > 0.0 {
+            self.frame_cpu.push(profiler.frame_cpu_ms);
+        }
+        self.surface_acquire.push(profiler.surface_acquire_ms);
 
         let (serial, raw) = profiler.raw_sample();
         // Same serial means the readback ring has not produced a new frame yet.
@@ -362,7 +384,9 @@ impl TimingRun {
                     .or_default()
                     .push(r.ms);
             }
-            for r in profiler.cpu_results() {
+            // PORTAL-0-B: raw, not `cpu_results()`. The smoothed series has a
+            // standard deviation of the smoother rather than of the work.
+            for r in profiler.cpu_raw_results() {
                 self.cpu
                     .entry((r.name.to_string(), r.depth))
                     .or_default()
@@ -479,11 +503,22 @@ impl TimingRun {
                 a.n
             );
         }
-        if self.wall_frame.n > 0 {
-            let a = &self.wall_frame;
+        // PORTAL-0-B: three frame-level rows, written together because they
+        // only mean anything read together. `Frame wall` is the interval,
+        // `Frame CPU` is what the engine did inside it, and `Surface acquire`
+        // is the presentation block inside `Frame CPU`. Wall minus CPU is the
+        // frame limiter; CPU minus acquire is real work.
+        for (name, a) in [
+            ("Frame wall", &self.wall_frame),
+            ("Frame CPU", &self.frame_cpu),
+            ("Surface acquire", &self.surface_acquire),
+        ] {
+            if a.n == 0 {
+                continue;
+            }
             let _ = writeln!(
                 s,
-                "cpu\tFrame wall\t0\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}",
+                "cpu\t{name}\t0\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}",
                 a.mean(),
                 a.stddev(),
                 a.min,

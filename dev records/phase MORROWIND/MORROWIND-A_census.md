@@ -18,25 +18,25 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 59,490 | +9,284 | 32.0% | 400 | +72 | 88 | 53 |
-| `somnium_ui` | 57,203 | +29,673 | 30.7% | 579 | +364 | 98 | 2 |
-| `somnium_core` | 31,703 | +12,483 | 17.0% | 359 | +142 | 42 | 0 |
+| `somnium_renderer` | 61,599 | +11,393 | 32.6% | 416 | +88 | 90 | 55 |
+| `somnium_ui` | 57,411 | +29,881 | 30.4% | 583 | +368 | 98 | 2 |
+| `somnium_core` | 32,089 | +12,869 | 17.0% | 361 | +144 | 42 | 0 |
 | `somnium_asset` | 6,229 | +4,590 | 3.3% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.8% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,878 | +63 | 2.6% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,754 | +297 | 2.6% | 59 | +1 | 9 | 0 |
-| `somnium_anim` | 4,380 | +4,380 | 2.4% | 46 | +46 | 4 | 0 |
+| `somnium_script_luau` | 4,754 | +297 | 2.5% | 59 | +1 | 9 | 0 |
+| `somnium_anim` | 4,380 | +4,380 | 2.3% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.7% | 66 | +66 | 6 | 0 |
-| `somnium_shader` | 1,968 | +1,968 | 1.1% | 35 | +35 | 5 | 0 |
-| `somnium_i18n` | 1,954 | +1,954 | 1.1% | 57 | +57 | 5 | 0 |
+| `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
+| `somnium_i18n` | 1,954 | +1,954 | 1.0% | 57 | +57 | 5 | 0 |
 | `somnium_jobs` | 1,636 | +1,636 | 0.9% | 17 | +17 | 5 | 0 |
 | `somnium_audio` | 1,516 | +1,423 | 0.8% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **186,029** | +72,137 | | **1842** | +897 | | |
+| **Total** | **188,732** | +74,840 | | **1864** | +919 | | |
 
-The top three crates are **79.8%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.1%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,875 lines** (+229 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -50,8 +50,8 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1131 | 237 | 104 | 8 | 10 | 173 | 95 | **1758** |
-| `somnium_renderer` | 613 | 150 | 8 | 1 | 2 | 116 | 85 | **975** |
-| `somnium_core` | 300 | 103 | 19 | 3 | 3 | 58 | 39 | **525** |
+| `somnium_renderer` | 631 | 152 | 8 | 1 | 2 | 121 | 87 | **1002** |
+| `somnium_core` | 308 | 103 | 21 | 3 | 3 | 58 | 39 | **535** |
 | `somnium_script` | 125 | 34 | 9 | 3 | 3 | 18 | 11 | **203** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 11 | 8 | **158** |
@@ -68,14 +68,14 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **53 WGSL files, 13,818 lines** (+5 files, +1,739 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **55 files, 14,287 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,266 lines** (+7 files, +2,187 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **57 files, 14,735 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
 | Shader | Lines |
 |---|---:|
 | `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,079 |
-| `crates/somnium_renderer/src/shaders/water.wgsl` | 1,171 |
+| `crates/somnium_renderer/src/shaders/water.wgsl` | 1,214 |
 | `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,165 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
 | `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 481 |
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 30 (+18 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 111 (+15 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 115 (+19 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 
@@ -126,20 +126,9 @@ column would find something, and it does.
 
 | Crate | Dependency | Verdict | Reason |
 |---|---|---|---|
-| `somnium_audio` | `tracing` | UNREFERENCED | no match for `tracing` |
-| `somnium_core` | `base64` | UNREFERENCED | no match for `base64` |
-| `somnium_ecs` | `rayon` | UNREFERENCED | no match for `rayon` |
-| `somnium_renderer` | `pollster` | UNREFERENCED | no match for `pollster` |
-| `somnium_script_luau` | `tracing` | UNREFERENCED | no match for `tracing` |
-| `somnium_voxel` | `tracing` | UNREFERENCED | no match for `tracing` |
-| `hello_engine` | `anyhow` | UNREFERENCED | no match for `anyhow` |
-| `hello_engine` | `rand` | UNREFERENCED | no match for `rand` |
 | `hello_engine` | `tracing-subscriber` | exempt | installed once at startup; referenced as `tracing_subscriber`. |
-| `<workspace>` | `anyhow` | UNREFERENCED | no match for `anyhow` |
-| `<workspace>` | `egui-wgpu` | exempt | DEAD — plan §4.7. |
-| `<workspace>` | `egui-winit` | exempt | DEAD — plan §4.7. |
 
-**9 unreferenced**, **3 exempt with a stated reason.** The `egui` triple is exempt-and-dead: the plan (§4.7) found it declared and unreferenced, and left its removal to Phase PORTAL's CI gates rather than smuggling a cleanup into a census.
+**0 unreferenced**, **1 exempt with a stated reason.** PORTAL-0-C removed the nine unreferenced rows this column was reporting — `rayon` from `somnium_ecs`, `pollster` from `somnium_renderer`, `base64` from `somnium_core`, `tracing` from `somnium_audio`, `somnium_voxel` and `somnium_script_luau`, `anyhow` and `rand` from `hello_engine`, and `anyhow` from the workspace — together with the dead `egui` / `egui-wgpu` / `egui-winit` triple the plan (§4.7) had left for this phase. Each was verified to appear in no source file under any spelling before it was deleted, and `cargo check --workspace --all-targets` passes without them.
 
 ---
 

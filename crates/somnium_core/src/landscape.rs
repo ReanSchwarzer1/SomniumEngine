@@ -107,7 +107,16 @@ pub fn create_default_landscape(
     }
     let [width, depth] = preset.terrain.world_size();
     let water_id = renderer.allocate_water_body_id();
-    let water = WaterComponent::great_lakes(water_id, terrain_id, [0.0, 0.0, width, depth]);
+    let mut water = WaterComponent::great_lakes(water_id, terrain_id, [0.0, 0.0, width, depth]);
+    // `SOMNIUM_WATER_LEVEL` overrides the authored datum for an A/B. The
+    // shoreline follows it now (`water_body::reproject_to_datum`), which is
+    // what makes the override worth having: before, it would have moved the
+    // plane and left the coverage behind.
+    if let Ok(level) = std::env::var("SOMNIUM_WATER_LEVEL") {
+        if let Ok(level) = level.trim().parse::<f32>() {
+            water.surface_level = level;
+        }
+    }
     renderer.ensure_water_body(render_ctx, water.descriptor())?;
     let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
     let (terrain, water_snapshot) = landscape_snapshots(

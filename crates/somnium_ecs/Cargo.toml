@@ -8,7 +8,6 @@ license.workspace     = true
 authors.workspace     = true
 
 [dependencies]
-rayon = { workspace = true }
 # Phase 16-A: `ReflectField` must be implemented for the engine's math
 # types, and the orphan rule puts those impls here — `somnium_core` can
 # implement a foreign trait for its own types, but not for glam's.
