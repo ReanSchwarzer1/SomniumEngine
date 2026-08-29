@@ -28,16 +28,18 @@ The engine is organized around three deliberate commitments:
 |---|---|
 | **Visibility Buffer rendering** | Geometry is rasterized once into a compact `(instance, triangle)` ID buffer; a single fullscreen pass then shades each visible pixel exactly once. No overdraw, bandwidth scales with the framebuffer rather than scene complexity. |
 | **Archetype ECS** | Entities are grouped by component signature and stored as struct-of-arrays, so iterating a query walks contiguous memory — cache-coherent, no per-component hash lookups. |
-| **Native wgpu UI** | The editor (outliner, inspector, gizmos, log) is a native widget tree drawn by the engine's own GPU pass. No browser, WebView, or external UI toolkit — and no immediate-mode debug skin either: it runs on **Nocturne Atelier**, a real token system with semantic colour roles, five bundled type cuts and one icon family. |
+| **Native wgpu UI** | The editor (outliner, Details, gizmos, log, graph editor, timeline) is a native widget tree drawn by the engine's own GPU pass. No browser, WebView, or external UI toolkit — and no immediate-mode debug skin either: it runs on **Nocturne Atelier**, a real token system with semantic colour roles, five bundled type cuts and one icon family. |
 
 > **Status:** actively developed, single-author hobby/research project. Expect
-> rough edges and churn — see [`context.md`](context.md) for the current phase
-> and the full phase history. **Start-here:**
-> [`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
-> (learn the architecture, then audit Halcyon→HEAD). Next phase plan:
-> [`dev records/phase_DF.md`](dev%20records/phase_DF.md) (Daggerfall — terrain
-> clipmaps). Halcyon VV-A–H is in the tree; remaining Halcyon work is live
-> evidence captures, not a re-implementation.
+> rough edges and churn.
+>
+> **Current phase:** [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse) —
+> the "everything that is not the renderer" phase: runtime UI, animation, the
+> asset cook, world partition, scripting reach and the last rendering gaps.
+> Seven of its nine tracks have shipped work; see [Phase history](#phase-history).
+>
+> **Architecture reference:** [`context.md`](context.md) — living, continuously
+> updated, and the file to read before the source.
 
 ## Screenshots
 
@@ -47,159 +49,195 @@ The engine is organized around three deliberate commitments:
 ![The Somnium editor with boat and sea](media/editor_boatsea.png)
 ![The Somnium editor with sunset and sea](media/sunset_sea.png)
 
+*Every capture in this repository is taken from a running build —
+`SOMNIUM_CAPTURE_UI_PNG` reads back the swapchain after the UI pass — never
+mocked up. More captures live in [`media/`](media/).*
 
-*The editor: three command scopes, the viewport-context bar floating
-over the render, the Outliner and Details columns, and the Content Drawer. Every
-capture in this repository is taken from a running build — `SOMNIUM_CAPTURE_UI_PNG`
-reads back the swapchain after the UI pass — never mocked up.*
+## How this project works
 
-More captures live in [`media/`](media/); that folder's README lists the shots
-still wanted (terrain, voxel world, shadows, water).
+Somnium is developed in **codenamed phases**, each with a written plan, a record
+of what actually shipped, and committed evidence. Three habits do most of the
+work, and they are worth describing because they shape the codebase more than
+any single feature:
+
+**Nothing is claimed without a measurement.** `.somtime` files are committed
+timing runs — mean, standard deviation, min, max and sample count per GPU and CPU
+zone, from a pinned camera after a fixed warm-up. A change to the frame is
+argued from a matched before/after pair, and a delta inside the noise band is
+reported as noise. The habit has repeatedly overturned the plan: Phase DOOM's
+central thesis (per-tile shader specialisation) was **measured wrong and
+abandoned**, and Phase PORTAL-0 reverted its own WGSL optimisation after three
+back-to-back repetitions showed it 4% *slower*.
+
+**Generated evidence, not hand-typed tables.** The engine census
+(`tools/census/generate.py`) regenerates every structural figure from the tree,
+because a hand-written audit was found to be 27,329 lines out of date one day
+after it was written. **GHOSTFENCE** (`tools/ghostfence/run.py`) is the gate:
+seven rows — census freshness, frozen toolchain, shader-variant budget, one job
+system, no second implementation of a singleton system, golden images, and the
+full test suite. A row that cannot run reports `SKIP` with the command that
+would make it pass, never a green it did not earn.
+
+**Negative results are recorded, not deleted.** Records state what was tried and
+rejected, and why, in the same detail as what shipped — including cases where a
+plan's stated "likely answer" turned out to be the wrong one.
+
+## Phase history
+
+Roughly chronological. Detailed records live in [`dev records/`](dev%20records/).
+
+| Phase | Codename | What it built | Status |
+|---|---|---|---|
+| 1–15 | — | Lifecycle, ECS, visibility buffer, shadows, PBR, clustered lights, glTF, voxels, heightmap terrain, GPU-driven rendering | In tree |
+| 16 | — | **Scripting** — Luau via `mlua`, sandboxed, with a deferred command boundary and measured budgets | Complete |
+| IV | — | Great Lakes landscape and finite water; three-cascade FFT ocean | Complete |
+| XV | — | 32-layer terrain material, splat/biome authoring, BC7 packs | XV-A–J complete |
+| VV | Halcyon | Ray-traced water reflections and refraction | VV-A–H + VV+1 |
+| CR | Crysis | CPU/GPU frustum culling | In engine |
+| DF | Daggerfall | Terrain material clipmaps (macro + detail stacks) | In engine |
+| 26 / 26-Zeta | Metaphor / Nocturne Atelier | Editor information architecture, then its token and paint layer | In tree |
+| 27 | Hades | Editor paint layer, motion, elevation | 27-A–G |
+| DOOM | id Tech | **The clock** — GPU/CPU profiler, `.somtime`, pixel census, dynamic resolution | A, B, C, E, F |
+| CONTROL | Northlight | **Editor reach** — property seam, asset database, drag-and-drop, viewport control, preferences, scene lifecycle, curves, time of day, clouds, weather, decals | **A–O complete** |
+| MORROWIND | NetImmerse | The engine's non-renderer half — see below | **In progress** |
+| PORTAL-0 | Source | Performance audit and engineering health | **Complete** |
+
+### Phase MORROWIND, by track
+
+| Track | Codename | Shipped | Open |
+|---|---|---|---|
+| 0 | BALMORA | Census, **job system** (priorities, deadlines, cancellation), **shader system** (`//!include` composition, variant cache, hot reload), wgpu 30 | — |
+| 1 | VIVEC | **Runtime UI framework** — canvases, anchors, paths and gradients, directional navigation, rich text and IME, motion/springs, accessibility tree (AccessKit) | Text shaping (`cosmic-text`, decided, behind a flag) |
+| 2 | CONSTRUCTION SET | **Node graph editor** (material + animation catalogues), **timeline** with embedded curve editor | Docking, virtualisation, play-in-editor, GUI layout editor |
+| 3 | HLAALU | — | Prefabs, splines, rule-driven scattering |
+| 4 | SILT STRIDER | **Deterministic asset cook** with content-hashed incremental cache, **budgeted residency** + hot reload, **world partition** with cell-owned entity streaming, **HLOD/impostors** and a floating origin | — |
+| 5 | DWEMER | **Skeletal animation** — GPU skinning into the shared geometry pool, clips, blend trees, state machines, sync tracks | Root motion, IK, compression |
+| 6 | SIXTH HOUSE | — | Navmesh, behaviour trees |
+| 7 | RED MOUNTAIN | **Virtual shadow maps**, **portable DDGI** (SDF-traced, no ray query), **virtual texturing** for terrain, **OIT + SMAA** | GPU particles |
+| 8 | ALMSIVI | **Input actions** (control paths, processors, rebinding), **audio** (buses, attenuation, occlusion, Doppler), **localisation** (CLDR plurals, fallback chains) | Save games, video, the playable slice |
 
 ## Highlights
 
 **Rendering**
 - Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
-- Cascaded Shadow Maps (4 cascades, PSS splits, PCF filtering)
+- GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters, Hi-Z two-phase occlusion culling
 - Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode
-- **Image-based lighting** — the procedural sky is captured to a prefiltered environment cubemap, so metals reflect their surroundings (Karis split-sum)
-- Clustered forward lighting for point/spot lights (froxel binning)
-- HDR pipeline: `Rgba16Float` target, ACES filmic tone mapping, FXAA, and a scene Post Processing volume (vignette, chromatic aberration)
-- Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps,
-  temporal foam, Beer's-law transport, and a shoreline SDF. Reflections blend
-  screen-space tracing, half-res hardware ray tracing, and the environment cube
-  (`SOMNIUM_RT_REFLECT=0` restores SSR + sky cube)
-- GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters,
-  and a Hi-Z depth pyramid driving two-phase occlusion culling
-- Cutout foliage support: sidecar alpha masks, alpha-weighted mip generation, and
-  coverage-preserving alpha so vegetation neither darkens nor erodes with distance
+- **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster)
+- **Global illumination** — ReSTIR DI/GI on wgpu acceleration structures, with a **portable DDGI tier** (SDF-traced 4×4×4 volume, budgeted temporal SH updates) for hardware without ray query
+- **Atmosphere and sky** — Hillaire scattering LUTs driving both sky and IBL, analytic NOAA sun position, a five-track day cycle, and volumetric clouds (Perlin–Worley, quarter-res adaptive march, cloud shadows folded into one `shadow_factor` every surface reads)
+- **Weather** — coverage → precipitation → wetness on Lagarde's two time constants, porosity as a material channel, rain ripples on water
+- HDR pipeline: `Rgba16Float`, AgX/ACES tone mapping, GTAO, bloom, DoF, motion blur, deferred decals
+- **Anti-aliasing as one authored choice** — Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3, plus SMAA quality presets. (It was three independent booleans until MORROWIND-AC, where the default configuration was measured to run *no* AA pass while showing a checked box.)
+- **Order-independent transparency** — weighted-blended, authored per scene, with the sorted path retained
+- Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps, temporal foam, Beer's-law transport, a shoreline SDF and a depth-faded shore. Reflections blend screen-space tracing, half-res hardware ray tracing, and the environment cube
+- **Terrain** — 32-layer material with strongest-four blending, triplanar cliffs, hex tiling and parallax occlusion; nested material **clipmaps**; **virtual texturing** streaming BC7 source pages into a fixed 64 MiB atlas
 
 **World & content**
-- glTF 2.0 asset loading (meshes, PBR materials, textures), importable at runtime from **File > Import Model**
-- **Voxel world** — 32³ padded chunks, `block_mesh` face culling, async generation
-  (rayon + mpsc), 3 LOD levels, sparse edit overlay ([`context.md` §19](context.md))
-- **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching,
-  splatmap PBR with triplanar cliffs, real-time sculpting + texture painting,
-  editor terrain mode ([`context.md` §20](context.md))
-- **Foliage painting** — UE5-style brush over terrain with density, size and
-  single-instance placement, plus a CC0 high-poly grass/tree palette
+- glTF 2.0 loading (meshes, PBR materials, textures, skins), importable at runtime
+- **Deterministic asset cook** — versioned, integrity-checked payloads with a SHA-256 recipe key; changing a texture recooks its material's reverse closure while unrelated meshes stay cached
+- **Residency** — typed placeholders returned immediately, resolver I/O through the job system, per-frame upload budget, deterministic LRU, atomic publish
+- **World partition** — double-precision cell hashing, camera/player/volume want-state, transactional unload that persists real ECS components through the schema serializer
+- **Voxel world** — 32³ padded chunks, `block_mesh` face culling, 3 LOD levels, sparse edit overlay
+- **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching, real-time sculpting and texture painting
+- **Foliage painting** — brush over terrain with density, size and single-instance placement
 
-**Editor & runtime**
-- Archetype ECS with parent/child hierarchy and world-transform propagation
-- Transform gizmos, light gizmos (range/cone visualization), selection outline, infinite editor grid
-- Undo/redo (command stack), scene save/load (`.somnium` JSON)
-- Native UI widget library (Grid, StackPanel, ScrollViewer, WrapPanel, TextBox, NumericField, PropertyRow, …)
-- Custom title bar (undecorated window), docked Content Drawer, F1 Help, Ctrl+P command palette
-- Jolt physics integration; Kira audio scaffolding
+**Scripting & simulation**
+- **Luau** (`mlua`, interpreter only) — sandboxed, with a deferred command buffer as the only route into the world, generated type declarations, and acceptance budgets asserted as tests
+- **Animation** — skeletons, four-weight skinning, clips, `Blend1D`/`Blend2D`, masked layers, typed parameters and triggers, sync tracks, state machines with a bounded pose cache
+- **Jobs** — declared priorities and deadlines, cancellation, a budgeted main-thread completion drain, and profiler telemetry. A job whose deadline passed while queued is dropped rather than run
+- Jolt physics integration; Kira audio with buses, attenuation curves, cones, occlusion and Doppler
 - CPU particle system with GPU billboard instancing
 
+**Editor**
+- **Schema-generated Details** — all **267** editable fields across **25** registered component schemas are generated from the schema, with scoped undo, drag coalescing, multi-select intersection and mixed-value rows. The hand-wiring census is **0 identifiers**: there is no hand-written inspector left, and a generated table proves it rather than a claim
+- **One command registry** — 52+ commands generate the menus, Create surfaces, toolbar, tooltips, shortcuts, palette and F1 index
+- **Node graph editor** and **timeline**, both archetype-driven and feature-neutral, with material and animation catalogues as the first consumers
+- Curve and gradient editing as reflected *values* (`FieldType::Curve`), so a curve gets its Details row, undo and round-trip for free
+- Scene lifecycle: format-routed load, retained unknown components and fields (no silent data loss), header thumbnails, autosave and crash recovery, clickable undo history
+- Preferences with a `default → project.toml → editor.toml → SOMNIUM_*` order. All **115** `SOMNIUM_*` variables have a declared, checked route — schema field, setting, command or a stated harness reason — and **0** are unexplained, enforced by `tools/reachability/`
+- Transform gizmos, light gizmos, selection outline, infinite grid, camera bookmarks, statistics overlay, output log with severity chips and jump-to-source
+- Accessibility: roles, names, values, focus announcements, reduced motion, high contrast reusing the theme's certified contrast pairs
+
 **Editor design system — Nocturne Atelier**
-- **Correct colour pipeline.** Authored sRGB decodes to linear exactly once
-  before the sRGB swapchain, with straight alpha through the widget API. `#1C1E26`
-  reaches the framebuffer as `#1C1E26`
-- **Layered tokens** — palette → semantic roles → component recipes → interaction
-  state, so a widget asks for `style::button(state)` rather than picking a grey
-- **Typography with actual hierarchy** — Inter Regular/Medium/SemiBold and
-  JetBrains Mono Regular/Medium behind named roles; numeric fields use the mono
-  face so a scrub cannot shift a row
-- **One icon family** — 67 Tabler outline icons plus 16 original Somnium glyphs on
-  the same 24×24 / 2 px grid, rasterized from SVG by `resvg` into a two-cut atlas
-- **Three command scopes** at 36 / 32 / 32 px, the third floating over the render,
-  so the scene starts 68 logical px from the top instead of 122
-- **Measured Details grammar** — a 46 % label column, a 14 px modified gutter whose
-  dot reverts the property in one undo step, ellipsis-with-tooltip, and a
-  stack-below-240 px rule
-- Named workspaces, width-driven collapse rules, Tab/Esc traversal, and an
-  original Eclipse `S` monogram
+- **Correct colour pipeline.** Authored sRGB decodes to linear exactly once before the sRGB swapchain, straight alpha through the widget API. `#1C1E26` reaches the framebuffer as `#1C1E26`
+- **Layered tokens** — palette → semantic roles → component recipes → interaction state, so a widget asks for `style::button(state)` rather than picking a grey
+- **Typography with actual hierarchy** — Inter Regular/Medium/SemiBold and JetBrains Mono Regular/Medium behind named roles; numeric fields use the mono face so a scrub cannot shift a row
+- **One icon family** — 67 Tabler outline icons plus 16 original Somnium glyphs on the same 24×24 / 2 px grid, rasterized from SVG by `resvg`
 - The full contract is [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md)
-
-### Lighting and water reflections
-
-Phase 24 lighting largely ships: photometric units and auto-exposure, AgX, a
-Hillaire atmosphere driving sky and IBL, TAA, PCSS and contact shadows, GTAO,
-and ReSTIR DI/GI on wgpu acceleration structures. Parked rows (world cache,
-general specular GI, path tracer, software RT, probes, area lights) stay in
-[`context.md` §22](context.md). Water specular reflections are **Phase VV —
-Halcyon** (VV-A–H in tree), not 24N.
-
-Kill switch: `SOMNIUM_RT_REFLECT=0`. **Start-here:**
-[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md)
-(learn the architecture, then audit Halcyon→HEAD). Halcyon history:
-[`dev records/halcyon_context_handoff.md`](dev%20records/halcyon_context_handoff.md).
-Next phase plan: [`dev records/phase_DF.md`](dev%20records/phase_DF.md).
-
-For the complete, continuously updated architecture reference, read
-[`context.md`](context.md).
 
 ## Building
 
 Requires:
-- **Rust 1.88+** (edition 2024; the dependency tree sets the effective minimum)
-- A **C++ toolchain** for the Jolt physics bridge — MSVC Build Tools on Windows,
-  clang/gcc elsewhere
+- **Rust 1.88** (edition 2024; pinned in `rust-toolchain.toml` and gated by GHOSTFENCE)
+- A **C++ toolchain** — MSVC Build Tools on Windows, clang/gcc elsewhere. Both
+  the Jolt physics bridge and Luau are built from source
 
 ```sh
 cargo build --workspace
 cargo run -p hello_engine        # runnable editor demo
 ```
 
-Optional environment flags:
+Running the gates:
 
 ```sh
-SOMNIUM_TERRAIN=1 cargo run -p hello_engine   # spawn a pre-sculpted heightmap terrain
-SOMNIUM_RT_REFLECT=0 cargo run -p hello_engine  # SSR + sky cube only (no traced water reflections)
+cargo test --workspace -j 1      # -j 1 avoids transient LNK1104 on Windows
+python tools/ghostfence/run.py   # every gate; --fast skips the test row
+python tools/census/generate.py  # regenerate the engine census
+```
+
+A timing run, which is how any frame-time claim is made:
+
+```sh
+SOMNIUM_TIME=after.somtime SOMNIUM_TIME_VIEW=coastal-ground \
+SOMNIUM_MAXIMIZE=1 SOMNIUM_TIME_QUIT=1 \
+cargo run --release -p hello_engine
 ```
 
 ### Editor controls (demo)
 
-- **Right mouse + WASD/QE** — fly camera (Shift = faster)
-- **RMB + scroll wheel** — adjust fly speed (0.5–500 m/s), or drag the **Camera Speed** slider above the viewport
+- **Right mouse + WASD/QE** — fly camera (Shift = faster); **RMB + scroll** adjusts speed
 - **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
-- **L** — toggle light gizmos (point range spheres, spot cones, sun direction)
-- **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay or exit immersive play
-- **Ctrl+Space** — show or hide the docked Content Drawer · **Ctrl+P** — command palette
-- **Play / Pause / Stop** — simulation transport. Play possesses the Outliner **Camera**; Stop restores the editor fly-cam.
-- **F9** — A/B the GPU-driven indirect draw path against the CPU path
-- **F10** — A/B GPU frustum culling (a correct cull is invisible). Camera Details **Frustum Cull** is the CPU early-out (default on; `SOMNIUM_CPU_FRUSTUM=0`). Hold RMB and look at empty sky to see profiler `cpu-cull` rise.
-- **File > Import Model…** — import any glTF/GLB into the scene at the origin
-- **Create menu** — spawn primitives, lights, particle emitters, heightmap/voxel terrain, or a runtime UI Canvas root
-- Select a light to edit its intensity / range / cone angles / colour in the inspector
-  (Iris swatches shipped as Metaphor 26-F; see `dev records/phase_26.md`)
-- **F6** — toggle terrain edit mode (with a terrain selected); then `1`–`6`
-  pick Raise / Lower / Smooth / Flatten / Noise / Paint, `[` / `]` size, `-` / `=` strength
-
-- **Tab / Shift+Tab** — move between shell regions; **Window menu** — switch
-  workspace (Layout, Terrain, Foliage, Lighting, Materials, Debug, Play) or reset it
-- Click the indigo dot in a Details row's left gutter to revert that property
-
-Metaphor editor chrome (26-A–I) plus the Nocturne Atelier identity pass
-(26-Zeta-B–I) are in the tree, but **the UI phase is not over**. Later engine
-features will keep needing new inspector fields, panels, and Help pages, and
-Zeta's own remaining work — Content Browser workflows, text shaping, AccessKit —
-is listed in [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md).
-Water Help is [`docs/editor/water.md`](docs/editor/water.md). Halcyon (VV-A–H) is
-in the tree; remaining GPU work on that track is evidence captures.
-**Start-here:**
-[`dev records/post_halcyon_audit_handoff.md`](dev%20records/post_halcyon_audit_handoff.md).
+- **L** — light gizmos · **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
+- **Ctrl+Space** — Content Drawer · **Ctrl+P** — command palette
+- **Play / Pause / Stop** — simulation transport
+- **F6** — terrain edit mode; then `1`–`6` pick Raise / Lower / Smooth / Flatten / Noise / Paint
+- **F9 / F10** — A/B the GPU-driven indirect path and GPU frustum culling
+- **File > Import Model…** — import any glTF/GLB
+- **Create menu** — primitives, lights, particle emitters, terrain, or a runtime UI Canvas root
+- **Tab / Shift+Tab** — move between shell regions; **Window menu** — switch workspace
+- Click the indigo dot in a Details row's gutter to revert that property in one undo step
 
 ## Repository layout
 
 ```
 crates/
-  somnium_core/         App lifecycle, events, ECS re-exports, editor logic
-  somnium_ecs/          Archetype ECS (no external deps)
-  somnium_renderer/     wgpu backend, visibility buffer, render passes, terrain
+  somnium_core/         App lifecycle, events, editor logic, scene schema, scripting host
+  somnium_ecs/          Archetype ECS + reflection (no external deps)
+  somnium_renderer/     wgpu backend, visibility buffer, render passes, terrain, water
+  somnium_shader/       WGSL module registry, //!include composition, variant cache
+  somnium_jobs/         Priorities, deadlines, cancellation, budgeted drain (no deps)
+  somnium_anim/         Skeletons, clips, blend graphs, state machines
+  somnium_asset/        Vertex type, glTF loader, deterministic cook, residency
+  somnium_script/       Language-neutral scripting seam (command buffer, budgets)
+  somnium_script_luau/  Luau backend via mlua
+  somnium_input/        Action maps, control paths, processors, rebinding
+  somnium_i18n/         CLDR plural/gender rules, fallback chains, key extraction
+  somnium_audio/        Kira wrapper — buses, attenuation, occlusion, Doppler
   somnium_physics/      Jolt high-level wrapper
   somnium_physics_sys/  Raw Jolt FFI (compiles Jolt C++ at build time)
-  somnium_audio/        Kira audio wrapper
-  somnium_ui/           Native wgpu widget tree + UiPass
-                        theme/style/typography tokens, editor/ shell modules,
-                        assets/ bundled fonts, icons and brand marks
-  somnium_asset/        Vertex type, glTF loader
+  somnium_ui/           Native wgpu widget tree, editor shell, graph, timeline, theme
   somnium_voxel/        Voxel world (chunks, meshing, async streaming)
 examples/
   hello_engine/         Runnable editor demo
+  vvardenfell/          Public-API-only sample — exercises the engine boundary
+tools/
+  census/               Generates the engine census (GHOSTFENCE row)
+  ghostfence/           The gate: seven rows, and a standard-library PNG codec
+  shadercook/           Shader variant budget report
+  reachability/         Environment/component/hand-wiring reachability tables
+  assetcook/            Standalone deterministic cook CLI
 context.md              Living architecture document (phase history, GPU layouts)
+dev records/            Phase plans, sub-phase records, and committed evidence
 ATTRIBUTION.md          Provenance: which reference patterns informed which files
 THIRD_PARTY_NOTICES.md  Bundled fonts and icons, their licences and modifications
 example_repo/           Local reference codebases — NOT committed (see below)
@@ -209,10 +247,11 @@ example_repo/           Local reference codebases — NOT committed (see below)
 
 Somnium is built with substantial **AI pair-programming assistance (Anthropic's
 Claude, via Claude Code)**. The AI is used as an implementation and research
-partner — reading reference engines, drafting subsystems, and maintaining the
-architecture docs — while design direction, review, and verification are
-human-driven. This is noted for transparency; it has no bearing on how the code
-is licensed or how you may use it.
+partner — reading reference engines, drafting subsystems, running the
+measurement harnesses, and maintaining the architecture docs — while design
+direction, review, and verification are human-driven. This is noted for
+transparency; it has no bearing on how the code is licensed or how you may use
+it.
 
 The assistant's own working files (session memory, planning notes, local
 configuration) live alongside the source during development but are intentionally
@@ -223,25 +262,26 @@ kept out of version control — see the AI-assisted section of
 
 [`ATTRIBUTION.md`](ATTRIBUTION.md) and many source-file comments cite paths
 inside an `example_repo/` directory (Unreal Engine, The Forge, Fyrox, Bevy
-plugins, Jolt, and others). That directory is a local, multi-gigabyte collection
-of third-party reference repositories studied **for architectural patterns only —
-no source is copied**. It is intentionally excluded from version control for two
-reasons:
+plugins, Jolt, O3DE, Godot, Stride, Wicked, and others). That directory is a
+local, multi-gigabyte collection of third-party reference repositories studied
+**for architectural patterns only — no source is copied**. It is intentionally
+excluded from version control for two reasons:
 
 1. **Size** — several gigabytes, far beyond GitHub's limits.
-2. **Licensing** — some references (notably Unreal Engine) are under licenses
-   that forbid redistribution.
+2. **Licensing** — some references (notably Unreal Engine and Flax) are under
+   licenses that forbid redistribution. Where a reference is proprietary or
+   copyleft, `ATTRIBUTION.md` records that it informed *architecture only* and
+   supplied no code, identifiers, constants, layouts or comments.
 
 After cloning, those cited paths will not be present. The citations remain
-meaningful as *provenance* — they record where each pattern was studied — and the
-engine does **not** depend on the reference code: `example_repo/` is excluded
-from the Cargo workspace and nothing is `include!`d from it.
+meaningful as *provenance*, and the engine does **not** depend on the reference
+code: `example_repo/` is excluded from the Cargo workspace and nothing is
+`include!`d from it.
 
 **One exception:** `somnium_physics_sys/build.rs` compiles
 [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (MIT-licensed) directly
 from `example_repo/JoltPhysics-master/`, so that single subtree **is** kept under
-version control — without it a fresh clone cannot build the physics crate. If you
-relocate or remove it, update the include paths in that build script.
+version control — without it a fresh clone cannot build the physics crate.
 
 ## License
 
@@ -258,8 +298,11 @@ any additional terms or conditions.
 Bundled third-party code and assets retain their own licenses:
 
 - **Jolt Physics** (in `example_repo/JoltPhysics-master/`) — MIT; see its `LICENSE`
+- **Luau** (built from source by `mlua-sys`) — MIT
 - **Inter** and **JetBrains Mono** — SIL Open Font License 1.1
 - **Tabler Icons** — MIT
+- **Great Lakes height map** (Motion Forge Pictures) — CC0 1.0; provenance and
+  audited source hashes in `assets/terrain/great_lakes/README.md`
 
 Every bundled asset, its upstream, its version and any modification is recorded
 in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). The Somnium name, the
