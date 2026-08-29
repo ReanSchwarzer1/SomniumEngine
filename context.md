@@ -3,6 +3,26 @@
 > **Last updated:** 2026-08-29
 > **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
 >
+> **MORROWIND-AC shipped 2026-08-29** — `dev records/phase MORROWIND/MORROWIND-AC.md`.
+> Of its five planned items three were already done (decals CONTROL-O, contact
+> shadows 24X, transmission 24S); a skin-diffusion profile is **declined**.
+> **The blocker was the AA state model:** `fxaa_enabled` and `fsr_enabled` both
+> defaulted true and `renderer.rs` resolved them with
+> `fxaa && !taa && !fsr_ok`, so **FXAA had never run by default** behind a
+> checked box. One `aa: AntiAliasing` value now replaces three booleans —
+> **Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3** — as a generated Details
+> enum, with an **SMAA Quality** row (Low/Medium/High/Ultra). Measured: every
+> value runs a pass and Off runs none. **SMAA S2x and 4x are refused** — both
+> resolve MSAA subsamples and a visibility buffer has none. SMAA's reference
+> `AreaTex`/`SearchTex` are **not vendored** (analytic coverage instead), so the
+> diagonal pass and corner rounding are absent and said so. **OIT is
+> weighted-blended, default off**; the plan's "PPLL likely" is recorded as
+> wrong (needs `FRAGMENT_WRITABLE_STORAGE`, which the engine has never queried,
+> and a ~796 MB-at-4K node pool sized from a guess).
+> **The visual gate is not met and the captures proved it:** a control of two
+> identical runs moves 4.48% of coastal-ground where SMAA moves 4.43%, and
+> 63.50% of island where OIT moves 63.49%. A deterministic fixture is owed.
+>
 > **Phase PORTAL-0 (Source) ran 2026-08-29, before MORROWIND-AC** —
 > `dev records/phase_PORTAL-0.md`, evidence in `dev records/phase PORTAL-0/`.
 > A measurement phase, and two of its seven sub-phases are **negative results
