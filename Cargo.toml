@@ -79,7 +79,9 @@ pollster = "0.3"
 
 # -- Error handling ----------------------------------------------------------
 thiserror = "2.0"
-anyhow    = "1.0"
+# PORTAL-0-C: `anyhow` removed. It was declared here and in
+# `hello_engine`, and referenced by no source file in the workspace —
+# MORROWIND-A_census.md flagged both rows and this closes them.
 
 # -- Logging -----------------------------------------------------------------
 tracing            = "0.1"
@@ -92,9 +94,11 @@ cc = "1.2"
 kira = "0.9"
 
 # -- UI (Phase 6/9) ------------------------------------------------------------
-egui       = "0.34"
-egui-wgpu  = "0.34"
-egui-winit = "0.34"
+# PORTAL-0-C: the `egui` / `egui-wgpu` / `egui-winit` triple is removed. Somnium
+# has drawn its own editor since Phase 12 and no crate has referenced any of the
+# three since; `phase_MORROWIND.md` §4.7 found them dead, MORROWIND-A's census
+# carried them as "exempt — DEAD" and left the removal "to Phase PORTAL's CI
+# gates rather than smuggling a cleanup into a census". This is that phase.
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"

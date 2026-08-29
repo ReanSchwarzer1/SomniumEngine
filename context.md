@@ -1,7 +1,35 @@
 # Somnium Engine — Project Context
 
-> **Last updated:** 2026-08-28
+> **Last updated:** 2026-08-29
 > **Current phase:** Phase MORROWIND (NetImmerse). CONTROL is complete.
+>
+> **Phase PORTAL-0 (Source) ran 2026-08-29, before MORROWIND-AC** —
+> `dev records/phase_PORTAL-0.md`, evidence in `dev records/phase PORTAL-0/`.
+> A measurement phase, and two of its seven sub-phases are **negative results
+> that are deliberately not in tree**: the audit's terrain-CPU-variance finding
+> was an artefact of a 20-frame warm-up (0.031 ms at the documented 180, not
+> 1.39), and a WGSL terrain micro-pass measured **4% slower** over three
+> back-to-back repetitions and was reverted. In tree: an honest frame
+> decomposition (`cpu Frame CPU` and `cpu Surface acquire` beside `Frame wall`,
+> which is a **vsync-inclusive interval and never was CPU work**), unsmoothed
+> CPU samples in `.somtime`, five new engine CPU zones, **nine dead
+> dependencies plus the dead `egui` triple removed** (census: 0 unreferenced),
+> a `one-job-system` gate widened to see `rayon::spawn`, and two confirmed CPU
+> mechanisms fixed — the terrain instance lookup was O(draws × chunks) and the
+> UI cloned every node's child list twice a frame (1,042 nodes; shell
+> layout+draw 0.054 → 0.043 ms).
+> **The headline is a decision, not a change: the Phase DF terrain clipmap
+> takes Coastal ground from 21.4 to 9.4 ms a frame (Shading 11.46 → 1.72) and
+> passes DF §6.4's eye-level luminance gate on all three views (≤ 0.49% against
+> a 1% budget).** DF-E's default-on has been blocked on exactly that remeasure
+> since 2026-08-15. **The default is still off** — flipping it changes what an
+> existing scene draws and two documents carry a standing instruction against
+> it — and taking it is recommended and owed.
+> **Also found, and older than this phase:** GHOSTFENCE's `golden-images` row
+> fails on `sculpt-panel` (5.33% of pixels, budget 0.2%) on a clean `439b6b6`;
+> the row had been reporting `SKIP` because no candidate was ever generated.
+> `assets/scripts/somnium.d.luau` was stale for the same reason — MORROWIND-AD
+> changed the Terrain schema to version 2 and regenerated neither.
 > MORROWIND-AB supplies the portable GI tier: a ray-query-free, SDF-traced
 > 4×4×4 DDGI volume with budgeted temporal SH updates. MORROWIND-AD now streams
 > the terrain's existing BC7 mip chains as paired 128² source pages into an

@@ -13,4 +13,3 @@ glam          = { workspace = true }
 block-mesh    = { workspace = true }
 ndshape       = { workspace = true }
 rayon         = { workspace = true }
-tracing       = { workspace = true }

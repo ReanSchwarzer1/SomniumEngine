@@ -2887,6 +2887,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        // PORTAL-0-B: the frame body starts here and ends at
+        // `wait_for_frame_budget` below. Timed with a plain `Instant` rather
+        // than a profiler CPU scope because a scope spanning the render call
+        // would still be open when `GpuProfiler::end_frame` harvests them, and
+        // that path warns about unclosed scopes for good reason. The value is
+        // handed to the profiler at the end of the frame and read by the timing
+        // harness during the *next* one; see `GpuProfiler::frame_cpu_ms`.
+        let frame_body_started = std::time::Instant::now();
+
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
         self.tick_autosave(dt);
@@ -3127,6 +3136,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── Update native UI panels with current frame state ─────────────────
+        // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
+        // all, which is why `Frame wall` was the only number anyone could
+        // quote about editor cost.
+        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Editor panels"); }
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
             let mut names: Vec<(u32, String, Option<u32>)> = all_entities
@@ -3672,9 +3685,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+
+        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Jobs & assets"); }
         self.pump_shader_reload();
         self.pump_jobs();
         self.update_asset_pipeline();
+        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
                 ui.begin_frame(window);
@@ -3737,10 +3754,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
+        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Scene submit"); }
         self.submit_terrains();
         self.submit_foliage();
         self.submit_decals();
         self.sync_terrain_colliders();
+        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         if !self.play_session_active {
@@ -3748,12 +3767,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
+        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Environment"); }
         self.apply_time_of_day(dt);
         self.apply_sky(dt);
         self.apply_weather(dt);
         self.publish_time_of_day();
         self.apply_post_process();
         self.apply_camera_settings();
+        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -3855,6 +3876,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     ui.append_log(entry);
                 }
             }
+        }
+
+        // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
+        if let Some(r) = &mut self.renderer {
+            r.profiler.frame_cpu_ms = frame_body_started.elapsed().as_secs_f32() * 1000.0;
         }
 
         self.time.wait_for_frame_budget();

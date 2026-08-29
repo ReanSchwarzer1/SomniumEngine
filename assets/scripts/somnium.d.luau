@@ -266,7 +266,7 @@ export type SomniumSky = {
 	temporal_jitter: boolean,
 }
 
---- `somnium.Terrain` (schema version 1).
+--- `somnium.Terrain` (schema version 2).
 export type SomniumTerrain = {
 	terrain_id: number,
 	chunk_cells: number,
@@ -274,6 +274,14 @@ export type SomniumTerrain = {
 	grid_z: number,
 	cell_size: number,
 	height_scale: number,
+	virtual_texturing: boolean,
+	virtual_texture_cache_mib: number,
+	virtual_texture_uploads_per_frame: number,
+	virtual_texture_resident_pages: number, -- engine-owned; reading only
+	virtual_texture_pending_pages: number, -- engine-owned; reading only
+	virtual_texture_hits: number, -- engine-owned; reading only
+	virtual_texture_misses: number, -- engine-owned; reading only
+	virtual_texture_evictions: number, -- engine-owned; reading only
 }
 
 --- `somnium.TimeOfDay` (schema version 1).

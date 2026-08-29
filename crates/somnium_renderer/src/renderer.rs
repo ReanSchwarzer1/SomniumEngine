@@ -379,6 +379,17 @@ pub struct SomniumRenderer {
     cascade_view_projs: [glam::Mat4; crate::shadow::NUM_CASCADES],
     /// Terrain chunks rebuilt this frame; capacity is kept across frames (CR-F).
     rebuilt_chunks: Vec<u32>,
+    /// This frame's packed terrain LOD word, keyed by chunk vertex offset
+    /// (PORTAL-0-D).
+    ///
+    /// `gpu_instance_from_cmd` used to recover this by scanning every chunk
+    /// of every terrain for each draw command — O(draws x chunks), which is
+    /// quadratic in terrain size and was measurable as a cross-scene ratio:
+    /// Coastal (256 chunks / 89 draws) against Island (64 / 56) predicts
+    /// 6.4x and the `Instances` zone measured 5.4x. The terrain loop below
+    /// already holds the chunk when it builds the draw, so the word is
+    /// recorded there instead of searched for afterwards.
+    terrain_lod_by_vertex: std::collections::HashMap<u32, u32>,
     /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
     /// so they skip vis / GPU 15B, but they occupy instance slots after the
     /// opaque vis draws so the shadow pass can find their transforms.
@@ -906,6 +917,7 @@ impl SomniumRenderer {
             cascade_caster_cull: !cascade_cull_env_off(),
             cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
             rebuilt_chunks: Vec::with_capacity(32),
+            terrain_lod_by_vertex: std::collections::HashMap::new(),
             shadow_only_queue: Vec::with_capacity(256),
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
@@ -2457,6 +2469,7 @@ impl SomniumRenderer {
         // contract). CR-E cascade-culls that list; never the camera frustum.
         self.profiler.cpu_begin("Terrain");
         self.shadow_only_queue.clear();
+        self.terrain_lod_by_vertex.clear();
         let cam_planes = crate::culling::frustum_planes(self.view_proj_unjittered);
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
@@ -2526,6 +2539,24 @@ impl SomniumRenderer {
                 // `submit`, which would need a second mutable borrow of self —
                 // terrain's material is registered opaque, so the routing
                 // `submit` does would be a no-op anyway.
+                //
+                // PORTAL-0-D: record the packed LOD word here, where the chunk
+                // and its terrain are both in hand, rather than recovering it
+                // by search once per draw command later.
+                {
+                    let verts = terrain.desc.chunk_cells + 1;
+                    let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
+                    let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
+                    let morph_on = u32::from(terrain.lod_morph);
+                    self.terrain_lod_by_vertex.insert(
+                        chunk.vertex_offset,
+                        (u32::from(chunk.lod) & 15)
+                            | ((verts & 511) << 4)
+                            | (morph_on << 13)
+                            | ((lod_base & 255) << 14)
+                            | ((start & 1023) << 22),
+                    );
+                }
                 let cmd = DrawCommand {
                     casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
@@ -2604,11 +2635,11 @@ impl SomniumRenderer {
         self.instances.clear();
         for cmd in &self.draw_queue {
             self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
+                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
         }
         for cmd in &self.shadow_only_queue {
             self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrains, cmd, shadow_debug));
+                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
         }
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones (vis + shadow-only). The visibility pass only
@@ -2737,6 +2768,14 @@ impl SomniumRenderer {
         }
 
         // ── 4. Acquire swapchain texture ─────────────────────────────────────
+        //
+        // PORTAL-0-B times this rather than wrapping it in a CPU scope: under
+        // `PresentMode::AutoVsync` the presentation block lands here, and a
+        // scope would have to close before `end_frame` to be reported in the
+        // same frame, which this one does — but the row belongs beside
+        // `Frame wall` and `Frame CPU` rather than among the engine's own
+        // zones, because it is a wait and not work.
+        let acquire_started = std::time::Instant::now();
         let output = match ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex) => tex,
             wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -2751,6 +2790,7 @@ impl SomniumRenderer {
                 return;
             }
         };
+        self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
         let surface_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -4715,29 +4755,16 @@ fn cascade_cull_env_off() -> bool {
     std::env::var("SOMNIUM_CASCADE_CULL").as_deref() == Ok("0")
 }
 
+/// PORTAL-0-D: `packed` is this frame's `terrain_lod_by_vertex`, built by the
+/// terrain loop. A non-terrain draw is simply absent from it, which is the same
+/// answer the old scan gave by falling off the end of every chunk list — but in
+/// one hash lookup instead of one pass over every chunk of every terrain.
 fn gpu_instance_from_cmd(
-    terrains: &[crate::terrain::TerrainData],
+    packed: &std::collections::HashMap<u32, u32>,
     cmd: &DrawCommand,
     shadow_debug: f32,
 ) -> crate::instance::GpuInstanceData {
-    let terrain_packed = terrains.iter().find_map(|terrain| {
-        terrain.chunks.iter().find_map(|chunk| {
-            if chunk.vertex_offset != cmd.vertex_offset {
-                return None;
-            }
-            let verts = terrain.desc.chunk_cells + 1;
-            let lod_base = terrain.desc.lod_base_range.round().clamp(1.0, 255.0) as u32;
-            let start = (terrain.lod_morph_start.clamp(0.0, 1.0) * 1023.0) as u32;
-            let morph_on = u32::from(terrain.lod_morph);
-            Some(
-                (u32::from(chunk.lod) & 15)
-                    | ((verts & 511) << 4)
-                    | (morph_on << 13)
-                    | ((lod_base & 255) << 14)
-                    | ((start & 1023) << 22),
-            )
-        })
-    });
+    let terrain_packed = packed.get(&cmd.vertex_offset).copied();
     let terrain_lod = if shadow_debug > 12.5 && shadow_debug < 13.5 {
         terrain_packed.map(|p| (p & 15) + 1).unwrap_or(0)
     } else {
@@ -5079,7 +5106,7 @@ mod frame_instance_layout_tests {
         let shadow_only = draw(22, 202, 2, 20.0);
         let transparent = draw(33, 303, 3, 30.0);
         let uploaded =
-            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&[], cmd, 0.0));
+            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
         let layout = frame_instance_layout(1, 1);
 
         for gpu_driven in [false, true] {

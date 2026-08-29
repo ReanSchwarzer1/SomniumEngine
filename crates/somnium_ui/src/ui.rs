@@ -1260,29 +1260,44 @@ impl UserInterface {
         }
     }
 
+    // PORTAL-0-D: walked by index rather than over a cloned child list.
+    //
+    // This and `draw_node` are the two traversals that visit *every* node
+    // *every* frame, and both cloned the child `Vec` at each node purely to end
+    // the borrow before recursing — one heap allocation per widget per frame,
+    // twice over, for a list that is never mutated during the walk. Re-borrowing
+    // per child is a pool index plus a generation check and allocates nothing.
+    //
+    // The other five `children.clone()` sites in this file are left alone on
+    // purpose: they are structural (`remove_node`, `clear_children`) or
+    // event-driven (`pick_node`, `collect_focusable`, the a11y snapshot), and
+    // two of them mutate the tree while walking it, where the clone is what
+    // makes the walk correct rather than merely convenient.
     fn update_global_visibility(&mut self, handle: IH, parent_visible: bool) {
-        let children = match self.nodes.try_borrow_mut(handle) {
+        let (gv, count) = match self.nodes.try_borrow_mut(handle) {
             Ok(node) => {
                 node.widget.global_visibility = parent_visible && node.widget.visibility;
-                node.widget.children.clone()
+                (node.widget.global_visibility, node.widget.children.len())
             }
             Err(_) => return,
         };
-        let gv = self
-            .nodes
-            .try_borrow(handle)
-            .map(|n| n.widget.global_visibility)
-            .unwrap_or(false);
-        for ch in children {
+        for i in 0..count {
+            let Some(ch) = self
+                .nodes
+                .try_borrow(handle)
+                .ok()
+                .and_then(|n| n.widget.children.get(i).copied())
+            else {
+                break;
+            };
             self.update_global_visibility(to_ih(ch), gv);
         }
     }
 
     fn draw_node(&mut self, handle: IH) {
-        let (clip, children) = match self.nodes.try_borrow(handle) {
-            Ok(n) if n.widget.global_visibility => {
-                (n.widget.clip_bounds, n.widget.children.clone())
-            }
+        // PORTAL-0-D: see `update_global_visibility` above.
+        let (clip, count) = match self.nodes.try_borrow(handle) {
+            Ok(n) if n.widget.global_visibility => (n.widget.clip_bounds, n.widget.children.len()),
             _ => return,
         };
         self.draw_ctx.push_clip_rect(clip);
@@ -1295,7 +1310,15 @@ impl UserInterface {
                 (*control_ptr).draw(&*widget_ptr, &mut self.draw_ctx);
             }
         }
-        for ch in children {
+        for i in 0..count {
+            let Some(ch) = self
+                .nodes
+                .try_borrow(handle)
+                .ok()
+                .and_then(|n| n.widget.children.get(i).copied())
+            else {
+                break;
+            };
             self.draw_node(to_ih(ch));
         }
         // Overlay pass, still inside this node's clip: whatever a container
