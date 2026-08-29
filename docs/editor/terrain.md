@@ -108,3 +108,20 @@ A/B.
 **Open ocean** (`WaterComponent::ocean`, preset 2) is exempt: it is a fully wet
 rectangle with no baked shoreline, and terrain depth already owns where it meets
 the island.
+
+### Where the water meets the shore
+
+The surface fades out over the last **0.9 m** of depth difference against
+whatever is behind it, rather than being cut off by the depth test.
+
+That fade is not cosmetic polish, it is the shoreline. Coverage deliberately
+extends the water **1.5 m under** the terrain and lets the depth test own the
+visible intersection, so the waterline you see is the terrain's rasterised
+silhouette against a flat plane — and a binary depth test against LOD-reduced
+terrain gives that silhouette hard, axis-aligned steps. Before the fade the
+shore was visibly staircased.
+
+Worth knowing if you go looking for that staircase again: it is **not** the
+water mesh (rebuilding it at 0.5 m instead of 2 m changes nothing) and **not**
+the shore SDF (coverage cuts 1.5 m further out, under the terrain, so the
+contour never draws that edge). Both were checked.

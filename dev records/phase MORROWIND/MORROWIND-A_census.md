@@ -18,7 +18,7 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 61,556 | +11,350 | 32.6% | 416 | +88 | 90 | 55 |
+| `somnium_renderer` | 61,599 | +11,393 | 32.6% | 416 | +88 | 90 | 55 |
 | `somnium_ui` | 57,411 | +29,881 | 30.4% | 583 | +368 | 98 | 2 |
 | `somnium_core` | 32,089 | +12,869 | 17.0% | 361 | +144 | 42 | 0 |
 | `somnium_asset` | 6,229 | +4,590 | 3.3% | 48 | +42 | 12 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **188,689** | +74,797 | | **1864** | +919 | | |
+| **Total** | **188,732** | +74,840 | | **1864** | +919 | | |
 
 The top three crates are **80.1%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -68,14 +68,14 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **55 WGSL files, 14,223 lines** (+7 files, +2,144 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **57 files, 14,692 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,266 lines** (+7 files, +2,187 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **57 files, 14,735 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
 | Shader | Lines |
 |---|---:|
 | `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,079 |
-| `crates/somnium_renderer/src/shaders/water.wgsl` | 1,171 |
+| `crates/somnium_renderer/src/shaders/water.wgsl` | 1,214 |
 | `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,165 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
 | `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 481 |

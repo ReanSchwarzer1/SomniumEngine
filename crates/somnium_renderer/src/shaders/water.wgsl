@@ -738,6 +738,43 @@ fn upsample_rt(
     return acc / weight;
 }
 
+/// Metres of depth difference over which the surface fades into whatever it
+/// meets. Roughly a wave's own height: long enough to hide the intersection,
+/// short enough that open water is unaffected.
+const SHORE_SOFT_METRES: f32 = 0.9;
+
+/// Fade the surface out where it meets opaque geometry.
+///
+/// **This is what the jagged waterline was.** Coverage deliberately extends the
+/// surface 1.5 m *under* the terrain and lets the depth test own the visible
+/// intersection, so the shoreline you see is not the SDF contour at all — it is
+/// the terrain's rasterised silhouette against a flat plane, and a binary depth
+/// test against LOD-reduced terrain gives that silhouette hard, axis-aligned
+/// steps. Neither a finer water mesh nor a better shore SDF can touch it,
+/// because neither is what draws that edge.
+///
+/// The standard remedy, and the one every engine applies where transparent
+/// geometry meets opaque: fade alpha with the depth difference instead of
+/// cutting at it. The step is still there in the depth buffer; it stops being
+/// visible because nothing changes abruptly across it.
+fn soft_edge(clip_pos: vec4<f32>, world_position: vec3<f32>) -> f32 {
+    let dimensions = textureDimensions(depth_texture);
+    let coord = clamp(
+        vec2<i32>(clip_pos.xy),
+        vec2<i32>(0),
+        vec2<i32>(dimensions) - vec2<i32>(1),
+    );
+    let scene = textureLoad(depth_texture, coord, 0);
+    // Nothing behind this pixel: open water against the sky needs no fade, and
+    // reconstructing a world position from a cleared depth would be nonsense.
+    if scene >= 0.9999 {
+        return 1.0;
+    }
+    let uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / vec2<f32>(dimensions);
+    let behind = view_depth(reconstruct_world(uv, scene)) - view_depth(world_position);
+    return clamp(behind / SHORE_SOFT_METRES, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> ShadeOutput {
     // Reconstruct a continuous zero contour from the signed shoreline field.
@@ -1033,11 +1070,17 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
         + direct;
 
     if debug_mode > 0.5 {
-        return ShadeOutput(vec4<f32>(min(reflected, vec3<f32>(60000.0)), coverage));
+        return ShadeOutput(vec4<f32>(
+            min(reflected, vec3<f32>(60000.0)),
+            coverage * soft_edge(input.clip_pos, input.world_position),
+        ));
     }
 
     return ShadeOutput(
-        vec4<f32>(min(final_color, vec3<f32>(60000.0)), coverage),
+        vec4<f32>(
+            min(final_color, vec3<f32>(60000.0)),
+            coverage * soft_edge(input.clip_pos, input.world_position),
+        ),
     );
 }
 
