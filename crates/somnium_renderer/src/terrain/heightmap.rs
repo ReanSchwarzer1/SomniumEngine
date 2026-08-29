@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn island_relief_peaks_above_water_and_rim_is_submerged() {
-        let water = 16.1;
+        let water = crate::terrain::DEFAULT_WATER_LEVEL_METRES;
         let h = island_relief(65, 65, 9, 55.0, water);
         assert!(
             h.iter().any(|&x| x > water),

@@ -2342,7 +2342,7 @@ impl WaterComponent {
     }
 
     /// Open ocean filling `bounds`. Same frozen look as [`Self::great_lakes`]
-    /// (datum 16.1 / optical 18.6 / Gerstner 0.85); coverage is a wet rectangle
+    /// (bake datum / optical 18.6 / Gerstner 0.85); coverage is a wet rectangle
     /// so the island can sit in surrounding sea instead of a lake mask.
     pub fn ocean(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
         Self {

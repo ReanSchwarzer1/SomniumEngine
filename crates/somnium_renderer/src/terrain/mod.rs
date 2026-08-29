@@ -143,8 +143,38 @@ pub const DEFAULT_HEIGHTMAP: &str = "assets/terrain/great_lakes/height.png";
 /// Authored low-frequency colour paired with [`DEFAULT_HEIGHTMAP`].
 pub const DEFAULT_MACRO_MAP: &str = "assets/terrain/great_lakes/macro_color.png";
 
+/// The datum `assets/terrain/great_lakes/` was baked at.
+///
+/// Not a preference — a **property of the shipped files**, recorded in their
+/// own `recipe.json` as `"water_level_metres": 15`. The mask, depth and shore
+/// SDF are a shoreline solved for a water plane at this height, so a runtime
+/// datum that disagrees with it puts the surface somewhere the coverage does
+/// not describe.
+pub const GREAT_LAKES_BAKE_DATUM_METRES: f32 = 15.0;
+
 /// Great Lakes preset surface datum in terrain-local metres.
-pub const DEFAULT_WATER_LEVEL_METRES: f32 = 16.1;
+///
+/// **Was 16.1 until 2026-08-29, and that was 1.1 m above the bake.** Measured
+/// against the shipped `height.png` and `water_mask.png` at the default 105 m
+/// of relief, over all 4,194,304 mask cells:
+///
+/// | datum | dry cells under water | wet cells above it |
+/// |---|---:|---:|
+/// | 14.0 | 0 | 235,688 |
+/// | **15.0** | **3,545** | **3,625** |
+/// | 16.1 | **108,719** | 1 |
+///
+/// At 16.1 a hundred and nine thousand cells of ground the shoreline calls dry
+/// were under the plane, which is why the water read as sitting *on* the beach
+/// rather than meeting it. At 14.0 the error simply reverses and strands a
+/// quarter of a million wet cells above the surface. The separating level is
+/// 15.4 and the bake's own recipe says 15, so 15 it is: the residual ~7,000
+/// cells are the antialiasing band, not a disagreement.
+///
+/// `terrain_shading_occupancy_2026-08-14.md` froze the old 16.1. That freeze is
+/// superseded here rather than quietly broken — it pinned a number that never
+/// matched the data it depends on, and the measurement above is the argument.
+pub const DEFAULT_WATER_LEVEL_METRES: f32 = GREAT_LAKES_BAKE_DATUM_METRES;
 
 /// Maximum synthetic lake-bed depth in the baked preset.
 pub const DEFAULT_WATER_DEPTH_METRES: f32 = 12.0;

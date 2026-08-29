@@ -69,8 +69,24 @@ Water is a separate child entity. Reflection knobs live on that Water, not on Te
 ## Water surface level
 
 **Surface Level** on a Water entity is the height of the water plane in
-terrain-local metres. The Great Lakes preset defaults to **16.1 m**, which is
-the datum its shoreline was baked at.
+terrain-local metres. The Great Lakes preset defaults to **15.0 m**, which is
+the datum its shoreline was baked at — `assets/terrain/great_lakes/recipe.json`
+records it as `"water_level_metres": 15`.
+
+It defaulted to **16.1 m** until 2026-08-29, and that was 1.1 m above the bake.
+Measured over all 4,194,304 mask cells against the shipped heightmap at the
+default 105 m of relief:
+
+| Datum | Dry cells under water | Wet cells above it |
+|---|---:|---:|
+| 14.0 | 0 | 235,688 |
+| **15.0** | **3,545** | **3,625** |
+| 16.1 | **108,719** | 1 |
+
+At 16.1 a hundred and nine thousand cells of ground the shoreline calls dry sat
+under the plane, which is why the water read as lying *on* the beach instead of
+meeting it. At 14.0 the error just reverses. The residual few thousand cells at
+15.0 are the antialiasing band.
 
 Moving it now moves the shoreline with it. That is worth saying because it did
 not used to: `assets/terrain/great_lakes/{mask,depth,shore_sdf}.png` are a

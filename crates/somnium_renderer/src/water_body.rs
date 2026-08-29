@@ -185,14 +185,28 @@ fn upload_r32_float(
 /// they are a *shoreline*, solved once for a water plane at this height. The
 /// depth texel is metres of water below it and the SDF is the contour where
 /// that reaches zero.
-pub const BAKED_DATUM_METRES: f32 = crate::terrain::DEFAULT_WATER_LEVEL_METRES;
+pub const BAKED_DATUM_METRES: f32 = crate::terrain::GREAT_LAKES_BAKE_DATUM_METRES;
+
+/// The depth the baked texture is normalised against, from the same
+/// `recipe.json` (`"max_depth_metres": 12`).
+///
+/// **This is not `WaterBodyDescriptor::max_depth`**, and conflating the two is
+/// the trap here. The descriptor's 18.6 is an *optical* path length, chosen
+/// deliberately deeper than the bed so open water reaches full absorption
+/// instead of staying thin and grey; `WaterBodyData::load` decodes the texel
+/// with it, so the depth the shader reads is the true depth scaled by
+/// 18.6/12 ≈ 1.55. That is fine for an extinction integral and wrong for
+/// geometry: a datum shift is in real metres, so it has to be applied to real
+/// depth. [`reproject_to_datum`] divides the scaling out, shifts, and puts it
+/// back.
+pub const BAKED_MAX_DEPTH_METRES: f32 = crate::terrain::DEFAULT_WATER_DEPTH_METRES;
 
 /// Move baked coverage from [`BAKED_DATUM_METRES`] to the authored datum.
 ///
 /// **The defect this fixes:** `surface_level` is an editable field, and moving
 /// it moved the water *plane* while the mask, depth and SDF stayed where they
 /// were baked. Lower the datum and the plane drops below a shoreline that still
-/// thinks it is at 16.1, so the surface ends in the wrong place and the beach
+/// thinks it is at the bake datum, so the surface ends in the wrong place and
 /// gets an edge that does not follow the terrain it is supposedly meeting.
 /// Raise it and water draws over ground that is now above it. Either way the
 /// number in Details and the picture on screen disagree, which is the same
@@ -207,7 +221,7 @@ pub const BAKED_DATUM_METRES: f32 = crate::terrain::DEFAULT_WATER_LEVEL_METRES;
 ///
 /// **At the default datum this returns the baked data untouched.** That is
 /// deliberate and load-bearing: `terrain_shading_occupancy_2026-08-14.md`
-/// freezes the Great Lakes look at datum 16.1, so the shipped scene must be
+/// froze the Great Lakes look, so authoring the shipped datum must be
 /// bit-identical, and it is — the work happens only once someone authors a
 /// different number, which is exactly when the old behaviour was wrong.
 fn reproject_to_datum(
@@ -216,18 +230,33 @@ fn reproject_to_datum(
     depth_metres: Vec<f32>,
     sdf_cells: Vec<f32>,
     surface_level: f32,
+    optical_max_depth: f32,
 ) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
     let shift = BAKED_DATUM_METRES - surface_level;
     if shift.abs() < 1.0e-3 {
         return (mask, depth_metres, sdf_cells);
     }
-    let shifted: Vec<f32> = depth_metres.iter().map(|d| d - shift).collect();
+    // `depth_metres` arrives scaled by the optical/bake ratio — see
+    // [`BAKED_MAX_DEPTH_METRES`]. The shift is in real metres, so undo the
+    // scaling, shift, and reapply it; the optics are then unchanged and only
+    // the waterline has moved.
+    let optical = if BAKED_MAX_DEPTH_METRES > 0.0 {
+        optical_max_depth / BAKED_MAX_DEPTH_METRES
+    } else {
+        1.0
+    };
+    let optical = if optical.is_finite() && optical > 0.0 {
+        optical
+    } else {
+        1.0
+    };
+    let shifted: Vec<f32> = depth_metres.iter().map(|d| d / optical - shift).collect();
     let wet: Vec<bool> = shifted.iter().map(|d| *d > 0.0).collect();
     let mask = wet.iter().map(|w| if *w { 255u8 } else { 0 }).collect();
     // The shader reads depth as a positive optical path; a negative one is dry
     // ground it discards anyway, and clamping keeps the extinction integral
     // from being handed a negative length.
-    let depth = shifted.iter().map(|d| d.max(0.0)).collect();
+    let depth = shifted.iter().map(|d| d.max(0.0) * optical).collect();
     let sdf = signed_distance_cells(size, &wet);
     (mask, depth, sdf)
 }
@@ -347,6 +376,7 @@ impl WaterBodyData {
                 depth_metres,
                 shore_distance_cells,
                 descriptor.surface_level,
+                descriptor.max_depth,
             )
         } else {
             (mask, depth_metres, shore_distance_cells)
@@ -740,7 +770,7 @@ mod tests {
             water_id: 0,
             terrain_id: 0,
             preset: 2,
-            surface_level: 16.1,
+            surface_level: BAKED_DATUM_METRES,
             max_depth: 18.6,
             bounds: [0.0, 0.0, 512.0, 512.0],
             amplitude: 0.57,
@@ -862,6 +892,7 @@ mod datum_tests {
             depth.clone(),
             sdf.clone(),
             BAKED_DATUM_METRES,
+            BAKED_MAX_DEPTH_METRES,
         );
         assert_eq!(m, mask);
         assert_eq!(d, depth);
@@ -881,6 +912,7 @@ mod datum_tests {
             depth,
             vec![0.0; 8],
             BAKED_DATUM_METRES - 2.0,
+            BAKED_MAX_DEPTH_METRES,
         );
         // Baked depths 0,1,2 are at or above the new plane; 3..7 stay wet.
         assert_eq!(
@@ -904,9 +936,47 @@ mod datum_tests {
             depth,
             vec![0.0; 8],
             BAKED_DATUM_METRES + 1.5,
+            BAKED_MAX_DEPTH_METRES,
         );
         // Everything from the 0 m cell up is now under water.
         assert!(mask.iter().all(|m| *m == 255), "mask = {mask:?}");
+    }
+
+    /// The two constants above are claims about files on disk, so they are
+    /// checked against those files rather than trusted.
+    ///
+    /// This is the test that would have caught the original defect: the runtime
+    /// datum was 16.1 while `recipe.json` said the shoreline was baked at 15,
+    /// and nothing anywhere compared the two.
+    #[test]
+    fn the_bake_constants_match_the_shipped_recipe() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/terrain/great_lakes/recipe.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // A clone without the assets still builds; the asset tests beside
+            // this one already skip on the same condition.
+            return;
+        };
+        let number = |key: &str| -> f32 {
+            let at = text.find(key).expect("recipe key");
+            let rest = &text[at + key.len()..];
+            let start = rest.find(|c: char| c.is_ascii_digit()).expect("digit");
+            let end = start
+                + rest[start..]
+                    .find(|c: char| !c.is_ascii_digit() && c != '.')
+                    .unwrap_or(rest.len() - start);
+            rest[start..end].parse().expect("number")
+        };
+        assert_eq!(
+            number("\"water_level_metres\""),
+            BAKED_DATUM_METRES,
+            "the runtime datum must be the one the shoreline was baked at"
+        );
+        assert_eq!(
+            number("\"max_depth_metres\""),
+            BAKED_MAX_DEPTH_METRES,
+            "the depth texture's normalisation must match what decodes it"
+        );
     }
 
     #[test]

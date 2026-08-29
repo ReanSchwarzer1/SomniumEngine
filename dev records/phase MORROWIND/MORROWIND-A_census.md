@@ -18,9 +18,9 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 61,456 | +11,250 | 32.6% | 415 | +87 | 90 | 55 |
+| `somnium_renderer` | 61,556 | +11,350 | 32.6% | 416 | +88 | 90 | 55 |
 | `somnium_ui` | 57,411 | +29,881 | 30.4% | 583 | +368 | 98 | 2 |
-| `somnium_core` | 32,083 | +12,863 | 17.0% | 361 | +144 | 42 | 0 |
+| `somnium_core` | 32,089 | +12,869 | 17.0% | 361 | +144 | 42 | 0 |
 | `somnium_asset` | 6,229 | +4,590 | 3.3% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.8% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,878 | +63 | 2.6% | 55 | — | 12 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **188,583** | +74,691 | | **1863** | +918 | | |
+| **Total** | **188,689** | +74,797 | | **1864** | +919 | | |
 
-The top three crates are **80.0%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.1%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,875 lines** (+229 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1131 | 237 | 104 | 8 | 10 | 173 | 95 | **1758** |
-| `somnium_renderer` | 631 | 152 | 8 | 1 | 2 | 119 | 87 | **1000** |
+| `somnium_renderer` | 631 | 152 | 8 | 1 | 2 | 121 | 87 | **1002** |
 | `somnium_core` | 308 | 103 | 21 | 3 | 3 | 58 | 39 | **535** |
 | `somnium_script` | 125 | 34 | 9 | 3 | 3 | 18 | 11 | **203** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
