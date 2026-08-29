@@ -38,7 +38,9 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_ANALYTIC_GRAD": ("schema", "somnium.PostProcess.analytic_grad"),
     "SOMNIUM_BLOOM": ("schema", "somnium.PostProcess.bloom_enabled"),
     "SOMNIUM_CAS": ("schema", "somnium.PostProcess.cas_enabled"),
-    "SOMNIUM_FSR": ("schema", "somnium.PostProcess.fsr_enabled"),
+    # MORROWIND-AC replaced fxaa_enabled/taa_enabled/fsr_enabled with one
+    # authored `aa` value, so both of these now route to that field.
+    "SOMNIUM_FSR": ("schema", "somnium.PostProcess.aa"),
     "SOMNIUM_GTAO": ("schema", "somnium.PostProcess.gtao_enabled"),
     "SOMNIUM_LIGHT_SHAFTS": ("schema", "somnium.PostProcess.light_shafts"),
     "SOMNIUM_MESH_SDF": ("schema", "somnium.PostProcess.mesh_sdf"),
@@ -52,7 +54,10 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_RT_REFLECT": ("schema", "somnium.PostProcess.rt_reflect_enabled"),
     "SOMNIUM_RT_REFRACT": ("schema", "somnium.PostProcess.rt_refract_enabled"),
     "SOMNIUM_SPECULAR_GI": ("schema", "somnium.PostProcess.specular_gi"),
-    "SOMNIUM_TAA": ("schema", "somnium.PostProcess.taa_enabled"),
+    "SOMNIUM_TAA": ("schema", "somnium.PostProcess.aa"),
+    "SOMNIUM_AA": ("schema", "somnium.PostProcess.aa"),
+    "SOMNIUM_SMAA_PRESET": ("schema", "somnium.PostProcess.smaa_preset"),
+    "SOMNIUM_OIT": ("schema", "somnium.PostProcess.oit_enabled"),
     "SOMNIUM_VOLUMETRICS": ("schema", "somnium.PostProcess.volumetrics_enabled"),
     # CONTROL-M. The switch is a schema field; the variable is Seam 4's
     # override of it, and it wins so recorded captures keep working.
@@ -105,6 +110,11 @@ ENV_ROUTES: dict[str, tuple[str, str]] = {
     "SOMNIUM_RT_TERRAIN": ("command", "editor.view.pipeline.rt_terrain"),
 
     # ── Startup and capture harness: arguments to a process ────────────────
+    "SOMNIUM_WATER_LEVEL": (
+        "harness",
+        "Overrides the default landscape's water datum for an A/B; the authored "
+        "control is Water Details > Surface Level.",
+    ),
     "SOMNIUM_AUDIT_CONTENT_PATH": ("harness", "CONTROL-A capture driver: which drawer folder to open."),
     "SOMNIUM_AUDIT_LOG": ("harness", "CONTROL-A capture driver: where the renderer audit log is written."),
     "SOMNIUM_AUDIT_SELECT_ENTITY": ("harness", "CONTROL-A capture driver: which entity to select before capture."),
