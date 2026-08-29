@@ -2467,3 +2467,37 @@ distance-field sphere tracing and temporal exponential blending are standard
 published rendering techniques. The pass deliberately has no ray-query
 extension or acceleration-structure binding, and ReSTIR GI remains a separate
 hardware tier.
+
+### 13H.26 Transparency and anti-aliasing, MORROWIND-AC
+
+Two techniques, both implemented from primary published literature and neither
+adapted from an engine in `example_repo`.
+
+**Weighted-blended OIT.** Morgan McGuire and Louis Bavoil, *Weighted Blended
+Order-Independent Transparency*, Journal of Computer Graphics Techniques 2(2),
+2013 — an open-access paper. Somnium takes the two-target accumulation scheme
+and the paper's equation 9 weight function; the clamp range in
+`transparent.wgsl::oit_weight` is chosen against `Rgba16Float`, which is a
+Somnium format decision, and the blend states, clear-value discipline and the
+NaN guard in `oit_composite.wgsl` are original. No code was consulted.
+
+**SMAA.** Jorge Jimenez, Jose I. Echevarria, Tiago Sousa and Diego Gutierrez,
+*SMAA: Enhanced Subpixel Morphological Antialiasing*, Computer Graphics Forum
+31(2), 2012. Somnium takes the three-pass structure, the luma edge test and its
+local contrast adaptation, and the along-edge search.
+
+**The plan's cited source was not used and could not be.** `phase_MORROWIND.md`
+§8 pointed at Flax's `Source/Engine/Renderer/AntiAliasing/SMAA.cpp`.
+MORROWIND-A's licence audit classifies Flax as **proprietary**, so it supplied
+no code, identifiers, constants, layouts, shader equations or comments — the
+same boundary §13H.25 records for the same source.
+
+**The reference `AreaTex` and `SearchTex` lookup tables are not vendored.**
+`smaa.wgsl::smaa_coverage` solves the same quantity analytically from the
+reconstructed silhouette geometry. This is a deliberate substitution, not an
+approximation of convenience: a generated data table carries the licence of the
+distribution it ships in, and Somnium's rule is to implement from the
+literature. The consequence is stated in that file and in
+`dev records/phase MORROWIND/MORROWIND-AC.md` — the diagonal-pattern pass
+and sharp-corner rounding of full SMAA, which depend on their own tables, are
+**not implemented**, so near-45° edges are handled by the orthogonal path alone.

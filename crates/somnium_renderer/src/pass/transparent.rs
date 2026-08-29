@@ -24,6 +24,12 @@ pub struct TransparentDraw {
 
 pub struct TransparentPass {
     pipeline: wgpu::RenderPipeline,
+    /// MORROWIND-AC: the same geometry and the same `shade`, writing the two
+    /// weighted-blended targets instead of blending straight into the HDR
+    /// image. Built alongside the sorted pipeline rather than lazily, because
+    /// both are one pipeline each and a first-use compile inside a frame is a
+    /// hitch the profiler would attribute to the transparent pass.
+    oit_pipeline: wgpu::RenderPipeline,
     /// Sampler + environment cubemap for reflections.
     bind_group: wgpu::BindGroup,
 }
@@ -146,9 +152,115 @@ impl TransparentPass {
             cache: None,
         });
 
+        let oit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Transparent OIT Pipeline"),
+            layout: Some(&pipeline_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_oit"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: crate::pass::oit::ACCUM_FORMAT,
+                        blend: Some(crate::pass::oit::OitPass::accum_blend()),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: crate::pass::oit::REVEAL_FORMAT,
+                        blend: Some(crate::pass::oit::OitPass::reveal_blend()),
+                        write_mask: wgpu::ColorWrites::RED,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Identical to the sorted path: test against opaque depth,
+                // never write. Order independence is about *blending*, and a
+                // blended surface still must not draw through a wall.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+        });
+
         Self {
             pipeline,
+            oit_pipeline,
             bind_group,
+        }
+    }
+
+    /// Draw the blended queue into the weighted-blended targets (MORROWIND-AC).
+    ///
+    /// `draws` need not be sorted, which is the entire point — the caller may
+    /// hand over the queue in submission order. It is accepted as a slice in
+    /// the same shape as [`Self::record`] so the two paths differ in exactly
+    /// one thing at the call site.
+    pub fn record_weighted(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        accum_view: &wgpu::TextureView,
+        reveal_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        global_bind_group: &wgpu::BindGroup,
+        draws: &[TransparentDraw],
+    ) {
+        if draws.is_empty() {
+            return;
+        }
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Transparent OIT Pass"),
+            multiview_mask: None,
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: accum_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // Loaded, not cleared: `OitPass::begin` already set the
+                        // identity values, and clearing here would discard them.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: reveal_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: None, // read-only
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rpass.set_pipeline(&self.oit_pipeline);
+        rpass.set_bind_group(0, global_bind_group, &[]);
+        rpass.set_bind_group(1, &self.bind_group, &[]);
+        for d in draws {
+            rpass.draw(0..d.index_count, d.instance_index..d.instance_index + 1);
         }
     }
 

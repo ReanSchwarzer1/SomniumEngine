@@ -642,8 +642,10 @@ impl SetFieldCmd {
         if component.as_str() == "somnium.PostProcess" {
             if let Some(pp) = world.get_mut::<crate::PostProcessComponent>(entity) {
                 match field_schema.name {
-                    "taa_enabled" => pp.set_taa_enabled(pp.taa_enabled),
-                    "fsr_enabled" => pp.set_fsr_enabled(pp.fsr_enabled),
+                    // MORROWIND-AC: `taa_enabled` and `fsr_enabled` used to be
+                    // re-applied here to restore their mutual exclusion after a
+                    // generic patch. They are not fields any more — `aa` holds
+                    // one value — so there is no pair left to reconcile.
                     "cas_enabled" => pp.set_cas_enabled(pp.cas_enabled),
                     "volumetrics_enabled" => pp.set_volumetrics_enabled(pp.volumetrics_enabled),
                     "light_shafts" => pp.set_light_shafts_enabled(pp.light_shafts),

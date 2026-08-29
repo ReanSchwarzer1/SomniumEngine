@@ -183,7 +183,7 @@ export type SomniumPostProcess = {
 	gtao_enabled: boolean,
 	dof_enabled: boolean,
 	dof_focus_distance: number,
-	taa_enabled: boolean,
+	aa: number --[[ Off | FXAA | SMAA 1x | SMAA T2x | TAA | FSR 3 ]],
 	restir_enabled: boolean,
 	restir_gi_enabled: boolean,
 	rt_reflect_enabled: boolean,
@@ -206,7 +206,8 @@ export type SomniumPostProcess = {
 	vignette_strength: number,
 	ca_enabled: boolean,
 	ca_strength: number,
-	fxaa_enabled: boolean,
+	smaa_preset: number --[[ Low | Medium | High | Ultra ]],
+	oit_enabled: boolean,
 	pcss_enabled: boolean,
 	contact_shadows_enabled: boolean,
 	ibl_intensity: number,
@@ -227,7 +228,6 @@ export type SomniumPostProcess = {
 	ddgi_hysteresis: number,
 	analytic_grad: boolean,
 	shaft_intensity: number,
-	fsr_enabled: boolean,
 	fsr_sharpness: number,
 }
 

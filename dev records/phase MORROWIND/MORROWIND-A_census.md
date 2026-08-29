@@ -18,25 +18,25 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 59,593 | +9,387 | 32.0% | 400 | +72 | 88 | 53 |
-| `somnium_ui` | 57,289 | +29,759 | 30.8% | 580 | +365 | 98 | 2 |
-| `somnium_core` | 31,729 | +12,509 | 17.0% | 359 | +142 | 42 | 0 |
+| `somnium_renderer` | 61,158 | +10,952 | 32.5% | 410 | +82 | 90 | 55 |
+| `somnium_ui` | 57,289 | +29,759 | 30.4% | 580 | +365 | 98 | 2 |
+| `somnium_core` | 32,074 | +12,854 | 17.0% | 361 | +144 | 42 | 0 |
 | `somnium_asset` | 6,229 | +4,590 | 3.3% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.8% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,878 | +63 | 2.6% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,754 | +297 | 2.6% | 59 | +1 | 9 | 0 |
-| `somnium_anim` | 4,380 | +4,380 | 2.4% | 46 | +46 | 4 | 0 |
+| `somnium_script_luau` | 4,754 | +297 | 2.5% | 59 | +1 | 9 | 0 |
+| `somnium_anim` | 4,380 | +4,380 | 2.3% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.7% | 66 | +66 | 6 | 0 |
-| `somnium_shader` | 1,968 | +1,968 | 1.1% | 35 | +35 | 5 | 0 |
+| `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.0% | 57 | +57 | 5 | 0 |
 | `somnium_jobs` | 1,636 | +1,636 | 0.9% | 17 | +17 | 5 | 0 |
 | `somnium_audio` | 1,516 | +1,423 | 0.8% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,000 | — | 0.5% | 11 | — | 6 | 0 |
 | `somnium_physics` | 580 | — | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **186,244** | +72,352 | | **1843** | +898 | | |
+| **Total** | **188,154** | +74,262 | | **1855** | +910 | | |
 
-The top three crates are **79.8%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.0%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,875 lines** (+229 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -50,8 +50,8 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1131 | 237 | 104 | 8 | 10 | 173 | 95 | **1758** |
-| `somnium_renderer` | 614 | 150 | 8 | 1 | 2 | 116 | 85 | **976** |
-| `somnium_core` | 300 | 103 | 19 | 3 | 3 | 58 | 39 | **525** |
+| `somnium_renderer` | 631 | 152 | 8 | 1 | 2 | 118 | 87 | **999** |
+| `somnium_core` | 308 | 103 | 21 | 3 | 3 | 58 | 39 | **535** |
 | `somnium_script` | 125 | 34 | 9 | 3 | 3 | 18 | 11 | **203** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 11 | 8 | **158** |
@@ -68,7 +68,7 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **53 WGSL files, 13,818 lines** (+5 files, +1,739 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **55 files, 14,287 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,223 lines** (+7 files, +2,144 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **57 files, 14,692 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 30 (+18 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 111 (+15 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 114 (+18 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 

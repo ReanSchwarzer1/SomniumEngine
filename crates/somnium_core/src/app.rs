@@ -5644,15 +5644,15 @@ impl<G: GameApp> Engine<G> {
             // updated. Daylight FSR and real-resolution upscaling remain live.
             let fsr_safe_for_lighting = r.light_direction.y > 0.0;
             r.fsr_pass
-                .set_enabled(pp.fsr_enabled && !path_active && fsr_safe_for_lighting);
+                .set_enabled(pp.fsr_enabled() && !path_active && fsr_safe_for_lighting);
             r.fsr_pass.sharpness = pp.fsr_sharpness;
             // Use the pass's effective state, not the authored request: on a
-            // device without FSR features, pp.fsr_enabled may be true while
-            // the pass correctly declined it. TAA/CAS must still be allowed.
+            // device without FSR features, `aa` may be `Fsr` while the pass
+            // correctly declined it. TAA/CAS must still be allowed.
             let fsr_active = r.fsr_pass.enabled;
-            let fsr_fallback = pp.fsr_enabled && !path_active && !fsr_active;
+            let fsr_fallback = pp.fsr_enabled() && !path_active && !fsr_active;
             r.taa_pass
-                .set_enabled((pp.taa_enabled || fsr_fallback) && !fsr_active && !path_active);
+                .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !path_active);
             r.gtao_pass.enabled = pp.gtao_enabled && !path_active;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
@@ -5759,7 +5759,15 @@ impl<G: GameApp> Engine<G> {
             };
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
-            r.fxaa_enabled = pp.fxaa_enabled;
+            // MORROWIND-AC. One authored value in, two effective flags out, and
+            // the renderer no longer re-derives precedence from three booleans.
+            r.fxaa_enabled = pp.fxaa_enabled();
+            r.oit_pass.enabled = pp.oit_enabled && !path_active;
+            r.smaa_pass.set_mode(
+                pp.smaa_enabled(),
+                pp.smaa_preset.threshold(),
+                pp.smaa_preset.max_search_steps(),
+            );
             // Phase 22C: rides along with the sun in the directional-light
             // buffer, so every pass that lights anything picks it up.
             r.set_ibl_intensity(pp.ibl_intensity);

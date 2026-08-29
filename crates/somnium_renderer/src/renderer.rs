@@ -198,6 +198,10 @@ pub struct SomniumRenderer {
     pub chromatic_aberration: f32,
     /// Phase 15A2: FXAA anti-aliasing pass (runs before editor overlays).
     fxaa_pass: crate::pass::fxaa::FxaaPass,
+    /// Weighted-blended OIT (MORROWIND-AC). Default off.
+    pub oit_pass: crate::pass::oit::OitPass,
+    /// SMAA 1x / T2x (MORROWIND-AC). Owns whether it runs.
+    pub smaa_pass: crate::pass::smaa::SmaaPass,
     /// Whether FXAA is applied. When off, post-processing writes straight to
     /// the swapchain and the pass costs nothing.
     pub fxaa_enabled: bool,
@@ -879,6 +883,20 @@ impl SomniumRenderer {
                 ctx.config.height,
             ),
             fxaa_enabled: true,
+            oit_pass: crate::pass::oit::OitPass::new(
+                &ctx.device,
+                &shaders,
+                HDR_FORMAT,
+                ctx.config.width,
+                ctx.config.height,
+            ),
+            smaa_pass: crate::pass::smaa::SmaaPass::new(
+                &ctx.device,
+                &shaders,
+                ctx.config.format,
+                ctx.config.width,
+                ctx.config.height,
+            ),
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
@@ -1787,7 +1805,13 @@ impl SomniumRenderer {
                 self.lighting_extra_pass.volume_view(),
             );
             self.taa_pass.resize(&ctx.device, HDR_FORMAT, width, height);
+            // Scene-sized, not window-sized: OIT accumulates at the resolution
+            // the transparent pass rasterises at, which dynamic resolution and
+            // the viewport preset both change.
+            self.oit_pass.resize(&ctx.device, width, height);
             self.fxaa_pass
+                .resize(&ctx.device, ctx.config.format, width, height);
+            self.smaa_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.cas_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
@@ -1841,6 +1865,8 @@ impl SomniumRenderer {
             return;
         }
         self.fxaa_pass
+            .resize(&ctx.device, ctx.config.format, width, height);
+        self.smaa_pass
             .resize(&ctx.device, ctx.config.format, width, height);
         self.cas_pass
             .resize(&ctx.device, ctx.config.format, width, height);
@@ -3830,13 +3856,31 @@ impl SomniumRenderer {
         // blended surfaces composite over a complete image. Depth-tested
         // against the opaque depth, never writing it.
         self.profiler.begin(&mut encoder, "Transparent");
-        self.transparent_pass.record(
-            &mut encoder,
-            &self.postprocess_pass.hdr_view,
-            &self.vis_pass.depth_view,
-            &self.global_pool.bind_group,
-            &transparent_draws,
-        );
+        if self.oit_pass.enabled {
+            // MORROWIND-AC. Same queue, same depth, same shading — the draws
+            // are simply not required to be in any order, so the sort above is
+            // wasted work rather than wrong work and is left in place: turning
+            // OIT off mid-session must not need a re-sort.
+            self.oit_pass.begin(&mut encoder);
+            self.transparent_pass.record_weighted(
+                &mut encoder,
+                self.oit_pass.accum_view(),
+                self.oit_pass.reveal_view(),
+                &self.vis_pass.depth_view,
+                &self.global_pool.bind_group,
+                &transparent_draws,
+            );
+            self.oit_pass
+                .composite(&mut encoder, &self.postprocess_pass.hdr_view);
+        } else {
+            self.transparent_pass.record(
+                &mut encoder,
+                &self.postprocess_pass.hdr_view,
+                &self.vis_pass.depth_view,
+                &self.global_pool.bind_group,
+                &transparent_draws,
+            );
+        }
 
         // ── 7.7 Grid Overlay → HDR texture ───────────────────────────────────
         if self.editor_overlays_enabled && self.grid_enabled {
@@ -4117,6 +4161,12 @@ impl SomniumRenderer {
         // and there is nothing left for FXAA to usefully do once TAA is on.
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Post + present");
+        // MORROWIND-AC. `AntiAliasing` is one authored value, so these are
+        // consequences rather than a precedence chain over three booleans. FSR
+        // still wins when it is *effective* — the pass declines itself on a
+        // device without the features, and the authored value must not override
+        // a decline — which is the one piece of precedence that survives.
+        let smaa_active = self.smaa_pass.active() && !fsr_ok;
         let fxaa_active = self.fxaa_enabled && !self.taa_pass.enabled() && !fsr_ok;
         // Phase 24AC: when CAS is running it owns the swapchain, and whatever
         // would have written there writes into its input instead. Placed here
@@ -4142,7 +4192,15 @@ impl SomniumRenderer {
             } else {
                 scene_present
             };
-            if fxaa_active {
+            if smaa_active {
+                self.profiler.begin(&mut encoder, "SMAA");
+                self.smaa_pass
+                    .update(&ctx.queue, self.ldr_width, self.ldr_height);
+                self.postprocess_pass
+                    .record(&mut encoder, &self.smaa_pass.ldr_view);
+                self.smaa_pass.record(&mut encoder, ldr_target);
+                self.profiler.end(&mut encoder);
+            } else if fxaa_active {
                 self.fxaa_pass
                     .update(&ctx.queue, self.ldr_width, self.ldr_height);
                 self.postprocess_pass

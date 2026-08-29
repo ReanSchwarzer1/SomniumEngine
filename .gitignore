@@ -79,6 +79,13 @@ dev records/phase CONTROL/CONTROL-A_baseline/*
 dev records/phase MORROWIND/*
 !dev records/phase MORROWIND/README.md
 !dev records/phase MORROWIND/MORROWIND-*.md
+# MORROWIND-AC evidence. Added with the sub-phase, per PORTAL-0-C's note that
+# an allowlist silently swallows a phase whose entries were added afterwards.
+!dev records/phase MORROWIND/AC/
+dev records/phase MORROWIND/AC/*
+!dev records/phase MORROWIND/AC/README.md
+!dev records/phase MORROWIND/AC/AC_*.somtime
+!dev records/phase MORROWIND/AC/AC_*.png
 # Sub-phase measurements are source evidence; screenshots stay local unless
 # promoted into the reviewed golden manifest below.
 !dev records/phase MORROWIND/MORROWIND-AB_*.somtime

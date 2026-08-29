@@ -135,8 +135,14 @@ fn vs_main(
     return out;
 }
 
-@fragment
-fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+/// Shade one blended fragment. Straight (non-premultiplied) alpha.
+///
+/// MORROWIND-AC split this out of `fs_main` so the sorted path and the
+/// weighted-blended path shade identically. Any difference between the two
+/// images is then a difference in *compositing*, which is the thing being
+/// compared — not a difference in lighting, which would make the A/B
+/// meaningless.
+fn shade(in: VOut, front: bool) -> vec4<f32> {
     let material = materials[in.material_id];
 
     var albedo = material.base_color.rgb;
@@ -184,4 +190,53 @@ fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     let color = direct + (env * light.ibl_intensity) * (f0 + vec3<f32>(fresnel));
     let out_alpha = clamp(alpha + fresnel * (1.0 - alpha), 0.0, 1.0);
     return vec4<f32>(color, out_alpha);
+}
+
+@fragment
+fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return shade(in, front);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Weighted-blended OIT (MORROWIND-AC)
+//
+// McGuire and Bavoil, *Weighted Blended Order-Independent Transparency*
+// (JCGT 2013). Two targets instead of one blended pass:
+//
+//   accum  += (rgb * a, a) * w(z, a)      additive
+//   reveal *= (1 - a)                     multiplicative
+//
+// and the composite resolves `accum.rgb / accum.a` against `reveal`. Nothing
+// depends on draw order, so intersecting surfaces stop depending on which
+// object's origin happened to be nearer — which is the failure the sorted path
+// cannot fix, because a per-object key cannot order a per-pixel question.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct OitOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: f32,
+}
+
+/// The paper's weight function, equation 9.
+///
+/// Two jobs, and they pull against each other: near-camera fragments must
+/// dominate far ones, and the whole thing must stay inside `f16` range or the
+/// accumulation buffer saturates to `inf` and the pixel resolves to NaN. The
+/// `1e-5 .. 3e3` clamp is what keeps a distant, nearly-transparent fragment
+/// from underflowing to zero and a close, nearly-opaque one from overflowing.
+fn oit_weight(z: f32, a: f32) -> f32 {
+    let d = 1.0 - z;
+    return clamp(pow(a + 0.01, 4.0) + max(0.01, 3.0e3 * d * d * d), 1.0e-5, 3.0e3);
+}
+
+@fragment
+fn fs_oit(in: VOut, @builtin(front_facing) front: bool) -> OitOut {
+    let c = shade(in, front);
+    // `in.clip.z` is the post-projection depth wgpu hands the fragment, already
+    // in 0..1, so no view-space reconstruction is needed here.
+    let w = oit_weight(in.clip.z, c.a);
+    var out: OitOut;
+    out.accum = vec4<f32>(c.rgb * c.a, c.a) * w;
+    out.reveal = c.a;
+    return out;
 }
