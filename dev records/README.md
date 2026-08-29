@@ -1,115 +1,166 @@
 # Development records
 
-Validation images live here instead of the repository root. Records are grouped
-by project phase, then by the phase range that produced them. Filenames begin
-with the phase identifier and describe the validated viewpoint or render stage.
+This directory holds phase plans, completion records, generated audits, timing
+captures, and visual evidence. It is the detailed project memory. For the
+current architecture and roadmap, start with [`../context.md`](../context.md).
 
-**Start-here handoffs**
+## Read this first
 
-- [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md) — **current start-here.** A different model must learn the architecture (`context.md`, `ATTRIBUTION.md`, every markdown in this folder) then **audit Halcyon → HEAD** (VV, 24M–R, FSR 3, foliage LOD/cull). Phase 26 chrome is fine. Phase DF clipmaps are **in engine**; they need their **own** audit (`phase_DF.md` §12) before default-on — do not quietly retune them inside the Halcyon audit. Terrain shading occupancy (Island 30+ fps vs Coastal ~20 fps on the ground, compact PSO, do not flip uniforms expecting a drop): [`terrain_shading_occupancy_2026-08-14.md`](terrain_shading_occupancy_2026-08-14.md).
-- [`halcyon_context_handoff.md`](halcyon_context_handoff.md) — Phase VV (Halcyon) **VV-A–H in tree**. Remaining Halcyon work is live evidence / §11 timings. **Superseded as start-here** by the post-Halcyon audit handoff. Plan: [`phase_VV.md`](phase_VV.md).
-- [`post_IV_context_handoff.md`](post_IV_context_handoff.md) — IV/XV history after Phase IV. **XV-A–J complete.** Live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). Superseded as start-here by the post-Halcyon audit handoff.
-- [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md) — historical post-25M-2 / Phase IV A–J narrative; superseded as the XV entry point by the post-IV handoff.
+Use the documents in this order:
 
-**Evidence folders**
+1. [`../context.md`](../context.md) for current vocabulary, architecture,
+   subsystem status, known failures, and roadmap order.
+2. The relevant top-level phase file for intent, acceptance criteria, and the
+   original design argument.
+3. The matching phase directory for what actually ran and what evidence was
+   captured.
+4. Source and generated reports when a record conflicts with the current tree.
 
-- `phase IV/IV-D-E/` — finite-water and surface-optics evidence.
-- `phase IV/IV-F-G-H/` — spectral surface, underwater transition, and shared
-  default-landscape evidence.
-- `phase IV/IV-I-J/` — vessel, shoreline LOD, and contact-band evidence.
-- `phase IV/IV-K/` — ocean fidelity pass: the surface before and after the
-  shading rewrite, and the authored water body that ships.
-- `phase 26/` — Metaphor editor-chrome evidence (capture live; see `phase_26.md`). The UI phase remains open.
-- `phase VV/` — ray-traced water reflection evidence (captures still open;
-  do not invent PNGs). See [`phase VV/README.md`](phase%20VV/README.md) and
-  [`phase_VV.md`](phase_VV.md).
-- `phase DF/` — Daggerfall terrain-clipmap evidence. Plan + **audit brief:**
-  [`phase_DF.md`](phase_DF.md) §12. Timings: [`phase DF/DF-A_timings.md`](phase%20DF/DF-A_timings.md)
-  (stale vs current look). Default **off**.
-- `phase CR/` — Crysis occupancy. Plan: [`phase_CR.md`](phase_CR.md).
-  Table: [`phase CR/CR-A_occupancy.md`](phase%20CR/CR-A_occupancy.md).
-- `phase DOOM/` — optimization. **A, B, C, E, F in tree; D and G–M deferred.**
-  Plan + status: [`phase_DOOM.md`](phase_DOOM.md) §15. Evidence and every
-  number: [`phase DOOM/README.md`](phase%20DOOM/README.md). `.somtime` files are
-  deterministic GPU timing runs with a stddev per row — **do not overwrite the
-  `DOOM-A_*` baselines.** Headline: Frame 38.4 → 19.9 ms with dynamic
-  resolution; tile binning and the aerial terrain pipeline are built, correct
-  and default **off** because both measured slower.
-- `phase PORTAL/` — **not created yet.** Phase PORTAL (Source) is a
-  **plan only**, nothing in tree: [`phase_PORTAL.md`](phase_PORTAL.md). It is
-  the engineering-health phase — CI gates that can actually fail, one lint
-  policy, a one-command capture+`.somtime` parity harness, a Source-style
-  `ConVar` registry for the 96 `SOMNIUM_*` variables, the seven complex
-  functions (`handle_editor_event` is **cyclomatic 381**), the `somnium_ui` and
-  physics test holes, and the open defects in `context.md` §18.
-  **PORTAL-D migrates this folder's durable content into `context.md`** —
-  measured tables, negative results, frozen contracts — because **this folder
-  stays out of version control** and everything in it lives on one machine.
-  Migration is a *distillation*, not a concatenation: 40 markdown files /
-  17 387 lines against a `context.md` of 4 594. Retention rule and the
-  `docs/context/` fallback: `phase_PORTAL.md` §5.10.
-  **PORTAL-A creates the evidence folder**; do not invent PNGs before it runs.
-  It adds no rendering or editor feature and its success condition includes the
-  frame time **not moving**. Sequencing vs Phase CONTROL: §7.
-  **`rust-doctor` was run on 2026-08-18** — score 65/100, `authoritative:
-  false`, 3 files its parser could not read, and a default gate that evaluates
-  to `not-evaluated`. Read §2.1 before trusting the number.
+A phase plan is not proof that a feature exists. Older plans intentionally
+preserve the tree and assumptions they were written against. Their opening
+audits can therefore be historically useful and presently false.
 
-- `phase CONTROL/` — **not created yet.** Phase CONTROL (Northlight) is a
-  **plan only**, nothing in tree: [`phase_CONTROL.md`](phase_CONTROL.md). It is
-  the editor-reach phase — the reflection-driven Details seam, an asset database
-  with thumbnails, material authoring, drag and drop, preferences, the scene-load
-  fix, then volumetric clouds, time of day and weather. **CONTROL-A creates the
-  evidence folder**; do not invent PNGs before it runs.
-- `phase KENSHI/` — **not created yet.** Phase KENSHI (OGRE) is a **plan only**,
-  nothing in tree: [`phase_KENSHI.md`](phase_KENSHI.md). It is the **scale**
-  phase, and it is third: CONTROL, then MORROWIND, then this. Premise: after
-  MORROWIND every feature will have been accepted on a *single-feature*
-  `.somtime` row, and **nobody will ever have run the frame that has crowds,
-  streaming, particles and agents in it at once**. Four tracks — **THE HUB**
-  (determinism, `.somtime` v2 with a scale axis, the sweep harness, the scale
-  rig), **BEEP** (the profiler finished: CPU depth, memory, job queues,
-  per-system attribution, capture-to-file, and a Panda3D-style *networked*
-  client), **WORLD'S END** (the sweep, whose product is a publishable
-  `limits.md`), and **SKELETON** (the fixes — multi-threaded recording via
-  pipeline cycling, the pose task graph, virtual texturing).
-  **Its judging rule is the no-speculative-fix rule: no optimisation is
-  authorized until a measurement names it**, and every Track 3 sub-phase is
-  marked `BLOCKED` until the sweep indicts it — on the DOOM precedent that a
-  refusal on evidence (tile binning, aerial terrain) is worth more than a
-  feature. **Read the tags in its §4:** unlike CONTROL and MORROWIND it cannot
-  open with a measured audit, because the tree it measures does not exist yet,
-  so half of §4 is labelled `[P]` for predicted and KENSHI-A's whole job is to
-  replace those with `[M]`. Appendix A carries the determinism checklist, the
-  v2 parser branch, the shape classifier and the sweep spec format.
-- `phase MORROWIND/` — **not created yet.** Phase MORROWIND (NetImmerse) is a
-  **plan only**, nothing in tree: [`phase_MORROWIND.md`](phase_MORROWIND.md). It
-  is the engine-half phase — the runtime (game-facing) UI, skeletal animation,
-  prefabs, the asset cook and world streaming, navigation, GPU particles and
-  virtual shadow maps, input actions, save games, and an audio crate that is
-  currently **93 lines with three one-line stubs**. Eight tracks, 36 sub-phases,
-  and it **retires `context.md` §17.6's numbering** (§1.3 there): Phase 26
-  shipped as the editor's information architecture and Phase 27 as its paint
-  layer, so the §17.6 entries claiming those numbers for a UI framework and for
-  animation no longer describe reality. **Gated on CONTROL-B and CONTROL-C
-  being in tree**; §6.7 is the non-overlap table and it forbids this phase from
-  building a curve editor, a gradient editor, a preferences window, time of day,
-  clouds or weather — all CONTROL's. §9.3 gives the eleven-sub-phase cut if the
-  whole phase cannot be run. **MORROWIND-A creates this evidence folder** and
-  writes the census script; do not invent PNGs before it runs. §16 states which
-  claims were verified by reading the tree on 2026-08-23 and which were not —
-  notably that **no web-research pass completed**, so the plan carries no
-  third-party version claims by design.
-- `phase XV/` — terrain evidence (XV-A–J **complete**).
-  Path: `phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
-  Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
-  Live contract: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
-  Plan: [`phase_XV.md`](phase_XV.md).
-  XV-A provenance audit: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md).
-  Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
+## Status vocabulary
 
-Captures must be taken after tonemapping. The renderer's HDR target holds
-values far above one, so a PNG written from it directly is uniformly blown out
-and worthless as evidence.
+| Status | Meaning |
+|---|---|
+| In tree | Source exists, but every visual, performance, or close-out gate may not have passed |
+| Complete | The phase or named sub-phase closed its acceptance gates |
+| Partial | Some named work shipped and some remains open |
+| Planned | Design only; implementation has not started |
+| Deferred | Deliberately postponed with a recorded reason or prerequisite |
+| Refused | Tried or investigated and rejected on evidence |
 
-These images are engineering evidence, not runtime assets.
+## Current roadmap
+
+```mermaid
+flowchart LR
+    CONTROL["CONTROL<br/>complete"] --> MORROWIND["MORROWIND<br/>active, partial"]
+    MORROWIND --> KENSHI["KENSHI<br/>planned scale phase"]
+    MORROWIND --> PORTAL["PORTAL<br/>planned, audit needs rebase"]
+    KENSHI --> STALKER["STALKER<br/>planned product phase"]
+    PORTAL --> STALKER
+    P0["PORTAL-0<br/>complete"] -. focused precursor .-> PORTAL
+```
+
+MORROWIND is the active phase. PORTAL-0 is complete but is not the full PORTAL
+plan. KENSHI and PORTAL can proceed independently after MORROWIND where their
+work does not overlap. STALKER waits for the relevant outputs of both.
+
+## Phase index
+
+The status column is current as of 2026-08-29. The linked file still contains
+its own historical snapshot and revision notes.
+
+| Phase | Focus | Current status | Plan or record |
+|---|---|---|---|
+| 16 | Language-neutral scripting and sandboxed Luau | Complete | [`phase_16.md`](phase_16.md) |
+| 25M2 | Renderer milestone close-out | Complete record | [`phase_25m2_completion_report.md`](phase_25m2_completion_report.md) |
+| IV | Great Lakes landscape, finite water, FFT ocean | Complete | [`phase_IV.md`](phase_IV.md) |
+| XV | Terrain identity, layers, splat and biome authoring | A through J complete | [`phase_XV.md`](phase_XV.md) |
+| VV / Halcyon | Ray-traced water reflection and refraction | A through H plus VV+1 in tree; live evidence remains | [`phase_VV.md`](phase_VV.md) |
+| CR / Crysis | CPU and GPU frustum culling | In engine | [`phase_CR.md`](phase_CR.md) |
+| DF / Daggerfall | Terrain material clipmaps | In engine, default off; audit remains | [`phase_DF.md`](phase_DF.md) |
+| 26 / Metaphor | Editor information architecture | Most work in tree; selected follow-ups open | [`phase_26.md`](phase_26.md) |
+| 26-Zeta / Nocturne Atelier | Editor visual system, tokens, type, icons | In tree; final human sign-off remains | [`phase_26_Zeta.md`](phase_26_Zeta.md) |
+| 27 / Hades | Editor paint, motion, elevation, first impression | Partial; H through J not started | [`phase_27.md`](phase_27.md) |
+| DOOM / id Tech | Profiler, timing format, pixel census, measured optimization | A, B, C, E, F in tree; other work deferred | [`phase_DOOM.md`](phase_DOOM.md) |
+| CONTROL / Northlight | Schema-driven editor reach and world authoring | A through O complete | [`phase_CONTROL.md`](phase_CONTROL.md) |
+| PORTAL-0 / Source | Focused performance and engineering audit | A through G complete | [`phase_PORTAL-0.md`](phase_PORTAL-0.md) |
+| MORROWIND / NetImmerse | Runtime UI, cook, streaming, animation, game framework, rendering gaps | Active and partial | [`phase_MORROWIND.md`](phase_MORROWIND.md) |
+| PORTAL / Source | Engineering health and durable gates | Planned; rebase the 2026-08-18 audit before starting | [`phase_PORTAL.md`](phase_PORTAL.md) |
+| KENSHI / OGRE | Combined-load measurement and published engine limits | Planned | [`phase_KENSHI.md`](phase_KENSHI.md) |
+| STALKER / X-Ray | Player, packages, mods, product UI, living world, release | Planned | [`phase_STALKER.md`](phase_STALKER.md) |
+
+## MORROWIND at a glance
+
+| Track | In tree | Still open |
+|---|---|---|
+| BALMORA | Census, GHOSTFENCE, wgpu 30, jobs, shader composition and reload | None |
+| VIVEC | Runtime canvas, paint extensions, focus, navigation, rich text, IME, motion, accessibility | Full shaping, bidi, and fallback |
+| CONSTRUCTION SET | Graph surface and timeline | Docking, virtualisation, GUI editor, play-in-editor |
+| HLAALU | None | Prefabs, splines, blockout, scattering |
+| SILT STRIDER | Cook, residency, world partition, HLOD, impostors, floating origin | None |
+| DWEMER | GPU skinning, clips, blends, state machines | Root motion, IK, events, compression, pose task graph |
+| SIXTH HOUSE | None | Navmesh, pathfinding, behavior trees, perception |
+| RED MOUNTAIN | VSM, DDGI, terrain VT, OIT, SMAA, unified AA | GPU particles and VFX graph |
+| ALMSIVI | Input actions, audio, localisation | Save games, video, playable slice |
+
+The detailed records live in [`phase MORROWIND/`](phase%20MORROWIND/). The
+current list of completed record files is maintained in `context.md`; do not
+infer completion only from a filename.
+
+## Evidence directories
+
+| Directory | Contains |
+|---|---|
+| [`phase 16/`](phase%2016/) | Scripting acceptance evidence |
+| [`phase IV/`](phase%20IV/) | Finite water, spectral ocean, shoreline, vessel, and fidelity records |
+| [`phase XV/`](phase%20XV/) | Terrain research, implementation records, and captured evidence |
+| [`phase VV/`](phase%20VV/) | Halcyon captures and timing work |
+| [`phase CR/`](phase%20CR/) | Culling occupancy evidence |
+| [`phase DF/`](phase%20DF/) | Clipmap timings and audit material |
+| [`phase 26/`](phase%2026/) | Editor information-architecture captures |
+| [`phase DOOM/`](phase%20DOOM/) | `.somtime` baselines, reports, and optimization records |
+| [`phase CONTROL/`](phase%20CONTROL/) | Editor-reach sub-phase records and evidence |
+| [`phase PORTAL-0/`](phase%20PORTAL-0/) | Focused audit records and matched measurements |
+| [`phase MORROWIND/`](phase%20MORROWIND/) | Active MORROWIND sub-phase records and audits |
+| [`evidence/`](evidence/) | Cross-phase or uncategorized committed evidence |
+
+Planned phases do not receive evidence folders in advance. The first sub-phase
+creates the folder when it has an actual record to store.
+
+## Evidence rules
+
+### Images
+
+- Capture the running build. Do not use mockups as implementation evidence.
+- Capture after tone mapping. A direct PNG of the HDR target is clipped and
+  cannot establish the displayed result.
+- Record the scene, camera, resolution, feature state, and command.
+- Keep comparison conditions matched. If control runs move as much as the
+  feature runs, report the result as inconclusive.
+
+### Timings
+
+- `.somtime` runs need the same scene, pinned view, warm-up, resolution, and
+  sample policy.
+- Report mean, spread, minimum, maximum, and sample count.
+- `Frame wall` includes vsync and waiting. It is not CPU work.
+- Do not overwrite the original `DOOM-A_*` baselines.
+- Keep negative results. DOOM's tile binning and aerial terrain path, and
+  PORTAL-0's reverted WGSL optimization, are part of the engineering record.
+
+### Gates
+
+`python tools/ghostfence/run.py` is the repository gate. A row that cannot run
+is skipped with a reason; it is not silently green. As of 2026-08-29 the fast
+gate still fails the `sculpt-panel` golden image, so the repository must not be
+described as fully green.
+
+## Record-writing rules
+
+1. Put current architecture and roadmap facts in `context.md`.
+2. Put detailed implementation history, measurements, and rejected approaches
+   in the relevant phase record.
+3. Write the command and revision beside generated evidence.
+4. Separate what was planned, what shipped, what was deferred, and what was
+   refused.
+5. Correct stale status at the top of a plan, but preserve its dated audit as
+   history.
+6. Link to large reports and evidence. Do not paste the same audit into several
+   maintained documents.
+7. Do not claim a visual or performance result that the captured evidence did
+   not establish.
+
+## Historical handoffs
+
+These are useful snapshots, not current entry points:
+
+- [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)
+- [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
+- [`post_IV_context_handoff.md`](post_IV_context_handoff.md)
+- [`post_25M2_context_handoff.md`](post_25M2_context_handoff.md)
+
+Read them when reconstructing the reasoning of their period. Use
+[`../context.md`](../context.md) for the present state.

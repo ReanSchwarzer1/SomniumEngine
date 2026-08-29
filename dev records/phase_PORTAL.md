@@ -21,27 +21,35 @@
 > run for the first time on 2026-08-18, reports its own gate as
 > `"status": "not-evaluated"` for exactly the same reason (§2.1).
 >
-> **Status:** **PLAN — nothing in tree.** No sub-phase has been started.
-> **Snapshot date:** 2026-08-18. **Branch:** `dev`. **HEAD at write:**
-> `45a3df8` (`Update context.md`).
+> **Current status, 2026-08-29:** **PLAN ONLY.** No full PORTAL sub-phase has
+> started. PORTAL-0 later completed a focused performance and health pass, but
+> it does not make this phase complete. Before PORTAL-A, re-run the audit,
+> remove work already closed by PORTAL-0, and rebase the sequence against
+> completed CONTROL and the current MORROWIND tree.
+>
+> **Original snapshot:** 2026-08-18 on `dev` at `45a3df8` (`Update
+> context.md`). Counts, dependency versions, defect locations, and sequencing
+> below belong to that snapshot unless a revision note says otherwise.
 > **Revision:** r2, 2026-08-18 — rust-doctor run against the tree (§2.1);
 > PORTAL-D inverted from "version-control `dev records/`" to "migrate the
 > record into `context.md`" at the user's direction (§5.10); the foliage-colour
 > defect found already fixed and never struck from `context.md` §18 (§5.11).
 > **Record:** this file. Evidence folder `dev records/phase PORTAL/` is created
 > by **PORTAL-A**, not before. **Do not invent PNGs or `.somtime` files.**
-> **Predecessor:** Phase DOOM (id Tech) closed the measurable half of frame
-> time. Phase CONTROL (Northlight) is planned and **not started**; it owns
-> *editor reach*. PORTAL owns *engineering health*. They are orthogonal, and
-> PORTAL should land first — see §7.
+> **Roadmap correction:** CONTROL is complete. MORROWIND is active and partial.
+> PORTAL still owns engineering health, but the old instruction to land it
+> before CONTROL is obsolete. Use [`../context.md`](../context.md#roadmap-order)
+> for the current sequence.
 
-**Frozen by this phase.** A PORTAL sub-phase that changes any of these has gone
-wrong: Great Lakes water numbers (datum 16.1 m, `max_depth` 18.6 m,
+**Frozen in the original 2026-08-18 plan.** Revalidate this list before
+PORTAL-A. A PORTAL sub-phase that changes any confirmed item has gone wrong:
+Great Lakes water numbers (datum 16.1 m, `max_depth` 18.6 m,
 `wave_speed` 0.85); the XV 32-layer terrain contract and the 2032-byte
 `GpuTerrainMaterial` layout; the Island `hero_bank_only` recipe; foliage LOD /
 impostor / cull distances (45 / 90 / 120 m); DOOM's measured defaults (dynamic
 resolution opt-in, tile binning and aerial terrain off, hex/POM off); the
-Nocturne token sheet; rustc **1.88**; wgpu **29**.
+Nocturne token sheet; rustc **1.88**. The recorded wgpu **29** value is
+historical; the current gated version is wgpu **30**.
 
 **The rule this phase is judged by, stated once — the gate rule:**
 

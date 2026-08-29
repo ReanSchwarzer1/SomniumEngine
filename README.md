@@ -16,27 +16,26 @@
 
 ---
 
-A from-scratch 3D game engine written in Rust, built directly on `wgpu`. Somnium
-is a learning-driven, ground-up engine: rather than wrapping an existing engine,
-it reimplements the core systems of a modern renderer and editor from first
-principles, studying production engines for *architecture* while writing all of
-its own code.
+A from-scratch 3D game engine written in Rust and built directly on `wgpu`.
+Somnium implements its renderer, editor, runtime UI, asset pipeline, and game
+framework as one native workspace. Production engines are studied for
+architecture and comparison; Somnium's implementation is its own.
 
 The engine is organized around three deliberate commitments:
 
 | Commitment | Why it matters |
 |---|---|
-| **Visibility Buffer rendering** | Geometry is rasterized once into a compact `(instance, triangle)` ID buffer; a single fullscreen pass then shades each visible pixel exactly once. No overdraw, bandwidth scales with the framebuffer rather than scene complexity. |
-| **Archetype ECS** | Entities are grouped by component signature and stored as struct-of-arrays, so iterating a query walks contiguous memory — cache-coherent, no per-component hash lookups. |
-| **Native wgpu UI** | The editor (outliner, Details, gizmos, log, graph editor, timeline) is a native widget tree drawn by the engine's own GPU pass. No browser, WebView, or external UI toolkit — and no immediate-mode debug skin either: it runs on **Nocturne Atelier**, a real token system with semantic colour roles, five bundled type cuts and one icon family. |
+| **Visibility-buffer rendering** | Geometry writes compact instance and triangle identity. A later fullscreen pass reconstructs and shades each visible surface. |
+| **Archetype ECS** | Entities sharing a component signature occupy dense columns, keeping common queries contiguous. |
+| **Native wgpu UI** | Editor and game UI use the same retained widget and paint system, with Nocturne Atelier tokens, bundled type, and one icon family. |
 
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn.
 >
-> **Current phase:** [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse) —
-> the "everything that is not the renderer" phase: runtime UI, animation, the
-> asset cook, world partition, scripting reach and the last rendering gaps.
-> Seven of its nine tracks have shipped work; see [Phase history](#phase-history).
+> **Current phase:** [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse),
+> covering runtime UI, animation, asset cooking, world partition, input, audio,
+> localisation, and remaining rendering gaps. Seven of its nine tracks contain
+> shipped work; the phase is not complete.
 >
 > **Architecture reference:** [`context.md`](context.md) — living, continuously
 > updated, and the file to read before the source.
@@ -49,38 +48,37 @@ The engine is organized around three deliberate commitments:
 ![The Somnium editor with boat and sea](media/editor_boatsea.png)
 ![The Somnium editor with sunset and sea](media/sunset_sea.png)
 
-*Every capture in this repository is taken from a running build —
-`SOMNIUM_CAPTURE_UI_PNG` reads back the swapchain after the UI pass — never
-mocked up. More captures live in [`media/`](media/).*
+Every capture in this repository comes from a running build.
+`SOMNIUM_CAPTURE_UI_PNG` reads back the swapchain after the UI pass. More
+captures live in [`media/`](media/).
 
 ## How this project works
 
-Somnium is developed in **codenamed phases**, each with a written plan, a record
-of what actually shipped, and committed evidence. Three habits do most of the
-work, and they are worth describing because they shape the codebase more than
-any single feature:
+Somnium is developed in codenamed phases. Each phase has a plan, a record of
+what shipped, and evidence proportionate to its claims.
 
-**Nothing is claimed without a measurement.** `.somtime` files are committed
-timing runs — mean, standard deviation, min, max and sample count per GPU and CPU
-zone, from a pinned camera after a fixed warm-up. A change to the frame is
-argued from a matched before/after pair, and a delta inside the noise band is
-reported as noise. The habit has repeatedly overturned the plan: Phase DOOM's
-central thesis (per-tile shader specialisation) was **measured wrong and
-abandoned**, and Phase PORTAL-0 reverted its own WGSL optimisation after three
-back-to-back repetitions showed it 4% *slower*.
+### Measurements
 
-**Generated evidence, not hand-typed tables.** The engine census
-(`tools/census/generate.py`) regenerates every structural figure from the tree,
-because a hand-written audit was found to be 27,329 lines out of date one day
-after it was written. **GHOSTFENCE** (`tools/ghostfence/run.py`) is the gate:
-seven rows — census freshness, frozen toolchain, shader-variant budget, one job
-system, no second implementation of a singleton system, golden images, and the
-full test suite. A row that cannot run reports `SKIP` with the command that
-would make it pass, never a green it did not earn.
+`.somtime` files record mean, standard deviation, minimum, maximum, and sample
+count for GPU and CPU zones after a fixed warm-up at a pinned camera. Frame
+changes use matched before and after runs. A delta inside the noise band is
+reported as noise.
 
-**Negative results are recorded, not deleted.** Records state what was tried and
-rejected, and why, in the same detail as what shipped — including cases where a
-plan's stated "likely answer" turned out to be the wrong one.
+This has changed decisions. DOOM's tile-specialisation path and aerial terrain
+split measured slower and stayed off. PORTAL-0 reverted a WGSL optimization
+after repeated runs showed a regression.
+
+### Generated checks
+
+`tools/census/generate.py` derives structural counts from the current tree.
+`tools/ghostfence/run.py` checks census freshness, the frozen toolchain, shader
+variant budget, job-system ownership, duplicate singleton systems, golden
+images, and workspace tests. A row that cannot run reports `SKIP` with a reason.
+
+### Negative results
+
+Rejected and inconclusive work stays in the record. A phase document separates
+what was planned, what shipped, what was deferred, and what evidence refused.
 
 ## Phase history
 
@@ -115,6 +113,17 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | 6 | SIXTH HOUSE | — | Navmesh, behaviour trees |
 | 7 | RED MOUNTAIN | **Virtual shadow maps**, **portable DDGI** (SDF-traced, no ray query), **virtual texturing** for terrain, **OIT + SMAA** | GPU particles |
 | 8 | ALMSIVI | **Input actions** (control paths, processors, rebinding), **audio** (buses, attenuation, occlusion, Doppler), **localisation** (CLDR plurals, fallback chains) | Save games, video, the playable slice |
+
+### Planned phases
+
+| Phase | Purpose | State |
+|---|---|---|
+| PORTAL | Rebase and close engineering-health work not covered by PORTAL-0 | Plan only |
+| KENSHI | Measure combined load and publish engine limits before optimizing | Plan only |
+| STALKER | Build the player, packaging, mods, product UI, living-world systems, and release proof | Plan only |
+
+See [`context.md`](context.md) for prerequisites, open work, and the distinction
+between current capability and planned design.
 
 ## Highlights
 
