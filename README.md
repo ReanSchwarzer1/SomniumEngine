@@ -42,12 +42,13 @@ The engine is organized around three deliberate commitments:
 ## Screenshots
 
 ![The Somnium editor](media/editor.png)
+![Volumetric Clouds](media/vol_clouds.png)
 ![The Somnium editor with foliage](media/editor_foliage.png)
 ![The Somnium editor with boat and sea](media/editor_boatsea.png)
 ![The Somnium editor with sunset and sea](media/sunset_sea.png)
 
 
-*The editor at 1280×720: three command scopes, the viewport-context bar floating
+*The editor: three command scopes, the viewport-context bar floating
 over the render, the Outliner and Details columns, and the Content Drawer. Every
 capture in this repository is taken from a running build — `SOMNIUM_CAPTURE_UI_PNG`
 reads back the swapchain after the UI pass — never mocked up.*
