@@ -21,23 +21,17 @@ Somnium implements its renderer, editor, runtime UI, asset pipeline, and game
 framework as one native workspace. Production engines are studied for
 architecture and comparison; Somnium's implementation is its own.
 
-> ### Read [`context.md`](context.md) first
->
-> **`context.md` is the engine's architecture reference** — one living document,
-> kept current, that describes Somnium *as it exists now* rather than as it was
-> planned. It is the file to read before the source, and the file to update when
-> a subsystem boundary changes.
->
-> It covers the crate graph and the seams between subsystems, illustrated
-> walkthroughs of the five ideas that shape the code, the frame's pass order and
-> where its milliseconds actually go, the ECS and scene schema, assets and world
-> streaming, the scripting boundary, a phase ledger separating shipped from
-> planned from refused, and the decisions not to reopen without new evidence.
->
-> New here? [Core ideas, illustrated](context.md#core-ideas-illustrated) is the
-> shortest path to understanding how the renderer works, and
-> [Where the frame actually goes](context.md#where-the-frame-actually-goes) is
-> the shortest path to understanding what it costs.
+### [`context.md`](context.md) is the map
+
+One living document, kept current, describing the engine as it is rather than as
+it was planned. Read it before the source.
+
+| | |
+|---|---|
+| [Core ideas](context.md#core-ideas-illustrated) | How the renderer works, in five diagrams |
+| [Frame cost](context.md#where-the-frame-actually-goes) | Where the milliseconds go, measured |
+| [Why things are this way](context.md#why-things-are-the-way-they-are) | The decisions, and what they cost to learn |
+| [Phase ledger](context.md#phase-ledger) | Shipped, open, deferred, refused |
 
 The engine is organized around three deliberate commitments:
 

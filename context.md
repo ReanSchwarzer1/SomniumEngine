@@ -310,8 +310,8 @@ The important seams are directional:
 
 ## Core ideas, illustrated
 
-Five ideas explain most of what the code looks like. Each is a trade that was
-made deliberately, and each is cheap to verify in the tree.
+Five ideas explain most of what the code looks like. Every one of them is a
+trade, and every one is cheap to check against the tree.
 
 ### 1. Shade every pixel exactly once
 
@@ -349,11 +349,11 @@ records pipeline statistics for the shading pass:
 | 2560 x 1392 | 3,563,520 | **3,563,520** |
 
 Exactly one invocation per pixel, at both sizes. The cost of that pass is
-therefore entirely *per-pixel work* — never geometry, never overdraw — which is
-why the only levers that have ever moved it are pixel count and deleting
+therefore entirely *per-pixel work*. Not geometry, not overdraw. That is why
+the only two levers that have ever moved it are pixel count and deleting
 material work.
 
-**The trade:** material evaluation becomes centralized and specialized, and a
+What it costs: material evaluation becomes centralized and specialized, and a
 blended surface cannot go through a buffer that stores one triangle per pixel.
 That is why `pass/transparent.rs` and `pass/oit.rs` exist at all.
 
@@ -385,7 +385,7 @@ That is what lets one indirect draw cover unrelated meshes.
 ### 3. Queries walk contiguous memory
 
 Entities sharing a component signature live in one archetype, stored as
-parallel columns — struct-of-arrays, not array-of-structs:
+parallel columns. Struct-of-arrays, not array-of-structs:
 
 ```
 Archetype { Transform, MeshComponent, MaterialComponent }
@@ -400,7 +400,7 @@ Iterating `(Transform, Mesh, Material)` walks three dense slabs. A query selects
 archetypes whose component set is a superset of what was asked for, so the
 per-entity cost is a column index rather than a hash lookup.
 
-**The trade:** adding or removing a component moves an entity between
+What it costs: adding or removing a component moves an entity between
 archetypes. That is a structural change, not a field write.
 
 ### 4. An asset has one identity and many states
@@ -427,13 +427,13 @@ nothing ever observes a half-installed asset: a value is published complete or
 not at all. Mesh LODs are independent residency keys, so coarse geometry can
 stay resident while LOD 0 is absent.
 
-**The trade:** every caller has to handle placeholder and pending states rather
-than assuming the data is there.
+What it costs: every caller has to handle placeholder and pending states
+rather than assuming the data is there.
 
 ### 5. The frame has a deadline, and meeting it takes two phases
 
-Sleeping to a deadline is inaccurate — OS timer granularity on Windows is around
-15 ms, far coarser than a frame. Spinning is accurate and burns a core. The
+Sleeping to a deadline is inaccurate. OS timer granularity on Windows is around
+15 ms, far coarser than a frame. Spinning is accurate and burns a core. So the
 limiter does both:
 
 ```
@@ -446,12 +446,12 @@ frame work done ──► wait_for_frame_budget()
                                               sub-microsecond, ~1 ms of core
 ```
 
-The same instinct recurs across the engine: be cheap where precision does not
-matter, be exact only in the last stretch where it does.
+Cheap where precision does not matter, exact only in the last stretch where it
+does. The same shape turns up in the upload budget and the job drain.
 
 ## Where the frame actually goes
 
-Measured, not estimated — from `dev records/phase PORTAL-0/`, on an RTX 5080
+Measured, not estimated. From `dev records/phase PORTAL-0/`, on an RTX 5080
 Laptop at 1920 x 1032, release, 180 warm-up and 300 measured frames, at the
 default Coastal viewpoint with shipped settings.
 
@@ -466,9 +466,9 @@ default Coastal viewpoint with shipped settings.
 | everything else | ~2.0 | 9% |
 | **Frame** | **21.439** | |
 
-This table is useful for two things.
+Two things the table is good for.
 
-**It says where to look.** Shading is over half the frame, and a pixel-class
+It says where to look. Shading is over half the frame, and a pixel-class
 ablation (`SOMNIUM_SHADE_ABLATE`) says what is inside it. Measured back to back
 in one batch, where the unablated pass was 11.463 ms:
 
@@ -482,14 +482,14 @@ in one batch, where the unablated pass was 11.463 ms:
 Terrain is effectively the whole pass. Serious work on this frame is terrain
 material work, and the measurement said so before anyone had to guess.
 
-**It says what the CPU is doing, which is mostly waiting.** The same run records
-`Frame CPU` at 21.185 ms, of which `Surface acquire` is **16.797 ms** — blocked
-waiting for the GPU. Real CPU work is about 4.4 ms. The frame is GPU-bound, so
-no amount of CPU optimization would move it.
+It also says what the CPU is doing, which is mostly waiting. The same run
+records `Frame CPU` at 21.185 ms, of which `Surface acquire` is **16.797 ms**
+spent blocked on the GPU. Real CPU work is about 4.4 ms. The frame is GPU-bound,
+so no amount of CPU optimization would move it.
 
-For contrast, the same viewpoint with the terrain clipmap enabled measures
-**Frame 9.096 ms, Shading 1.655 ms**, and the CPU blocks for 0.04 ms instead of
-16.8 — it stops waiting because there is nothing left to wait for.
+The same viewpoint with the terrain clipmap enabled measures **Frame 9.096 ms,
+Shading 1.655 ms**, and the CPU blocks for 0.04 ms instead of 16.8. It stops
+waiting because there is nothing left to wait for.
 
 ## Codenames
 
@@ -1290,6 +1290,344 @@ does not overlap. STALKER waits for both relevant outputs.
   know every feature.
 - `somnium_core` still carries editor orchestration that may need deeper module
   boundaries before the planned player split.
+
+## Why things are the way they are
+
+Most of the surprising decisions in this engine were forced by something that
+went wrong. The reasons are worth keeping, because a constraint whose reason has
+been forgotten looks like an arbitrary rule, and arbitrary rules get removed by
+the next person who finds them inconvenient.
+
+Each entry is deliberately short. The full argument lives in the phase record
+named at the end of it.
+
+### The renderer
+
+**Terrain used to shade in its own pass, and it cost more than it looked.**
+`TerrainPass` ran after the visibility pass, after the acceleration-structure
+build, after GTAO. Terrain was therefore invisible to all of them, and
+`terrain.wgsl` kept private copies of the shadow cascade selection and the
+cluster lookup. The visible symptom was that terrain got no GTAO and no contact
+shadows. The expensive symptom was structural: every lighting improvement in
+Phase 24 had to be written twice or quietly skip terrain. Phase 25A moved
+terrain into the shared visibility buffer and deleted the duplicates. One source,
+one shading path. (Phase 25)
+
+**The instance cap was 1,022 because of how `vis_data` was packed.** A 10/22
+split gave 1,022 draws and four million triangles per draw, which was exactly
+backwards for a scene with many objects. Repacking to 16/16 raised it to 65,535
+draws at 65,536 triangles per draw. `GeometryPool` warns at upload when a mesh
+exceeds that rather than silently wrapping the primitive index, which is the
+failure that would otherwise show up as one triangle in the wrong place. (15C)
+
+**Meshlets are a Morton sort, not a graph partition.** Nanite uses METIS. Somnium
+cuts a space-filling curve of triangle centroids into fixed runs of 128, because
+the curve keeps spatial neighbours adjacent in the sequence and that is all a
+bounding volume needs. It stays O(n log n), allocates little, and is
+deterministic. Clusters store an offset and count into the index range rather
+than a triangle list, which only works if a cluster's triangles are contiguous,
+so `build_meshlets` returns a permuted index buffer and the uploader uses that.
+Triangle order within a draw does not change the image, so the reorder is free.
+(15D)
+
+**Voxel chunks are deliberately not clustered.** They are remeshed continuously,
+so the sort would cost more than the culling saves, and a chunk is already small
+enough to cull as one unit. (15D)
+
+**The TLAS is rebuilt from the same draw queue the raster path uses.** Not from a
+parallel list. Two lists drift, and a traced scene that disagrees with the drawn
+one produces shadows from geometry that is not there. Positions are the first 12
+bytes of the 32-byte vertex, so the acceleration-structure build reads the
+existing pools in place with no second copy. (24J)
+
+**Ray tracing needed four things beyond the feature bit, and none are obvious.**
+An `unsafe` experimental-features token, the `max_blas_*` and
+`max_tlas_instance_count` limits, the
+`max_acceleration_structures_per_shader_stage` binding limit, and `enable
+wgpu_ray_query` in the shader. All three limits default to zero, so a TLAS of any
+size is rejected until they are asked for explicitly. (24J)
+
+**A correctly built acceleration structure and a silently broken one look
+identical** until something traces against them, which is why 24J ships an
+acceptance test rather than a screenshot. The helmet self-shadowing is what
+confirmed the build. (24J)
+
+**Cascades are fitted from the unjittered inverse view-projection.** Using the
+jittered one is right for reconstructing world position from a jittered depth
+buffer and wrong here: it shifts the cascade frusta by the sub-pixel jitter every
+frame, so every shadow-map texel lands somewhere slightly different in world
+space and every shadow edge crawls. TAA cannot average that away, because it is a
+real change in the scene rather than a sampling difference. The tell was that the
+shimmer vanished when TAA was switched off, since `jitter_ndc` returns zero then
+and the cascades stopped moving. (24F)
+
+**Night was impossible before the sky became a function of the sun.** The
+environment cubemap was built from three hardcoded constants, so the dome's
+brightness was independent of the sun entirely. Turning the sun down removed
+direct light and left everything sitting in bright blue ambient, which reads as
+overcast and never as night. No multiplier fixes that. The same fault had the sky
+constants living in three files at once. (24C, 22.1)
+
+**Water extends 1.5 m under the terrain on purpose.** Coverage does not stop at
+the shoreline; the depth test owns the visible intersection. That closes sub-cell
+mismatches between the coverage mask and the terrain without letting water draw
+over dry ground. It also means the visible waterline is the terrain's silhouette,
+not the shore SDF, which is worth knowing before debugging a shoreline artefact
+by editing the SDF. (MORROWIND-AC follow-up)
+
+### Terrain material
+
+**Hex-tiling shipped switched off, then switched on, and the reason changed in
+between.** Against the original procedural layers there was no repetition to
+remove, so all it contributed was its own faint lattice. Once photographed layers
+arrived it removed the banding outright. Same code, opposite verdict, because the
+input changed. (25F, 25K)
+
+**Pulling a texture out of a binding array and passing it across a function
+boundary segfaults naga's SPIR-V backend.** It is legal WGSL. The process dies
+during pipeline creation with no diagnostic at all. Every sampling site in the
+engine passes a bindless *index* instead. (25F)
+
+**The hex-tile port needed per-tap derivatives.** Each tap reads a different part
+of the texture, so implicit derivatives get taken across a discontinuity and
+collapse mip selection into noise. World-position derivatives are taken in
+`shading.wgsl`, where control flow is uniform, and scaled per layer. The
+reference does not cover one thing Somnium needed: counter-rotating each tap's
+tangent-space normal, because a normal map stores its vector in the texture's UV
+frame and each tap reads that frame rotated. (25F)
+
+**Hex and parallax flags must stay uniform across the draw.** ANDing them with a
+per-pixel fade or a cliff test makes the whole branch varying, the compiler
+flattens the march, and the Details checkbox appears to work while the samples
+still run. The aerial cut and the toggle both zero those uniforms on the CPU
+instead. Do not reintroduce a close/far sample-path mix: warps pay the union of
+both paths, and walking measured slower. (XV-Zeta, DOOM)
+
+**The terrain material's 32-entry weight array is scratch memory, and shrinking
+the work around it is the win.** An earlier version ran four passes of 32
+iterations over a companion `array<bool, 32>`, copied 128 bytes by value at the
+call, and renormalised all 32 slots when only four survivors are ever read. The
+current form holds the running top four in scalars. Every terrain pixel used to
+pay scratch traffic for a selection sort of at most four winners. (XV-Zeta)
+
+### Shaders and WGSL
+
+**Naga will not dynamically index an array reached through a member access.**
+Returning `struct { index: array<u32,4>, weight: array<f32,4> }` from the
+strongest-four scan looks tidier than an out-pointer and makes `selected[s]`
+unindexable, with the error `Invalid access into expression`. Binding it to `var`
+instead of `let` does not help. This cost a full build-and-validate cycle to
+find. (MORROWIND-AC)
+
+**Shader validation runs against the same naga the compiler uses.** MORROWIND-A2
+bumped wgpu to 30 and left the `naga` dev-dependency on 29, so the shader tests
+were validating with a different front end from the one that compiles them. That
+hid a real wgpu 30 incompatibility (`binding_array` now needs an explicit
+`enable`) which would have failed on the first frame. Version-skewed validation
+is worse than none, because it reports green. (MORROWIND-C)
+
+**A debug branch behind a pipeline-overridable constant costs nothing; a debug
+branch behind a uniform costs everything.** The 34 shader debug codes compile out
+entirely because `enable_debug` is a specialisation constant. The same code read
+from a buffer would leave every branch resident and every register live. (DOOM,
+CONTROL-G)
+
+### ECS and scenes
+
+**Scripts get a copy, not a borrow.** A script that held an ECS reference would
+either block the world for the duration of the phase or invite iterator
+invalidation halfway through. `ScriptSnapshot` copies out, the script returns an
+ordered `CommandBuffer`, and the engine validates and applies it. Every new script
+operation therefore needs an explicit command, which is the cost. What it buys is
+deterministic ordering and a capability check at a single choke point. (Phase 16)
+
+**`applyForce` was the wrong shape for a character.** Queuing a force is right for
+a push and wrong for walking: a character sets its velocity outright, which is
+what makes it stop dead on key release instead of skating. Expressing that
+through forces means fighting the integrator with a PD controller that never
+feels right. So `velocity` is script-readable and script-writable, and the engine
+brackets the script phase with a sync in both directions. The Jolt body index is
+readable but not writable and not saved, because a script that could set it could
+point one entity's controls at another's body, and an index from the last run
+names a different body in this one. (17.19)
+
+**Unknown components and fields survive a load and save cycle.** Before
+CONTROL-J, `scene_from_json` dropped what it did not recognise with a warning, so
+opening a scene in a build that was missing a component and saving it destroyed
+that data permanently. Stride's `IUnloadable` is what exposed this. Retention is
+not a nicety; it is the difference between a version mismatch being an
+inconvenience and being data loss. (CONTROL-J)
+
+**An entity's component set is its archetype, so adding a component is a move,
+not a write.** That is the trade the storage layout makes. Queries walk dense
+columns and cost a column index per archetype rather than a hash lookup per
+entity, and structural change pays for it.
+
+### The editor
+
+**A property is declared once and everything else is derived.** Before CONTROL-B
+the property surface was maintained by hand at a cost of 675 identifiers: 106
+`InspectorField` variants, a 245-line struct of bare handles, 106 binding rows and
+201 dispatch arms. Against that there were 12 registered schemas driving zero
+generated rows. Details, undo scope, multi-select intersection, the scene
+serializer and the script type declarations now all read the same schema. The
+hand-wiring census is 0. (CONTROL-B)
+
+**Curves are a reflected value, not a widget.** `FieldType::Curve` means a curve
+gets its Details row, its scoped undo entry, its drag coalescing and its scene
+round-trip for free, the same way a float does. Making it a bespoke editor
+instead would have meant reimplementing all four. (CONTROL-K)
+
+**Menus, shortcuts, the palette, tooltips and the help index are projections of
+one registry.** They were four unconnected hand-written lists, and the palette
+dispatched by array index, which meant inserting an entry silently rebound
+everything after it. (CONTROL-A2)
+
+**`WidgetMessage` carries a modifier snapshot because without one, Ctrl-click and
+Shift-range are inexpressible.** Not hard, not awkward. Inexpressible. That single
+gap blocked three later sub-phases. (CONTROL-A1)
+
+**Opening the terrain folder froze the editor for over a second.** `thumbnail.rs`
+claimed a 4096² source downscaled in single-digit milliseconds and decoded two per
+frame on the UI thread. The folder is 60 PNGs and 1.17 GB, and zlib inflate alone
+on the largest measured 232 to 260 ms. The fix is a thread split, visible-tile
+prioritisation and a two-stage cache. The lesson is that the comment was written
+from an assumption and nobody measured it for months. (CONTROL-A, CONTROL-C)
+
+**The window is created invisible and shown once initialised**, because
+`accesskit_winit` panics on an already-shown window. It turned out to be a better
+startup regardless, and the golden capture still matching is what proved the
+change was inert. (MORROWIND-I)
+
+**High contrast walks existing colours toward the pole their background is not,
+until the ratio clears 7:1.** It does not invent a palette. Reusing the theme's
+certified pairs means the contrast mode cannot drift away from the design system
+as the design system changes. (MORROWIND-I)
+
+**Layout invalidation has to walk to the root, not to the parent.** For a while
+`add_node` and `remove_node` only invalidated the immediate parent, so ancestors
+kept a stale `measure_valid` cache and Outliner buttons came out zero-sized from
+frame two onward. Everything looked right on the first frame, which is the worst
+way for a layout bug to present. `invalidate_ancestors` clears both flags all the
+way up. (Phase 12)
+
+**A `Border` hands every child the same inner rect.** The log header and its
+scroll view were drawn on top of each other for that reason, and the fix was a
+Grid with an explicit 22 px header row rather than anything to do with the log.
+Worth remembering when two siblings occupy the same pixels. (Phase 12)
+
+**Authored sRGB decodes to linear exactly once, and alpha stays straight.** The
+UI shader decodes before the sRGB target re-encodes. Get that wrong in either
+direction and `#1C1E26` does not arrive as `#1C1E26`, which is a hard thing to
+debug by eye because everything is only slightly off. Premultiplied alpha crept
+into one shader under a comment claiming it matched the straight-alpha pipeline,
+and MORROWIND-D's first shader validation test is what caught it. (26-Zeta,
+MORROWIND-D)
+
+**The editor draws before the game UI in the frame, and after it in z-order.**
+Game UI runs at renderer pass 9 in its own profiler zone, then the editor shell
+composites over it. A game that draws a HUD and an editor that draws panels are
+the same widget tree and the same paint system, so the ordering is the only thing
+that distinguishes them. (MORROWIND-E2)
+
+### Assets and streaming
+
+**`AssetId` is derived from a normalised source path and survives everything
+else.** A renderer slot, a package offset and a residency state all change while
+the scene is open. Identity does not. That is what lets a scene stay valid while
+data streams, evicts and hot reloads underneath it. (MORROWIND-Q, R)
+
+**Cooked artifacts exclude absolute paths and timestamps.** Two clean output roots
+produce identical bytes, which is the only way an incremental cache can be
+trusted. Changing a texture recooks its material's reverse closure and leaves an
+unrelated mesh alone, and the SHA-256 recipe key is what decides that. (MORROWIND-Q)
+
+**An unloading cell serializes real ECS components through the schema, not a
+streaming DTO.** A second representation would have to be kept in step with the
+first forever, and the first thing to break would be a component the streaming
+path had never heard of. Despawn happens only after persistence succeeds.
+(MORROWIND-S)
+
+**Mesh LODs are independent residency keys.** Coarse geometry can stay resident
+while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
+into lower detail instead of into a missing object. (MORROWIND-R)
+
+**Large-world positions are exact CPU integer cells plus small local f32
+offsets.** Shader soft-double was the alternative. The CPU design was chosen
+because it is reversible, keeps the complexity outside every shader, and
+preserves centimetre differences at 10,000 km. A camera-aligned rebase changes
+only the render origin and never the authored data. (MORROWIND-T)
+
+### Measurement
+
+**Screen-grabbing the window produced a frame-delta metric that varied from 0.776
+to 2.018 across three runs of one identical build.** A whole session went into
+chasing that variance instead of the change. `capture.rs` exists because of it,
+and `timing.rs` is the same argument applied to time rather than to pixels. A
+number with no error bar cannot answer whether a 3% change did anything, and 3%
+is the size of most of the wins worth chasing. (DOOM-A)
+
+**`.somtime` measures a stationary camera, deliberately.** A stationary viewpoint
+removes terrain streaming, clipmap recentring and LOD transitions from the
+measurement. A flythrough is a different experiment, and it is the one that
+matters for hitches rather than for steady-state cost. Conflating them produces a
+mean that describes neither. (DOOM-A)
+
+**A standard deviation from one run cannot judge a comparison across two.**
+Between-session drift on this hardware is larger than within-run spread: the same
+viewpoint measured 11.463 ms in one session and 11.703 to 12.239 in another on
+identical code, against a within-run sigma of 0.47. Anything under about a
+millisecond needs repetitions taken back to back. (PORTAL-0)
+
+**A short warm-up lies in the other direction.** MORROWIND-AB's 20-frame runs
+reported the terrain CPU zone at 1.39 ms where 180 frames report 0.031. The
+warm-up exists to discard exactly that transient, and a finding built on a
+20-frame run was an artefact of the harness rather than a defect in the engine.
+(PORTAL-0)
+
+**The census is generated because a hand-typed one rotted in a day.** The phase
+plan's audit was accurate when written and 27,329 lines out of date the next
+morning, because another phase landed in between. A generated report cannot drift
+without failing its gate. (MORROWIND-A)
+
+**A gate that reports SKIP by default is a gate that is off.** GHOSTFENCE's golden
+image row reported SKIP whenever no candidate image existed, and no candidate had
+been generated since the reference was taken. A real regression sat behind that
+green for weeks. (PORTAL-0)
+
+**Evidence folders get their `.gitignore` entries in the same commit as the
+phase.** `dev records/phase MORROWIND/` was ignored from its first sub-phase, so
+the census, the licence audit, every record and the phase plan itself existed on
+one disk and in no commit. The allowlist is convenient and it swallows things
+silently. (MORROWIND-E2b)
+
+### Things that were tried and rejected
+
+**Per-tile shader specialisation.** Phase DOOM's founding thesis. Built,
+correct to two pixels of 2.6 million, and slower at every tile size tested: 32.5,
+27.8, 27.0 and 26.1 ms against 24.9 for the plain fullscreen pass. The
+instanced-quad setup costs more than the binning saves, which is why the
+references that do this use compute. Kept behind `SOMNIUM_SHADE_BINS=1`. (DOOM-C)
+
+**The aerial terrain split.** Also built, also off. Dropping hex and parallax past
+a distance is invisible at 925 pixels and costs 2.3 ms, because
+`gpu_material_for_camera` already did the same cut above 80 m. (DOOM-E)
+
+**Returning the strongest-four weights instead of re-reading them.** Eight dynamic
+indexes into a 32-element scratch array per terrain pixel looked free to remove.
+Measured 4% slower across three back-to-back repetitions, with the two sets not
+overlapping. Reverted. (PORTAL-0-G)
+
+**Per-pixel linked-list OIT.** The plan called it the likely answer. It needs
+fragment-writable storage, which this engine has never queried and has no fallback
+for, and a node pool sized from a guess: about 796 MB at 4K for eight layers,
+where overflow is a dropped fragment. Weighted-blended needs no feature and no
+guess. (MORROWIND-AC)
+
+**Reconstructing the shore SDF from the depth field.** Reasonable, and wrong: all
+2,995,072 dry texels in the baked depth map are exactly zero, so it is a plateau
+rather than a crossing and carries no sub-cell information on the land side. Two
+reconstructions were written and both reverted. (MORROWIND-AC follow-up)
 
 ## Decisions not to reopen casually
 
