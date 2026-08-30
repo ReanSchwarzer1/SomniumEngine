@@ -910,6 +910,36 @@ Phase 25A is why the visibility buffer is in that chain at all. Terrain used to
 shade in its own pass afterwards, which meant it missed GTAO, contact shadows and
 traced visibility, and every lighting change had to be written twice.
 
+Foliage is a rejection funnel. Almost every candidate is thrown away, and the
+useful trick is throwing them away as early and as cheaply as possible.
+
+```mermaid
+flowchart TB
+    SEED["density and seed<br/>candidates per square metre"] --> SLOPE{"slope under<br/>max_slope_deg?"}
+    SLOPE -->|no| DROP1["rejected"]
+    SLOPE -->|yes| LAYER{"splat layer weight<br/>above min_layer_weight?"}
+    LAYER -->|no| DROP2["rejected"]
+    LAYER -->|yes| DISC{"inside the scatter<br/>radius around the camera?"}
+    DISC -->|no| DROP3["rejected"]
+    DISC -->|yes| CULL{"nearer than<br/>cull_distance?"}
+    CULL -->|no| DROP4["never submitted:<br/>no instance, no indirect argument"]
+    CULL -->|yes| FALLOFF["lod_falloff curve<br/>scale by normalised distance"]
+    FALLOFF --> SHADOW{"nearer than<br/>foliage_shadow_distance?"}
+    SHADOW -->|no| NOCAST["drawn, but casts no shadow"]
+    SHADOW -->|yes| CAST["drawn and casts"]
+    NOCAST --> INST["instance buffer"]
+    CAST --> INST
+```
+
+Three of those cuts exist because the profiler asked for them. The distance cull
+is on the CPU because the GPU cull cannot reject a draw that has to exist before
+it can be rejected, and a tuft a few centimetres across is sub-pixel at a hundred
+metres. The shadow cut is deliberately *nearer* than the draw cut: a grass field
+fills the frame long before it reaches draw distance, and every tuft was costing
+four cascades of depth for a shadow that reads as noise a few metres out. The
+`lod_falloff` curve exists to shrink cover out rather than pop it, which is what
+makes a hard distance edge tolerable.
+
 Current conservative defaults matter:
 
 - Terrain hex tiling and parallax are off on the shipped maps.
@@ -1212,6 +1242,34 @@ stale live instances rather than indexing a replacement definition.
 Jolt is wrapped by safe body, shape, contact, layer, and world modules. The raw
 C++ boundary stays in `somnium_physics_sys`.
 
+The order inside one fixed step is the whole design, and it is ordered so a
+script always reads what happened and writes the last word before integration.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Game as GameApp
+    participant Jolt as Jolt world
+    participant World as ECS
+    participant Script as Luau
+
+    Note over Game,Script: one fixed step, repeated until<br/>the accumulator is drained
+    Game->>Game: on_fixed_update
+    Jolt->>World: read velocities and transforms
+    Note right of World: a script sees the velocity it has<br/>after last step's collisions,<br/>not the one it asked for
+    World->>Script: snapshot
+    Script->>World: commands applied and validated
+    World->>Jolt: write velocities back
+    Note right of Jolt: after the command apply,<br/>so the script write survives
+    Jolt->>Jolt: step(fixed_dt)
+```
+
+`RigidBodyComponent::velocity` is readable and writable because a walking
+character sets velocity outright, which is what makes it stop dead on key
+release. The Jolt body index is readable and **not** writable: a script that
+could set it would be able to point one entity's controls at another's body, and
+an index saved from the last run names a different body in this one.
+
 The examples include a scripted first-person character. Its grounded state is
 a documented heuristic, not a general character-controller guarantee.
 
@@ -1247,6 +1305,30 @@ The Kira-backed audio crate supports sounds, listeners, buses, authored
 attenuation curves, cones, occlusion, Doppler, and editor/game integration.
 Audio is no longer the 93-line placeholder described by the original MORROWIND
 audit.
+
+```mermaid
+flowchart TB
+    REQ["play, play_on, play_spatial"] --> CACHE["sound cache<br/>decoded once, hits and misses counted"]
+    CACHE --> BUS["mixer bus<br/>volume, mute, solo"]
+    BUS --> SPATIAL{"spatial?"}
+    SPATIAL -->|no| SET
+    SPATIAL -->|yes| EVAL["evaluate against the listener"]
+
+    DIST["distance attenuation<br/>linear or inverse-square"] --> EVAL
+    CONE["cone<br/>inner, outer, off-axis gain"] --> EVAL
+    OCC["occlusion<br/>supplied by the caller"] --> EVAL
+    VEL["relative velocity"] --> EVAL
+
+    EVAL --> AUD{"audible?"}
+    AUD -->|"past max range"| NONE["Ok(None), nothing scheduled"]
+    AUD -->|yes| SET["gain, pan, playback rate"]
+    SET --> KIRA["Kira"]
+```
+
+**Occlusion is an input, not something this crate computes.** It would need a
+raycast, and the audio crate deliberately does not depend on the physics one:
+a sound system that cannot be tested without a physics world is a sound system
+nobody tests. The caller does the trace and passes a number.
 
 ### Localisation
 
