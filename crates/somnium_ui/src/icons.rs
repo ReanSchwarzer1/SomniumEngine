@@ -75,6 +75,8 @@ pub enum IconId {
     Profiler,
     OutputLog,
     ContentDrawer,
+    /// Two chain links: the References panel, MORROWIND-M item 3.
+    Link,
     Cube,
     Sphere,
     Plane,
@@ -166,6 +168,7 @@ impl IconId {
         Self::Profiler,
         Self::OutputLog,
         Self::ContentDrawer,
+        Self::Link,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -729,6 +732,12 @@ impl IconAtlas {
                 self.rect_stroke(s(4.0), t(6.0), 16.0, 12.0, w);
                 self.line(s(4.0), t(11.0), s(20.0), t(11.0), w);
                 self.line(s(10.0), t(6.0), s(10.0), t(18.0), w);
+            }
+            IconId::Link => {
+                // Two open links, overlapping in the middle: the shape reads
+                // as "connected to" at 16 px, where a chain of four does not.
+                self.circle(s(9.0), t(12.0), 4.5, w, false);
+                self.circle(s(15.0), t(12.0), 4.5, w, false);
             }
             IconId::Cube => self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w),
             IconId::Sphere => self.circle(s(12.0), t(12.0), 8.0, w, false),

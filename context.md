@@ -2228,6 +2228,20 @@ would crop the empty state of an empty folder out of existence, and an inline
 rename is a text box parented to a tile, so a rename holds the window still
 until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**The cook plan's dependency graph cannot answer the editor's question.**
+MORROWIND-Q's graph is built from declared edges, because a cook plan has them.
+Nobody declares that a scene uses a mesh — they drop the mesh onto an entity and
+the edge exists because a field now holds an id. `somnium_asset::depend` reads
+the project instead, and does it **structurally**: an asset id reaches a file as
+either a tagged `{"$asset": …}` or a bare 32-hex string, so one scanner covers
+scenes, prefabs, materials and `.somui` documents, and a new asset field cannot
+go missing from the view by nobody remembering to teach it twice. What it cannot
+read it *counts* rather than reports as empty — a dependency view that says a
+`.glb` references nothing is worse than none, because it is believed. The index
+is built on the asset inventory's own job, so the graph and the drawer always
+describe the same disk.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
 **A selection is held by key, never by index.** Filtering, sorting, expanding a
 parent and scrolling all renumber positions; the key is the thing the user
 picked. Storing indices is why a selection appears to jump when a list changes

@@ -623,6 +623,10 @@ struct EditorLayout {
     help_toc: Vec<(NodeHandle, u8)>,
     help_close: NodeHandle,
     log_panel: NodeHandle,
+    references_panel: NodeHandle,
+    references_button: NodeHandle,
+    references_title: NodeHandle,
+    references_list: NodeHandle,
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
@@ -935,6 +939,14 @@ pub struct UiManager {
     content_all: Vec<crate::metaphor::ContentEntry>,
     /// The window `content_entries` was built for, or `None` if it is stale.
     content_window: Option<crate::virtual_list::GridWindow>,
+    /// MORROWIND-M item 3. Built with the asset inventory, on its job, so the
+    /// graph and the drawer always describe the same disk.
+    dependency_index: somnium_asset::depend::DependencyIndex,
+    /// The asset the References panel is answering about.
+    references_subject: Option<somnium_asset::database::AssetId>,
+    /// One row per listed asset, so a click can name what it landed on.
+    references_rows: Vec<(NodeHandle, somnium_asset::database::AssetId)>,
+    references_open: bool,
     outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
     outliner_selection: Vec<u32>,
     clipboard_filled: bool,
@@ -1022,6 +1034,10 @@ pub struct UiManager {
     script_errors: usize,
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
+    references_panel: NodeHandle,
+    references_button: NodeHandle,
+    references_title: NodeHandle,
+    references_list: NodeHandle,
     title_drag: NodeHandle,
     title_label: NodeHandle,
     win_min: NodeHandle,
@@ -1578,6 +1594,10 @@ impl UiManager {
             content_entries: Vec::new(),
             content_all: Vec::new(),
             content_window: None,
+            dependency_index: somnium_asset::depend::DependencyIndex::default(),
+            references_subject: None,
+            references_rows: Vec::new(),
+            references_open: false,
             outliner_entity_handles: HashMap::new(),
             outliner_selection: Vec::new(),
             clipboard_filled: false,
@@ -1631,6 +1651,10 @@ impl UiManager {
             help_toc: layout.help_toc,
             help_close: layout.help_close,
             log_panel: layout.log_panel,
+            references_panel: layout.references_panel,
+            references_button: layout.references_button,
+            references_title: layout.references_title,
+            references_list: layout.references_list,
             title_last_click: None,
             immersive: false,
             immersive_restore_fullscreen: None,
@@ -1832,6 +1856,9 @@ impl UiManager {
                 self.log_open = true;
             }
         }
+        // A workspace preset never asks for References: it is scoped to an
+        // asset, and a preset does not know which one.
+        self.references_open = false;
         self.apply_bottom_panel();
 
         self.chrome_layout = crate::layout_persist::ChromeLayout {
@@ -3085,9 +3112,10 @@ impl UiManager {
 
     pub fn set_play_overlays_hidden(&mut self, hidden: bool) {
         if hidden {
-            if self.drawer_open || self.log_open {
+            if self.drawer_open || self.log_open || self.references_open {
                 self.drawer_open = false;
                 self.log_open = false;
+                self.references_open = false;
                 self.apply_bottom_panel();
             }
             if self.help_open {
@@ -3141,6 +3169,7 @@ impl UiManager {
         } else {
             self.drawer_open = true;
             self.log_open = false;
+            self.references_open = false;
         }
         self.apply_bottom_panel();
     }
@@ -3151,15 +3180,32 @@ impl UiManager {
         } else {
             self.log_open = true;
             self.drawer_open = false;
+            self.references_open = false;
+        }
+        self.apply_bottom_panel();
+    }
+
+    /// MORROWIND-M item 3. Opens on whatever the panel was last pointed at,
+    /// which for a first press is nothing and says so.
+    fn toggle_references_panel(&mut self) {
+        if self.references_open {
+            self.references_open = false;
+        } else {
+            self.references_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+            self.refresh_references_panel();
         }
         self.apply_bottom_panel();
     }
 
     fn apply_bottom_panel(&mut self) {
-        let show = self.drawer_open || self.log_open;
+        let show = self.drawer_open || self.log_open || self.references_open;
         self.native_ui
             .set_visibility(self.content_drawer, self.drawer_open);
         self.native_ui.set_visibility(self.log_panel, self.log_open);
+        self.native_ui
+            .set_visibility(self.references_panel, self.references_open);
         self.native_ui.send(UiMessage::new(
             self.outer_grid,
             MessageDirection::ToWidget,
@@ -4271,6 +4317,21 @@ impl UiManager {
                 .editor_events
                 .push_back(EditorEvent::ToggleImmersiveViewport),
             A::OpenOutputLog => self.toggle_log_panel(),
+            A::OpenReferences => self.toggle_references_panel(),
+            A::ContentShowReferences => {
+                // Only an asset has references. A folder is a place, and the
+                // command is disabled for one because `content_target` gates
+                // on there being an item at all — but a virtual engine
+                // primitive has no id either, and that is not a failure worth
+                // a message.
+                if let Some(asset) = self
+                    .content_menu_target
+                    .as_ref()
+                    .and_then(|entry| entry.asset_id)
+                {
+                    self.show_references_for(asset);
+                }
+            }
             A::CreateEntity(kind) => self
                 .editor_events
                 .push_back(EditorEvent::CreateEntity(kind)),
@@ -4671,6 +4732,195 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+    }
+
+    /// The project's reference graph, rebuilt with the asset inventory.
+    ///
+    /// MORROWIND-M item 3. It arrives from the same job as the snapshot, so
+    /// the two always describe the same disk — a graph a scan behind the
+    /// drawer would name assets the drawer cannot show.
+    pub fn set_dependency_index(&mut self, index: somnium_asset::depend::DependencyIndex) {
+        self.dependency_index = index;
+        if self.references_open {
+            self.refresh_references_panel();
+        }
+    }
+
+    /// Point the References panel at an asset and bring it forward.
+    pub fn show_references_for(&mut self, asset: somnium_asset::database::AssetId) {
+        self.references_subject = Some(asset);
+        if !self.references_open {
+            self.references_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+        }
+        self.refresh_references_panel();
+        self.apply_bottom_panel();
+    }
+
+    /// The three questions, in the order they get asked.
+    ///
+    /// Outgoing first — it is the one with an answer even for an asset nothing
+    /// uses — then incoming, then the transitive breakage, which comes last
+    /// because it is a superset of incoming and reads as an alarm rather than
+    /// as information.
+    fn refresh_references_panel(&mut self) {
+        self.native_ui.clear_children(self.references_list);
+        self.references_rows.clear();
+
+        let Some(subject) = self.references_subject else {
+            self.native_ui
+                .send(TextMessage::set_text(self.references_title, "References"));
+            self.reference_note(
+                "Right-click an asset in the Content Drawer and choose Show References.",
+            );
+            return;
+        };
+
+        let name = self
+            .asset_db
+            .get(subject)
+            .map(|record| record.relative_path.clone())
+            .unwrap_or_else(|| format!("{subject}"));
+        self.native_ui.send(TextMessage::set_text(
+            self.references_title,
+            &format!("References - {name}"),
+        ));
+
+        // A folder is a place, not an asset: it references nothing and
+        // nothing references it, and the three lists would all be empty in a
+        // way that reads as "safe to delete" when its contents may not be.
+        if self
+            .asset_db
+            .get(subject)
+            .is_some_and(|record| record.kind == somnium_asset::database::AssetKind::Folder)
+        {
+            self.reference_note(
+                "A folder has no references of its own. Ask about the assets inside it.",
+            );
+            return;
+        }
+
+        let uses = self.dependency_index.references(subject);
+        let used_by = self.dependency_index.referenced_by(subject);
+        let breakage = self.dependency_index.breakage(subject);
+        let dangling = self.dependency_index.dangling(subject);
+        let scannable = self
+            .asset_db
+            .get(subject)
+            .is_some_and(|record| somnium_asset::depend::is_scannable(record.kind));
+
+        if scannable {
+            self.reference_section(&format!("Uses ({})", uses.len()), &uses);
+        } else {
+            // A `.glb` names its own textures, a script names assets by path,
+            // and the index reads neither. Reporting that as "uses nothing" is
+            // the lie that would make a dependency view worse than none.
+            self.reference_note(
+                "References are read out of scenes, prefabs, materials and UI documents. This kind is not one of them, so what it uses is not listed here.",
+            );
+        }
+        self.reference_section(&format!("Used by ({})", used_by.len()), &used_by);
+
+        // Only when it differs from the direct dependents: repeating the same
+        // three rows under a scarier heading teaches people to ignore it.
+        if breakage.len() > used_by.len() {
+            self.reference_section(
+                &format!("Breaks if deleted ({})", breakage.len()),
+                &breakage,
+            );
+        }
+        if !dangling.is_empty() {
+            self.reference_section(&format!("Missing ({})", dangling.len()), &dangling);
+        }
+        if uses.is_empty() && used_by.is_empty() && dangling.is_empty() && scannable {
+            self.reference_note(
+                "Nothing in the project references this, and it references nothing.",
+            );
+        }
+    }
+
+    /// A heading, then one clickable row per asset.
+    fn reference_section(&mut self, heading: &str, assets: &[somnium_asset::database::AssetId]) {
+        if assets.is_empty() {
+            return;
+        }
+        let t = theme::active();
+        let head = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 8.0,
+            top: 8.0,
+            right: 0.0,
+            bottom: 2.0,
+        }))
+        .with_role(TextRole::SectionCaps)
+        .with_text(heading)
+        .with_font_id(self.font_id)
+        .build();
+        self.native_ui.add_node(head, self.references_list);
+
+        for asset in assets {
+            let record = self.asset_db.get(*asset).cloned();
+            // An id with no record is a reference to something that is not in
+            // the project. The raw id is the only honest label, and it is what
+            // you paste into a search.
+            let label = record
+                .as_ref()
+                .map(|record| record.relative_path.clone())
+                .unwrap_or_else(|| format!("{asset}"));
+            let icon = record
+                .as_ref()
+                .map(|record| crate::metaphor::icon_for_path(&record.absolute_path, false))
+                .unwrap_or(crate::icons::IconId::Warn);
+            let tint = if record.is_some() {
+                theme::TEXT_PRIMARY
+            } else {
+                t.semantic.status.warning.bytes()
+            };
+            let row = ButtonBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::ROW_HEIGHT)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .build();
+            let row = self.native_ui.add_node(row, self.references_list);
+            let line =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Horizontal)
+                    .build();
+            let line = self.native_ui.add_node(line, row);
+            let glyph = ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_width(14.0)
+                    .with_height(14.0)
+                    .with_margin(Thickness::axes(8.0, 4.0)),
+            )
+            .with_icon(icon)
+            .with_size(14.0)
+            .with_tint(tint)
+            .build();
+            self.native_ui.add_node(glyph, line);
+            let text =
+                TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(0.0, 4.0)))
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(self.font_id)
+                    .with_color(tint)
+                    .build();
+            self.native_ui.add_node(text, line);
+            self.references_rows.push((row, *asset));
+        }
+    }
+
+    /// A line of prose in the panel, for the states a list cannot express.
+    fn reference_note(&mut self, text: &str) {
+        let note = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(8.0)))
+            .with_text(text)
+            .with_font_size(11.0)
+            .with_font_id(self.font_id)
+            .with_color(theme::active().semantic.text.secondary.bytes())
+            .with_wrap(true)
+            .build();
+        self.native_ui.add_node(note, self.references_list);
     }
 
     /// Select sort order for the current database query.
@@ -6638,6 +6888,25 @@ impl UiManager {
                     self.toggle_log_panel();
                     continue;
                 }
+                if msg.destination == self.references_button {
+                    self.toggle_references_panel();
+                    continue;
+                }
+                // Walking the graph is the point of the panel: a row is a
+                // link, so clicking one asks the same three questions about
+                // what it names. A row for an asset that is not in the project
+                // is not a link to anywhere.
+                if let Some((_, asset)) = self
+                    .references_rows
+                    .iter()
+                    .find(|(row, _)| *row == msg.destination)
+                    .copied()
+                {
+                    if self.asset_db.get(asset).is_some() {
+                        self.show_references_for(asset);
+                    }
+                    continue;
+                }
                 if msg.destination == self.drawer_button {
                     self.toggle_drawer();
                     continue;
@@ -8303,6 +8572,7 @@ mod must_not_break {
             ("camera speed", l.camera_speed_slider),
             ("content drawer", l.drawer_button),
             ("output log", l.log_button),
+            ("references", l.references_button),
             ("help", l.help_button),
         ] {
             assert!(!handle.is_none(), "{name} is missing from the shell");

@@ -6,6 +6,8 @@
 
 pub mod cook;
 pub mod database;
+/// MORROWIND-M item 3: what references what, across a whole project.
+pub mod depend;
 pub mod material;
 pub mod preview;
 pub mod residency;

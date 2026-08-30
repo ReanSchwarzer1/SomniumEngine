@@ -18,10 +18,10 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,247 | +13,041 | 31.8% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 62,828 | +35,298 | 31.6% | 682 | +467 | 103 | 2 |
-| `somnium_core` | 34,960 | +15,740 | 17.6% | 398 | +181 | 46 | 0 |
-| `somnium_asset` | 6,242 | +4,603 | 3.1% | 48 | +42 | 12 | 0 |
+| `somnium_renderer` | 63,247 | +13,041 | 31.6% | 436 | +108 | 91 | 55 |
+| `somnium_ui` | 63,207 | +35,677 | 31.6% | 682 | +467 | 103 | 2 |
+| `somnium_core` | 34,973 | +15,753 | 17.5% | 398 | +181 | 46 | 0 |
+| `somnium_asset` | 6,711 | +5,072 | 3.4% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
@@ -29,14 +29,14 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_input` | 3,177 | +3,177 | 1.6% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,964 | +1,964 | 1.0% | 57 | +57 | 5 | 0 |
-| `somnium_jobs` | 1,697 | +1,697 | 0.9% | 18 | +18 | 5 | 0 |
+| `somnium_jobs` | 1,697 | +1,697 | 0.8% | 18 | +18 | 5 | 0 |
 | `somnium_audio` | 1,581 | +1,488 | 0.8% | 40 | +40 | 6 | 0 |
-| `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
+| `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **199,079** | +85,187 | | **2023** | +1,078 | | |
+| **Total** | **199,940** | +86,048 | | **2031** | +1,086 | | |
 
-The top three crates are **80.9%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **3,130 lines** (+484 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,12 +49,12 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1221 | 256 | 115 | 8 | 13 | 185 | 101 | **1900** |
+| `somnium_ui` | 1223 | 256 | 115 | 8 | 13 | 185 | 101 | **1902** |
 | `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
 | `somnium_core` | 331 | 110 | 23 | 4 | 3 | 47 | 41 | **559** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
-| `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 13 | 8 | **160** |
+| `somnium_asset` | 93 | 49 | 10 | 0 | 0 | 13 | 9 | **174** |
 | `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
 | `somnium_shader` | 48 | 11 | 2 | 0 | 0 | 1 | 3 | **65** |
@@ -102,7 +102,7 @@ is a system this phase still owes.
 | `action_map` | 1 | 0 | +1 | As above. |
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
-| `prefab` | 6 | 2 | +4 | Both are comments in the scripting crate. No prefab system (Track 3). |
+| `prefab` | 9 | 2 | +7 | Both are comments in the scripting crate. No prefab system (Track 3). |
 | `dock` | 10 | 5 | +5 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 12 | 1 | +11 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |

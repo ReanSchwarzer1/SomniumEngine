@@ -1348,6 +1348,69 @@ pub(crate) fn build_editor_layout(
         crate::metaphor::empty::LOG,
     );
 
+    // ── The References panel (MORROWIND-M item 3) ───────────────────────────
+    //
+    // A third tenant of the bottom row, beside the Content Drawer and the
+    // Output Log, because it answers a question you ask *about* a drawer
+    // selection and want to read next to it.
+    let references_panel = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT)
+            .with_visibility(false),
+    )
+    .add_row(Row::strict(22.0))
+    .add_row(Row::stretch())
+    .add_column(Column::stretch())
+    .build();
+    let references_panel = ui.add_node(references_panel, bottom_swap_h);
+
+    let references_hdr = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 1.0,
+    })
+    .build();
+    let references_hdr = ui.add_node(references_hdr, references_panel);
+
+    // The subject's name lives in the header, not above the lists: the panel
+    // is short, and a reader who has scrolled the lists still needs to know
+    // which asset they are looking at.
+    let references_title = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+        left: 8.0,
+        top: 4.0,
+        right: 0.0,
+        bottom: 0.0,
+    }))
+    .with_role(TextRole::SectionCaps)
+    .with_text("References")
+    .with_font_id(font_id)
+    .build();
+    let references_title = ui.add_node(references_title, references_hdr);
+
+    let references_scroll = ScrollViewerBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::BG_CONTENT),
+    )
+    .build();
+    let references_scroll = ui.add_node(references_scroll, references_panel);
+    let references_stack =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build();
+    let references_list = ui.add_node(references_stack, references_scroll);
+
     // ── Row 6: status bar ────────────────────────────────────────────────────
     let status_bar = BorderBuilder::new(
         WidgetBuilder::new()
@@ -1398,6 +1461,15 @@ pub(crate) fn build_editor_layout(
         IconId::OutputLog,
         "Output Log",
         &command_tooltip("editor.window.output_log"),
+        font_id,
+        theme::STATUS_HEIGHT,
+    );
+    let (references_button, _) = labeled_icon_button(
+        ui,
+        status_stack_h,
+        IconId::Link,
+        "References",
+        &command_tooltip("editor.window.references"),
         font_id,
         theme::STATUS_HEIGHT,
     );
@@ -1856,5 +1928,9 @@ pub(crate) fn build_editor_layout(
         help_toc,
         help_close,
         log_panel,
+        references_panel,
+        references_button,
+        references_title,
+        references_list,
     }
 }

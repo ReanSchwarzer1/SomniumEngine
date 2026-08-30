@@ -632,7 +632,15 @@ pub struct Engine<G: GameApp> {
     world_partition: Option<crate::world_partition::WorldPartition>,
     world_partition_cell_size: f64,
     world_partition_pin: Option<crate::world_partition::CellCoord>,
-    asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
+    /// The inventory and the reference graph travel together, because they
+    /// are two readings of the same disk and a panel showing one against the
+    /// other's assets is worse than no panel (MORROWIND-M item 3).
+    asset_scan: Option<
+        JobHandle<(
+            somnium_asset::database::AssetDbSnapshot,
+            somnium_asset::depend::DependencyIndex,
+        )>,
+    >,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
     next_asset_scan: std::time::Instant,
     /// When shader files were last polled for hot reload (MORROWIND-C).
@@ -4430,10 +4438,11 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_scan {
             self.asset_scan = None;
             match result {
-                Ok(snapshot) => {
+                Ok((snapshot, index)) => {
                     if let Some(published) = self.asset_gate.stage(snapshot) {
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.set_asset_snapshot(published);
+                            ui.set_dependency_index(index);
                         }
                     }
                 }
@@ -4474,8 +4483,12 @@ impl<G: GameApp> Engine<G> {
                     ctx.check_cancelled()
                         .map_err(|error| format!("{error:?}"))?;
                     let snapshot = somnium_asset::database::AssetDb::scan(root)?;
+                    ctx.set_progress(0.8);
+                    // On the job, not on the frame: this opens every scene,
+                    // prefab, material and document in the project.
+                    let index = somnium_asset::depend::DependencyIndex::build(&snapshot);
                     ctx.set_progress(1.0);
-                    Ok(snapshot)
+                    Ok((snapshot, index))
                 }) {
                 Ok(handle) => self.asset_scan = Some(handle),
                 Err(error) => warn!(?error, "asset scan queue is full"),

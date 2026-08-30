@@ -274,6 +274,10 @@ pub enum CommandAction {
     ToggleFoliage,
     ToggleImmersiveViewport,
     OpenOutputLog,
+    /// Open or close the References panel on whatever it last had.
+    OpenReferences,
+    /// Point the References panel at the chosen content item.
+    ContentShowReferences,
     CreateEntity(CreateKind),
     DockContentDrawer,
     SetWorkspace(Workspace),
@@ -976,6 +980,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.window.references",
+            "References",
+            "Window",
+            None,
+            "Open or close the References panel.",
+            A::OpenReferences,
+            WINDOW,
+            always
+        ),
+        command!(
             "editor.window.dock_content",
             "Show Content Drawer",
             "Window",
@@ -1322,6 +1336,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Put the chosen asset into the matching field of the selected entity.",
             A::ContentAssignToSelection,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.references",
+            "Show References",
+            "Content",
+            None,
+            "Show what uses this asset, what it uses, and what breaks if it goes.",
+            A::ContentShowReferences,
             CONTENT,
             content_target
         ),

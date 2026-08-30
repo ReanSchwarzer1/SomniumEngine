@@ -1,6 +1,6 @@
 # MORROWIND-M — virtualisation, data tables, the localisation editor
 
-**Status:** step 1 complete, 2026-08-30. The virtualising container exists; the
+**Status:** items 1 and 3 complete, 2026-08-31. The virtualising container exists; the
 outliner virtualises its draw and the content drawer virtualises its *widgets*,
 both with the acceptance property measured rather than asserted.
 
@@ -10,7 +10,7 @@ both with the acceptance property measured rather than asserted.
 |---|---|
 | 1. A virtualising container, retro-fitted to the outliner, content drawer and asset browser | Container **done**; **outliner done**; **content drawer done** — a different shape, see below. The asset browser is the drawer under another name and inherits it |
 | 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | **Model done**, with the localisation table as its first customer; the grid widget is not built |
-| 3. Asset dependency view, built on MORROWIND-Q's dependency graph | Not started |
+| 3. Asset dependency view, built on MORROWIND-Q's dependency graph | **Done** — a project-wide reference graph and a References panel |
 
 ## The ceiling nobody had measured
 
@@ -205,6 +205,92 @@ translation is usually a mistake and it is one nobody can see in a table that
 lists only what the default locale has. `Table::keys` was added to
 `somnium_i18n` to make that askable at all.
 
+## Item 3 — the dependency view
+
+Three questions, and the plan is right that they are one feature; they are not
+one query:
+
+```text
+  what does this reference?     forward, direct   "open the texture this
+                                                   material paints with"
+  what references this?         reverse, direct   "who is using this?"
+  what breaks if I delete it?   reverse, closed   a texture deleted breaks its
+                                                   material, and every scene
+                                                   that material appears in
+```
+
+The third has to be transitive, and it is the only one anybody asks with their
+finger over the delete key.
+
+### The graph MORROWIND-Q built is not this graph
+
+`cook::AssetDependencyGraph` answers the same shape of question for a **cook
+plan**, where every edge was declared by whoever wrote the plan. The editor
+cannot ask that. Nobody declares that a scene uses a mesh — they drop the mesh
+onto an entity, and the edge exists because a field now holds an id.
+
+So `somnium_asset::depend` reads the project and works the edges out. One
+decision carries the module:
+
+**The scan is structural, not schema-driven.** An asset id reaches a file in one
+of two spellings — the scene schema tags its references so they survive a round
+trip through a generic value (`{"$asset": "…"}`), and a material declares typed
+`AssetId` fields that serialise as the bare string — and both are 32 lowercase
+hex digits. Walking the JSON for that shape means one scanner covers scenes,
+prefabs, materials, `.somui` documents and anything added later. The
+alternative, teaching this module the component schemas, would mean a new asset
+field quietly missing from the dependency view until somebody remembered to
+teach it twice, and the place people forget is exactly the place where "what
+breaks if I delete this" starts lying.
+
+Three things the scan refuses to guess at:
+
+- **A file it cannot read is counted, not called empty.** A `.glb` names its own
+  textures and a script names assets by path; neither is JSON. `ScanSummary`
+  separates *scanned*, *opaque* and *unreadable*, and the panel says so in
+  words. A dependency view that reports a mesh as referencing nothing is worse
+  than no dependency view, because it is trusted.
+- **A reference to something absent is dangling, not dropped.** It is the trail
+  of a file deleted outside the editor, and it is the one thing here that can be
+  seen *before* it becomes a mystery at runtime.
+- **A cycle is walked once.** A prefab that spawns a scene that places the
+  prefab is legal, and an infinite walk for any closure without a visited set.
+
+### In the editor
+
+A third tenant of the bottom row, beside the Content Drawer and the Output Log,
+because it answers a question you ask *about* a drawer selection and want to
+read next to it. Right-click any asset → **Show References**, or the References
+button in the status bar, or `editor.window.references` from the Window menu and
+the command palette.
+
+Every row is a link: clicking one asks the same three questions about what it
+names, so a texture two steps under a scene is two clicks away in either
+direction. A row for an id with no record shows the raw id in the warning colour
+and is not a link, because there is nowhere to go.
+
+Two pieces of restraint in the panel, both about not training people to ignore
+it. "Breaks if deleted" is only shown when it is *larger* than "used by" —
+otherwise it is the same three rows under a scarier heading. And a folder gets a
+sentence rather than three empty lists, which would read as "safe to delete"
+about a folder whose contents are anything but.
+
+**The index is built on the inventory's own job.** Not a second scan and not a
+lazy build: the same background job that scans the content root then opens every
+scannable file in it, and the snapshot and the graph are handed to the shell
+together. A graph one scan behind the drawer would name assets the drawer cannot
+show, and the bug that produces looks exactly like a broken reference.
+
+### Verification
+
+Seven unit tests on the model, and one that writes a real three-link project to
+disk — a texture, a `.sommat` that paints with it, a framed `.somnium` scene
+that places the material — scans it with `AssetDb::scan` and reads the chain
+back out. That last one is the half a unit test cannot reach: a scene is a
+binary header followed by its document, so the file is not JSON even though its
+body is, and the summary counts prove which files were opened and which were
+skipped.
+
 ## What this step does not claim
 
 - No frame time was measured. The property was, in both panels.
@@ -218,6 +304,12 @@ lists only what the default locale has. `Table::keys` was added to
   a row scrolled into view are requested one frame later. The thumbnail pump is
   already asynchronous and bounded per frame, so this is a frame of icon rather
   than a frame of nothing.
-- Nothing here touches items 2 and 3 — the data table editor and the dependency
-  view — and the localisation table, which item 2 names as its first customer,
-  is still edited outside the editor.
+- Item 2's grid widget is not built. The model is done and the localisation
+  table, which the plan names as its first customer, is still edited outside the
+  editor.
+- The reference graph reads scenes, prefabs, materials, `.somui` documents and
+  plain JSON. Meshes, scripts and shaders keep their references in formats it
+  does not parse, and it says so rather than reporting them as unused.
+- The whole index is rebuilt whenever the inventory is. That is one pass over
+  the project's JSON per real change on disk, on a background job; an
+  incremental rebuild is a thing to want at a project size nobody here has.
