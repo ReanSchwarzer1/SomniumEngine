@@ -261,6 +261,8 @@ pub enum CommandAction {
     Play,
     Pause,
     Stop,
+    /// MORROWIND-N: one fixed step while paused.
+    Step,
     ToggleProfiler,
     ToggleDrawer,
     TogglePalette,
@@ -800,6 +802,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Pause or resume the play simulation.",
             A::Pause,
+            TOOLBAR,
+            always
+        ),
+        command!(
+            "editor.simulation.step",
+            "Step",
+            "Simulation",
+            None,
+            "Advance one fixed step while paused.",
+            A::Step,
             TOOLBAR,
             always
         ),

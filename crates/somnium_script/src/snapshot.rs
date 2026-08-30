@@ -44,6 +44,19 @@ pub struct TimeSnapshot {
     pub simulation_time: f64,
     /// Number of fixed steps since the simulation started.
     pub step: u64,
+    /// Whether this step is the game running, or the editor stepping it by hand.
+    ///
+    /// MORROWIND-N. The plan asks for *"a runtime-versus-editor flag visible to
+    /// script"*, and this is the honest shape of it: scripts only ever run
+    /// inside a play session, so the distinction a script can act on is not
+    /// *editor or game* but **live or held** — is time advancing on its own, or
+    /// is somebody pressing Step.
+    ///
+    /// A script that interpolates over wall-clock time, plays a sound per
+    /// frame, or drives an animation needs to know, because a stepped frame is
+    /// one fixed step separated from the last by however long the user took to
+    /// press the button again.
+    pub stepping: bool,
 }
 
 impl Default for TimeSnapshot {
@@ -54,6 +67,7 @@ impl Default for TimeSnapshot {
         Self {
             fixed_delta: 1.0 / 60.0,
             delta: 1.0 / 60.0,
+            stepping: false,
             simulation_time: 0.0,
             step: 0,
         }

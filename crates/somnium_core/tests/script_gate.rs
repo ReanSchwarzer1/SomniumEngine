@@ -44,6 +44,8 @@ struct Gate {
     entity: Entity,
     instance: InstanceUuid,
     step: u64,
+    /// MORROWIND-N: what the host tells scripts about this frame.
+    stepping: bool,
     forces: Arc<AtomicU32>,
 }
 
@@ -87,6 +89,7 @@ impl Gate {
             entity,
             instance,
             step: 0,
+            stepping: false,
             forces,
         }
     }
@@ -104,6 +107,7 @@ impl Gate {
             #[allow(clippy::cast_precision_loss)]
             simulation_time: self.step as f64 / 60.0,
             step: self.step,
+            stepping: self.stepping,
         }
     }
 
@@ -345,5 +349,61 @@ fn an_authored_property_overrides_the_scripts_own_default() {
     assert!(
         start.angle_between(gate.transform().rotation) < 1.0e-4,
         "a spin speed of zero authored in the editor must actually stop it"
+    );
+}
+
+// ── MORROWIND-N: the runtime-versus-editor flag ────────────────────────────
+
+/// A script that reports what the host told it about the frame.
+const REPORTER: &str = r#"
+return Script.define({
+	apiVersion = 1,
+	schemaVersion = 1,
+	uses = {},
+	fields = {},
+	onFixedUpdate = function(self, ctx)
+		ctx:log(if ctx.stepping then "stepped" else "live")
+	end,
+})
+"#;
+
+/// The plan asks for *"a runtime-versus-editor flag visible to script"*.
+///
+/// Scripts only ever run inside a play session, so the distinction one can act
+/// on is not *editor or game* but **live or held** — is time advancing on its
+/// own, or is somebody pressing Step. A stepped frame is one fixed step
+/// separated from the last by however long the user took to press the button,
+/// which is exactly what breaks anything paced against the wall clock.
+#[test]
+fn a_script_can_tell_a_hand_driven_step_from_a_running_one() {
+    let mut gate = Gate::new();
+    let asset = ScriptAssetId::mint();
+    gate.host
+        .load_script(asset, "reporter.luau", REPORTER)
+        .unwrap_or_else(|d| panic!("the reporter must compile:\n{d}"));
+    let entity = gate.world.spawn((
+        Name::new("Reporter"),
+        Transform::default(),
+        ScriptSet::new(),
+    ));
+    gate.world
+        .get_mut::<ScriptSet>(entity)
+        .unwrap()
+        .attach(ScriptAttachment::new(asset));
+
+    let input = InputSnapshot::default();
+
+    gate.stepping = false;
+    gate.frame(&input);
+    assert!(
+        gate.log().iter().any(|line| line == "live"),
+        "a running frame must not read as stepped"
+    );
+
+    gate.stepping = true;
+    gate.frame(&input);
+    assert!(
+        gate.log().iter().any(|line| line == "stepped"),
+        "a hand-driven step must reach the script"
     );
 }

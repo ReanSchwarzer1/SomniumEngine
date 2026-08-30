@@ -301,6 +301,12 @@ pub enum EditorEvent {
     PauseSimulation,
     /// Return to edit mode and reset the simulation clock.
     StopSimulation,
+    /// Advance exactly one fixed step while paused (MORROWIND-N).
+    ///
+    /// Only meaningful from `Paused`: stepping a running simulation is
+    /// ambiguous — it would either do nothing visible or fight the accumulator
+    /// — and stepping from Edit would advance a clock that is not running.
+    StepSimulation,
     /// Hide editor chrome and fill the monitor with the 3D view. Esc toggles off.
     ToggleImmersiveViewport,
     /// 0 translate, 1 rotate, 2 scale — same as T / R / S.

@@ -1755,6 +1755,16 @@ framework nobody can reach.
 
 #### MORROWIND-N — Play-in-editor
 
+**Complete 2026-08-30** — see [`MORROWIND-N.md`](phase%20MORROWIND/MORROWIND-N.md).
+Four of the six items were already in tree from earlier phases: play/pause, the
+`WorldCheckpoint` snapshot-and-restore the plan called the hard half, separate
+input focus, and a survivable error path. Three were added or settled here — a
+**step control** (a counter, exactly one `fixed_dt`, scripts reconciled on a
+stepped frame, refused rather than reinterpreted from Playing or Editing), the
+script-visible flag as **`ctx.stepping`** (live or held, because *editor or
+game* is a constant a script can learn nothing from), and the decision **not**
+to auto-stop play on a script error. No process-separation option was taken.
+
 The editor and the game become distinguishable: a play/pause/step control, a
 snapshot of world state on enter and a restore on exit, separate input focus, a
 runtime-versus-editor flag visible to script, and an error path that returns to

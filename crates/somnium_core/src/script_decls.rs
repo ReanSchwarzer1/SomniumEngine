@@ -115,6 +115,11 @@ export type Context = {
 	fixedDelta: number,
 	--- Fixed steps since the simulation started.
 	step: number,
+	--- True when the editor advanced this step by hand rather than time
+	--- advancing on its own. A stepped frame is one fixed step separated
+	--- from the last by however long the user took to press Step, so
+	--- anything paced against the wall clock should check this.
+	stepping: boolean,
 	input: Input,
 	--- This entity's declared components, as plain tables. Present only
 	--- for components named in `uses`.

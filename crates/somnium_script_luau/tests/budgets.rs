@@ -85,6 +85,7 @@ fn snapshot(entity: somnium_ecs::Entity, persistent: PersistentId) -> ScriptSnap
             delta: 1.0 / 60.0,
             simulation_time: 0.0,
             step: 0,
+            stepping: false,
         },
         input: InputSnapshot::default(),
         self_entity: entity,

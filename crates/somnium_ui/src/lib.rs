@@ -4227,6 +4227,7 @@ impl UiManager {
             A::Play => self.editor_events.push_back(EditorEvent::PlaySimulation),
             A::Pause => self.editor_events.push_back(EditorEvent::PauseSimulation),
             A::Stop => self.editor_events.push_back(EditorEvent::StopSimulation),
+            A::Step => self.editor_events.push_back(EditorEvent::StepSimulation),
             A::ToggleProfiler => self.editor_events.push_back(EditorEvent::ToggleProfiler),
             A::ToggleDrawer => self.toggle_drawer(),
             A::TogglePalette => self.toggle_palette(),

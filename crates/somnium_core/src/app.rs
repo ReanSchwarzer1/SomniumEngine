@@ -806,6 +806,18 @@ pub struct Engine<G: GameApp> {
     /// Fixed steps elapsed in this play session. Part of the deterministic
     /// clock a script sees, and reset by Stop.
     script_step: u64,
+    /// MORROWIND-N: fixed steps owed to a paused simulation.
+    ///
+    /// A counter rather than a flag so holding the Step control queues steps
+    /// instead of dropping every one that arrives inside a single frame — at
+    /// 60 Hz a key repeat is faster than the frame that would consume it.
+    pending_steps: u32,
+    /// Whether *this frame* is a hand-driven step.
+    ///
+    /// Separate from `pending_steps` because the counter is spent before the
+    /// step it pays for actually runs: deriving the flag from it made
+    /// `stepping` false during the very step it describes.
+    stepping_now: bool,
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -948,6 +960,8 @@ impl<G: GameApp + 'static> Engine<G> {
             script_input: crate::script_input::ScriptInputTracker::new(),
             input: somnium_input::InputSystem::with_default_maps(),
             play_checkpoint: None,
+            pending_steps: 0,
+            stepping_now: false,
             script_step: 0,
         };
 
@@ -1193,6 +1207,10 @@ impl<G: GameApp> Engine<G> {
             delta: dt,
             simulation_time: f64::from(self.simulation_clock.elapsed_seconds),
             step: self.script_step,
+            // MORROWIND-N. True only on a frame the step control drove; while
+            // Playing it is always false, which is what makes the flag mean
+            // "held" rather than "in the editor".
+            stepping: self.stepping_now,
         }
     }
 
@@ -3002,13 +3020,28 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // before any phase runs, so an attachment added this frame is
         // initialised this frame. Only while Play is running — scripts are
         // not allowed to dirty the edit-time scene.
-        if self.simulation_clock.state == SimulationState::Playing {
+        // MORROWIND-N: a step is a play frame that happens to be paused, so
+        // scripts have to be reconciled for it too — otherwise stepping never
+        // initialises an attachment added while the simulation was held.
+        let stepping = self.simulation_clock.state == SimulationState::Paused
+            && self.pending_steps > 0
+            && self.play_session_active;
+        self.stepping_now = stepping;
+        if self.simulation_clock.state == SimulationState::Playing || stepping {
             self.sync_scripts(dt);
         }
 
-        if self.simulation_clock.state != SimulationState::Paused {
-            self.simulation_accumulator += dt.min(0.1);
+        if self.simulation_clock.state != SimulationState::Paused || stepping {
             let fixed_dt = self.simulation_clock.fixed_delta_seconds;
+            if stepping {
+                // Exactly one step, and never the wall clock: the point of a
+                // step is that it is the same size every time, so a slow frame
+                // cannot turn one press into three.
+                self.pending_steps -= 1;
+                self.simulation_accumulator += fixed_dt;
+            } else {
+                self.simulation_accumulator += dt.min(0.1);
+            }
             while self.simulation_accumulator >= fixed_dt {
                 {
                     let mut ctx = EngineContext::new(
@@ -8611,7 +8644,24 @@ impl<G: GameApp> Engine<G> {
                 info!("Simulation paused");
             }
 
+            EditorEvent::StepSimulation => {
+                // Refused rather than reinterpreted. Stepping a *running*
+                // simulation would either do nothing visible or fight the
+                // accumulator, and stepping from Edit would advance a clock
+                // that is not running — neither is what the control means, and
+                // guessing which one the user wanted is how a debugging tool
+                // stops being trustworthy.
+                if self.simulation_clock.state != SimulationState::Paused {
+                    info!("Step ignored: the simulation is not paused");
+                } else if !self.play_session_active {
+                    info!("Step ignored: no play session is running");
+                } else {
+                    self.pending_steps = self.pending_steps.saturating_add(1);
+                }
+            }
+
             EditorEvent::StopSimulation => {
+                self.pending_steps = 0;
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
                 self.simulation_accumulator = 0.0;

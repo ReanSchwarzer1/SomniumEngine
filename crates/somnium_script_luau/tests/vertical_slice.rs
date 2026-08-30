@@ -49,6 +49,7 @@ fn snapshot(entity: Entity, persistent: PersistentId) -> ScriptSnapshot {
             delta: 1.0 / 60.0,
             simulation_time: 0.0,
             step: 0,
+            stepping: false,
         },
         input: InputSnapshot::default(),
         self_entity: entity,

@@ -1822,8 +1822,11 @@ does not overlap. STALKER waits for both relevant outputs.
   so nothing moved. What is missing is the shell resolving tiles directly, a
   drag-to-dock affordance, real `winit` child windows, and a renderer that
   draws more than one view per frame (MORROWIND-J steps 2 and 3).
-- Data-table editing, the GUI layout editor, and isolated play-in-editor
-  (MORROWIND Construction Set M items 2–3, M2, and N).
+- Data-table editing and the GUI layout editor (MORROWIND Construction Set M
+  items 2–3, and M2). **Play-in-editor is complete** — play/pause/step, a
+  `WorldCheckpoint` snapshot restored exactly on Stop, separate input focus, a
+  survivable error path, and `ctx.stepping` so a script can tell a hand-driven
+  step from a running frame.
 - Virtualisation for the **content drawer and asset browser**. The outliner is
   done — `somnium_ui::virtual_list` windows its draw against the clip, so a
   hundred thousand rows cost what thirty cost — but the drawer builds one widget
@@ -2166,6 +2169,19 @@ path had never heard of. Despawn happens only after persistence succeeds.
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
 into lower detail instead of into a missing object. ([MORROWIND-R](<dev records/phase MORROWIND/MORROWIND-R.md>))
+
+**A counter and the thing it authorises are not the same fact.** The
+play-in-editor step flag was first derived from "are steps owed", which is false
+during the very step it describes — the counter is spent before the step it pays
+for runs. It is now set once per frame as its own value.
+([MORROWIND-N](<dev records/phase MORROWIND/MORROWIND-N.md>))
+
+**"Am I in the editor" is a constant a script can learn nothing from.** Scripts
+only ever run inside a play session, so the distinction one can act on is *live
+or held* — `ctx.stepping` — because a stepped frame is one fixed step separated
+from the last by however long somebody took to press the button, and anything
+paced against the wall clock behaves differently on one.
+([MORROWIND-N](<dev records/phase MORROWIND/MORROWIND-N.md>))
 
 **A widget inside a scroll viewer is as tall as its content, so its own bounds
 say nothing about what can be seen.** The outliner's draw loop ran over every

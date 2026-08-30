@@ -498,6 +498,7 @@ pub fn build_ctx<'scope, 'env>(
     ctx.set("time", snapshot.time.simulation_time)?;
     ctx.set("fixedDelta", snapshot.time.fixed_delta)?;
     ctx.set("step", snapshot.time.step)?;
+    ctx.set("stepping", snapshot.time.stepping)?;
 
     // ── Input ────────────────────────────────────────────────────
     let input = lua.create_table()?;
