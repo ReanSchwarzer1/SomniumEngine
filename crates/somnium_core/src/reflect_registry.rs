@@ -19,7 +19,8 @@ use somnium_ecs::reflect::{
 use somnium_ecs::{Entity, World};
 
 use crate::{
-    AntiAliasing, BuoyantVessel, CameraSettingsComponent, EditorFlags, FoliageComponent,
+    AntiAliasing, AudioAttenuationModel, AudioBus, AudioEmitterComponent, BuoyantVessel,
+    CameraSettingsComponent, EditorFlags, FoliageComponent,
     LightComponent,
     LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
     ParticleEmitter, PostProcessComponent, TerrainComponent, Tonemapper, Transform,
@@ -186,6 +187,44 @@ impl ReflectField for LightShadowTechnique {
                 expected: "LightShadowTechnique".into(),
                 found: other.kind(),
             }),
+        }
+    }
+}
+
+const AUDIO_BUS_NAMES: &[&str] = &["SFX", "Music", "Dialogue", "UI"];
+
+impl ReflectField for AudioBus {
+    fn field_type() -> FieldType { FieldType::Enum(AUDIO_BUS_NAMES) }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(match self { Self::Sfx => 0, Self::Music => 1, Self::Dialogue => 2, Self::Ui => 3 })
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Sfx),
+            ReflectValue::I64(1) => Ok(Self::Music),
+            ReflectValue::I64(2) => Ok(Self::Dialogue),
+            ReflectValue::I64(3) => Ok(Self::Ui),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange { field, min: Some(0.0), max: Some(3.0) }),
+            other => Err(ReflectError::TypeMismatch { field, expected: "AudioBus".into(), found: other.kind() }),
+        }
+    }
+}
+
+const AUDIO_ATTENUATION_NAMES: &[&str] = &["Linear", "Inverse Square", "Authored", "None"];
+
+impl ReflectField for AudioAttenuationModel {
+    fn field_type() -> FieldType { FieldType::Enum(AUDIO_ATTENUATION_NAMES) }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(match self { Self::Linear => 0, Self::InverseSquare => 1, Self::Authored => 2, Self::None => 3 })
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Linear),
+            ReflectValue::I64(1) => Ok(Self::InverseSquare),
+            ReflectValue::I64(2) => Ok(Self::Authored),
+            ReflectValue::I64(3) => Ok(Self::None),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange { field, min: Some(0.0), max: Some(3.0) }),
+            other => Err(ReflectError::TypeMismatch { field, expected: "AudioAttenuationModel".into(), found: other.kind() }),
         }
     }
 }
@@ -548,6 +587,7 @@ fn mesh_kind_schema() -> ComponentSchema {
 #[must_use]
 pub fn component_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
+    registry.register(audio_emitter_schema());
 
     registry.register(buoyant_vessel_schema());
     registry.register(camera_settings_schema());
@@ -563,6 +603,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(particle_emitter_schema());
     registry.register(post_process_schema());
     crate::character::register(&mut registry);
+    crate::spline::register(&mut registry);
     registry.register(sky_schema());
     registry.register(terrain_schema());
     registry.register(world_partition_schema());
@@ -1024,6 +1065,33 @@ fn light_schema() -> ComponentSchema {
     }
 }
 
+fn audio_emitter_schema() -> ComponentSchema {
+    component_schema! {
+        AudioEmitterComponent as "somnium.AudioEmitter", display "Audio Emitter", version 1,
+        fields {
+            enabled { group: "Playback" },
+            audio { group: "Playback", asset_kind_mask: somnium_asset::database::ASSET_KIND_AUDIO },
+            autoplay { group: "Playback", display_name: "Auto Play" },
+            looping { group: "Playback" },
+            volume { min: 0.0, soft_max: 2.0, step: 0.01, group: "Playback" },
+            bus { group: "Playback" },
+            spatial { group: "Spatial" },
+            attenuation { group: "Attenuation" },
+            min_distance { min: 0.0, soft_max: 100.0, step: 0.1, unit: "m", group: "Attenuation" },
+            max_distance { min: 0.0, soft_max: 500.0, step: 0.5, unit: "m", group: "Attenuation" },
+            attenuation_curve { group: "Attenuation", min: 0.0, max: 1.0,
+                soft_min: 0.0, soft_max: 100.0, display_name: "Attenuation Curve" },
+            cone_enabled { group: "Directivity", display_name: "Directional Cone" },
+            cone_inner_degrees { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Directivity", display_name: "Inner Angle" },
+            cone_outer_degrees { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Directivity", display_name: "Outer Angle" },
+            cone_outer_gain { min: 0.0, max: 1.0, step: 0.01, group: "Directivity", display_name: "Outer Gain" },
+            occlusion { min: 0.0, max: 1.0, step: 0.01, group: "Spatial",
+                doc: "Transmission factor supplied by gameplay or a physics occlusion query." },
+            doppler_scale { min: 0.0, soft_max: 4.0, step: 0.05, group: "Spatial", display_name: "Doppler Scale" },
+        }
+    }
+}
+
 fn mesh_schema() -> ComponentSchema {
     component_schema! {
         MeshComponent as "somnium.Mesh", display "Mesh", version 1,
@@ -1166,11 +1234,12 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 23);
+        assert_eq!(registry.len(), 25);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
+                "somnium.AudioEmitter",
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
                 "somnium.Decal",
@@ -1186,6 +1255,7 @@ mod tests {
                 "somnium.PostProcess",
                 "somnium.RigidBody",
                 "somnium.Sky",
+                "somnium.Spline",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",
@@ -1219,6 +1289,26 @@ mod tests {
         assert!((after.translation - original.translation).length() < 1.0e-6);
         assert!(after.rotation.angle_between(original.rotation) < 1.0e-5);
         assert!((after.scale - original.scale).length() < 1.0e-6);
+    }
+
+    #[test]
+    fn audio_emitter_round_trips_asset_and_spatial_authoring() {
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.AudioEmitter").unwrap();
+        let mut world = World::new();
+        let original = AudioEmitterComponent {
+            audio: somnium_asset::database::AssetId::from_relative_path("audio/test.ogg"),
+            attenuation: AudioAttenuationModel::Authored,
+            cone_enabled: true,
+            occlusion: 0.35,
+            doppler_scale: 1.5,
+            ..Default::default()
+        };
+        let entity = world.spawn((original.clone(),));
+        let snapshot = (schema.snapshot)(&world, entity).unwrap();
+        *world.get_mut::<AudioEmitterComponent>(entity).unwrap() = AudioEmitterComponent::default();
+        (schema.apply)(&mut world, entity, &snapshot).unwrap();
+        assert_eq!(world.get::<AudioEmitterComponent>(entity), Some(&original));
     }
 
     #[test]

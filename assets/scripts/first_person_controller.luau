@@ -11,6 +11,17 @@
 -- Every field below shows up in the Details panel. Change one while Play
 -- is running and it takes effect on the next frame.
 
+-- Metres of travel between footfalls. Distance rather than a timer, so one
+-- number covers walking and sprinting.
+local STRIDE_METRES = 1.8
+
+local FOOTSTEP_CLIPS = {
+	"audio/footsteps/footstep_01_cc0.ogg",
+	"audio/footsteps/footstep_02_cc0.ogg",
+	"audio/footsteps/footstep_03_cc0.ogg",
+	"audio/footsteps/footstep_04_cc0.ogg",
+}
+
 return Script.define({
 	apiVersion = 1,
 	schemaVersion = 1,
@@ -31,8 +42,8 @@ return Script.define({
 			description = "Upward metres per second at the moment of a jump." }),
 		airControl = Field.number(0.25, { min = 0.0, max = 1.0,
 			description = "How much of your input steers you while airborne. 0 is none." }),
-		mouseSensitivity = Field.number(0.12, { min = 0.005, max = 2.0,
-			description = "Degrees of yaw per pixel of mouse movement." }),
+		lookSensitivity = Field.number(1.2, { min = 0.01, max = 10.0,
+			description = "Degrees of yaw per Look action unit." }),
 		invertMouseX = Field.boolean(false),
 	},
 
@@ -57,6 +68,9 @@ return Script.define({
 		-- means a short wait before you can jump again; that goes away
 		-- when a real ground test replaces the heuristic.
 		self.jumpCooldown = self.jumpCooldown or 0
+		self.footstepDistance = self.footstepDistance or 0.0
+		self.footstepIndex = self.footstepIndex or 1
+		self.walking = self.walking or false
 	end,
 
 	onStart = function(self, ctx)
@@ -68,11 +82,12 @@ return Script.define({
 		local transform = ctx.self.transform
 
 		-- ── Look (yaw only; the camera child owns pitch) ─────────────
-		local dx = ctx.input.mouseDeltaX
+		local look = ctx.input:vector2("Look")
+		local dx = look.x
 		if self.invertMouseX then
 			dx = -dx
 		end
-		self.yaw = self.yaw - dx * self.mouseSensitivity
+		self.yaw = self.yaw - dx * self.lookSensitivity
 
 		-- Keep it in range so the number a script or a save sees stays
 		-- small however long someone spins on the spot.
@@ -90,33 +105,12 @@ return Script.define({
 		local forwardX, forwardZ = -math.sin(yawRadians), -math.cos(yawRadians)
 		local rightX, rightZ = math.cos(yawRadians), -math.sin(yawRadians)
 
-		local wishX, wishZ = 0.0, 0.0
-		if ctx.input:isKeyDown(string.byte("W")) then
-			wishX += forwardX
-			wishZ += forwardZ
-		end
-		if ctx.input:isKeyDown(string.byte("S")) then
-			wishX -= forwardX
-			wishZ -= forwardZ
-		end
-		if ctx.input:isKeyDown(string.byte("D")) then
-			wishX += rightX
-			wishZ += rightZ
-		end
-		if ctx.input:isKeyDown(string.byte("A")) then
-			wishX -= rightX
-			wishZ -= rightZ
-		end
+		-- `Move` has already combined and normalised WASD/gamepad bindings.
+		local move = ctx.input:vector2("Move")
+		local wishX = rightX * move.x + forwardX * -move.y
+		local wishZ = rightZ * move.x + forwardZ * -move.y
 
-		-- Normalise, so walking diagonally is not 1.41× faster than
-		-- walking forwards.
-		local length = math.sqrt(wishX * wishX + wishZ * wishZ)
-		if length > 0.0001 then
-			wishX /= length
-			wishZ /= length
-		end
-
-		local speed = if ctx.input:isKeyDown(264) then self.runSpeed else self.walkSpeed
+		local speed = if ctx.input:actionDown("Sprint") then self.runSpeed else self.walkSpeed
 		local targetX, targetZ = wishX * speed, wishZ * speed
 
 		-- Vertical velocity belongs to gravity and to the jump; the
@@ -136,23 +130,57 @@ return Script.define({
 		if self.jumpCooldown > 0 then
 			self.jumpCooldown -= 1
 		end
-		-- `isKeyPressed`, not `isKeyDown`: holding Space is one jump, not
+		-- `actionPressed`, not `actionDown`: holding the binding is one jump, not
 		-- a jump every step you are near the ground.
-		if body.grounded and self.jumpCooldown == 0 and ctx.input:isKeyPressed(32) then
+		if body.grounded and self.jumpCooldown == 0 and ctx.input:actionPressed("Jump") then
 			newY = self.jumpSpeed
 			self.jumpCooldown = math.ceil(2.0 * self.jumpSpeed / 9.81 / dt)
 		end
 
 		body.velocity = vector.create(newX, newY, newZ)
+
+		-- Grounded cadence drives four short CC0 variants through the same
+		-- audio command path gameplay uses. Distance, not a timer, keeps steps
+		-- matched to both walk and sprint speed.
+		--
+		-- `grounded` is the engine's gravity-cancellation test, so this holds
+		-- on a slope. It did not always: while `grounded` meant "vertical speed
+		-- near zero", walking any hill reset the accumulator every step and the
+		-- footsteps arrived seconds late or never.
+		local speed2 = newX * newX + newZ * newZ
+		if body.grounded and speed2 > 0.25 then
+			if not self.walking then
+				-- The first footfall belongs to the moment you start moving,
+				-- not to a stride later. Priming rather than waiting is the
+				-- difference between audio that answers the key and audio that
+				-- trails it by a fifth of a second, every single time.
+				self.walking = true
+				self.footstepDistance = STRIDE_METRES
+			end
+			self.footstepDistance += math.sqrt(speed2) * dt
+			while self.footstepDistance >= STRIDE_METRES do
+				self.footstepDistance -= STRIDE_METRES
+				ctx:playAudio(FOOTSTEP_CLIPS[self.footstepIndex], 0.45)
+				self.footstepIndex = self.footstepIndex % #FOOTSTEP_CLIPS + 1
+			end
+		else
+			self.walking = false
+			self.footstepDistance = 0.0
+		end
 	end,
 
 	-- Only pure data survives a reload; this is all of it.
 	saveState = function(self)
-		return { yaw = self.yaw, jumpCooldown = self.jumpCooldown }
+		return { yaw = self.yaw, jumpCooldown = self.jumpCooldown,
+			footstepDistance = self.footstepDistance, footstepIndex = self.footstepIndex,
+			walking = self.walking }
 	end,
 
 	loadState = function(self, state)
 		self.yaw = state.yaw
 		self.jumpCooldown = state.jumpCooldown
+		self.footstepDistance = state.footstepDistance or 0.0
+		self.footstepIndex = state.footstepIndex or 1
+		self.walking = state.walking or false
 	end,
 })

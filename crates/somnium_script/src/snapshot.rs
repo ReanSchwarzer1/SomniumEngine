@@ -60,39 +60,53 @@ impl Default for TimeSnapshot {
     }
 }
 
+/// One named input action as a fixed step sees it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct InputActionSnapshot {
+    /// Value represented uniformly as two axes. Digital and 1D actions use X.
+    pub value: [f32; 2],
+    /// Whether the value is above the action system's activation threshold.
+    pub active: bool,
+    /// Whether the action became active this frame.
+    pub pressed: bool,
+}
+
 /// Input state as scripts see it.
 ///
-/// Keys are engine key codes, already translated out of the windowing
-/// layer, and the set is sorted so that iterating it is deterministic.
+/// Actions are named gameplay verbs (for example `Move`, `Look`, and `Jump`),
+/// not hardware controls. That keeps scripts valid when a player rebinds a
+/// keyboard key or switches to a gamepad.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InputSnapshot {
-    /// Keys currently held, sorted ascending.
-    pub keys_down: Vec<u32>,
-    /// Keys that went down this step, sorted ascending.
-    pub keys_pressed: Vec<u32>,
-    /// Mouse buttons currently held, sorted ascending.
-    pub mouse_down: Vec<u8>,
-    /// Cursor movement since the previous step, in pixels.
-    pub mouse_delta: [f32; 2],
+    /// Deterministically ordered action values, keyed by authored name.
+    pub actions: BTreeMap<String, InputActionSnapshot>,
 }
 
 impl InputSnapshot {
-    /// Whether a key is held.
+    /// Whether a named action is active.
     #[must_use]
-    pub fn is_key_down(&self, key: u32) -> bool {
-        self.keys_down.binary_search(&key).is_ok()
+    pub fn action_down(&self, action: &str) -> bool {
+        self.actions.get(action).is_some_and(|state| state.active)
     }
 
-    /// Whether a key went down this step.
+    /// Whether a named action became active this frame.
     #[must_use]
-    pub fn is_key_pressed(&self, key: u32) -> bool {
-        self.keys_pressed.binary_search(&key).is_ok()
+    pub fn action_pressed(&self, action: &str) -> bool {
+        self.actions.get(action).is_some_and(|state| state.pressed)
     }
 
-    /// Whether a mouse button is held.
+    /// Read a named action as one axis.
     #[must_use]
-    pub fn is_mouse_down(&self, button: u8) -> bool {
-        self.mouse_down.binary_search(&button).is_ok()
+    pub fn axis(&self, action: &str) -> f32 {
+        self.actions.get(action).map_or(0.0, |state| state.value[0])
+    }
+
+    /// Read a named action as a 2D vector.
+    #[must_use]
+    pub fn vector2(&self, action: &str) -> [f32; 2] {
+        self.actions
+            .get(action)
+            .map_or([0.0; 2], |state| state.value)
     }
 }
 
@@ -237,26 +251,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_lookups_use_the_sorted_invariant() {
+    fn input_lookups_are_named_and_typed() {
         let input = InputSnapshot {
-            keys_down: vec![10, 20, 30],
-            keys_pressed: vec![20],
-            mouse_down: vec![0, 2],
-            mouse_delta: [1.0, -2.0],
+            actions: [(
+                "Move".to_string(),
+                InputActionSnapshot {
+                    value: [1.0, -0.5],
+                    active: true,
+                    pressed: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
-        assert!(input.is_key_down(20));
-        assert!(!input.is_key_down(21));
-        assert!(input.is_key_pressed(20));
-        assert!(!input.is_key_pressed(10), "held is not the same as pressed");
-        assert!(input.is_mouse_down(2));
-        assert!(!input.is_mouse_down(1));
+        assert!(input.action_down("Move"));
+        assert!(input.action_pressed("Move"));
+        assert_eq!(input.axis("Move"), 1.0);
+        assert_eq!(input.vector2("Move"), [1.0, -0.5]);
     }
 
     #[test]
     fn an_empty_input_snapshot_reports_nothing_held() {
         let input = InputSnapshot::default();
-        assert!(!input.is_key_down(0));
-        assert!(!input.is_mouse_down(0));
-        assert!(input.mouse_delta.iter().all(|d| d.abs() < f32::EPSILON));
+        assert!(!input.action_down("Nothing"));
+        assert!(!input.action_pressed("Nothing"));
+        assert_eq!(input.vector2("Nothing"), [0.0; 2]);
     }
 }

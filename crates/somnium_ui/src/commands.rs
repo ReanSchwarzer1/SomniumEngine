@@ -281,6 +281,14 @@ pub enum CommandAction {
     ContentNewMaterial,
     ContentRename,
     ContentShowInFolder,
+    /// Open the chosen content item: a scene loads, a folder is entered,
+    /// anything else goes to the external editor.
+    ContentOpen,
+    /// Put the chosen content item into the matching asset field of the
+    /// selected entity.
+    ContentAssignToSelection,
+    /// Choose a scene file from disk and load it.
+    OpenScene,
     ContentRefresh,
     OpenPreferences,
     OpenProjectPicker,
@@ -756,6 +764,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.scene.open",
+            "Open Scene…",
+            "Scene",
+            ctrl('O'),
+            "Choose a scene file on disk and load it.",
+            A::OpenScene,
+            FILE,
+            always
+        ),
+        command!(
             "editor.file.open_project",
             "Open Project...",
             "File",
@@ -1156,6 +1174,36 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.create.audio_emitter",
+            "Create Audio Emitter",
+            "Create",
+            None,
+            "Create an authored spatial sound source.",
+            A::CreateEntity(C::AudioEmitter),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.spline",
+            "Create Spline",
+            "Create",
+            None,
+            "Create an authored path: the primitive shaped emitters and roads read.",
+            A::CreateEntity(C::Spline),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.shoreline_audio",
+            "Create Shoreline Audio",
+            "Create",
+            None,
+            "Create an audio emitter heard along a path rather than from a point.",
+            A::CreateEntity(C::ShorelineAudio),
+            CREATE,
+            always
+        ),
+        command!(
             "editor.create.terrain",
             "Create Terrain",
             "Create",
@@ -1242,6 +1290,26 @@ fn declarations() -> Vec<Command> {
             None,
             "Reveal the chosen content item in the operating system.",
             A::ContentShowInFolder,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.open",
+            "Open",
+            "Content",
+            None,
+            "Open the chosen content item: a scene loads, a folder is entered.",
+            A::ContentOpen,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.assign_to_selection",
+            "Assign to Selection",
+            "Content",
+            None,
+            "Put the chosen asset into the matching field of the selected entity.",
+            A::ContentAssignToSelection,
             CONTENT,
             content_target
         ),

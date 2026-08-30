@@ -1056,6 +1056,15 @@ impl ScriptHost {
                     Err(error) => self.rejections.push(format!("playAudio {path}: {error}")),
                 }
             }
+        } else if !outcome.audio.is_empty() {
+            // Silence with no explanation is the worst outcome here: an
+            // audio backend that would not start leaves `services.audio`
+            // empty, and without this the scripts asking for sound look
+            // exactly like scripts that are working.
+            self.rejections.push(format!(
+                "playAudio: no audio backend is running, so {} sound(s) were dropped",
+                outcome.audio.len()
+            ));
         }
 
         // Despawned entities take their attachments with them.

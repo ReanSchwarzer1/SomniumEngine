@@ -502,35 +502,35 @@ pub fn build_ctx<'scope, 'env>(
     // ── Input ────────────────────────────────────────────────────
     let input = lua.create_table()?;
     {
-        let keys_down = snapshot.input.keys_down.clone();
+        let actions = snapshot.input.actions.clone();
         input.set(
-            "isKeyDown",
-            scope.create_function(move |_, (_self, key): (Table, u32)| {
-                Ok(keys_down.binary_search(&key).is_ok())
+            "actionDown",
+            scope.create_function(move |_, (_self, name): (Table, String)| {
+                Ok(actions.get(&name).is_some_and(|state| state.active))
             })?,
         )?;
-        let keys_pressed = snapshot.input.keys_pressed.clone();
+        let actions = snapshot.input.actions.clone();
         input.set(
-            "isKeyPressed",
-            scope.create_function(move |_, (_self, key): (Table, u32)| {
-                Ok(keys_pressed.binary_search(&key).is_ok())
+            "actionPressed",
+            scope.create_function(move |_, (_self, name): (Table, String)| {
+                Ok(actions.get(&name).is_some_and(|state| state.pressed))
             })?,
         )?;
-        let mouse_down = snapshot.input.mouse_down.clone();
+        let actions = snapshot.input.actions.clone();
         input.set(
-            "isMouseDown",
-            scope.create_function(move |_, (_self, button): (Table, u8)| {
-                Ok(mouse_down.binary_search(&button).is_ok())
+            "axis",
+            scope.create_function(move |_, (_self, name): (Table, String)| {
+                Ok(actions.get(&name).map_or(0.0, |state| state.value[0]))
             })?,
         )?;
-        // Plain numbers rather than a call, because look code reads them
-        // every step and a host call for a value already sitting in the
-        // snapshot would be two hundred nanoseconds for nothing.
-        //
-        // Pixels since the previous fixed step, already accumulated — a
-        // script must not have to know the frame rate to aim.
-        input.set("mouseDeltaX", snapshot.input.mouse_delta[0])?;
-        input.set("mouseDeltaY", snapshot.input.mouse_delta[1])?;
+        let actions = snapshot.input.actions.clone();
+        input.set(
+            "vector2",
+            scope.create_function(move |_, (_self, name): (Table, String)| {
+                let value = actions.get(&name).map_or([0.0; 2], |state| state.value);
+                Ok(mlua::Vector::new(value[0], value[1], 0.0))
+            })?,
+        )?;
     }
     ctx.set("input", input)?;
 
@@ -644,6 +644,25 @@ pub fn build_ctx<'scope, 'env>(
                     } else {
                         ForceMode::Force
                     },
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    ctx.set(
+        "playAudio",
+        scope.create_function(
+            move |_, (_ctx, asset_path, volume): (Table, String, Option<f64>)| {
+                let volume = volume.unwrap_or(1.0) as f32;
+                if !volume.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "audio volume must be finite".into(),
+                    ));
+                }
+                commands.borrow_mut().push(ScriptCommand::PlayAudio {
+                    asset: ScriptAssetId::from_path(&asset_path),
+                    volume,
                 });
                 Ok(())
             },

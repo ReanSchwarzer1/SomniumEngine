@@ -19,17 +19,11 @@ use somnium_script::attachment::{ScriptAttachment, ScriptSet};
 use somnium_script::backend::Budget;
 use somnium_script::ids::{InstanceUuid, ScriptAssetId};
 use somnium_script::runtime::PhaseInput;
-use somnium_script::snapshot::{InputSnapshot, TimeSnapshot};
+use somnium_script::snapshot::{InputActionSnapshot, InputSnapshot, TimeSnapshot};
 use somnium_script::value::ScriptValue;
 
 const CONTROLLER: &str = include_str!("../../../assets/scripts/first_person_controller.luau");
 const CAMERA: &str = include_str!("../../../assets/scripts/first_person_camera.luau");
-
-/// Engine key numbers, as `script_input` defines them.
-const KEY_W: u32 = b'W' as u32;
-const KEY_A: u32 = b'A' as u32;
-const KEY_SPACE: u32 = 32;
-const KEY_SHIFT: u32 = 264;
 
 /// Serialises Jolt world creation across the cases in this binary.
 ///
@@ -61,6 +55,16 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        Self::on_slope(0.0)
+    }
+
+    /// The same rig with the floor tilted `slope_deg` about X.
+    ///
+    /// A hill is not a decoration here: a body walking one has a
+    /// legitimate vertical speed, which is the input that the original
+    /// `grounded` heuristic could not tell from falling. Every character
+    /// test that only ever ran on flat ground agreed with it.
+    fn on_slope(slope_deg: f32) -> Self {
         let jolt = JOLT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -82,9 +86,10 @@ impl Rig {
         // A wide floor at y = 0, so "grounded" and "jump" mean something.
         physics.create_body(RigidBodyDescriptor {
             shape: ColliderShape::Box {
-                half_extents: glam::Vec3::new(60.0, 0.5, 60.0),
+                half_extents: glam::Vec3::new(200.0, 0.5, 200.0),
             },
             position: glam::Vec3::new(0.0, -0.5, 0.0),
+            rotation: glam::Quat::from_rotation_x(slope_deg.to_radians()),
             motion_type: MotionType::Static,
             object_layer: LAYER_NON_MOVING,
             ..Default::default()
@@ -174,7 +179,7 @@ impl Rig {
             self.host.sync(&mut self.world, &phase, &mut services);
         }
 
-        read_physics_into_world(&mut self.world, &self.physics);
+        read_physics_into_world(&mut self.world, &self.physics, 1.0 / 60.0);
         {
             let mut services = HostServices {
                 physics: Some(&mut self.physics),
@@ -183,7 +188,7 @@ impl Rig {
             self.host
                 .fixed_update(&mut self.world, time, input, &mut services);
         }
-        write_world_into_physics(&self.world, &mut self.physics);
+        write_world_into_physics(&mut self.world, &mut self.physics);
         self.physics.step(1.0 / 60.0);
         propagate_transforms(&mut self.world);
         self.step += 1;
@@ -200,6 +205,13 @@ impl Rig {
             .get::<Transform>(self.player)
             .unwrap()
             .translation
+    }
+
+    fn grounded(&self) -> bool {
+        self.world
+            .get::<RigidBodyComponent>(self.player)
+            .unwrap()
+            .grounded
     }
 
     fn eye(&self) -> glam::Vec3 {
@@ -221,32 +233,32 @@ impl Rig {
     }
 }
 
-fn keys(down: &[u32]) -> InputSnapshot {
-    let mut sorted = down.to_vec();
-    sorted.sort_unstable();
+fn action(name: &str, value: [f32; 2], pressed: bool) -> InputSnapshot {
+    let active = value[0].abs().max(value[1].abs()) > 0.5;
     InputSnapshot {
-        keys_down: sorted,
-        ..InputSnapshot::default()
+        actions: [(name.to_string(), InputActionSnapshot { value, active, pressed })]
+            .into_iter()
+            .collect(),
     }
 }
 
-/// Keys held *and* reported as newly pressed this step — what the tracker
-/// produces on the frame a key goes down.
-fn press(down: &[u32]) -> InputSnapshot {
-    let mut sorted = down.to_vec();
-    sorted.sort_unstable();
-    InputSnapshot {
-        keys_down: sorted.clone(),
-        keys_pressed: sorted,
-        ..InputSnapshot::default()
+fn movement(x: f32, y: f32, sprint: bool) -> InputSnapshot {
+    let mut input = action("Move", [x, y], false);
+    if sprint {
+        input.actions.insert(
+            "Sprint".to_string(),
+            InputActionSnapshot { value: [1.0, 0.0], active: true, pressed: false },
+        );
     }
+    input
 }
 
-fn mouse(dx: f32, dy: f32) -> InputSnapshot {
-    InputSnapshot {
-        mouse_delta: [dx, dy],
-        ..InputSnapshot::default()
-    }
+fn jump(pressed: bool) -> InputSnapshot {
+    action("Jump", [1.0, 0.0], pressed)
+}
+
+fn look(x: f32, y: f32) -> InputSnapshot {
+    action("Look", [x, y], false)
 }
 
 // ── The scripts themselves ─────────────────────────────────────────────
@@ -267,7 +279,7 @@ fn both_character_scripts_compile_and_declare_their_fields() {
             "airControl",
             "invertMouseX",
             "jumpSpeed",
-            "mouseSensitivity",
+            "lookSensitivity",
             "runSpeed",
             "walkSpeed"
         ],
@@ -289,7 +301,7 @@ fn both_character_scripts_compile_and_declare_their_fields() {
         vec![
             "eyeHeight",
             "invertMouseY",
-            "mouseSensitivity",
+            "lookSensitivity",
             "pitchLimit"
         ]
     );
@@ -328,7 +340,7 @@ fn w_walks_forward_and_releasing_it_stops_dead() {
     rig.run(10, &InputSnapshot::default());
     let start = rig.position();
 
-    rig.run(60, &keys(&[KEY_W]));
+    rig.run(60, &movement(0.0, -1.0, false));
     let walked = rig.position();
     let travelled = (walked - start).length();
     assert!(
@@ -358,11 +370,11 @@ fn shift_runs_and_it_is_measurably_faster_than_walking() {
     rig.run(10, &InputSnapshot::default());
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let walked = (rig.position() - before).length();
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W, KEY_SHIFT]));
+    rig.run(30, &movement(0.0, -1.0, true));
     let ran = (rig.position() - before).length();
 
     assert!(
@@ -379,11 +391,12 @@ fn strafing_diagonally_is_not_faster_than_walking_straight() {
     rig.run(10, &InputSnapshot::default());
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let straight = (rig.position() - before).length();
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W, KEY_A]));
+    let diagonal = -1.0 / 2.0_f32.sqrt();
+    rig.run(30, &movement(diagonal, diagonal, false));
     let diagonal = (rig.position() - before).length();
 
     assert!(
@@ -399,16 +412,16 @@ fn the_mouse_turns_the_player_and_walking_follows_the_new_facing() {
     let mut rig = Rig::new();
     rig.run(10, &InputSnapshot::default());
 
-    // A quarter turn: 90° at 0.12°/pixel is 750 pixels.
-    rig.step(&mouse(750.0, 0.0));
+    // The default mouse binding scales 750 pixels by 0.1 into 75 Look units.
+    rig.step(&look(75.0, 0.0));
     let yaw = rig.state(rig.controller, "yaw");
     assert!(
         (yaw + 90.0).abs() < 1.0,
-        "750 px at 0.12°/px should be about -90°, got {yaw}"
+        "75 Look units at 1.2°/unit should be about -90°, got {yaw}"
     );
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let moved = rig.position() - before;
     assert!(
         moved.x.abs() > moved.z.abs() * 3.0,
@@ -422,14 +435,14 @@ fn pitch_is_clamped_so_the_view_never_flips() {
     rig.run(5, &InputSnapshot::default());
 
     // Far more than enough to pass vertical.
-    rig.run(40, &mouse(0.0, -200.0));
+    rig.run(40, &look(0.0, -20.0));
     let pitch = rig.state(rig.camera_instance, "pitch");
     assert!(
         (pitch - 89.0).abs() < 0.001,
         "looking up must stop at the limit, got {pitch}"
     );
 
-    rig.run(80, &mouse(0.0, 200.0));
+    rig.run(80, &look(0.0, 20.0));
     let pitch = rig.state(rig.camera_instance, "pitch");
     assert!(
         (pitch + 89.0).abs() < 0.001,
@@ -440,7 +453,7 @@ fn pitch_is_clamped_so_the_view_never_flips() {
 #[test]
 fn the_camera_rides_at_eye_height_on_the_player() {
     let mut rig = Rig::new();
-    rig.run(20, &keys(&[KEY_W]));
+    rig.run(20, &movement(0.0, -1.0, false));
 
     let eye = rig.eye();
     let feet = rig.position();
@@ -464,10 +477,10 @@ fn space_jumps_and_the_character_comes_back_down() {
 
     // One press, then the key merely held — which is what the input
     // tracker reports for a key someone is resting a finger on.
-    rig.step(&press(&[KEY_SPACE]));
+    rig.step(&jump(true));
     let mut peak = ground;
     for _ in 0..40 {
-        rig.step(&keys(&[KEY_SPACE]));
+        rig.step(&jump(false));
         peak = peak.max(rig.position().y);
     }
     assert!(
@@ -497,7 +510,7 @@ fn the_cooldown_stops_a_free_second_jump_at_the_apex() {
 
     let mut peak = ground;
     for _ in 0..120 {
-        rig.step(&press(&[KEY_SPACE]));
+        rig.step(&jump(true));
         peak = peak.max(rig.position().y);
     }
     assert!(
@@ -513,7 +526,7 @@ fn the_cooldown_stops_a_free_second_jump_at_the_apex() {
 fn look_direction_survives_a_reload() {
     let mut rig = Rig::new();
     rig.run(5, &InputSnapshot::default());
-    rig.step(&mouse(300.0, -100.0));
+    rig.step(&look(30.0, -10.0));
 
     let yaw = rig.state(rig.controller, "yaw");
     let pitch = rig.state(rig.camera_instance, "pitch");
@@ -530,5 +543,109 @@ fn look_direction_survives_a_reload() {
     assert!(
         (rig.state(rig.controller, "yaw") - yaw).abs() < 0.001,
         "an author editing the walk speed must not spin the player round"
+    );
+}
+
+// ── Footing ────────────────────────────────────────────────────────────
+
+/// Walk each slope for ten seconds and report `(grounded steps, footfalls)`.
+///
+/// A footfall is counted by watching `footstepIndex`, which the controller
+/// advances once per `ctx:playAudio`. That makes the cadence observable
+/// without an audio device, which is the only reason this can run in CI.
+fn walk_a_slope(slope_deg: f32) -> (u32, u32) {
+    let mut rig = Rig::on_slope(slope_deg);
+    rig.run(30, &InputSnapshot::default());
+
+    let walk = movement(0.0, -1.0, false);
+    let mut previous = rig.state(rig.controller, "footstepIndex");
+    let (mut grounded, mut footfalls) = (0, 0);
+    for _ in 0..600 {
+        rig.step(&walk);
+        if rig.grounded() {
+            grounded += 1;
+        }
+        let index = rig.state(rig.controller, "footstepIndex");
+        if (index - previous).abs() > 0.001 {
+            footfalls += 1;
+            previous = index;
+        }
+    }
+    (grounded, footfalls)
+}
+
+#[test]
+fn a_slope_is_not_the_same_thing_as_falling() {
+    // The bug this test exists for: `grounded` was `velocity.y.abs() <
+    // 0.35`, and a character walking at 4.5 m/s up a five-degree rise has
+    // a vertical speed of 0.39 — over the line. Ten degrees read as
+    // airborne on 599 of 600 steps. Nothing on flat ground could see it,
+    // which is why every hill in the engine had a character that could not
+    // jump and did not make a sound.
+    for slope in [0.0_f32, 5.0, 10.0, 20.0, 30.0] {
+        let (grounded, _) = walk_a_slope(slope);
+        assert!(
+            grounded >= 590,
+            "walking a {slope}-degree slope must not read as falling:              grounded on only {grounded} of 600 steps"
+        );
+    }
+}
+
+#[test]
+fn footsteps_keep_their_cadence_on_a_hill() {
+    // Distance-driven cadence is slope-independent by construction, so the
+    // count is allowed to differ by one footfall and no more. Before the
+    // `grounded` fix this was 25 footfalls on the flat and none at all at
+    // ten degrees.
+    let (_, flat) = walk_a_slope(0.0);
+    assert!(
+        flat >= 20,
+        "ten seconds of walking is more than {flat} footsteps"
+    );
+    for slope in [5.0_f32, 10.0, 20.0, 30.0] {
+        let (_, hill) = walk_a_slope(slope);
+        assert!(
+            hill.abs_diff(flat) <= 1,
+            "a {slope}-degree slope changed the cadence: {hill} footfalls against              {flat} on the flat"
+        );
+    }
+}
+
+#[test]
+fn the_first_footstep_lands_on_the_first_step_taken() {
+    // Waiting a full stride before the first sound puts the audio a fifth
+    // of a second behind the key, every time the player starts walking —
+    // which reads as broken rather than as latency.
+    let mut rig = Rig::new();
+    rig.run(30, &InputSnapshot::default());
+    let before = rig.state(rig.controller, "footstepIndex");
+
+    rig.step(&movement(0.0, -1.0, false));
+    assert!(
+        (rig.state(rig.controller, "footstepIndex") - before).abs() > 0.001,
+        "the first fixed step of walking should already have asked for a footstep"
+    );
+}
+
+#[test]
+fn a_jump_still_leaves_the_ground() {
+    // The counterweight to the coyote window: grace measured in a handful
+    // of steps must not turn into a character who is never airborne, or
+    // the flag stops meaning anything and the jump gate opens in mid-air.
+    let mut rig = Rig::new();
+    rig.run(15, &InputSnapshot::default());
+    assert!(rig.grounded(), "standing on the floor");
+
+    rig.step(&jump(true));
+    let mut airborne = 0;
+    for _ in 0..60 {
+        rig.step(&InputSnapshot::default());
+        if !rig.grounded() {
+            airborne += 1;
+        }
+    }
+    assert!(
+        airborne > 40,
+        "most of a one-second flight should read as airborne, not {airborne} steps"
     );
 }

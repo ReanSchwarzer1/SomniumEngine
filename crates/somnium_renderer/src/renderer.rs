@@ -213,6 +213,13 @@ pub struct SomniumRenderer {
     light_gizmo_pass: crate::pass::light_gizmo::LightGizmoPass,
     /// Light gizmos submitted this frame.
     light_gizmo_queue: Vec<crate::pass::light_gizmo::LightGizmoDesc>,
+    /// Free-form editor lines, drawn in the same batch as the light gizmos.
+    ///
+    /// `LightGizmoDesc` describes one of a fixed set of shapes; a spline is a
+    /// polyline whose length the author decides, and squeezing that through a
+    /// struct of fixed fields would have meant either a second pass or a
+    /// pretend "light" with a point list bolted on.
+    line_gizmo_queue: Vec<crate::pass::light_gizmo::LineVertex>,
     /// When true, submitted light gizmos are drawn (toggle with `L`).
     light_gizmos_enabled: bool,
     /// Master switch for editor-only viewport overlays. Play-in-editor keeps
@@ -902,6 +909,7 @@ impl SomniumRenderer {
             gizmo_world_pos: None,
             light_gizmo_pass,
             light_gizmo_queue: Vec::new(),
+            line_gizmo_queue: Vec::new(),
             light_gizmos_enabled: true,
             editor_overlays_enabled: true,
             game_ui_empty_warned: false,
@@ -1440,6 +1448,17 @@ impl SomniumRenderer {
     }
 
     /// Whether editor-only viewport overlays may be drawn or picked.
+    /// The view-projection to use for cursor picking.
+    ///
+    /// **Not** [`Self::view_proj`], which carries the per-frame sub-pixel
+    /// jitter FSR and TAA need. Editor overlays — the gizmo included — are
+    /// drawn with the unjittered matrix, so picking must use it too or the
+    /// ray and the arrow the user aimed at disagree by the jitter.
+    #[must_use]
+    pub fn picking_view_proj(&self) -> glam::Mat4 {
+        self.view_proj_unjittered
+    }
+
     pub fn editor_overlays_enabled(&self) -> bool {
         self.editor_overlays_enabled
     }
@@ -1542,6 +1561,17 @@ impl SomniumRenderer {
     /// light it wants visualized.
     pub fn submit_light_gizmo(&mut self, desc: crate::pass::light_gizmo::LightGizmoDesc) {
         self.light_gizmo_queue.push(desc);
+    }
+
+    /// Queue raw line-list vertices for this frame's editor overlay.
+    ///
+    /// Pairs, in world space. Cleared with the rest of the gizmo queues at the
+    /// end of the frame, so a caller submits every frame it wants them.
+    pub fn submit_gizmo_lines(
+        &mut self,
+        vertices: impl IntoIterator<Item = crate::pass::light_gizmo::LineVertex>,
+    ) {
+        self.line_gizmo_queue.extend(vertices);
     }
 
     /// Show or hide light gizmos (on by default).
@@ -4284,9 +4314,11 @@ impl SomniumRenderer {
         // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
         if self.editor_overlays_enabled
             && self.light_gizmos_enabled
-            && !self.light_gizmo_queue.is_empty()
+            && !(self.light_gizmo_queue.is_empty() && self.line_gizmo_queue.is_empty())
         {
-            let lines = crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
+            let mut lines =
+                crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
+            lines.extend_from_slice(&self.line_gizmo_queue);
             self.light_gizmo_pass.record(
                 &ctx.device,
                 &ctx.queue,
@@ -4499,6 +4531,7 @@ impl SomniumRenderer {
         self.terrain_queue.clear();
         self.transparent_queue.clear();
         self.light_gizmo_queue.clear();
+        self.line_gizmo_queue.clear();
     }
 
     /// Compact revision of every input that changes a reference path sample.

@@ -234,6 +234,25 @@ impl UserInterface {
         self.drag_drop.release()
     }
 
+    /// Why the drop under the pointer would be refused, if it would be.
+    ///
+    /// [`Self::take_completed_drop`] returns `None` both for "there was no
+    /// drag" and for "the drag ended over something that will not take it",
+    /// and the caller could not tell the two apart — so a drop onto the wrong
+    /// field, or onto a field whose asset the database had not indexed, did
+    /// nothing at all and said nothing at all. That is the worst outcome
+    /// available: the user cannot tell a refusal from a bug.
+    #[must_use]
+    pub fn drop_rejection_reason(&self) -> Option<String> {
+        let acceptance = self.drag_drop.acceptance()?;
+        (!acceptance.can_drop()).then(|| {
+            acceptance
+                .reason
+                .clone()
+                .unwrap_or_else(|| "That cannot be dropped here".to_string())
+        })
+    }
+
     pub fn parent(&self, handle: NodeHandle) -> NodeHandle {
         self.nodes
             .try_borrow(to_ih(handle))

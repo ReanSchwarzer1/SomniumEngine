@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-08-29 at `d9d0009`.
+Last verified: 2026-08-30 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -18,13 +18,14 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 |---|---|
 | Active phase | MORROWIND, partially complete |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
-| Latest MORROWIND work | AC: weighted OIT, one anti-aliasing setting, and SMAA |
+| Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Next planned phases | PORTAL, KENSHI, then STALKER; none has started |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
 | Generated census | 188,732 Rust/WGSL lines and 1,864 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Current gate failure | `sculpt-panel` golden image: 5.3333% changed, budget 0.2% |
+| Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
 
 The top-level phase status is:
 
@@ -96,6 +97,11 @@ Authored entities and component data stored through the versioned scene schema.
 Unknown components and fields must survive a load and save cycle.
 _Avoid_: level when referring to the file format
 
+**Audio Emitter**:
+Serialized ECS intent for a sound source, including its asset, playback, bus,
+and spatial authoring. It is not a live audio-backend resource.
+_Avoid_: audio object, Kira handle
+
 ### Editing
 
 **Schema**:
@@ -156,6 +162,16 @@ _Avoid_: bare thread, rayon spawn outside the allowed worker
 A copy-out view given to a script for one phase. Scripts return commands and do
 not retain ECS borrows.
 _Avoid_: script world reference
+
+**Input action**:
+A named semantic value such as `Move`, `Look`, or `Jump`, resolved from physical
+controls by an action map.
+_Avoid_: key when the binding may also be a mouse or gamepad control
+
+**Live voice**:
+A transient audio-backend playback resource reconciled from authored intent
+during Play. It is never serialized.
+_Avoid_: Audio Emitter, saved sound handle
 
 **Evidence**:
 A generated report, test result, image, or timing capture tied to a command and
@@ -949,6 +965,25 @@ Current conservative defaults matter:
   opt-in. The last two measured slower in their original tests.
 - Weighted OIT is off unless authored.
 
+The night sky's stars are procedural, and sized in pixels rather than in
+radians. That took two goes to get right. The original used a fixed angular
+radius of about a seventh of a pixel at a normal field of view, so every star
+was smaller than the pixel it landed in, the smoothstep meant to soften it had
+no sub-pixel room to work in, and what reached the screen was a grid of
+hard-edged fully-lit pixels: blocky squares. The first fix over-corrected. A
+core wider than a pixel plus a ten-percent *exponential* skirt has a fat tail,
+and the skirt stayed visible six or seven pixels out, so the sky filled with
+soft glowing blobs instead. Both terms are Gaussian now, so the halo falls off
+as fast as the core does. The core is a multiple of `fwidth(dir)` and
+sub-pixel at the faint end, brighter stars are drawn slightly larger, and the
+density is roughly a sixth of where this started.
+
+Wicked, Flax and Godot all render a night sky from a star-map texture rather
+than from a hash. A 4K panorama is the higher-fidelity answer and is still
+available. The procedural field is what works with no asset in the project, and
+both of its failures were profile bugs rather than anything inherent to the
+approach.
+
 ### Post processing and anti-aliasing
 
 The HDR chain includes AgX/ACES tone mapping, bloom, depth of field, motion
@@ -1271,7 +1306,23 @@ could set it would be able to point one entity's controls at another's body, and
 an index saved from the last run names a different body in this one.
 
 The examples include a scripted first-person character. Its grounded state is
-a documented heuristic, not a general character-controller guarantee.
+a documented heuristic, not a general character-controller guarantee — but it
+is a heuristic about the right quantity. `grounded` asks whether a step's
+gravity was **cancelled**, not whether vertical speed is near zero: a contact
+cancels gravity whatever the body's speed along the surface, while a falling
+body loses `g * dt` every step. The comparison is against the velocity handed
+to Jolt rather than the one read back, so a scripted jump is not mistaken for
+free fall, and support may lapse for four steps before the flag drops, which
+bridges the gaps a capsule crosses walking over heightfield triangle edges.
+
+The earlier test was `velocity.y.abs() < 0.35`, which is only true of a body
+standing on *flat* ground. A character walking a five-degree rise at 4.5 m/s
+has a vertical speed of 0.39, so every character on every hill read as
+airborne: no jump, and no footsteps. Nothing on flat ground could see it, which
+is why `crates/somnium_core/tests/first_person.rs` now runs its walk on a
+tilted floor as well as a level one. A real shape cast is still the honest
+answer and still a `somnium_physics` job; the field's meaning does not change
+when that lands.
 
 Navigation meshes, pathfinding, behavior trees, and perception are not in the
 tree.
@@ -1299,6 +1350,15 @@ It supports keyboard and gamepad controls, radial dead zones, inversion,
 scaling, tap/hold/multi-tap interactions, action maps, conflict reporting, and
 runtime rebinding.
 
+Scripts consume the same named actions as games and editor systems. Their input
+snapshot exposes `actionDown`, `actionPressed`, `axis`, and `vector2`; physical
+keys, mouse buttons, and device-specific names do not cross the language-neutral
+script boundary. Press edges are retained until a fixed step consumes them, so a
+short input is not lost when the render loop runs faster than simulation. The
+shipped first-person controller and camera use `Move`, `Look`, `Jump`, and
+`Sprint`, and therefore follow rebinding and action-map changes without script
+edits.
+
 ### Audio
 
 The Kira-backed audio crate supports sounds, listeners, buses, authored
@@ -1306,9 +1366,25 @@ attenuation curves, cones, occlusion, Doppler, and editor/game integration.
 Audio is no longer the 93-line placeholder described by the original MORROWIND
 audit.
 
+An **Audio Emitter** is serialized ECS authoring: asset identity, playback
+settings, bus, spatial policy, attenuation, cone, occlusion factor, and Doppler
+scale. A **live voice** is the transient Kira resource created from that intent
+during Play. The runtime reconciles the two instead of saving backend handles;
+Pause suspends live voices, Stop releases them, and duplication, deletion,
+hierarchy transforms, and property edits remain ordinary ECS operations. The
+schema-generated Details panel, `Create Audio Emitter` command, audio-only asset
+picker, and cyan range/cone gizmos all consume the same authored component. The
+picker is a searchable dropdown over the asset database filtered by the field's
+`asset_kind_mask`, and that same mask makes the row a drop target: dragging a
+clip out of the Content Drawer onto it assigns the field in one undo step, and
+dragging a texture onto it is refused with a reason.
+
 ```mermaid
 flowchart TB
-    REQ["play, play_on, play_spatial"] --> CACHE["sound cache<br/>decoded once, hits and misses counted"]
+    AUTHOR["Audio Emitter<br/>serialized ECS intent"] --> RECON["runtime reconciliation<br/>Play, Pause, Stop"]
+    SCRIPT["ctx:playAudio<br/>ordered one-shot command"] --> REQ["play, play_on, play_spatial"]
+    RECON --> REQ
+    REQ --> CACHE["sound cache<br/>decoded once, hits and misses counted"]
     CACHE --> BUS["mixer bus<br/>volume, mute, solo"]
     BUS --> SPATIAL{"spatial?"}
     SPATIAL -->|no| SET
@@ -1322,13 +1398,62 @@ flowchart TB
     EVAL --> AUD{"audible?"}
     AUD -->|"past max range"| NONE["Ok(None), nothing scheduled"]
     AUD -->|yes| SET["gain, pan, playback rate"]
-    SET --> KIRA["Kira"]
+    SET --> VOICE["live voice<br/>gain, pan, rate updated in place"]
+    VOICE --> KIRA["Kira"]
 ```
 
 **Occlusion is an input, not something this crate computes.** It would need a
 raycast, and the audio crate deliberately does not depend on the physics one:
 a sound system that cannot be tested without a physics world is a sound system
 nobody tests. The caller does the trace and passes a number.
+
+The Coastal and Island acceptance maps ship overlapping spatial surf and splash
+emitters, while the first-person controller drives four distance-based footstep
+one-shots through `ctx:playAudio`. Their cadence is a property of the character,
+not of the audio crate: the first shipped version accumulated distance only
+while `grounded`, and reset it otherwise, so the old vertical-speed heuristic
+starved it on any hill — footsteps arrived seconds late or not at all. It now
+also fires the first footfall on the step you start walking rather than a full
+stride later, because audio that trails the key by a fifth of a second reads as
+broken rather than as latency. `playAudio` with no audio backend now says so
+instead of returning silence. All seven CC0 fixtures are decoded by the
+workspace tests; their sources, licences, and hashes are recorded in
+[`ATTRIBUTION.md`](ATTRIBUTION.md). On 2026-08-30 the complete serial workspace
+test run passed with zero failures. This proves decoding, reconciliation, input,
+script, scene-schema, editor, and example integration; whether a particular
+output device is audible remains an interactive acceptance check.
+
+### Splines
+
+`SplineComponent` is an authored path: control points in entity-local space and
+a `closed` flag. The curve through them is uniform Catmull-Rom, which
+*interpolates* its control points. The curve passes exactly through what the
+author placed, and it needs no tangent handles, which is why it is the usual
+choice for level-editor paths.
+
+Queries run against a sampled polyline rather than the analytic curve. Solving
+for the nearest point on the real curve means a numerical pass per segment per
+query; sampling is a few hundred dot products against the same polyline the
+viewport draws. What an author sees is therefore what the engine uses, and the
+error is bounded by a sampling rate they can read.
+
+The spline knows nothing about audio. It is its own component because a road, a
+river, a fence line and a camera rail are the same primitive, and each would
+otherwise have arrived carrying its own point list, its own serialization and
+its own editor handles.
+
+Control points are edited in Details like any other field, through the
+collection editor described under *Why things are the way they are*: a numeric
+strip per point, duplicate and remove beside each, an append at the foot.
+
+An audio emitter on a spline is an ordinary Audio Emitter whose entity also
+carries one. There is no second component and no second code path. The audio
+runtime asks where a sound is; a spline answers "at your nearest point" and
+everything else answers "at my origin". That one difference is what lets a
+single emitter cover a whole shoreline. Walk the beach and the surf stays
+beside you; walk inland and it fades with distance from the water rather than
+from a marker somewhere out at sea. `Create → Shoreline Audio` makes both at
+once.
 
 ### Localisation
 
@@ -1609,10 +1734,37 @@ does not overlap. STALKER waits for both relevant outputs.
 - `context.md` and several old phase preambles had drifted. This rewrite makes
   the current ledger explicit, but those historical files still need care when
   used as plans.
+- Dragging an asset out of the Content Drawer onto a Details asset field has a
+  complete and tested semantic route, and has now been reported as doing
+  nothing in the running editor three separate times. Every stage of the drag
+  leaves a breadcrumb in the Output Log, so the next run names the link that
+  breaks instead of costing another round of reading. Two routes that do not
+  depend on a drag at all ship beside it: `Assign to Selection` in the drawer's
+  context menu, and `Use Selected` on every asset row in Details. Unreal ships
+  that second button for the same reason a drag has a dozen ways to not quite
+  happen, and every one of them looks like a broken feature.
+- A gizmo drag on a **child** entity is anchored correctly but still writes a
+  world-space delta into a local transform, so it is only right while the
+  parent is unrotated and unscaled. The anchor fix made this visible; mapping
+  the delta through the inverse parent transform is the remaining half.
+- The terrain layer palette and the foliage picker are fixed built-in lists,
+  not asset fields. They therefore have no `asset_kind_mask` and are not drop
+  targets, and the Content Drawer cannot supply a terrain layer texture or a
+  foliage kind. Making them asset-backed is a scene-format change, not a UI one.
+- Viewport ray picking requires a `MeshComponent`, so the piercing menu cannot
+  reach an Audio Emitter, a light or a decal. The rubber band, which selects on
+  projected origin, can.
 
 ### Missing systems
 
-- Prefab authoring/instancing, general splines, and rule-driven scattering.
+- Prefab authoring/instancing and rule-driven scattering. Splines are now in
+  tree (see below); roads, rivers and fences built on them are not.
+- Terrain layers and foliage kinds are fixed built-in lists rather than assets,
+  so the left toolbar's tools have nothing to offer beyond a mode. The tools
+  now say when they cannot run; they still do not open their own options.
+- Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
+  textures. Importing a brush alpha is the next step and needs the same asset
+  field the other pickers use.
 - Docking, large-list virtualisation, GUI authoring, and isolated play-in-editor.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
@@ -1813,6 +1965,65 @@ the property surface was maintained by hand at a cost of 675 identifiers: 106
 generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
 hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
+
+**A widget that measures itself must also be aligned, or arrange throws the
+measure away.** `Tooltip::measure_override` returned the size of its text plus
+padding, correctly, for as long as the widget existed. But `WidgetBuilder`
+defaults to `Stretch`, nothing overrode it, and the tooltip hangs off the root.
+So every tooltip in the editor painted as a slab reaching from the cursor to
+the bottom-right corner of the window. The measure was right; arrange threw it
+away. Floating widgets set `Left`/`Top` at the builder now. Placement flips
+near an edge instead of clamping flush against it, since clamping would park
+the tooltip on top of the control the pointer is resting on.
+
+**An array field is a row of editors, not a printed debug value.** Details had
+no collection editor. `FieldType::Array` fell into the same branch as
+`Unsupported` and printed `Array([Vec3([...])])` as a caption: perfectly
+accurate and completely unusable. That cost nothing while no component had an
+array. The moment splines arrived it was the one field authors needed to edit.
+Each element is now a strip of numeric lanes with duplicate and remove beside
+it, over a footer that appends a copy of the last element rather than a zero at
+the world origin. All of those writes rebuild the whole array and send it down
+the ordinary field path, so undo and serialization never learn that collections
+exist.
+
+**A mode that refuses a gesture says so, at the moment it refuses.** Every
+transform gizmo in the editor was inert. Translate, rotate, scale, on every
+object, and nothing anywhere said why. The cause was `select_only`, a
+deliberate Godot-style mode that stops a click on a gizmo axis from moving the
+thing you were only trying to select. It lives in `editor.toml`, so once it is
+on it stays on across every session, and the press it swallowed left no toast
+and no log line. There was nothing to distinguish it from a dead feature. Two
+sessions went into the ray maths and the gizmo anchor before anyone thought to
+read the settings file. The code that refuses now says so, because it is the
+only code that knows the reason.
+
+**Every viewport ray reads the live surface size, never a cached one.** The
+editor kept a `viewport_size` filled from winit's `Resized`, and
+`window_event` drops every event that arrives before the lifecycle reaches
+`Running`, and on Windows the window's first `Resized` is one of them. So the
+cache held the *requested* size for the whole session unless someone happened
+to drag a window edge. That requested size is also logical, while the cursor
+and the surface are both physical, so on any display with a scale factor the
+two disagreed by the scale even after a resize did land. Everything that turns
+a cursor position into a world ray went through it: the transform gizmo, the
+terrain and foliage brushes, the rubber band, the drop probe. The gizmo drew in
+the right place, the click landed on the arrow, and the drag never started. No
+error, no log line, nothing to look at. The size now comes from
+`RenderContext::config`, which is the surface's own record of itself and cannot
+go stale. Picking also uses `picking_view_proj`, the unjittered matrix the
+overlays are drawn with, rather than the TAA-jittered one.
+
+**The transform gizmo is anchored from the world every frame, not pushed on
+selection change.** The anchor used to be written to the renderer only from
+selection events, so the gizmo tracked *events* rather than the selected
+entity. `Create` sets the selection through the undo stack without raising one.
+A newly created Audio Emitter therefore arrived fully editable in Details with
+no working handle in the viewport, and the same went for lights and particle
+emitters. Undo, Redo and a typed Details translation all moved an entity and
+left the gizmo behind. A value recomputed from the world every frame cannot
+drift out of step with it. That same read is where locked and hidden finally
+withhold the handle, which a comment had claimed for some time without doing.
 
 **Curves are a reflected value, not a widget.** `FieldType::Curve` means a curve
 gets its Details row, its scoped undo entry, its drag coalescing and its scene

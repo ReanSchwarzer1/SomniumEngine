@@ -75,7 +75,7 @@ return Script.define({
 			t.translation.z
 		)
 
-		if ctx.input:isKeyDown(string.byte("W")) then
+		if ctx.input:vector2("Move").y < -0.5 then
 			ctx:applyForce(ctx.entity, vector.create(0.0, 0.0, -self.thrust))
 		end
 

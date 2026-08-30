@@ -10,6 +10,7 @@ use crate::{
 /// The main physics simulation world.
 pub struct PhysicsWorld {
     system: *mut c_void,
+    config: PhysicsConfig,
 }
 
 impl PhysicsWorld {
@@ -30,8 +31,18 @@ impl PhysicsWorld {
                 config.gravity.z,
             );
 
-            Self { system }
+            Self { system, config }
         }
+    }
+
+    /// The gravity this world was built with.
+    ///
+    /// Kept so callers can reason about what a step will do to a body
+    /// without hard-coding 9.81. `somnium_core::character` uses it to tell
+    /// a body whose gravity a contact cancelled from one in free fall.
+    #[must_use]
+    pub fn gravity(&self) -> Vec3 {
+        self.config.gravity
     }
 
     /// Step the simulation forward by `dt` seconds.

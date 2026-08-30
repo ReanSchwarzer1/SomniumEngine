@@ -47,8 +47,10 @@
 /// Core application lifecycle and event loop management.
 pub mod a11y_bridge;
 pub mod app;
+mod audio_scene;
 pub mod autosave;
 pub mod character;
+pub mod spline;
 pub mod clipboard;
 pub mod config;
 pub mod context;
@@ -99,6 +101,7 @@ pub mod world_partition;
 
 pub use app::{Engine, GameApp};
 pub use character::RigidBodyComponent;
+pub use spline::SplineComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
@@ -164,6 +167,105 @@ pub struct MaterialComponent {
     pub runtime_id: u32,
 }
 impl somnium_ecs::Component for MaterialComponent {}
+
+/// Mixer destination for an authored sound emitter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AudioBus {
+    /// Environmental and gameplay effects.
+    #[default]
+    Sfx,
+    /// Music and score.
+    Music,
+    /// Spoken dialogue.
+    Dialogue,
+    /// Interface feedback.
+    Ui,
+}
+
+/// Distance falloff used by an authored sound emitter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AudioAttenuationModel {
+    /// Full volume inside `min_distance`, fading linearly to zero at max.
+    Linear,
+    /// Physically inspired inverse-square falloff, clamped at max distance.
+    #[default]
+    InverseSquare,
+    /// An authored curve whose time axis is distance and value is gain.
+    Authored,
+    /// No distance attenuation (panning and Doppler may still apply).
+    None,
+}
+
+/// Authored, inspectable spatial sound source.
+///
+/// Position and forward direction come from [`Transform`]. Runtime voice
+/// handles deliberately live outside the ECS and are rebuilt when Play starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioEmitterComponent {
+    /// Whether this emitter participates in playback.
+    pub enabled: bool,
+    /// Durable content-drawer reference to an audio file.
+    pub audio: somnium_asset::database::AssetId,
+    /// Start automatically when Play begins.
+    pub autoplay: bool,
+    /// Repeat until the emitter is disabled or Play stops.
+    pub looping: bool,
+    /// Linear source gain before mixer-bus volume and spatial attenuation.
+    pub volume: f32,
+    /// Route the sound through the matching mixer bus.
+    pub bus: AudioBus,
+    /// Enable position, distance, cone, occlusion, panning, and Doppler.
+    pub spatial: bool,
+    /// Distance falloff model.
+    pub attenuation: AudioAttenuationModel,
+    /// Radius at which the source still has full gain.
+    pub min_distance: f32,
+    /// Radius at which the source becomes silent.
+    pub max_distance: f32,
+    /// Distance-to-gain curve used by `Authored` attenuation.
+    pub attenuation_curve: somnium_ecs::curve::Curve,
+    /// Enable directional cone attenuation along local forward (-Z).
+    pub cone_enabled: bool,
+    /// Fully audible cone half-angle in degrees.
+    pub cone_inner_degrees: f32,
+    /// Cone half-angle at which `cone_outer_gain` is reached.
+    pub cone_outer_degrees: f32,
+    /// Gain outside the outer cone.
+    pub cone_outer_gain: f32,
+    /// Caller-authored transmission factor after an occlusion query.
+    pub occlusion: f32,
+    /// Per-emitter multiplier for Doppler pitch shift.
+    pub doppler_scale: f32,
+}
+
+impl Default for AudioEmitterComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            audio: somnium_asset::database::AssetId::NONE,
+            autoplay: true,
+            looping: true,
+            volume: 1.0,
+            bus: AudioBus::Sfx,
+            spatial: true,
+            attenuation: AudioAttenuationModel::InverseSquare,
+            min_distance: 2.0,
+            max_distance: 40.0,
+            attenuation_curve: somnium_ecs::curve::Curve::from_keys(vec![
+                somnium_ecs::curve::CurveKey::new(0.0, 1.0),
+                somnium_ecs::curve::CurveKey::new(40.0, 0.0),
+            ]),
+            cone_enabled: false,
+            cone_inner_degrees: 45.0,
+            cone_outer_degrees: 90.0,
+            cone_outer_gain: 0.2,
+            occlusion: 1.0,
+            doppler_scale: 1.0,
+        }
+    }
+}
+
+impl somnium_ecs::Component for AudioEmitterComponent {}
 
 /// ECS Component for spatial transformation.
 #[derive(Debug, Clone, Copy)]

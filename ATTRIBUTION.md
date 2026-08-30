@@ -2501,3 +2501,26 @@ literature. The consequence is stated in that file and in
 `dev records/phase MORROWIND/MORROWIND-AC.md` — the diagonal-pattern pass
 and sharp-corner rounding of full SMAA, which depend on their own tables, are
 **not implemented**, so near-45° edges are handled by the orthogonal path alone.
+
+### 13H.27 Audio acceptance fixtures, CC0
+
+The following unmodified sounds are bundled as redistributable acceptance
+fixtures for authored emitters, overlapping voices, map ambience, and scripted
+footstep cadence. All source pages declare **CC0 1.0**. Attribution is not
+required by CC0, but provenance and exact SHA-256 hashes are retained here.
+
+| Shipped file | Source / author | SHA-256 |
+|---|---|---|
+| `assets/audio/ambient/coastal_waves_cc0.flac` | OpenGameArt, “Beach Ocean Waves”, jasinski (submitted by qubodup), `wave_01_cc0-18363__jasinski__alkaibeach.flac` | `FCFCA178ECA2EAC536E8C2A4ED5CF8096E44C921ACD587047B3D9F1D7845435C` |
+| `assets/audio/ambient/island_waves_cc0.flac` | same source, `wave_02_cc0-18363__jasinski__alkaibeach.flac` | `53B5C28C0EDC36F049E77E65F2CF8A86135103328C44C1507C416E6469D18096` |
+| `assets/audio/footsteps/footstep_01_cc0.ogg` | OpenGameArt, “Footsteps”, GboxMikeFozzy, `01-footstep.ogg` | `33C9BEF5E8AEB1069455699A34A0C5E1EF1787FD3F61594B0859D7E6BB9F9DEC` |
+| `assets/audio/footsteps/footstep_02_cc0.ogg` | same source, `02-footstep.ogg` | `F05396C807EB8EAECFFB2A1EAD611EC971C5A7914D1D081C91D7796E852692A2` |
+| `assets/audio/footsteps/footstep_03_cc0.ogg` | same source, `03-footstep.ogg` | `9817CC93897ED1DE5DA87675B26BE4196BFDA3DAA6F1DE9DC4398A68D250CDB9` |
+| `assets/audio/footsteps/footstep_04_cc0.ogg` | same source, `04-footstep.ogg` | `B373FF981E44D6F7BA2291225A4803078771029615ED81606136FDB9599906D5` |
+| `assets/audio/sfx/water_splash_cc0.wav` | OpenGameArt, “Water Splash and sand footsteps”, Peludo, `splash1.wav` | `E45D466F7E63E5D566F8A822A7A1A3F7D5131319D17CA0436DCC615B251E9277` |
+
+Source pages:
+
+- <https://opengameart.org/content/beach-ocean-waves>
+- <https://opengameart.org/content/footsteps-0>
+- <https://opengameart.org/content/water-splash-and-sand-footsteps>

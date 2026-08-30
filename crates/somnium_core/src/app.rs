@@ -591,6 +591,7 @@ pub struct Engine<G: GameApp> {
     type_registry: somnium_ecs::reflect::TypeRegistry,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
+    audio_scene: crate::audio_scene::AudioScene,
     window: Option<Arc<Window>>,
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
@@ -701,7 +702,7 @@ pub struct Engine<G: GameApp> {
     /// Current cursor position in physical pixels.
     cursor_pos: (f32, f32),
     /// Current window dimensions in physical pixels (updated on resize).
-    viewport_size: (f32, f32),
+    viewport_size_hint: (f32, f32),
     /// Active gizmo drag state (Some while LMB is held on a gizmo axis).
     gizmo_drag: Option<GizmoDragState>,
     /// Viewport rubber-band, live only while the left button is down over
@@ -797,6 +798,8 @@ pub struct Engine<G: GameApp> {
     /// editor's own input handling because a script's view is a *sampled*
     /// snapshot per fixed step, not an event stream.
     script_input: crate::script_input::ScriptInputTracker,
+    /// Hardware-independent action maps shared by game code and scripts.
+    input: somnium_input::InputSystem,
     /// The authored world as it was when Play was pressed. Stop restores
     /// it, which is what stops a script dirtying the edit-time scene.
     play_checkpoint: Option<crate::script_input::WorldCheckpoint>,
@@ -862,6 +865,7 @@ impl<G: GameApp + 'static> Engine<G> {
             type_registry: crate::reflect_registry::component_registry(),
             physics: None,
             audio: None,
+            audio_scene: crate::audio_scene::AudioScene::default(),
             window: None,
             render_ctx: None,
             renderer: None,
@@ -903,7 +907,7 @@ impl<G: GameApp + 'static> Engine<G> {
             undo_stack: UndoStack::new(128),
             field_gestures: std::collections::HashMap::new(),
             cursor_pos: (0.0, 0.0),
-            viewport_size: initial_vp,
+            viewport_size_hint: initial_vp,
             gizmo_drag: None,
             marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
@@ -942,6 +946,7 @@ impl<G: GameApp + 'static> Engine<G> {
             pending_map_load: None,
             scripts: crate::script_host::ScriptHost::default(),
             script_input: crate::script_input::ScriptInputTracker::new(),
+            input: somnium_input::InputSystem::with_default_maps(),
             play_checkpoint: None,
             script_step: 0,
         };
@@ -1293,8 +1298,8 @@ impl<G: GameApp> Engine<G> {
         let Some(renderer) = self.renderer.as_ref() else {
             return;
         };
-        let view_proj = renderer.view_proj;
-        let viewport = self.viewport_size;
+        let view_proj = renderer.picking_view_proj();
+        let viewport = self.viewport_size();
         let caught: Vec<_> = self
             .world
             .entities()
@@ -1872,13 +1877,41 @@ impl<G: GameApp> Engine<G> {
             self.terrain_edit_active = false;
             self.terrain_stroke = None;
         }
-        if let Some(entity) = self.selection.primary {
-            let translation = self.world.get::<Transform>(entity).map(|t| t.translation);
-            if let (Some(pos), Some(r)) = (translation, self.renderer.as_mut()) {
-                r.set_gizmo_world_pos(pos);
+        self.refresh_gizmo_anchor();
+    }
+
+    /// Put the transform gizmo where the primary selection actually is.
+    ///
+    /// Called once per frame as well as on selection change, and that is the
+    /// point. The anchor used to be pushed to the renderer only when the
+    /// selection changed, which quietly meant the gizmo tracked *selection
+    /// events* rather than the selected entity:
+    ///
+    /// * `Create` sets `selection.primary` through the undo stack without
+    ///   raising a selection event, so a newly created Audio Emitter — or
+    ///   light, or particle emitter — arrived with the gizmo still parked on
+    ///   whatever was selected before it, or with no gizmo at all. The
+    ///   Details panel edited it perfectly; the viewport had no handle on it.
+    ///   That is the bug this function exists for.
+    /// * Undo, Redo and a typed Details translation all move an entity
+    ///   without changing the selection, and all left the gizmo behind.
+    ///
+    /// A value recomputed from the world every frame cannot drift out of
+    /// step with it, which is why this replaced the push rather than gaining
+    /// another caller.
+    fn refresh_gizmo_anchor(&mut self) {
+        // Terrain sculpting, foliage painting and Play each own the viewport
+        // and have already cleared the gizmo; re-placing it here would undo
+        // that every frame.
+        if self.play_session_active || self.terrain_edit_active || self.foliage_paint_active {
+            return;
+        }
+        let anchor = gizmo_anchor(&self.world, self.selection.primary);
+        if let Some(renderer) = self.renderer.as_mut() {
+            match anchor {
+                Some(pos) => renderer.set_gizmo_world_pos(pos),
+                None => renderer.clear_gizmo(),
             }
-        } else if let Some(r) = &mut self.renderer {
-            r.clear_gizmo();
         }
     }
 
@@ -2122,6 +2155,7 @@ impl<G: GameApp> Engine<G> {
         // a file on disk is the only thing that survives a play session that
         // ends badly enough to need it.
         self.write_autosave(crate::autosave::AutosaveReason::BeforePlay);
+        self.audio_scene.stop_all();
         self.play_checkpoint = Some(crate::script_input::WorldCheckpoint::capture(
             &mut self.world,
             &self.type_registry,
@@ -2132,6 +2166,7 @@ impl<G: GameApp> Engine<G> {
 
     /// Tear every script down and restore the world exactly as it was.
     fn end_play_session(&mut self) {
+        self.audio_scene.stop_all();
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
@@ -2491,7 +2526,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // Handle Resizing
         if let WindowEvent::Resized(size) = &event {
-            self.viewport_size = (size.width as f32, size.height as f32);
+            self.viewport_size_hint = (size.width as f32, size.height as f32);
             if let Some(r_ctx) = &mut self.render_ctx {
                 r_ctx.resize(size.width, size.height);
             }
@@ -2607,22 +2642,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     match code {
                         WKC::BracketLeft if self.terrain_edit_active => {
                             self.terrain_brush.radius = (self.terrain_brush.radius / 1.25).max(0.5);
-                            info!("Brush radius: {:.1} m", self.terrain_brush.radius);
+                            self.announce_brush();
                         }
                         WKC::BracketRight if self.terrain_edit_active => {
                             self.terrain_brush.radius =
                                 (self.terrain_brush.radius * 1.25).min(128.0);
-                            info!("Brush radius: {:.1} m", self.terrain_brush.radius);
+                            self.announce_brush();
                         }
                         WKC::Minus if self.terrain_edit_active => {
                             self.terrain_brush.strength =
                                 (self.terrain_brush.strength - 0.1).max(0.05);
-                            info!("Brush strength: {:.2}", self.terrain_brush.strength);
+                            self.announce_brush();
                         }
                         WKC::Equal if self.terrain_edit_active => {
                             self.terrain_brush.strength =
                                 (self.terrain_brush.strength + 0.1).min(1.0);
-                            info!("Brush strength: {:.2}", self.terrain_brush.strength);
+                            self.announce_brush();
                         }
                         WKC::Comma if self.terrain_edit_active => {
                             self.terrain_brush.paint_layer =
@@ -2631,12 +2666,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                         as usize
                                         - 1,
                                 );
-                            info!("Paint layer: {}", self.terrain_brush.paint_layer);
+                            self.announce_brush();
                         }
                         WKC::Period if self.terrain_edit_active => {
                             self.terrain_brush.paint_layer = (self.terrain_brush.paint_layer + 1)
                                 % somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize;
-                            info!("Paint layer: {}", self.terrain_brush.paint_layer);
+                            self.announce_brush();
+                        }
+                        // Cycle the dab mask. Next to the layer keys because
+                        // it is a painting decision, not a sculpting one.
+                        WKC::Slash if self.terrain_edit_active => {
+                            self.terrain_brush.alpha = self.terrain_brush.alpha.next();
+                            self.announce_brush();
                         }
                         WKC::Digit1 if self.terrain_edit_active => self.set_terrain_tool(0),
                         WKC::Digit2 if self.terrain_edit_active => self.set_terrain_tool(1),
@@ -2668,6 +2709,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         };
         if ui_consumed {
             return;
+        }
+
+        // Once the editor has declined the event, feed the same physical
+        // transition to the action system. Scripts never see this hardware
+        // event; they sample the named actions evaluated from it.
+        if self.play_session_active {
+            self.input.handle_window_event(&event);
         }
 
         // ── 3.2 Route to the game (MORROWIND-E2) ─────────────────────────────
@@ -2768,16 +2816,35 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 // preference: without it a click that happens to land on a
                 // gizmo axis moves the object you were only trying to select,
                 // and the damage is silent until you notice it later.
-                let drag = if self.settings.editor().select_only {
+                //
+                // The mode had the opposite failure, and a worse one. It is
+                // persisted in `editor.toml`, so once it is on it stays on
+                // across every session — and it used to swallow the press with
+                // no word of explanation. Every gizmo in the editor was inert,
+                // for translate and rotate and scale alike, and nothing
+                // anywhere said why. A mode that refuses a gesture has to
+                // admit it at the moment it refuses, or it is indistinguishable
+                // from a broken feature.
+                let started = try_start_gizmo_drag(
+                    self.renderer.as_ref(),
+                    &self.world,
+                    &self.selection.primary,
+                    self.cursor_pos,
+                    self.viewport_size(),
+                );
+                let blocked = started.is_some() && self.settings.editor().select_only;
+                if blocked {
+                    let message =
+                        "Select Only is on — click it in the toolbar to move, rotate and scale";
+                    info!("{message}");
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast(message);
+                    }
+                }
+                let drag = if blocked {
                     None
                 } else {
-                    try_start_gizmo_drag(
-                        self.renderer.as_ref(),
-                        &self.world,
-                        &self.selection.primary,
-                        self.cursor_pos,
-                        self.viewport_size,
-                    )
+                    started
                     .map(|mut drag| {
                         drag.local_space = self.settings.editor().gizmo_local_space;
                         drag.followers = self
@@ -2855,15 +2922,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         let engine_event: Option<EngineEvent> = match event {
-            winit::event::DeviceEvent::MouseMotion { delta } => Some(EngineEvent::MouseMotion {
-                delta_x: delta.0 as f32,
-                delta_y: delta.1 as f32,
-            }),
+            winit::event::DeviceEvent::MouseMotion { delta } => {
+                if self.play_session_active {
+                    self.input
+                        .add_mouse_delta(glam::Vec2::new(delta.0 as f32, delta.1 as f32));
+                }
+                Some(EngineEvent::MouseMotion {
+                    delta_x: delta.0 as f32,
+                    delta_y: delta.1 as f32,
+                })
+            }
             _ => None,
         };
 
         if let Some(ev) = engine_event {
-            self.script_input.observe(&ev);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -2898,6 +2970,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
+        if self.play_session_active {
+            self.input.update(dt);
+            self.script_input.capture(&self.input);
+        }
         self.tick_autosave(dt);
         // Phase 16-F: the script profiler counters are per frame, and the
         // frame starts here.
@@ -2957,13 +3033,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     // actually has after last step's collisions rather
                     // than the one it asked for.
                     if let Some(physics) = self.physics.as_ref() {
-                        crate::character::read_physics_into_world(&mut self.world, physics);
+                        crate::character::read_physics_into_world(
+                            &mut self.world,
+                            physics,
+                            fixed_dt,
+                        );
                     }
                     self.script_fixed_update(fixed_dt, dt);
                     // Components → Jolt, after the command apply, so a
                     // script's write is the last word before integration.
                     if let Some(physics) = self.physics.as_mut() {
-                        crate::character::write_world_into_physics(&self.world, physics);
+                        crate::character::write_world_into_physics(&mut self.world, physics);
                     }
                     self.script_input.end_step();
                     self.script_step += 1;
@@ -2989,14 +3069,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .as_ref()
                 .is_some_and(somnium_ui::UiManager::command_modifier_held),
         );
+        let viewport = self.viewport_size();
         let drag_result: Option<(u32, Transform)> = self.gizmo_drag.as_ref().and_then(|drag| {
             let (cam, inv_vp) = self
                 .renderer
                 .as_ref()
-                .map(|r| (r.camera_pos, r.view_proj.inverse()))
+                .map(|r| (r.camera_pos, r.picking_view_proj().inverse()))
                 .unwrap_or((glam::Vec3::ZERO, glam::Mat4::IDENTITY));
-            let new_t =
-                apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, self.viewport_size, snap);
+            let new_t = apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, viewport, snap);
             Some((drag.entity_index, new_t))
         });
         if let Some((idx, mut new_t)) = drag_result {
@@ -3726,6 +3806,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // not from a stale ECS settings transform or last frame's renderer.
         self.update_world_partition();
 
+        // The active camera is the listener. Reconcile authored emitters only
+        // after `on_render` publishes that same-frame view.
+        if self.play_session_active
+            && let (Some(audio), Some(renderer)) = (self.audio.as_mut(), self.renderer.as_ref())
+        {
+            let (_, orientation, _) = renderer
+                .view_matrix
+                .inverse()
+                .to_scale_rotation_translation();
+            self.audio_scene.update(
+                &self.world,
+                self.asset_gate.published(),
+                audio,
+                renderer.camera_pos,
+                orientation,
+                dt,
+            );
+        }
+
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
@@ -3761,9 +3860,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.sync_terrain_colliders();
         if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
 
+        // The gizmo follows the entity, not the last selection event. After
+        // the game layer has propagated transforms, so a child is anchored
+        // where it is drawn rather than where its parent's origin is.
+        self.refresh_gizmo_anchor();
+
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         if !self.play_session_active {
             self.submit_light_gizmos();
+            self.submit_audio_gizmos();
+            self.submit_spline_gizmos();
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
@@ -4459,10 +4565,6 @@ impl<G: GameApp> Engine<G> {
     /// path whether it came from the ordinary window route or from an editor
     /// shortcut that deliberately preserves its physical key transition.
     fn forward_engine_event(&mut self, event_loop: &ActiveEventLoop, engine_event: EngineEvent) {
-        // Phase 16-C: scripts see a sampled snapshot per fixed step rather
-        // than the event stream, so the tracker folds every event in here and
-        // the phase reads it later.
-        self.script_input.observe(&engine_event);
         let mut ctx = EngineContext::new(
             &self.time,
             &self.config,
@@ -4666,18 +4768,138 @@ impl<G: GameApp> Engine<G> {
             .map(|(_, entity)| entity)
     }
 
+    /// The size, in physical pixels, of the surface the cursor is over.
+    ///
+    /// Read from the live surface configuration rather than from a cached
+    /// `Resized`, because the cache was wrong in two ways at once and both
+    /// were invisible until something aimed a ray. `window_event` drops every
+    /// event that arrives before the lifecycle reaches `Running`, and on
+    /// Windows the window's first `Resized` is one of them — so the cache kept
+    /// the *requested* size for the whole session unless the user happened to
+    /// drag the window edge. That requested size is also **logical**, while
+    /// the surface and the cursor are both physical, so on any display with a
+    /// scale factor other than 1.0 the two disagreed by the scale even after a
+    /// resize did land.
+    ///
+    /// Everything that turns a cursor position into a world ray goes through
+    /// here: the transform gizmo, the terrain and foliage brushes, the
+    /// rubber band, the drop probe. All of them were aiming somewhere the user
+    /// was not pointing.
+    fn viewport_size(&self) -> (f32, f32) {
+        self.render_ctx
+            .as_ref()
+            .map(|ctx| (ctx.config.width as f32, ctx.config.height as f32))
+            .filter(|(w, h)| *w >= 1.0 && *h >= 1.0)
+            .unwrap_or(self.viewport_size_hint)
+    }
+
     fn cursor_ray(&self) -> Option<(glam::Vec3, glam::Vec3)> {
         let r = self.renderer.as_ref()?;
-        let inv_vp = r.view_proj.inverse();
-        let world_pt = ndc_to_world(
-            self.cursor_pos.0,
-            self.cursor_pos.1,
-            self.viewport_size.0,
-            self.viewport_size.1,
-            &inv_vp,
-        );
+        let inv_vp = r.picking_view_proj().inverse();
+        let (vw, vh) = self.viewport_size();
+        let world_pt = ndc_to_world(self.cursor_pos.0, self.cursor_pos.1, vw, vh, &inv_vp);
         let dir = (world_pt - r.camera_pos).normalize_or_zero();
         (dir != glam::Vec3::ZERO).then_some((r.camera_pos, dir))
+    }
+
+    /// Put `path`'s asset into the first field of the selection that accepts
+    /// its kind.
+    ///
+    /// The menu-and-keyboard route to where a drop lands. It exists because a
+    /// drag is a gesture with a dozen ways to not quite happen — the pointer a
+    /// few pixels off the row, a threshold not crossed, a window that lost
+    /// focus mid-drag — and an author who cannot make the drag work needs a
+    /// path that is a single click and cannot miss.
+    ///
+    /// The kind comes from the extension rather than from the asset database,
+    /// so this works during the window after a file appears and before the
+    /// scan that indexes it has finished.
+    fn assign_asset_to_selection(&mut self, path: &std::path::Path) {
+        use somnium_ecs::reflect::ReflectValue;
+
+        let Some(entity) = self.selection.primary else {
+            self.toast("Select something first — an asset has to be assigned to an entity");
+            return;
+        };
+        let kind = somnium_asset::database::classify(path, false);
+        // Ids are minted from the path *relative to the content root*, which
+        // is the whole point of `AssetId`: the same file names the same asset
+        // whatever the project happens to be checked out at.
+        let relative = path
+            .strip_prefix(&self.config.content_root)
+            .unwrap_or(path);
+        let asset = somnium_asset::database::AssetId::from_relative_path(relative);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let target = asset_field_for(&self.type_registry, &self.world, entity, kind);
+
+        let Some((component, field, component_name, field_name)) = target else {
+            self.toast(&format!(
+                "Nothing on this entity takes a {} asset",
+                kind.label()
+            ));
+            return;
+        };
+
+        self.handle_editor_event(EditorEvent::SetComponentField {
+            entity,
+            component,
+            field,
+            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(
+                asset.raw(),
+            ))),
+            gesture: GestureId(u64::MAX - 2),
+            live: false,
+        });
+        self.toast(&format!("{name} → {component_name} · {field_name}"));
+    }
+
+    /// Say something in the viewport, and in the log.
+    ///
+    /// Both, always: the log is the record and the toast is the one the author
+    /// is actually looking at. Several routes had only the log, which is the
+    /// same as saying nothing while someone is working in the viewport.
+    fn toast(&mut self, message: &str) {
+        info!("{message}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(message);
+        }
+    }
+
+    /// Put the whole brush state in front of the author, in the viewport.
+    ///
+    /// It used to go to `info!`, which means the Output Log, which means a
+    /// panel nobody has open while they are painting. The reported symptom was
+    /// having to click and look to find out whether the brush was doing
+    /// anything — a settings readout that lives somewhere else is the same as
+    /// no readout.
+    fn announce_brush(&mut self) {
+        let brush = self.terrain_brush;
+        let message = if brush.mode == BrushMode::Paint {
+            format!(
+                "{}  ·  layer {}  ·  {:.1} m  ·  strength {:.0}%  ·  {}",
+                brush.mode.label(),
+                brush.paint_layer,
+                brush.radius,
+                brush.strength * 100.0,
+                brush.alpha.label(),
+            )
+        } else {
+            format!(
+                "{}  ·  {:.1} m  ·  strength {:.0}%  ·  {}",
+                brush.mode.label(),
+                brush.radius,
+                brush.strength * 100.0,
+                brush.alpha.label(),
+            )
+        };
+        info!("{message}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(&message);
+        }
     }
 
     /// Select a terrain brush tool by index (0-5 = `BrushMode` order) and
@@ -4691,11 +4913,25 @@ impl<G: GameApp> Engine<G> {
             4 => BrushMode::Noise,
             _ => BrushMode::Paint,
         };
-        if self.selected_terrain().is_some() {
-            self.terrain_edit_active = true;
-        }
         self.foliage_paint_active = false;
-        info!("Terrain tool: {}", self.terrain_brush.mode.label());
+        if self.selected_terrain().is_none() {
+            // The reported symptom: clicking Raise with nothing selected
+            // changed the mode, armed nothing, and said nothing, so the whole
+            // toolbar read as decorative. A tool that cannot run has to say
+            // why — silence is indistinguishable from a broken button.
+            self.terrain_edit_active = false;
+            let message = format!(
+                "{} needs a terrain — select a Landscape in the Outliner first",
+                self.terrain_brush.mode.label()
+            );
+            info!("{message}");
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.push_toast(&message);
+            }
+            return;
+        }
+        self.terrain_edit_active = true;
+        self.announce_brush();
     }
 
     /// Begin a brush stroke under the cursor. Returns true if a stroke started.
@@ -5105,6 +5341,7 @@ impl<G: GameApp> Engine<G> {
                 Name::new(&node.entity_name)
             };
             let snapshot = EntitySnapshot {
+                spline: None,
                 transform: Some(Transform {
                     translation: translation + offset,
                     rotation,
@@ -5125,6 +5362,7 @@ impl<G: GameApp> Engine<G> {
                     runtime_id: node.material_id,
                 }),
                 light: None,
+                audio: None,
                 mesh_kind: None,
                 is_particle_emitter: false,
                 environment: false,
@@ -6312,6 +6550,127 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Queue attenuation and directivity shapes for authored audio emitters.
+    /// Draw every spline as a polyline, with a tick at each control point.
+    ///
+    /// The curve the author is editing has to be visible before it can be
+    /// edited, and the polyline drawn here is the *same* sampling the
+    /// nearest-point query uses — so what you see is exactly what the audio
+    /// hears, rather than a smooth curve drawn beside a coarse one that is
+    /// actually in effect.
+    fn submit_spline_gizmos(&mut self) {
+        use somnium_renderer::pass::light_gizmo::LineVertex;
+
+        // Selected splines are drawn bright; the rest are dimmed, the same
+        // rule the light gizmos already use.
+        const BRIGHT: [f32; 3] = [0.30, 0.90, 0.85];
+        const DIM: [f32; 3] = [0.13, 0.38, 0.36];
+
+        let mut lines: Vec<LineVertex> = Vec::new();
+        let entities: Vec<_> = self.world.entities().collect();
+        for entity in entities {
+            let Some(spline) = self.world.get::<crate::SplineComponent>(entity) else {
+                continue;
+            };
+            let flags = self
+                .world
+                .get::<EditorFlags>(entity)
+                .copied()
+                .unwrap_or_default();
+            if flags.hidden {
+                continue;
+            }
+            let model = self
+                .world
+                .get::<WorldTransform>(entity)
+                .map(|world| world.0)
+                .or_else(|| {
+                    self.world
+                        .get::<Transform>(entity)
+                        .map(Transform::to_matrix)
+                })
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let colour = if self.selection.contains(entity) {
+                BRIGHT
+            } else {
+                DIM
+            };
+
+            let path: Vec<glam::Vec3> = spline
+                .polyline()
+                .iter()
+                .map(|point| model.transform_point3(*point))
+                .collect();
+            for pair in path.windows(2) {
+                lines.push(LineVertex {
+                    position: pair[0].to_array(),
+                    color: colour,
+                });
+                lines.push(LineVertex {
+                    position: pair[1].to_array(),
+                    color: colour,
+                });
+            }
+
+            // A cross at each control point, sized in metres rather than in
+            // screen space: these mark authored data, and an author needs to
+            // see which bend belongs to a point they can move.
+            const TICK: f32 = 0.6;
+            for point in &spline.points {
+                let centre = model.transform_point3(*point);
+                for axis in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
+                    lines.push(LineVertex {
+                        position: (centre - axis * TICK).to_array(),
+                        color: colour,
+                    });
+                    lines.push(LineVertex {
+                        position: (centre + axis * TICK).to_array(),
+                        color: colour,
+                    });
+                }
+            }
+        }
+
+        if !lines.is_empty()
+            && let Some(renderer) = self.renderer.as_mut()
+        {
+            renderer.submit_gizmo_lines(lines);
+        }
+    }
+
+    fn submit_audio_gizmos(&mut self) {
+        use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
+
+        let selected_idx = self.selection.primary.map(|entity| entity.index());
+        let gizmos: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| {
+                let audio = self.world.get::<crate::AudioEmitterComponent>(entity)?;
+                let transform = self.world.get::<Transform>(entity)?;
+                Some(LightGizmoDesc {
+                    kind: if audio.cone_enabled {
+                        LightGizmoKind::AudioCone
+                    } else {
+                        LightGizmoKind::AudioOmni
+                    },
+                    position: transform.translation,
+                    direction: transform.rotation * glam::Vec3::NEG_Z,
+                    color: glam::Vec3::new(0.15, 0.85, 1.0),
+                    range: audio.max_distance,
+                    inner_angle: audio.cone_inner_degrees.to_radians(),
+                    outer_angle: audio.cone_outer_degrees.to_radians(),
+                    selected: selected_idx == Some(entity.index()),
+                })
+            })
+            .collect();
+        if let Some(renderer) = self.renderer.as_mut() {
+            for gizmo in gizmos {
+                renderer.submit_light_gizmo(gizmo);
+            }
+        }
+    }
+
     /// Queue every terrain entity for rendering this frame.
     fn submit_terrains(&mut self) {
         let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
@@ -6959,9 +7318,11 @@ impl<G: GameApp> Engine<G> {
                 // spins its streaming driver up when it sees this component
                 // (and tears it down when the entity is deleted).
                 let snapshot = EntitySnapshot {
+                    spline: None,
                     transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
                     name: Some(Name::new("Voxel Terrain")),
                     light: None,
+                    audio: None,
                     mesh: None,
                     mat: None,
                     wt: Some(WorldTransform::identity()),
@@ -7065,6 +7426,28 @@ impl<G: GameApp> Engine<G> {
                     )),
                     _ => None,
                 };
+                // A shoreline emitter is an ordinary emitter that happens to
+                // carry a path. There is no second component and no second
+                // code path: the audio runtime asks where the sound is, and a
+                // spline answers "at your nearest point" while everything else
+                // answers "at my origin".
+                let audio = matches!(
+                    kind,
+                    CreateKind::AudioEmitter | CreateKind::ShorelineAudio
+                )
+                .then(|| {
+                    let mut emitter = crate::AudioEmitterComponent::default();
+                    if kind == CreateKind::ShorelineAudio {
+                        // A shoreline is heard from far further than a point
+                        // source, and it loops: surf does not stop.
+                        emitter.max_distance = 120.0;
+                        emitter.min_distance = 6.0;
+                        emitter.looping = true;
+                    }
+                    emitter
+                });
+                let spline = matches!(kind, CreateKind::Spline | CreateKind::ShorelineAudio)
+                    .then(|| crate::SplineComponent::straight(4, 12.0));
 
                 // Determine mesh_kind for procedural mesh entities.
                 let mesh_kind = match kind {
@@ -7140,7 +7523,8 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
-                let spawn_dist = if light.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if light.is_some() || audio.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if spline.is_some() { 18.0 } else { spawn_dist };
                 let (spawn_pos, look, right) =
                     camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
                 let rotation = match kind {
@@ -7159,9 +7543,11 @@ impl<G: GameApp> Engine<G> {
                 };
                 let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
+                    spline,
                     transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
+                    audio,
                     mesh,
                     mat,
                     wt: Some(world),
@@ -7235,6 +7621,24 @@ impl<G: GameApp> Engine<G> {
                         }
                     );
                 }
+            }
+
+            EditorEvent::OpenScenePicker => {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Open Scene")
+                    .add_filter("Somnium scene", &["somnium"])
+                    .set_directory(&self.config.content_root)
+                    .pick_file()
+                else {
+                    return;
+                };
+                self.handle_editor_event(EditorEvent::LoadScene(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+
+            EditorEvent::AssignAssetToSelection(path) => {
+                self.assign_asset_to_selection(std::path::Path::new(&path));
             }
 
             EditorEvent::SetComponentField {
@@ -7644,6 +8048,7 @@ impl<G: GameApp> Engine<G> {
                         .map(|n| Name::new(&format!("{}_copy", n.as_str())))
                         .unwrap_or_else(|| Name::new("Entity_copy"));
                     let light = self.world.get::<LightComponent>(entity).copied();
+                    let audio = self.world.get::<crate::AudioEmitterComponent>(entity).cloned();
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
@@ -7667,9 +8072,11 @@ impl<G: GameApp> Engine<G> {
                     let mut dup_transform = transform;
                     dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
                     let snapshot = EntitySnapshot {
+                        spline: None,
                         transform: Some(dup_transform),
                         name: Some(name),
                         light,
+                        audio,
                         mesh,
                         mat,
                         wt: Some(WorldTransform::identity()),
@@ -7872,8 +8279,8 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetViewportResolution(idx) => {
                 self.viewport_resolution = idx as usize;
-                let w = self.viewport_size.0.max(1.0) as u32;
-                let h = self.viewport_size.1.max(1.0) as u32;
+                let w = self.viewport_size().0.max(1.0) as u32;
+                let h = self.viewport_size().1.max(1.0) as u32;
                 let (sw, sh) =
                     somnium_renderer::scene_size_for_preset(w, h, self.viewport_resolution);
                 if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx)
@@ -8138,6 +8545,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
+                self.audio_scene.set_paused(false);
                 self.gizmo_drag = None;
                 self.terrain_stroke = None;
                 if let Some(r) = &mut self.renderer {
@@ -8152,6 +8560,7 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::PauseSimulation => {
                 self.simulation_clock.state = SimulationState::Paused;
+                self.audio_scene.set_paused(true);
                 if self.play_session_active {
                     if let Some(r) = &mut self.renderer {
                         r.set_editor_overlays_enabled(false);
@@ -8493,22 +8902,12 @@ fn try_start_gizmo_drag(
     }
 
     let camera_pos = renderer.camera_pos;
-    let inv_vp = renderer.view_proj.inverse();
-
-    let world_pt = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
-    let ray_dir = (world_pt - camera_pos).normalize();
-
-    // Transform ray to gizmo-local space.
-    let dist = (camera_pos - gizmo_pos).length().max(0.5);
-    let scale = dist * 0.15;
-    let model =
-        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-    let inv_model = model.inverse();
-    let local_origin = inv_model.transform_point3(camera_pos);
-    let local_dir = inv_model.transform_vector3(ray_dir).normalize();
+    let inv_vp = renderer.picking_view_proj().inverse();
+    let ray_dir = (ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp) - camera_pos)
+        .normalize_or_zero();
 
     let mode = renderer.gizmo_mode;
-    let axis = gizmo_hit_test(local_origin, local_dir, mode)?;
+    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode)?;
 
     let start_transform = world
         .get::<Transform>(entity)
@@ -8599,6 +8998,104 @@ impl SnapSettings {
             scale: if self.scale > 0.0 { 0.0 } else { 0.1 },
         }
     }
+}
+
+/// The first field on `entity` that accepts an asset of `kind`.
+///
+/// Registration order decides, and the probe for "does this entity have that
+/// component at all" is `read_field` returning `Some` — the schema's own
+/// accessor, rather than a second list of component types that would drift
+/// away from it.
+fn asset_field_for(
+    registry: &somnium_ecs::reflect::TypeRegistry,
+    world: &somnium_ecs::World,
+    entity: somnium_ecs::Entity,
+    kind: somnium_asset::database::AssetKind,
+) -> Option<(
+    somnium_ecs::reflect::StableId,
+    somnium_ecs::reflect::FieldId,
+    &'static str,
+    &'static str,
+)> {
+    use somnium_ecs::reflect::FieldType;
+    registry.iter().find_map(|schema| {
+        let field = schema.fields.iter().find(|field| {
+            field.ty == FieldType::Asset
+                && kind.bit() & field.asset_kind_mask != 0
+                && !field.read_only
+        })?;
+        (schema.read_field)(world, entity, field.id)?;
+        Some((schema.stable_id, field.id, schema.display_name, field.name))
+    })
+}
+
+/// The gizmo axis a world-space ray hits, if any.
+///
+/// The gizmo is drawn at a constant size on screen, so its handles live in a
+/// space scaled by the camera distance; picking has to enter that same space
+/// or the arrows are nowhere near where they look. Both this and the draw in
+/// `SomniumRenderer::render` build the model matrix the same way from the same
+/// two numbers, which is the only reason they agree.
+fn gizmo_axis_under_ray(
+    camera_pos: glam::Vec3,
+    ray_dir: glam::Vec3,
+    gizmo_pos: glam::Vec3,
+    mode: GizmoMode,
+) -> Option<GizmoAxis> {
+    if ray_dir == glam::Vec3::ZERO {
+        return None;
+    }
+    let dist = (camera_pos - gizmo_pos).length().max(0.5);
+    let scale = dist * 0.15;
+    let model =
+        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let inv_model = model.inverse();
+    gizmo_hit_test(
+        inv_model.transform_point3(camera_pos),
+        inv_model.transform_vector3(ray_dir).normalize(),
+        mode,
+    )
+}
+
+/// Where the transform gizmo belongs for `primary`, or `None` for no gizmo.
+///
+/// Split out from [`SomniumApp::refresh_gizmo_anchor`] because the method
+/// needs a renderer and therefore a GPU, and this is the half that decides
+/// anything. Everything the tests at the bottom of this file assert about
+/// gizmo placement is asserted here.
+fn gizmo_anchor(
+    world: &somnium_ecs::World,
+    primary: Option<somnium_ecs::entity::Entity>,
+) -> Option<glam::Vec3> {
+    let entity = primary?;
+    // Locked and hidden are the two flags whose whole job is "do not let the
+    // viewport move this". The Outliner keeps the row selected, so the
+    // Details panel still reads and edits it.
+    let flags = world
+        .get::<EditorFlags>(entity)
+        .copied()
+        .unwrap_or_default();
+    if flags.locked || flags.hidden {
+        return None;
+    }
+    // A root's local translation *is* its world position and is always
+    // current. A child's is an offset from its parent, and only
+    // `WorldTransform` says where it is on screen — anchoring a child by its
+    // local translation puts the gizmo near the world origin, nowhere near
+    // the thing it is supposed to be a handle for.
+    if world.get::<crate::Parent>(entity).is_none() {
+        return world
+            .get::<Transform>(entity)
+            .map(|transform| transform.translation);
+    }
+    world
+        .get::<WorldTransform>(entity)
+        .map(|world| world.0.to_scale_rotation_translation().2)
+        .or_else(|| {
+            world
+                .get::<Transform>(entity)
+                .map(|transform| transform.translation)
+        })
 }
 
 fn apply_gizmo_drag(
@@ -8794,7 +9291,7 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
-    use super::{SnapSettings, ray_aabb_distance};
+    use super::{EditorFlags, SnapSettings, Transform, WorldTransform, ray_aabb_distance};
 
     /// Snapping rounds the *result*, so an object already off the grid lands
     /// on it. Rounding the delta instead would preserve the original error
@@ -8880,6 +9377,213 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+    }
+
+    // ── Assigning an asset without a drag ──────────────────────────
+
+    /// A clip lands on the Audio Emitter's clip field and nowhere else.
+    ///
+    /// This is the menu route to the thing a drag was supposed to do. It
+    /// exists because the drag has repeatedly done nothing at all in the
+    /// running editor, and an author needs one path to assigning an asset
+    /// that is a single click and cannot be missed by a few pixels.
+    #[test]
+    fn a_clip_finds_the_audio_emitters_field() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let emitter = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+
+        let found = super::asset_field_for(&registry, &world, emitter, AssetKind::Audio);
+        let (component, _, _, field_name) = found.expect("an emitter must accept a clip");
+        assert_eq!(
+            component,
+            somnium_ecs::reflect::StableId::new("somnium.AudioEmitter")
+        );
+        assert_eq!(field_name, "audio");
+    }
+
+    /// And the same entity refuses a texture rather than dropping it into
+    /// whichever asset field happens to come first in the registry.
+    #[test]
+    fn an_emitter_does_not_take_a_texture() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let emitter = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+        assert!(super::asset_field_for(&registry, &world, emitter, AssetKind::Texture).is_none());
+    }
+
+    /// An entity that has no asset field at all is not a target, however
+    /// many other components it carries.
+    #[test]
+    fn an_entity_with_no_asset_field_accepts_nothing() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let plain = world.spawn((Transform::default(), WorldTransform::identity()));
+        for kind in [AssetKind::Audio, AssetKind::Texture, AssetKind::Mesh] {
+            assert!(super::asset_field_for(&registry, &world, plain, kind).is_none());
+        }
+    }
+
+    // ── Gizmo picking ──────────────────────────────────────────────
+
+    /// A camera at `+Z` looking at the origin, and the matrix a click is
+    /// unprojected through.
+    fn look_at_origin(surface: (f32, f32)) -> (glam::Vec3, glam::Mat4) {
+        let camera = glam::Vec3::new(0.0, 0.0, 12.0);
+        let view = glam::Mat4::look_at_rh(camera, glam::Vec3::ZERO, glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(
+            60.0_f32.to_radians(),
+            surface.0 / surface.1,
+            0.1,
+            1000.0,
+        );
+        (camera, proj * view)
+    }
+
+    fn axis_at(
+        cursor: (f32, f32),
+        viewport: (f32, f32),
+        surface: (f32, f32),
+    ) -> Option<super::GizmoAxis> {
+        let (camera, view_proj) = look_at_origin(surface);
+        let inv = view_proj.inverse();
+        let world = super::ndc_to_world(cursor.0, cursor.1, viewport.0, viewport.1, &inv);
+        super::gizmo_axis_under_ray(
+            camera,
+            (world - camera).normalize_or_zero(),
+            glam::Vec3::ZERO,
+            super::GizmoMode::Translate,
+        )
+    }
+
+    /// **The bug that made every gizmo inert.** `viewport_size` was a cache
+    /// filled from `Resized`, and `window_event` drops every event that
+    /// arrives before the lifecycle reaches `Running` — which on Windows
+    /// includes the window's first one. The cache therefore kept the
+    /// *requested logical* size for the whole session, while the cursor and
+    /// the surface were both in physical pixels. On a 1.5× display that is a
+    /// 50% error on both axes, and a click on an arrow unprojects to a ray
+    /// pointing somewhere else entirely.
+    ///
+    /// Nothing was visibly broken, which is the point: the gizmo drew in the
+    /// right place, the click landed on it, and the drag simply never started.
+    #[test]
+    fn a_click_on_an_arrow_picks_it_only_when_the_viewport_size_is_the_real_one() {
+        // A 1280×720 window on a 1.5× display: the surface, and the cursor,
+        // are 1920×1080.
+        let surface = (1920.0, 1080.0);
+        let stale = (1280.0, 720.0);
+
+        // Straight down the +X arrow from a camera on +Z: a little right of
+        // centre, vertically centred.
+        let on_the_x_arrow = (surface.0 * 0.5 + 68.0, surface.1 * 0.5);
+
+        assert_eq!(
+            axis_at(on_the_x_arrow, surface, surface),
+            Some(super::GizmoAxis::X),
+            "with the real surface size the click picks the arrow it is on"
+        );
+        assert_ne!(
+            axis_at(on_the_x_arrow, stale, surface),
+            Some(super::GizmoAxis::X),
+            "and with the stale logical size it does not — this is the whole bug"
+        );
+    }
+
+    /// The centre of the gizmo is inside every handle's box, so it must
+    /// resolve to *an* axis rather than nothing: a click there is a drag, not
+    /// a miss that falls through to a rubber band.
+    #[test]
+    fn the_centre_of_the_gizmo_is_always_a_hit() {
+        let surface = (1600.0, 900.0);
+        assert!(axis_at((surface.0 * 0.5, surface.1 * 0.5), surface, surface).is_some());
+    }
+
+    /// Empty sky is not a handle. Without this the previous test passes for a
+    /// hit test that says yes to everything.
+    #[test]
+    fn a_click_in_the_corner_hits_nothing() {
+        let surface = (1600.0, 900.0);
+        assert_eq!(axis_at((12.0, 12.0), surface, surface), None);
+    }
+
+    // ── Gizmo placement ────────────────────────────────────────────
+
+    /// The bug: `Create` sets the selection through the undo stack without
+    /// raising a selection event, and the gizmo anchor used to be pushed
+    /// only from selection events. A freshly created Audio Emitter was
+    /// therefore fully editable in the Details panel and had no working
+    /// handle in the viewport — the gizmo was still on whatever came
+    /// before it. Reading the anchor out of the world is what makes that
+    /// unrepresentable, so this asserts the read rather than a push.
+    #[test]
+    fn the_anchor_is_wherever_the_entity_currently_is() {
+        let mut world = somnium_ecs::World::new();
+        let entity = world.spawn((
+            Transform::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
+            WorldTransform::identity(),
+        ));
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(entity)),
+            Some(glam::Vec3::new(1.0, 2.0, 3.0))
+        );
+
+        // A typed Details translation, an Undo and a script write are all
+        // this: the transform moved and nothing raised a selection event.
+        world.get_mut::<Transform>(entity).unwrap().translation = glam::Vec3::new(-4.0, 0.5, 9.0);
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(entity)),
+            Some(glam::Vec3::new(-4.0, 0.5, 9.0)),
+            "the gizmo has to follow the entity, not the last selection event"
+        );
+    }
+
+    /// A child's local translation is an offset, so anchoring by it would
+    /// park the gizmo near the parent's origin rather than on the child.
+    #[test]
+    fn a_child_is_anchored_where_it_is_drawn() {
+        let mut world = somnium_ecs::World::new();
+        let parent = world.spawn((
+            Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0))),
+        ));
+        let child = world.spawn((
+            Transform::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 2.0, 0.0))),
+            crate::Parent { entity: parent },
+        ));
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(child)),
+            Some(glam::Vec3::new(10.0, 2.0, 0.0))
+        );
+    }
+
+    /// Locked and hidden exist to stop the viewport moving something. The
+    /// gizmo is the viewport moving something.
+    #[test]
+    fn a_locked_or_hidden_entity_offers_no_handle() {
+        for flags in [
+            EditorFlags { locked: true, ..EditorFlags::default() },
+            EditorFlags { hidden: true, ..EditorFlags::default() },
+        ] {
+            let mut world = somnium_ecs::World::new();
+            let entity = world.spawn((
+                Transform::from_translation(glam::Vec3::ONE),
+                WorldTransform::identity(),
+                flags,
+            ));
+            assert_eq!(super::gizmo_anchor(&world, Some(entity)), None);
+        }
+        assert_eq!(super::gizmo_anchor(&somnium_ecs::World::new(), None), None);
     }
 
     /// A ray that starts inside a box hits it at zero, not at a negative
