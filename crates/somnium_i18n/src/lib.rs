@@ -109,6 +109,16 @@ impl Table {
         self.strings.get(key).map(String::as_str)
     }
 
+    /// Every key this table defines.
+    ///
+    /// A translation *editor* needs the key set and not just lookups: the
+    /// question it exists to answer is which keys some locale is missing, and
+    /// that cannot be asked of a map you can only probe one key at a time.
+    /// MORROWIND-M.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.strings.keys().map(String::as_str)
+    }
+
     /// How many strings this table holds.
     #[must_use]
     pub fn len(&self) -> usize {

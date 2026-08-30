@@ -18,25 +18,25 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,247 | +13,041 | 32.0% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 61,472 | +33,942 | 31.1% | 656 | +441 | 102 | 2 |
-| `somnium_core` | 34,813 | +15,593 | 17.6% | 394 | +177 | 46 | 0 |
-| `somnium_asset` | 6,242 | +4,603 | 3.2% | 48 | +42 | 12 | 0 |
+| `somnium_renderer` | 63,247 | +13,041 | 31.9% | 436 | +108 | 91 | 55 |
+| `somnium_ui` | 62,225 | +34,695 | 31.4% | 671 | +456 | 103 | 2 |
+| `somnium_core` | 34,960 | +15,740 | 17.6% | 398 | +181 | 46 | 0 |
+| `somnium_asset` | 6,242 | +4,603 | 3.1% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.2% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.6% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
-| `somnium_i18n` | 1,954 | +1,954 | 1.0% | 57 | +57 | 5 | 0 |
+| `somnium_i18n` | 1,964 | +1,964 | 1.0% | 57 | +57 | 5 | 0 |
 | `somnium_jobs` | 1,697 | +1,697 | 0.9% | 18 | +18 | 5 | 0 |
 | `somnium_audio` | 1,581 | +1,488 | 0.8% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **197,566** | +83,674 | | **1993** | +1,048 | | |
+| **Total** | **198,476** | +84,584 | | **2012** | +1,067 | | |
 
-The top three crates are **80.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.8%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **3,094 lines** (+448 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,9 +49,9 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1197 | 251 | 111 | 8 | 12 | 185 | 100 | **1865** |
+| `somnium_ui` | 1213 | 255 | 115 | 8 | 13 | 185 | 101 | **1891** |
 | `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
-| `somnium_core` | 330 | 110 | 23 | 4 | 3 | 46 | 41 | **557** |
+| `somnium_core` | 331 | 110 | 23 | 4 | 3 | 47 | 41 | **559** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 13 | 8 | **160** |
@@ -59,8 +59,8 @@ panel, which §8 says is not a finished sub-phase.
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
 | `somnium_shader` | 48 | 11 | 2 | 0 | 0 | 1 | 3 | **65** |
 | `somnium_audio` | 37 | 10 | 2 | 0 | 0 | 8 | 5 | **62** |
+| `somnium_i18n` | 35 | 5 | 4 | 0 | 1 | 0 | 4 | **49** |
 | `somnium_jobs` | 35 | 10 | 3 | 0 | 1 | 0 | 0 | **49** |
-| `somnium_i18n` | 34 | 5 | 4 | 0 | 1 | 0 | 4 | **48** |
 | `somnium_physics` | 25 | 4 | 2 | 0 | 0 | 3 | 6 | **40** |
 | `somnium_script_luau` | 25 | 5 | 0 | 0 | 0 | 3 | 4 | **37** |
 | `somnium_voxel` | 16 | 6 | 1 | 0 | 1 | 6 | 5 | **35** |
@@ -93,7 +93,7 @@ is a system this phase still owes.
 
 | Term | Files | Plan | Δ | Reading |
 |---|---:|---:|---:|---|
-| `bone` | 5 | 0 | +5 | No skeletal animation of any kind (Track 5). |
+| `bone` | 6 | 0 | +6 | No skeletal animation of any kind (Track 5). |
 | `armature` | 1 | 0 | +1 | As above. |
 | `skin` | 30 | 8 | +22 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |

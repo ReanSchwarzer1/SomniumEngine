@@ -9,7 +9,7 @@ through the real draw path.
 | Item | State |
 |---|---|
 | 1. A virtualising container, retro-fitted to the outliner, content drawer and asset browser | Container **done**; **outliner done**; drawer and browser **not started** — they are a different shape, see below |
-| 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | Not started |
+| 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | **Model done**, with the localisation table as its first customer; the grid widget is not built |
 | 3. Asset dependency view, built on MORROWIND-Q's dependency graph | Not started |
 
 ## The ceiling nobody had measured
@@ -110,6 +110,43 @@ Worth noting that the drawer is not naive about the viewport already:
 `request_visible_thumbnails` promotes only tiles intersecting the scroll
 viewport, so the *expensive* per-tile work is already windowed. What is not
 windowed is the widget count.
+
+## Item 2 — the data table model
+
+`somnium_ui::data_table` is what a table *is*: typed columns, keyed rows,
+sorting, filtering, rectangular edits and CSV. The grid widget that draws it is
+a projection, the same way `somui_editor` is one for the layout editor.
+
+Separating it is not ceremony. A table editor's bugs are almost never in the
+drawing — they are a sort that loses the selection, a filter that hides a row
+you then edit by index, a paste that runs off the end, a CSV round trip that
+eats a comma. Each is a property of the model, and each is a test.
+
+Four decisions worth stating:
+
+- **Rows are addressed by `RowId`, never by position.** Sorting and filtering
+  renumber positions, and an edit applied to the wrong row because the view was
+  re-sorted between the click and the commit is *the* classic data-grid bug.
+  `visible_rows` returns ids for exactly this reason.
+- **`Cell::Empty` is not `Text("")`.** A locale with no translation is not a
+  locale translated to nothing, and an editor that cannot tell them apart cannot
+  show you what is missing. The `only_incomplete` filter is the whole reason a
+  translator opens the table.
+- **Reversing a sort really reverses it, blanks included.** Pinning empties to
+  the bottom in both directions is a common choice and it makes "show me what is
+  missing" impossible in a long table.
+- **A range edit is all or nothing.** A paste that writes four columns and fails
+  the fifth must write none: half a paste is worse than none, because the undo
+  the user reaches for no longer matches what happened.
+
+Its first customer is live. `somnium_core::i18n::catalog_to_table` projects a
+`Catalog` as keys down and locales across — the join lives beside
+`CatalogResolver` for the same reason that does, so neither `somnium_ui` nor
+`somnium_i18n` learns about the other. Keys come from the **union** of every
+locale rather than from the default one, because a key that exists only in a
+translation is usually a mistake and it is one nobody can see in a table that
+lists only what the default locale has. `Table::keys` was added to
+`somnium_i18n` to make that askable at all.
 
 ## What this step does not claim
 
