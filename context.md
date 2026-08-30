@@ -1797,10 +1797,20 @@ does not overlap. STALKER waits for both relevant outputs.
   its invertible members. `editor_gizmo` owns that transaction rather than the
   `Engine` host. Local axes are rotated consistently for drawing, picking and
   drag solving. This closes the rotated/non-uniformly-scaled-parent failure.
-- The terrain layer palette and the foliage picker are fixed built-in lists,
-  not asset fields. They therefore have no `asset_kind_mask` and are not drop
-  targets, and the Content Drawer cannot supply a terrain layer texture or a
-  foliage kind. Making them asset-backed is a scene-format change, not a UI one.
+- **Three of the open editor gaps are one gap.** The terrain layer palette, the
+  foliage kind picker and the brush alpha mask are all editor-private state —
+  `TerrainToolField` and `FoliageBrushField` are enums in `editor_event.rs`,
+  under a comment that says *"brush/runtime controls which deliberately remain
+  outside component schemas"*. Because they are not reflected fields they have
+  no `asset_kind_mask`, so Details cannot generate an asset picker for them and
+  the Content Drawer has nothing to drop onto. Everything that *is* reflected
+  gets both for free — `UiCanvasComponent::document` needed one line of schema
+  to become a picker and a drop target at once (MORROWIND-M2).
+
+  So the fix for all three is the same and it is a scene-format change rather
+  than a UI one: move brush and tool settings into a reflected component. That
+  also unblocks the left tool bar redesign below, which the plan is explicit
+  should wait until the tools have options worth showing.
 - Viewport ray picking no longer requires `MeshComponent`. One shared
   `entity_ray_hit_distance` path serves ordinary selection, the piercing menu,
   and placement: render meshes use their geometry AABB, decals use their
@@ -1822,8 +1832,10 @@ does not overlap. STALKER waits for both relevant outputs.
   so the left toolbar's tools have nothing to offer beyond a mode. The tools
   now say when they cannot run; they still do not open their own options.
 - Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
-  textures. Importing a brush alpha is the next step and needs the same asset
-  field the other pickers use.
+  textures. `BrushAlpha::mask` is a pure function of the pattern enum, so the
+  runtime half is a new variant carrying sampled texels; the authoring half is
+  blocked on the same reflected-component change as the terrain and foliage
+  pickers above.
 - Floating OS windows and multiple viewports. The **dock tree itself is in
   tree** (`somnium_ui::dock`): tiles, splitters and tab sets, with the shipped
   arrangement as its default and every workspace preset expressed through it,
