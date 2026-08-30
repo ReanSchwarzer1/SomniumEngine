@@ -96,6 +96,22 @@ pub const PIPELINE_STATS_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_STA
 /// Never request this bit if the adapter lacks it.
 pub const BC_COMPRESSION_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC;
 
+/// DOOM-K. `enable f16;` in WGSL, and half-precision arithmetic in a shader.
+///
+/// Detected, never demanded, and requesting it does not change a single shader
+/// on its own: a pipeline has to be compiled with the narrower types before any
+/// of it reaches the GPU. The flag exists so the experiment can *ask* whether
+/// the device would allow it, which is a different question from whether it
+/// helps.
+pub const SHADER_F16_FEATURES: wgpu::Features = wgpu::Features::SHADER_F16;
+
+/// DOOM-L. Subgroup ballot, broadcast and reduction intrinsics in WGSL.
+///
+/// Same contract: detected and requested when present, and no default path may
+/// depend on it — a device without subgroups must take a scalar or
+/// workgroup-shared path that produces identical results.
+pub const SUBGROUP_FEATURES: wgpu::Features = wgpu::Features::SUBGROUP;
+
 /// Features FSR 3 needs on the device (detect, do not demand).
 ///
 /// wgpu-ffx's tests request *every* adapter feature. We ask for the set it
@@ -267,6 +283,34 @@ impl RenderContext {
             required_features
         };
 
+        // DOOM-K and DOOM-L: detect, do not demand, and log either way. Both
+        // stages are experiments whose expected result is "no", and an
+        // experiment that cannot say whether the hardware would even allow it
+        // has not started.
+        let shader_f16 = available_features.contains(SHADER_F16_FEATURES);
+        if shader_f16 {
+            info!("Half-precision shader arithmetic available (f16)");
+        } else {
+            info!("Half-precision shader arithmetic unavailable — f32 only");
+        }
+        let required_features = if shader_f16 {
+            required_features | SHADER_F16_FEATURES
+        } else {
+            required_features
+        };
+
+        let subgroups = available_features.contains(SUBGROUP_FEATURES);
+        if subgroups {
+            info!("Subgroup operations available");
+        } else {
+            info!("Subgroup operations unavailable — scalar and workgroup paths only");
+        }
+        let required_features = if subgroups {
+            required_features | SUBGROUP_FEATURES
+        } else {
+            required_features
+        };
+
         let fsr = available_features.contains(FSR_FEATURES);
         if fsr {
             info!("FSR 3 available (adapter storage formats + shader passthrough)");
@@ -410,6 +454,16 @@ impl RenderContext {
     /// Whether FSR 3 may create `Rg16Float` storage images and load AMD SPIR-V.
     pub fn supports_fsr(&self) -> bool {
         self.features.contains(FSR_FEATURES)
+    }
+
+    /// Whether a shader may `enable f16` (DOOM-K).
+    pub fn supports_shader_f16(&self) -> bool {
+        self.features.contains(SHADER_F16_FEATURES)
+    }
+
+    /// Whether a shader may use subgroup intrinsics (DOOM-L).
+    pub fn supports_subgroups(&self) -> bool {
+        self.features.contains(SUBGROUP_FEATURES)
     }
 
     /// Resize the surface.

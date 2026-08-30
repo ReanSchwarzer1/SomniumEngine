@@ -172,10 +172,11 @@ frame, and reported as `alloc_churn_frames`, `alloc_worst_frame_delta`,
 accumulated, because an endpoint comparison reports "nothing changed" for a
 resource created every frame and destroyed the next.
 
-**Textures, texture views, bind groups and samplers do not move at all** across
-300 steady-state frames on either map. One buffer oscillates on about a fifth of
-frames, and `SOMNIUM_ALLOC_TRACE=1` names it: `(wgpu internal) Staging`. No
-engine-labelled resource is created in a steady-state frame.
+On **Coastal** the criterion holds: one object moves on any churning frame, it
+is always a buffer, and `SOMNIUM_ALLOC_TRACE=1` names it `(wgpu internal)
+Staging`. On **Island** it does not: 100 of 300 frames churn, four move a texture
+view and a bind group, and one frame moves 75 objects at once — five unrelated
+per-frame labels halving and doubling together. Named, not attributed.
 
 The inventory is 1901.7 MiB allocated of 2368.0 MiB reserved on Coastal, and its
 largest row is the trade that buys the result: 384 MiB of fixed geometry pools
@@ -186,6 +187,31 @@ pixel, not intermediate bandwidth.
 
 Full inventory, the naming trace, and the bandwidth-counter gap stated as a gap:
 [`DOOM-J.md`](DOOM-J.md).
+
+---
+
+# DOOM-K — fp16 in the terrain inner loop
+
+Completed and **reverted** 2026-08-30, which is what the stage prescribed for a
+result under 5%.
+
+The thirty-two entry splat-weight array and the scan over it were compiled at
+half precision behind a `//!if TERRAIN_F16` block — the first real use of
+MORROWIND-C's define machinery, which worked as documented, including hoisting
+`enable f16;` out of the guard. Two back-to-back repetitions on Coastal ground:
+
+| rep | f32 Shading | f16 Shading | delta | verdict |
+|---|---:|---:|---:|---|
+| 1 | 11.9365 ± 0.4488 | 11.6165 ± 0.4392 | −0.320 ms | ~ noise |
+| 2 | 11.4759 ± 0.3743 | 11.6319 ± 0.3170 | +0.156 ms | ~ noise |
+
+**The sign flips between repetitions.** Reverted; the adapter capability probes
+are kept, and this adapter reports both `SHADER_F16` and `SUBGROUP` available.
+
+The record also carries a broken run and how it was caught — a 49% "win" that
+was a lost `SOMNIUM_MAXIMIZE`, found by reading the `.somtime` header rather
+than its numbers — and the naga trap that an alias inside a
+`ptr<function, array<T, 32>>` parameter does not unify: [`DOOM-K.md`](DOOM-K.md).
 
 ---
 

@@ -18,7 +18,7 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,182 | +12,976 | 32.7% | 436 | +108 | 91 | 55 |
+| `somnium_renderer` | 63,236 | +13,030 | 32.7% | 436 | +108 | 91 | 55 |
 | `somnium_ui` | 58,234 | +30,704 | 30.1% | 594 | +379 | 98 | 2 |
 | `somnium_core` | 33,910 | +14,690 | 17.5% | 383 | +166 | 44 | 0 |
 | `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **193,232** | +79,340 | | **1920** | +975 | | |
+| **Total** | **193,286** | +79,394 | | **1920** | +975 | | |
 
 The top three crates are **80.4%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1134 | 237 | 105 | 8 | 10 | 173 | 95 | **1762** |
-| `somnium_renderer` | 646 | 156 | 9 | 1 | 2 | 123 | 88 | **1025** |
+| `somnium_renderer` | 648 | 156 | 9 | 1 | 2 | 125 | 88 | **1029** |
 | `somnium_core` | 317 | 106 | 23 | 3 | 3 | 46 | 40 | **538** |
 | `somnium_script` | 126 | 35 | 9 | 3 | 3 | 18 | 11 | **205** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |

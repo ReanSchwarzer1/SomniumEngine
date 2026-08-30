@@ -1663,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | A–J in tree; C/E/G are default-off measured experiments; D, H, I and J complete; K through M open |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | A–K done; C/E/G are default-off measured experiments and K is a reverted one; D, H, I, J complete; L and M open |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -2198,12 +2198,30 @@ one-off startup cost from a steady-state fault.
 **Allocation counters are gauges, so read the per-frame delta and not the
 endpoints.** A resource created every frame and destroyed the next nets to zero
 over a window, and that is exactly the churn worth finding. Sampling every
-measured frame, no engine-labelled texture, texture view, bind group or sampler
-moves across 300 steady-state frames on either shipped map; the one buffer that
-oscillates is `(wgpu internal) Staging`, wgpu's own pool for `write_buffer`.
-Counters say *that* something moved — only the allocator report's labels say
+measured frame, Coastal moves exactly one object on a churning frame and it is
+always `(wgpu internal) Staging`, wgpu's own pool for `write_buffer`. **Island
+does not meet the same bar**: 100 of 300 steady-state frames churn, four move a
+texture view and a bind group, and one moves 75 objects at once — five unrelated
+per-frame labels halving and doubling together, named and not yet attributed.
+Counters say *that* something moved; only the allocator report's labels say
 *which*, which is what `SOMNIUM_ALLOC_TRACE=1` prints.
 ([DOOM-J](<dev records/phase DOOM/DOOM-J.md>))
+
+**Read a `.somtime` header before its numbers.** Environment variables do not
+persist between shell invocations, so a run can quietly lose its resolution, its
+camera and its static-scene flag and still write a plausible-looking file. One
+such run reported a 49% frame-time win; `# render` said 1280x720 against the
+baseline's 1920x1032, `draw_calls` said 195 against 66, and `Shading.frag` said
+921 600 against 1 981 440. The controls are in the header, and a comparison whose
+controls moved is not a comparison. Two already-published Island runs were found
+the same way and re-measured. ([DOOM-K](<dev records/phase DOOM/DOOM-K.md>))
+
+**Half precision in the terrain inner loop is a null result, twice.** The
+thirty-two entry splat-weight array and its scan were compiled at f16 behind a
+shader define; back-to-back repetitions moved Shading by −0.320 ms and then
++0.156 ms. The sign flips, both are inside the noise band, and the stage's 5%
+gate is far away. Reverted, as the stage prescribed, with the numbers kept —
+the null *is* the deliverable. ([DOOM-K](<dev records/phase DOOM/DOOM-K.md>))
 
 **The geometry pools are 384 MiB of fixed reservation at about 3% occupancy, and
 that is the trade that makes the frame allocation-free.** They are allocated once

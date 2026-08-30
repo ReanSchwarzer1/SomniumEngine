@@ -148,9 +148,18 @@ Three changes, each removing one of the three wastes:
 | `hitch median_ms` | 19.710 ms | 19.897 ms | +0.187 ms |
 | `hitch over_2x_median` | 0 | 0 | — |
 
-Island, same build: `startup_ms` **2070.8 ms**, median 16.904 ms, worst 19.051
-ms, **0 hitches**. Both shipped maps now start in under 2.1 seconds and neither
-breaks step once running.
+Island, same build and the same settings: `startup_ms` **1145.4 ms**, median
+16.860 ms, worst 19.949 ms — 1.18x the median — and **0 hitches**. Both shipped
+maps now start in about a second and neither breaks step once running.
+
+> **Corrected 2026-08-30.** The Island figures first recorded here (2070.8 ms
+> startup, 16.904 ms median) came from a run that had lost `SOMNIUM_MAXIMIZE`,
+> `SOMNIUM_TIME_STATIC` and the fixed sun, because environment variables do not
+> persist between shell invocations. It rendered at 1280x720 with the demo boat
+> present. The run above is at 1920x1032 with the same controls as Coastal.
+> DOOM-K records how the class of mistake is caught: read the `.somtime`
+> header — `# render`, `draw_calls`, `Shading.frag` — before reading any
+> number below it.
 
 - [`DOOM-I_coastal-ground_before.somtime`](DOOM-I_coastal-ground_before.somtime)
 - [`DOOM-I_coastal-ground_after.somtime`](DOOM-I_coastal-ground_after.somtime)

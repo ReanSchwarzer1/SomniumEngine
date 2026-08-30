@@ -1,7 +1,8 @@
 # DOOM-J — bandwidth, formats, allocations
 
-**Status:** complete, 2026-08-30. One measurable clause met and proved; two
-closed without a change because the measurement did not support one.
+**Status:** complete, 2026-08-30. The instrument was built and it answered:
+the criterion holds on Coastal, does not hold on Island, and the two format
+clauses closed without a change because the measurement did not support one.
 
 ## The three clauses
 
@@ -11,7 +12,7 @@ rows with measured traffic or churn."*
 
 | Clause | Outcome |
 |---|---|
-| An allocation counter asserting zero buffer, texture and bind-group creation in a steady-state frame | **Built, and the assertion holds** for everything the engine owns |
+| An allocation counter asserting zero buffer, texture and bind-group creation in a steady-state frame | **Built. The assertion holds on Coastal and does not hold on Island**, and the counter is what says so |
 | `RGB9E5` or `f16` for intermediate targets *where the census says bandwidth matters* | **No change.** The census says it does not — see below |
 | Remove redundant full-resolution copies | **No change.** The inventory found none to remove |
 
@@ -42,27 +43,41 @@ accumulated:
 `churn_<object>` exists because the first run reported "68 of 300 frames
 churned" and that is not something anybody can act on.
 
-## What the first run found
+## What the runs found
 
-Coastal ground, 180 warm-up / 300 measured, fixed camera and sun, 1920×1032.
+Both maps, 180 warm-up / 300 measured, fixed camera and sun,
+`SOMNIUM_TIME_STATIC=1`, 1920×1032, same build.
 
 | | Coastal | Island |
 |---|---:|---:|
-| `alloc_churn_frames` | 59 / 300 | 96 / 300 |
-| `alloc_worst_frame_delta` | 1 | 1 |
-| `churn_buffers` | **59** | **96** |
-| `churn_textures`, `churn_texture_views`, `churn_bind_groups`, `churn_samplers` | **0** | **0** |
-| `live_buffers` | 342 | 192 |
-| `live_texture_views` | 594 | 430 |
-| `live_bind_groups` | 181 | 116 |
+| `alloc_churn_frames` | 69 / 300 | 100 / 300 |
+| **`alloc_worst_frame_delta`** | **1** | **75** |
+| `churn_buffers` | 69 | 100 |
+| `churn_texture_views` | **0** | **4** |
+| `churn_bind_groups` | **0** | **4** |
+| `churn_textures`, `churn_samplers` | 0 | 0 |
+| `live_buffers` | 342 | 194 |
+| `live_texture_views` | 594 | 424 |
+| `live_bind_groups` | 181 | 118 |
+| draw calls | 66 | 19 |
 
-**Textures, texture views, bind groups and samplers do not move at all** across
-three hundred steady-state frames on either map. Exactly one buffer appears and
-disappears, on about a fifth of frames.
+**Coastal meets the criterion.** Exactly one object moves on any churning frame,
+it is always a buffer, and nothing else in the inventory shifts across three
+hundred frames.
 
-Island churns *more* than Coastal while drawing 38 objects to Coastal's 66,
-which rules out the obvious explanations — it is not proportional to draws, to
-instances, or to scene size.
+**Island does not.** It churns on a third of frames, four of them move a texture
+view and a bind group, and one frame moves **seventy-five** objects at once —
+while drawing 19 objects to Coastal's 66, so this is not proportional to draws,
+instances or scene size.
+
+> **Corrected 2026-08-30.** The Island column first published here (96 churn
+> frames, worst delta 1, no view or bind-group movement) came from a run that had
+> lost `SOMNIUM_MAXIMIZE` and `SOMNIUM_TIME_STATIC` — environment variables do
+> not persist between shell invocations — and rendered at 1280×720 with the demo
+> boat present. Re-run at matched settings, Island shows churn the first run did
+> not. The original claim that *"textures, texture views, bind groups and
+> samplers do not move at all on either map"* was wrong; it is true of Coastal
+> only. DOOM-K records the audit that found it.
 
 ## Naming it
 
@@ -72,6 +87,8 @@ because it carries the label each resource was created with, so
 It is opt-in: rebuilding that multiset once a frame is far too much work to
 leave on.
 
+On **Coastal**, one name and nothing else:
+
 ```text
 alloc churn frame=62 name=(wgpu internal) Staging before=54 now=53
 alloc churn frame=63 name=(wgpu internal) Staging before=53 now=54
@@ -79,13 +96,39 @@ alloc churn frame=68 name=(wgpu internal) Staging before=54 now=53
 alloc churn frame=69 name=(wgpu internal) Staging before=53 now=54
 ```
 
-One name, oscillating by one on a fixed six-frame cycle: **wgpu's own staging
-pool** for `Queue::write_buffer` and `write_texture`. No engine-labelled
-resource is created or destroyed in a steady-state frame on either map.
+**wgpu's own staging pool** for `Queue::write_buffer` and `write_texture`,
+oscillating by one on a fixed six-frame cycle. No engine-labelled resource is
+created or destroyed in a steady-state Coastal frame.
 
-The clause is therefore met, with its boundary stated: *the engine allocates
-nothing in a steady-state frame; wgpu's staging pool breathes by one buffer, and
-that is inside wgpu.*
+On **Island** the trace shows something else entirely, and the seventy-five
+object delta is the same event:
+
+```text
+alloc churn frame=182 name=(wgpu) scratch buffer        before=2  now=1
+alloc churn frame=182 name=Bloom params                 before=22 now=11
+alloc churn frame=182 name=BufferClearer::uniform_buffer before=4 now=2
+alloc churn frame=182 name=Water Inst Buffer            before=4  now=2
+alloc churn frame=182 name=Water Mat Buffer             before=4  now=2
+alloc churn frame=204 …                                 (all of them double back)
+```
+
+Five unrelated labels **halve together and double back** twenty-two frames
+later, each from exactly two generations to one. The shape is a whole frame's
+worth of transient resources being released at once and then rebuilt — small
+per-frame uniform and instance buffers whose lifetime is tied to frame
+completion rather than to the scene. The hal counters and the allocator report
+agree on it, so it is real and not a reporting artefact.
+
+**It is named but not attributed.** Nothing is logged at those frames, and which
+call site rebuilds `Bloom params`, `Water Inst Buffer` and
+`BufferClearer::uniform_buffer` in lockstep on Island and never on Coastal was
+not chased. That is the honest state: the counter did its job by finding
+something the endpoint comparison would have reported as zero, and finding it is
+where this stage stops.
+
+The clause is therefore **met on Coastal and open on Island**, which is a more
+useful result than a green tick: there is now an instrument that can tell the
+two apart, and a named starting point for whoever closes it.
 
 ## The inventory
 
