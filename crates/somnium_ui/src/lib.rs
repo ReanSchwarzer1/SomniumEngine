@@ -2276,7 +2276,13 @@ impl UiManager {
 
     fn complete_drop(&mut self) {
         self.native_ui.set_drop_highlight(None);
+        // Read the refusal before taking the drop, because taking it clears
+        // the state that knows why.
+        let refused = self.native_ui.drop_rejection_reason();
         let Some(drop) = self.native_ui.take_completed_drop() else {
+            if let Some(reason) = refused {
+                self.push_toast(&reason);
+            }
             return;
         };
         match crate::drag_drop::semantic_request(

@@ -1440,6 +1440,17 @@ impl SomniumRenderer {
     }
 
     /// Whether editor-only viewport overlays may be drawn or picked.
+    /// The view-projection to use for cursor picking.
+    ///
+    /// **Not** [`Self::view_proj`], which carries the per-frame sub-pixel
+    /// jitter FSR and TAA need. Editor overlays — the gizmo included — are
+    /// drawn with the unjittered matrix, so picking must use it too or the
+    /// ray and the arrow the user aimed at disagree by the jitter.
+    #[must_use]
+    pub fn picking_view_proj(&self) -> glam::Mat4 {
+        self.view_proj_unjittered
+    }
+
     pub fn editor_overlays_enabled(&self) -> bool {
         self.editor_overlays_enabled
     }

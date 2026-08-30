@@ -965,6 +965,15 @@ Current conservative defaults matter:
   opt-in. The last two measured slower in their original tests.
 - Weighted OIT is off unless authored.
 
+The night sky's stars are procedural, sized in **pixels** rather than in
+radians. The first two versions used a fixed angular radius roughly a seventh
+of a pixel at a normal field of view, so every star was smaller than the pixel
+it landed in, the smoothstep meant to soften it had no sub-pixel room, and the
+result was a grid of hard-edged fully-lit pixels — the blocky squares. The core
+is now a multiple of `fwidth(dir)` with a Gaussian profile and a weak wide
+skirt, brighter stars are drawn slightly larger, and the density is about a
+third of what it was so the field reads as a sky rather than as noise.
+
 ### Post processing and anti-aliasing
 
 The HDR chain includes AgX/ACES tone mapping, bloom, depth of field, motion
@@ -1683,6 +1692,11 @@ does not overlap. STALKER waits for both relevant outputs.
 - `context.md` and several old phase preambles had drifted. This rewrite makes
   the current ledger explicit, but those historical files still need care when
   used as plans.
+- Dragging an asset out of the Content Drawer onto a Details asset field has a
+  complete and tested semantic route, but has been reported as doing nothing in
+  the running editor and the cause is not yet found. A refused drop now names
+  its reason in a toast instead of failing silently, so the next attempt says
+  which link is broken.
 - A gizmo drag on a **child** entity is anchored correctly but still writes a
   world-space delta into a local transform, so it is only right while the
   parent is unrotated and unscaled. The anchor fix made this visible; mapping
@@ -1697,7 +1711,16 @@ does not overlap. STALKER waits for both relevant outputs.
 
 ### Missing systems
 
-- Prefab authoring/instancing, general splines, and rule-driven scattering.
+- Prefab authoring/instancing, general splines, and rule-driven scattering. A
+  spline primitive is the prerequisite for the shaped ambient audio emitter a
+  shoreline wants — one that follows the water's edge instead of sitting at a
+  point — and for spline roads, rivers and fences after it.
+- Terrain layers and foliage kinds are fixed built-in lists rather than assets,
+  so the left toolbar's tools have nothing to offer beyond a mode. The tools
+  now say when they cannot run; they still do not open their own options.
+- Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
+  textures. Importing a brush alpha is the next step and needs the same asset
+  field the other pickers use.
 - Docking, large-list virtualisation, GUI authoring, and isolated play-in-editor.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
@@ -1898,6 +1921,22 @@ the property surface was maintained by hand at a cost of 675 identifiers: 106
 generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
 hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
+
+**Every viewport ray reads the live surface size, never a cached one.** The
+editor kept a `viewport_size` filled from winit's `Resized`, and
+`window_event` drops every event that arrives before the lifecycle reaches
+`Running` — which on Windows includes the window's first one. So the cache
+held the *requested* size for the whole session unless the user happened to
+drag a window edge, and that requested size is **logical** while the cursor and
+the surface are both **physical**, so on any display with a scale factor the
+two disagreed by the scale even after a resize did land. Everything that turns
+a cursor position into a world ray went through it: the transform gizmo, the
+terrain and foliage brushes, the rubber band, the drop probe. The gizmo drew in
+the right place, the click landed on the arrow, and the drag simply never
+started — no error, no log line, nothing to see. The size now comes from
+`RenderContext::config`, which is the surface's own record of itself and cannot
+go stale. Picking also uses `picking_view_proj`, the unjittered matrix the
+overlays are drawn with, rather than the TAA-jittered one.
 
 **The transform gizmo is anchored from the world every frame, not pushed on
 selection change.** The anchor used to be written to the renderer only from

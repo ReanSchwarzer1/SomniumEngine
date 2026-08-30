@@ -246,18 +246,42 @@ fn star_hash(p: vec3<f32>) -> f32 {
 
 /// A star field in the given direction, in cd/m².
 ///
-/// Phase 25M-2: Evaluates a 3×3×3 neighborhood of cells to prevent stars
-/// from clipping at cell boundaries (the cause of rectangular stars).
-/// Uses smoothstep angular falloff instead of pow(40000) for round points,
-/// and an exponential magnitude distribution for realistic brightness.
+/// # Why the first two versions looked like square pixels
+///
+/// A star was a disc of a fixed *angular* radius, `0.00015` radians. One
+/// screen pixel at a 60-degree field of view on a 1080-line display subtends
+/// roughly `0.001` radians — nearly seven times that. So every star was far
+/// smaller than the pixel it landed in, the smoothstep that was meant to
+/// soften its edge had no sub-pixel room to work in, and what reached the
+/// screen was a single fully-lit pixel with hard sides. A grid of those reads
+/// as blocky squares, which is exactly what it was.
+///
+/// The fix is to stop measuring a star in radians. `fwidth` already tells the
+/// fragment how much `dir` changes across one pixel, so the core is sized as a
+/// multiple of *that* and a star is always at least a pixel across with room
+/// to fade. The profile is a Gaussian core plus a much wider, much weaker
+/// halo: the core is the point of light, the halo is what makes a bright star
+/// read as brighter rather than merely as a whiter pixel, and both are smooth
+/// everywhere so they antialias for free as the camera turns.
+///
+/// Density came down at the same time. The old field was dense enough to read
+/// as noise; a real sky is mostly empty with a crowded band across it, so the
+/// cells are larger and the acceptance threshold is tighter, which keeps the
+/// Milky Way concentration while thinning the rest by roughly three times.
 fn star_field(dir: vec3<f32>) -> vec3<f32> {
-    let cell_scale = 340.0;
+    // Larger cells than before: fewer stars, and each one gets more room.
+    let cell_scale = 200.0;
     let base_cell = floor(dir * cell_scale);
-    let pixel_angle = length(fwidth(dir));
+
+    // The angular radius of one pixel. `fwidth` sums the absolute derivative
+    // in both screen axes, so halving it is the honest per-pixel figure; the
+    // floor keeps a still camera or a degenerate derivative from collapsing
+    // the star to nothing again.
+    let pixel_angle = max(length(fwidth(dir)) * 0.5, 2.0e-5);
+
     var result = vec3<f32>(0.0);
 
     // Galactic pole — density increases toward the galactic plane.
-    // Roughly the north galactic pole direction.
     const GALACTIC_POLE: vec3<f32> = vec3<f32>(0.4940, 0.0587, 0.8674);
 
     for (var dx = -1i; dx <= 1i; dx++) {
@@ -266,13 +290,11 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
         let cell = base_cell + vec3<f32>(f32(dx), f32(dy), f32(dz));
         let h = star_hash(cell);
 
-        // Density variation: lower the threshold near the galactic plane
-        // so more stars appear there (Milky Way concentration).
+        // Lower the threshold near the galactic plane so more stars appear
+        // there, which is the Milky Way without a texture for it.
         let cell_dir = normalize(cell + 0.5);
         let gal_dist = abs(dot(cell_dir, GALACTIC_POLE));
-        // Near the pole (gal_dist ~ 1): threshold stays high (fewer stars).
-        // Near the plane (gal_dist ~ 0): threshold drops (more stars).
-        let threshold = mix(0.978, 0.990, gal_dist * gal_dist);
+        let threshold = mix(0.975, 0.993, gal_dist * gal_dist);
         if h < threshold { continue; }
 
         // Star position within the cell.
@@ -283,24 +305,34 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
         );
         let star_dir = normalize((cell + offset) / cell_scale);
 
-        // Angular separation and smoothstep falloff.
         let cos_angle = dot(dir, star_dir);
         let angle = acos(clamp(cos_angle, -1.0, 1.0));
-        let star_radius = 0.00015;
-        let edge = max(pixel_angle * 0.5, 0.00003);
-        let falloff = 1.0 - smoothstep(star_radius - edge, star_radius + edge, angle);
-        if falloff <= 0.0 { continue; }
 
-        // Spectral tint: most white, some warm, a few blue.
-        let tint_pick = star_hash(cell + 53.0);
-        let tint = mix(
-            vec3<f32>(1.0, 0.85, 0.7),
-            vec3<f32>(0.75, 0.85, 1.0),
-            tint_pick,
-        );
         // Exponential magnitude distribution: many faint, few bright.
-        let brightness = 0.005 * exp(4.0 * star_hash(cell + 71.0));
-        result += tint * brightness * falloff;
+        let magnitude = star_hash(cell + 71.0);
+        let brightness = 0.0045 * exp(4.2 * magnitude);
+
+        // Bright stars are drawn slightly larger, which is how a photograph
+        // and an eye both encode magnitude. Sized in pixels, never in radians.
+        let core = pixel_angle * mix(0.62, 1.25, magnitude * magnitude);
+        let d = angle / core;
+        if d > 9.0 { continue; }
+
+        // Gaussian core, plus a wide exponential skirt at a tenth the weight.
+        let profile = exp(-d * d * 1.9) + 0.10 * exp(-d * 0.8);
+
+        // Spectral tint, pulled most of the way to white: real stars are far
+        // less colourful than a naive warm-to-blue ramp makes them, and a sky
+        // of saturated dots looks like confetti.
+        let tint_pick = star_hash(cell + 53.0);
+        let hue = mix(
+            vec3<f32>(1.0, 0.82, 0.66),
+            vec3<f32>(0.72, 0.83, 1.0),
+            smoothstep(0.15, 0.85, tint_pick),
+        );
+        let tint = mix(vec3<f32>(1.0), hue, 0.55);
+
+        result += tint * brightness * profile;
     }}}
     return result;
 }

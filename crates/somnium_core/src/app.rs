@@ -702,7 +702,7 @@ pub struct Engine<G: GameApp> {
     /// Current cursor position in physical pixels.
     cursor_pos: (f32, f32),
     /// Current window dimensions in physical pixels (updated on resize).
-    viewport_size: (f32, f32),
+    viewport_size_hint: (f32, f32),
     /// Active gizmo drag state (Some while LMB is held on a gizmo axis).
     gizmo_drag: Option<GizmoDragState>,
     /// Viewport rubber-band, live only while the left button is down over
@@ -907,7 +907,7 @@ impl<G: GameApp + 'static> Engine<G> {
             undo_stack: UndoStack::new(128),
             field_gestures: std::collections::HashMap::new(),
             cursor_pos: (0.0, 0.0),
-            viewport_size: initial_vp,
+            viewport_size_hint: initial_vp,
             gizmo_drag: None,
             marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
@@ -1298,8 +1298,8 @@ impl<G: GameApp> Engine<G> {
         let Some(renderer) = self.renderer.as_ref() else {
             return;
         };
-        let view_proj = renderer.view_proj;
-        let viewport = self.viewport_size;
+        let view_proj = renderer.picking_view_proj();
+        let viewport = self.viewport_size();
         let caught: Vec<_> = self
             .world
             .entities()
@@ -2526,7 +2526,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // Handle Resizing
         if let WindowEvent::Resized(size) = &event {
-            self.viewport_size = (size.width as f32, size.height as f32);
+            self.viewport_size_hint = (size.width as f32, size.height as f32);
             if let Some(r_ctx) = &mut self.render_ctx {
                 r_ctx.resize(size.width, size.height);
             }
@@ -2642,22 +2642,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     match code {
                         WKC::BracketLeft if self.terrain_edit_active => {
                             self.terrain_brush.radius = (self.terrain_brush.radius / 1.25).max(0.5);
-                            info!("Brush radius: {:.1} m", self.terrain_brush.radius);
+                            self.announce_brush();
                         }
                         WKC::BracketRight if self.terrain_edit_active => {
                             self.terrain_brush.radius =
                                 (self.terrain_brush.radius * 1.25).min(128.0);
-                            info!("Brush radius: {:.1} m", self.terrain_brush.radius);
+                            self.announce_brush();
                         }
                         WKC::Minus if self.terrain_edit_active => {
                             self.terrain_brush.strength =
                                 (self.terrain_brush.strength - 0.1).max(0.05);
-                            info!("Brush strength: {:.2}", self.terrain_brush.strength);
+                            self.announce_brush();
                         }
                         WKC::Equal if self.terrain_edit_active => {
                             self.terrain_brush.strength =
                                 (self.terrain_brush.strength + 0.1).min(1.0);
-                            info!("Brush strength: {:.2}", self.terrain_brush.strength);
+                            self.announce_brush();
                         }
                         WKC::Comma if self.terrain_edit_active => {
                             self.terrain_brush.paint_layer =
@@ -2666,12 +2666,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                         as usize
                                         - 1,
                                 );
-                            info!("Paint layer: {}", self.terrain_brush.paint_layer);
+                            self.announce_brush();
                         }
                         WKC::Period if self.terrain_edit_active => {
                             self.terrain_brush.paint_layer = (self.terrain_brush.paint_layer + 1)
                                 % somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT as usize;
-                            info!("Paint layer: {}", self.terrain_brush.paint_layer);
+                            self.announce_brush();
+                        }
+                        // Cycle the dab mask. Next to the layer keys because
+                        // it is a painting decision, not a sculpting one.
+                        WKC::Slash if self.terrain_edit_active => {
+                            self.terrain_brush.alpha = self.terrain_brush.alpha.next();
+                            self.announce_brush();
                         }
                         WKC::Digit1 if self.terrain_edit_active => self.set_terrain_tool(0),
                         WKC::Digit2 if self.terrain_edit_active => self.set_terrain_tool(1),
@@ -2818,7 +2824,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         &self.world,
                         &self.selection.primary,
                         self.cursor_pos,
-                        self.viewport_size,
+                        self.viewport_size(),
                     )
                     .map(|mut drag| {
                         drag.local_space = self.settings.editor().gizmo_local_space;
@@ -3044,14 +3050,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .as_ref()
                 .is_some_and(somnium_ui::UiManager::command_modifier_held),
         );
+        let viewport = self.viewport_size();
         let drag_result: Option<(u32, Transform)> = self.gizmo_drag.as_ref().and_then(|drag| {
             let (cam, inv_vp) = self
                 .renderer
                 .as_ref()
-                .map(|r| (r.camera_pos, r.view_proj.inverse()))
+                .map(|r| (r.camera_pos, r.picking_view_proj().inverse()))
                 .unwrap_or((glam::Vec3::ZERO, glam::Mat4::IDENTITY));
-            let new_t =
-                apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, self.viewport_size, snap);
+            let new_t = apply_gizmo_drag(drag, cam, inv_vp, self.cursor_pos, viewport, snap);
             Some((drag.entity_index, new_t))
         });
         if let Some((idx, mut new_t)) = drag_result {
@@ -4742,18 +4748,71 @@ impl<G: GameApp> Engine<G> {
             .map(|(_, entity)| entity)
     }
 
+    /// The size, in physical pixels, of the surface the cursor is over.
+    ///
+    /// Read from the live surface configuration rather than from a cached
+    /// `Resized`, because the cache was wrong in two ways at once and both
+    /// were invisible until something aimed a ray. `window_event` drops every
+    /// event that arrives before the lifecycle reaches `Running`, and on
+    /// Windows the window's first `Resized` is one of them — so the cache kept
+    /// the *requested* size for the whole session unless the user happened to
+    /// drag the window edge. That requested size is also **logical**, while
+    /// the surface and the cursor are both physical, so on any display with a
+    /// scale factor other than 1.0 the two disagreed by the scale even after a
+    /// resize did land.
+    ///
+    /// Everything that turns a cursor position into a world ray goes through
+    /// here: the transform gizmo, the terrain and foliage brushes, the
+    /// rubber band, the drop probe. All of them were aiming somewhere the user
+    /// was not pointing.
+    fn viewport_size(&self) -> (f32, f32) {
+        self.render_ctx
+            .as_ref()
+            .map(|ctx| (ctx.config.width as f32, ctx.config.height as f32))
+            .filter(|(w, h)| *w >= 1.0 && *h >= 1.0)
+            .unwrap_or(self.viewport_size_hint)
+    }
+
     fn cursor_ray(&self) -> Option<(glam::Vec3, glam::Vec3)> {
         let r = self.renderer.as_ref()?;
-        let inv_vp = r.view_proj.inverse();
-        let world_pt = ndc_to_world(
-            self.cursor_pos.0,
-            self.cursor_pos.1,
-            self.viewport_size.0,
-            self.viewport_size.1,
-            &inv_vp,
-        );
+        let inv_vp = r.picking_view_proj().inverse();
+        let (vw, vh) = self.viewport_size();
+        let world_pt = ndc_to_world(self.cursor_pos.0, self.cursor_pos.1, vw, vh, &inv_vp);
         let dir = (world_pt - r.camera_pos).normalize_or_zero();
         (dir != glam::Vec3::ZERO).then_some((r.camera_pos, dir))
+    }
+
+    /// Put the whole brush state in front of the author, in the viewport.
+    ///
+    /// It used to go to `info!`, which means the Output Log, which means a
+    /// panel nobody has open while they are painting. The reported symptom was
+    /// having to click and look to find out whether the brush was doing
+    /// anything — a settings readout that lives somewhere else is the same as
+    /// no readout.
+    fn announce_brush(&mut self) {
+        let brush = self.terrain_brush;
+        let message = if brush.mode == BrushMode::Paint {
+            format!(
+                "{}  ·  layer {}  ·  {:.1} m  ·  strength {:.0}%  ·  {}",
+                brush.mode.label(),
+                brush.paint_layer,
+                brush.radius,
+                brush.strength * 100.0,
+                brush.alpha.label(),
+            )
+        } else {
+            format!(
+                "{}  ·  {:.1} m  ·  strength {:.0}%  ·  {}",
+                brush.mode.label(),
+                brush.radius,
+                brush.strength * 100.0,
+                brush.alpha.label(),
+            )
+        };
+        info!("{message}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(&message);
+        }
     }
 
     /// Select a terrain brush tool by index (0-5 = `BrushMode` order) and
@@ -4767,11 +4826,25 @@ impl<G: GameApp> Engine<G> {
             4 => BrushMode::Noise,
             _ => BrushMode::Paint,
         };
-        if self.selected_terrain().is_some() {
-            self.terrain_edit_active = true;
-        }
         self.foliage_paint_active = false;
-        info!("Terrain tool: {}", self.terrain_brush.mode.label());
+        if self.selected_terrain().is_none() {
+            // The reported symptom: clicking Raise with nothing selected
+            // changed the mode, armed nothing, and said nothing, so the whole
+            // toolbar read as decorative. A tool that cannot run has to say
+            // why — silence is indistinguishable from a broken button.
+            self.terrain_edit_active = false;
+            let message = format!(
+                "{} needs a terrain — select a Landscape in the Outliner first",
+                self.terrain_brush.mode.label()
+            );
+            info!("{message}");
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.push_toast(&message);
+            }
+            return;
+        }
+        self.terrain_edit_active = true;
+        self.announce_brush();
     }
 
     /// Begin a brush stroke under the cursor. Returns true if a stroke started.
@@ -7989,8 +8062,8 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetViewportResolution(idx) => {
                 self.viewport_resolution = idx as usize;
-                let w = self.viewport_size.0.max(1.0) as u32;
-                let h = self.viewport_size.1.max(1.0) as u32;
+                let w = self.viewport_size().0.max(1.0) as u32;
+                let h = self.viewport_size().1.max(1.0) as u32;
                 let (sw, sh) =
                     somnium_renderer::scene_size_for_preset(w, h, self.viewport_resolution);
                 if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx)
@@ -8612,22 +8685,12 @@ fn try_start_gizmo_drag(
     }
 
     let camera_pos = renderer.camera_pos;
-    let inv_vp = renderer.view_proj.inverse();
-
-    let world_pt = ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp);
-    let ray_dir = (world_pt - camera_pos).normalize();
-
-    // Transform ray to gizmo-local space.
-    let dist = (camera_pos - gizmo_pos).length().max(0.5);
-    let scale = dist * 0.15;
-    let model =
-        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-    let inv_model = model.inverse();
-    let local_origin = inv_model.transform_point3(camera_pos);
-    let local_dir = inv_model.transform_vector3(ray_dir).normalize();
+    let inv_vp = renderer.picking_view_proj().inverse();
+    let ray_dir = (ndc_to_world(cursor_pos.0, cursor_pos.1, vw, vh, &inv_vp) - camera_pos)
+        .normalize_or_zero();
 
     let mode = renderer.gizmo_mode;
-    let axis = gizmo_hit_test(local_origin, local_dir, mode)?;
+    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode)?;
 
     let start_transform = world
         .get::<Transform>(entity)
@@ -8718,6 +8781,34 @@ impl SnapSettings {
             scale: if self.scale > 0.0 { 0.0 } else { 0.1 },
         }
     }
+}
+
+/// The gizmo axis a world-space ray hits, if any.
+///
+/// The gizmo is drawn at a constant size on screen, so its handles live in a
+/// space scaled by the camera distance; picking has to enter that same space
+/// or the arrows are nowhere near where they look. Both this and the draw in
+/// `SomniumRenderer::render` build the model matrix the same way from the same
+/// two numbers, which is the only reason they agree.
+fn gizmo_axis_under_ray(
+    camera_pos: glam::Vec3,
+    ray_dir: glam::Vec3,
+    gizmo_pos: glam::Vec3,
+    mode: GizmoMode,
+) -> Option<GizmoAxis> {
+    if ray_dir == glam::Vec3::ZERO {
+        return None;
+    }
+    let dist = (camera_pos - gizmo_pos).length().max(0.5);
+    let scale = dist * 0.15;
+    let model =
+        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let inv_model = model.inverse();
+    gizmo_hit_test(
+        inv_model.transform_point3(camera_pos),
+        inv_model.transform_vector3(ray_dir).normalize(),
+        mode,
+    )
 }
 
 /// Where the transform gizmo belongs for `primary`, or `None` for no gizmo.
@@ -9040,6 +9131,89 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+    }
+
+    // ── Gizmo picking ──────────────────────────────────────────────
+
+    /// A camera at `+Z` looking at the origin, and the matrix a click is
+    /// unprojected through.
+    fn look_at_origin(surface: (f32, f32)) -> (glam::Vec3, glam::Mat4) {
+        let camera = glam::Vec3::new(0.0, 0.0, 12.0);
+        let view = glam::Mat4::look_at_rh(camera, glam::Vec3::ZERO, glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(
+            60.0_f32.to_radians(),
+            surface.0 / surface.1,
+            0.1,
+            1000.0,
+        );
+        (camera, proj * view)
+    }
+
+    fn axis_at(
+        cursor: (f32, f32),
+        viewport: (f32, f32),
+        surface: (f32, f32),
+    ) -> Option<super::GizmoAxis> {
+        let (camera, view_proj) = look_at_origin(surface);
+        let inv = view_proj.inverse();
+        let world = super::ndc_to_world(cursor.0, cursor.1, viewport.0, viewport.1, &inv);
+        super::gizmo_axis_under_ray(
+            camera,
+            (world - camera).normalize_or_zero(),
+            glam::Vec3::ZERO,
+            super::GizmoMode::Translate,
+        )
+    }
+
+    /// **The bug that made every gizmo inert.** `viewport_size` was a cache
+    /// filled from `Resized`, and `window_event` drops every event that
+    /// arrives before the lifecycle reaches `Running` — which on Windows
+    /// includes the window's first one. The cache therefore kept the
+    /// *requested logical* size for the whole session, while the cursor and
+    /// the surface were both in physical pixels. On a 1.5× display that is a
+    /// 50% error on both axes, and a click on an arrow unprojects to a ray
+    /// pointing somewhere else entirely.
+    ///
+    /// Nothing was visibly broken, which is the point: the gizmo drew in the
+    /// right place, the click landed on it, and the drag simply never started.
+    #[test]
+    fn a_click_on_an_arrow_picks_it_only_when_the_viewport_size_is_the_real_one() {
+        // A 1280×720 window on a 1.5× display: the surface, and the cursor,
+        // are 1920×1080.
+        let surface = (1920.0, 1080.0);
+        let stale = (1280.0, 720.0);
+
+        // Straight down the +X arrow from a camera on +Z: a little right of
+        // centre, vertically centred.
+        let on_the_x_arrow = (surface.0 * 0.5 + 68.0, surface.1 * 0.5);
+
+        assert_eq!(
+            axis_at(on_the_x_arrow, surface, surface),
+            Some(super::GizmoAxis::X),
+            "with the real surface size the click picks the arrow it is on"
+        );
+        assert_ne!(
+            axis_at(on_the_x_arrow, stale, surface),
+            Some(super::GizmoAxis::X),
+            "and with the stale logical size it does not — this is the whole bug"
+        );
+    }
+
+    /// The centre of the gizmo is inside every handle's box, so it must
+    /// resolve to *an* axis rather than nothing: a click there is a drag, not
+    /// a miss that falls through to a rubber band.
+    #[test]
+    fn the_centre_of_the_gizmo_is_always_a_hit() {
+        let surface = (1600.0, 900.0);
+        assert!(axis_at((surface.0 * 0.5, surface.1 * 0.5), surface, surface).is_some());
+    }
+
+    /// Empty sky is not a handle. Without this the previous test passes for a
+    /// hit test that says yes to everything.
+    #[test]
+    fn a_click_in_the_corner_hits_nothing() {
+        let surface = (1600.0, 900.0);
+        assert_eq!(axis_at((12.0, 12.0), surface, surface), None);
     }
 
     // ── Gizmo placement ────────────────────────────────────────────

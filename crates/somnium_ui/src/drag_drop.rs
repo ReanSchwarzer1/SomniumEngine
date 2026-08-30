@@ -443,7 +443,19 @@ pub fn acceptance_for(
         _ => (Vec::new(), DropEffect::Forbidden),
     };
     if accepted.is_empty() {
-        return DropAcceptance::rejected(target, "Payload is not accepted here");
+        // Name the target. "Not accepted here" over a Details row and over
+        // empty sky are different problems, and the author has to be able to
+        // tell which one they are looking at.
+        let why = match &target {
+            DropTarget::AssetField { .. } => {
+                "This field does not accept that kind of asset"
+            }
+            DropTarget::Outliner(Some(_)) => "Only a material or a script can go on an entity",
+            DropTarget::Outliner(None) => "Nothing here to drop onto",
+            DropTarget::Viewport { .. } => "Nothing in the viewport accepts that",
+            DropTarget::DrawerFolder(_) => "Only files from outside the project import here",
+        };
+        return DropAcceptance::rejected(target, why);
     }
     let reason =
         (accepted.len() != total).then(|| format!("{} of {} · {effect:?}", accepted.len(), total));
