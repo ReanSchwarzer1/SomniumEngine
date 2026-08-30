@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-08-29 at `d9d0009`.
+Last verified: 2026-08-30 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -18,13 +18,14 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 |---|---|
 | Active phase | MORROWIND, partially complete |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
-| Latest MORROWIND work | AC: weighted OIT, one anti-aliasing setting, and SMAA |
+| Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Next planned phases | PORTAL, KENSHI, then STALKER; none has started |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
 | Generated census | 188,732 Rust/WGSL lines and 1,864 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Current gate failure | `sculpt-panel` golden image: 5.3333% changed, budget 0.2% |
+| Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
 
 The top-level phase status is:
 
@@ -96,6 +97,11 @@ Authored entities and component data stored through the versioned scene schema.
 Unknown components and fields must survive a load and save cycle.
 _Avoid_: level when referring to the file format
 
+**Audio Emitter**:
+Serialized ECS intent for a sound source, including its asset, playback, bus,
+and spatial authoring. It is not a live audio-backend resource.
+_Avoid_: audio object, Kira handle
+
 ### Editing
 
 **Schema**:
@@ -156,6 +162,16 @@ _Avoid_: bare thread, rayon spawn outside the allowed worker
 A copy-out view given to a script for one phase. Scripts return commands and do
 not retain ECS borrows.
 _Avoid_: script world reference
+
+**Input action**:
+A named semantic value such as `Move`, `Look`, or `Jump`, resolved from physical
+controls by an action map.
+_Avoid_: key when the binding may also be a mouse or gamepad control
+
+**Live voice**:
+A transient audio-backend playback resource reconciled from authored intent
+during Play. It is never serialized.
+_Avoid_: Audio Emitter, saved sound handle
 
 **Evidence**:
 A generated report, test result, image, or timing capture tied to a command and
@@ -1299,6 +1315,15 @@ It supports keyboard and gamepad controls, radial dead zones, inversion,
 scaling, tap/hold/multi-tap interactions, action maps, conflict reporting, and
 runtime rebinding.
 
+Scripts consume the same named actions as games and editor systems. Their input
+snapshot exposes `actionDown`, `actionPressed`, `axis`, and `vector2`; physical
+keys, mouse buttons, and device-specific names do not cross the language-neutral
+script boundary. Press edges are retained until a fixed step consumes them, so a
+short input is not lost when the render loop runs faster than simulation. The
+shipped first-person controller and camera use `Move`, `Look`, `Jump`, and
+`Sprint`, and therefore follow rebinding and action-map changes without script
+edits.
+
 ### Audio
 
 The Kira-backed audio crate supports sounds, listeners, buses, authored
@@ -1306,9 +1331,21 @@ attenuation curves, cones, occlusion, Doppler, and editor/game integration.
 Audio is no longer the 93-line placeholder described by the original MORROWIND
 audit.
 
+An **Audio Emitter** is serialized ECS authoring: asset identity, playback
+settings, bus, spatial policy, attenuation, cone, occlusion factor, and Doppler
+scale. A **live voice** is the transient Kira resource created from that intent
+during Play. The runtime reconciles the two instead of saving backend handles;
+Pause suspends live voices, Stop releases them, and duplication, deletion,
+hierarchy transforms, and property edits remain ordinary ECS operations. The
+schema-generated Details panel, `Create Audio Emitter` command, audio-only asset
+picker, and cyan range/cone gizmos all consume the same authored component.
+
 ```mermaid
 flowchart TB
-    REQ["play, play_on, play_spatial"] --> CACHE["sound cache<br/>decoded once, hits and misses counted"]
+    AUTHOR["Audio Emitter<br/>serialized ECS intent"] --> RECON["runtime reconciliation<br/>Play, Pause, Stop"]
+    SCRIPT["ctx:playAudio<br/>ordered one-shot command"] --> REQ["play, play_on, play_spatial"]
+    RECON --> REQ
+    REQ --> CACHE["sound cache<br/>decoded once, hits and misses counted"]
     CACHE --> BUS["mixer bus<br/>volume, mute, solo"]
     BUS --> SPATIAL{"spatial?"}
     SPATIAL -->|no| SET
@@ -1322,13 +1359,23 @@ flowchart TB
     EVAL --> AUD{"audible?"}
     AUD -->|"past max range"| NONE["Ok(None), nothing scheduled"]
     AUD -->|yes| SET["gain, pan, playback rate"]
-    SET --> KIRA["Kira"]
+    SET --> VOICE["live voice<br/>gain, pan, rate updated in place"]
+    VOICE --> KIRA["Kira"]
 ```
 
 **Occlusion is an input, not something this crate computes.** It would need a
 raycast, and the audio crate deliberately does not depend on the physics one:
 a sound system that cannot be tested without a physics world is a sound system
 nobody tests. The caller does the trace and passes a number.
+
+The Coastal and Island acceptance maps ship overlapping spatial surf and splash
+emitters, while the first-person controller drives four distance-based footstep
+one-shots through `ctx:playAudio`. All seven CC0 fixtures are decoded by the
+workspace tests; their sources, licences, and hashes are recorded in
+[`ATTRIBUTION.md`](ATTRIBUTION.md). On 2026-08-30 the complete serial workspace
+test run passed with zero failures. This proves decoding, reconciliation, input,
+script, scene-schema, editor, and example integration; whether a particular
+output device is audible remains an interactive acceptance check.
 
 ### Localisation
 
