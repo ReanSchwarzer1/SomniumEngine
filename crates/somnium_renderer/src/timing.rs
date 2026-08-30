@@ -274,6 +274,70 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
     out
 }
 
+/// Live GPU object counts and memory, sampled once per frame (DOOM-J).
+///
+/// Read from `wgpu`'s own internal counters rather than from wrappers around
+/// two hundred and sixty-five `create_*` call sites. These are **gauges** — one
+/// increment per creation, one decrement per destruction — so what they answer
+/// is *"does a steady-state frame change the set of live GPU objects"*, which
+/// is DOOM-J's exit criterion. They cannot see a resource created and destroyed
+/// inside one frame; a per-frame delta can, which is why the delta and not the
+/// endpoint difference is what gets reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AllocationSnapshot {
+    /// Live buffers.
+    pub buffers: i64,
+    /// Live textures.
+    pub textures: i64,
+    /// Live texture views.
+    pub texture_views: i64,
+    /// Live bind groups.
+    pub bind_groups: i64,
+    /// Live samplers.
+    pub samplers: i64,
+    /// Distinct GPU memory allocations held by the allocator.
+    pub memory_allocations: i64,
+    /// Bytes attributed to buffers.
+    pub buffer_bytes: i64,
+    /// Bytes attributed to textures.
+    pub texture_bytes: i64,
+}
+
+impl AllocationSnapshot {
+    /// Sample the device's counters.
+    #[must_use]
+    pub fn read(device: &wgpu::Device) -> Self {
+        let hal = device.get_internal_counters().hal;
+        Self {
+            buffers: hal.buffers.read() as i64,
+            textures: hal.textures.read() as i64,
+            texture_views: hal.texture_views.read() as i64,
+            bind_groups: hal.bind_groups.read() as i64,
+            samplers: hal.samplers.read() as i64,
+            memory_allocations: hal.memory_allocations.read() as i64,
+            buffer_bytes: hal.buffer_memory.read() as i64,
+            texture_bytes: hal.texture_memory.read() as i64,
+        }
+    }
+
+    /// The object counts, named, in a fixed order.
+    ///
+    /// Bytes are excluded on purpose: a buffer that is written but not
+    /// reallocated does not move them, and one that grows in place is still one
+    /// object. The question is object churn.
+    #[must_use]
+    pub fn objects(&self) -> [(&'static str, i64); 6] {
+        [
+            ("buffers", self.buffers),
+            ("textures", self.textures),
+            ("texture_views", self.texture_views),
+            ("bind_groups", self.bind_groups),
+            ("samplers", self.samplers),
+            ("memory_allocations", self.memory_allocations),
+        ]
+    }
+}
+
 /// A run's hitch profile: the typical frame, the tail, and what exceeded it.
 ///
 /// A *hitch* is defined here as a presented-frame interval above **twice the
@@ -391,6 +455,20 @@ pub struct TimingRun {
     /// statistic. Startup is a different question from the frame rate, so it
     /// gets its own row.
     startup_ms: Option<f32>,
+    /// Allocation gauges as of the previous frame, for the per-frame delta.
+    previous_alloc: Option<AllocationSnapshot>,
+    /// Allocation gauges at the first measured frame and the most recent one.
+    first_alloc: Option<AllocationSnapshot>,
+    last_alloc: Option<AllocationSnapshot>,
+    /// Measured frames in which any live object count moved at all.
+    alloc_churn_frames: u64,
+    /// Largest single-frame movement in any object count.
+    alloc_worst_frame_delta: i64,
+    /// Measured frames in which each object count moved, in `objects()` order.
+    alloc_churn_by_object: [u64; 6],
+    /// `SOMNIUM_ALLOC_TRACE=1`: name what churns, not only how often.
+    alloc_trace: bool,
+    previous_alloc_names: Option<BTreeMap<String, i64>>,
     /// Every wall interval *after* the first, kept rather than summarised.
     ///
     /// DOOM-I's exit criterion is a *hitch* metric — "no frame above 2x the
@@ -436,6 +514,14 @@ impl TimingRun {
             wall_frame: Accum::default(),
             wall_samples: Vec::new(),
             startup_ms: None,
+            previous_alloc: None,
+            first_alloc: None,
+            last_alloc: None,
+            alloc_churn_frames: 0,
+            alloc_worst_frame_delta: 0,
+            alloc_churn_by_object: [0; 6],
+            alloc_trace: std::env::var("SOMNIUM_ALLOC_TRACE").as_deref() == Ok("1"),
+            previous_alloc_names: None,
             frame_cpu: Accum::default(),
             surface_acquire: Accum::default(),
             // Seeded, not `None`. `from_env` runs while the renderer is being
@@ -472,6 +558,7 @@ impl TimingRun {
         profiler: &GpuProfiler,
         census: CensusResult,
         adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
         size: (u32, u32),
     ) {
         if self.written {
@@ -503,6 +590,93 @@ impl TimingRun {
             self.frame_cpu.push(profiler.frame_cpu_ms);
         }
         self.surface_acquire.push(profiler.surface_acquire_ms);
+
+        // DOOM-J. Sampled every measured frame rather than only at the ends,
+        // because a resource created on one frame and released on the next
+        // nets to nothing over a window and is still churn.
+        let alloc = AllocationSnapshot::read(device);
+        if let Some(previous) = self.previous_alloc {
+            let mut moved = 0;
+            // Per counter, not only in aggregate. "68 of 300 frames churned"
+            // is not something anybody can act on; "68 of them moved
+            // `textures`" names the subsystem.
+            for (index, ((_, now), (_, before))) in alloc
+                .objects()
+                .iter()
+                .zip(previous.objects().iter())
+                .enumerate()
+            {
+                let delta = (now - before).abs();
+                if delta > 0 {
+                    self.alloc_churn_by_object[index] += 1;
+                    moved = moved.max(delta);
+                }
+            }
+            if moved > 0 {
+                self.alloc_churn_frames += 1;
+                self.alloc_worst_frame_delta = self.alloc_worst_frame_delta.max(moved);
+            }
+        }
+        // `SOMNIUM_ALLOC_TRACE=1` names the churn. The counters say *that* one
+        // buffer appeared and one went away; only the allocator report says
+        // *which*, because it carries the label each resource was created with.
+        // Opt-in because it rebuilds a multiset of every live allocation's name
+        // once a frame, which is far too much work to leave on.
+        if self.alloc_trace
+            && let Some(report) = device.generate_allocator_report()
+        {
+            let mut names: BTreeMap<String, i64> = BTreeMap::new();
+            for allocation in &report.allocations {
+                *names.entry(allocation.name.clone()).or_default() += 1;
+            }
+            if let Some(previous) = &self.previous_alloc_names {
+                for (name, count) in &names {
+                    let before = previous.get(name).copied().unwrap_or(0);
+                    if *count != before {
+                        tracing::info!(frame = self.rendered, %name, before, now = count, "alloc churn");
+                    }
+                }
+                for (name, before) in previous {
+                    if !names.contains_key(name) {
+                        tracing::info!(frame = self.rendered, %name, before, now = 0, "alloc churn");
+                    }
+                }
+            }
+            self.previous_alloc_names = Some(names);
+
+            // The other half of DOOM-J's gate is an *inventory*, not only a
+            // churn count. Logged once, on the last measured frame, because
+            // what it answers — where the gigabyte went — does not change
+            // frame to frame.
+            if self.rendered == self.warmup + self.frames {
+                let mut bytes: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+                for allocation in &report.allocations {
+                    let entry = bytes.entry(allocation.name.as_str()).or_default();
+                    entry.0 += allocation.size;
+                    entry.1 += 1;
+                }
+                let mut rows: Vec<_> = bytes.into_iter().collect();
+                rows.sort_by_key(|(_, (size, _))| std::cmp::Reverse(*size));
+                tracing::info!(
+                    total_mib = report.total_allocated_bytes as f64 / (1024.0 * 1024.0),
+                    reserved_mib = report.total_reserved_bytes as f64 / (1024.0 * 1024.0),
+                    allocations = report.allocations.len(),
+                    blocks = report.blocks.len(),
+                    "alloc inventory"
+                );
+                for (name, (size, count)) in rows.into_iter().take(20) {
+                    tracing::info!(
+                        mib = size as f64 / (1024.0 * 1024.0),
+                        count,
+                        %name,
+                        "alloc inventory row"
+                    );
+                }
+            }
+        }
+        self.previous_alloc = Some(alloc);
+        self.first_alloc.get_or_insert(alloc);
+        self.last_alloc = Some(alloc);
 
         let (serial, raw) = profiler.raw_sample();
         // Same serial means the readback ring has not produced a new frame yet.
@@ -681,6 +855,44 @@ impl TimingRun {
                     "hitch	{name}	0	{v:.4}	0.0000	{v:.4}	{v:.4}	{}",
                     h.samples
                 );
+            }
+        }
+
+        // DOOM-J's inventory. `alloc_churn_frames` and `alloc_worst_frame_delta`
+        // are the gate; the `live_*` rows are the inventory it is a gate over,
+        // and a comparison shows both moving together when something changes.
+        if let (Some(first), Some(last)) = (self.first_alloc, self.last_alloc) {
+            const MIB: f32 = 1024.0 * 1024.0;
+            for (name, v) in [
+                ("alloc_churn_frames", self.alloc_churn_frames as i64),
+                ("alloc_worst_frame_delta", self.alloc_worst_frame_delta),
+                ("alloc_net_buffers", last.buffers - first.buffers),
+                ("alloc_net_textures", last.textures - first.textures),
+                (
+                    "alloc_net_bind_groups",
+                    last.bind_groups - first.bind_groups,
+                ),
+                ("live_buffers", last.buffers),
+                ("live_textures", last.textures),
+                ("live_texture_views", last.texture_views),
+                ("live_bind_groups", last.bind_groups),
+                ("live_samplers", last.samplers),
+                ("live_memory_allocations", last.memory_allocations),
+            ] {
+                let _ = writeln!(s, "count	{name}	0	{v}	0	{v}	{v}	1");
+            }
+            for (index, (name, _)) in last.objects().iter().enumerate() {
+                let v = self.alloc_churn_by_object[index];
+                if v > 0 {
+                    let _ = writeln!(s, "count	churn_{name}	0	{v}	0	{v}	{v}	1");
+                }
+            }
+            for (name, bytes) in [
+                ("live_buffer_mib", last.buffer_bytes),
+                ("live_texture_mib", last.texture_bytes),
+            ] {
+                let v = bytes as f32 / MIB;
+                let _ = writeln!(s, "count	{name}	0	{v:.1}	0	{v:.1}	{v:.1}	1");
             }
         }
 

@@ -161,6 +161,34 @@ why a tone-mapped capture could not settle it: [`DOOM-I.md`](DOOM-I.md).
 
 ---
 
+# DOOM-J — bandwidth, formats, allocations
+
+Completed 2026-08-30. One clause met and proved, two closed without a change
+because the measurement did not support one.
+
+`wgpu`'s internal counters are now on in every build, sampled every measured
+frame, and reported as `alloc_churn_frames`, `alloc_worst_frame_delta`,
+`churn_<object>` and a `live_*` inventory. The per-frame delta is what is
+accumulated, because an endpoint comparison reports "nothing changed" for a
+resource created every frame and destroyed the next.
+
+**Textures, texture views, bind groups and samplers do not move at all** across
+300 steady-state frames on either map. One buffer oscillates on about a fifth of
+frames, and `SOMNIUM_ALLOC_TRACE=1` names it: `(wgpu internal) Staging`. No
+engine-labelled resource is created in a steady-state frame.
+
+The inventory is 1901.7 MiB allocated of 2368.0 MiB reserved on Coastal, and its
+largest row is the trade that buys the result: 384 MiB of fixed geometry pools
+at roughly 3% occupancy, which cannot churn because they were never sized to the
+scene. Recorded, not changed. No format changed either — the census has said
+since DOOM-A that the frame is per-pixel shader cost at exactly one fragment per
+pixel, not intermediate bandwidth.
+
+Full inventory, the naming trace, and the bandwidth-counter gap stated as a gap:
+[`DOOM-J.md`](DOOM-J.md).
+
+---
+
 # DOOM-B — the pixel census
 
 `SOMNIUM_CENSUS=1` adds a compute pass that classifies every pixel of the

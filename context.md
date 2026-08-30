@@ -1663,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric | A–I in tree; C/E/G are default-off measured experiments; D, H and I complete; J through M open |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | A–J in tree; C/E/G are default-off measured experiments; D, H, I and J complete; K through M open |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -2194,6 +2194,22 @@ and the question being asked is whether the frame rate visibly broke step.
 `worst_frame` and `last_over_2x_frame` say *where*, which is what separates
 one-off startup cost from a steady-state fault.
 ([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
+
+**Allocation counters are gauges, so read the per-frame delta and not the
+endpoints.** A resource created every frame and destroyed the next nets to zero
+over a window, and that is exactly the churn worth finding. Sampling every
+measured frame, no engine-labelled texture, texture view, bind group or sampler
+moves across 300 steady-state frames on either shipped map; the one buffer that
+oscillates is `(wgpu internal) Staging`, wgpu's own pool for `write_buffer`.
+Counters say *that* something moved — only the allocator report's labels say
+*which*, which is what `SOMNIUM_ALLOC_TRACE=1` prints.
+([DOOM-J](<dev records/phase DOOM/DOOM-J.md>))
+
+**The geometry pools are 384 MiB of fixed reservation at about 3% occupancy, and
+that is the trade that makes the frame allocation-free.** They are allocated once
+at construction and never grow, so uploading geometry cannot reallocate. The
+footprint is the price of the guarantee, and nothing measured says footprint is
+the constraint. ([DOOM-J](<dev records/phase DOOM/DOOM-J.md>))
 
 **A tone-mapped capture cannot resolve a change smaller than its own variance.**
 Two runs of one unchanged build differ at frame 120 by 2.80% of pixels with a

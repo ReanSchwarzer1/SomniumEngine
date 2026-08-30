@@ -4497,6 +4497,7 @@ impl SomniumRenderer {
                 &self.profiler,
                 self.census_pass.result,
                 &ctx.adapter,
+                &ctx.device,
                 (self.render_width, self.render_height),
             );
         }

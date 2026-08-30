@@ -65,7 +65,12 @@ somnium_voxel    = { path = "crates/somnium_voxel" }
 winit = "0.30"
 
 # -- Graphics (Phase 2) -----------------------------------------------------
-wgpu = "30.0"
+# `counters` is on in every build, not behind a feature. DOOM-J needs to be able
+# to assert that a steady-state frame creates no buffers, textures or bind
+# groups, and this repository's own lesson is that a gate you have to opt into
+# is a gate that is off. The cost is one relaxed atomic per resource create and
+# destroy, which in steady state is the number this exists to prove is zero.
+wgpu = { version = "30.0", features = ["counters"] }
 
 # -- Math --------------------------------------------------------------------
 glam = "0.29"

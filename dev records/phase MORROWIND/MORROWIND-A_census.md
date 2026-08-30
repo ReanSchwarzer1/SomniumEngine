@@ -18,9 +18,9 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 62,969 | +12,763 | 32.6% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 58,234 | +30,704 | 30.2% | 594 | +379 | 98 | 2 |
-| `somnium_core` | 33,910 | +14,690 | 17.6% | 383 | +166 | 44 | 0 |
+| `somnium_renderer` | 63,182 | +12,976 | 32.7% | 436 | +108 | 91 | 55 |
+| `somnium_ui` | 58,234 | +30,704 | 30.1% | 594 | +379 | 98 | 2 |
+| `somnium_core` | 33,910 | +14,690 | 17.5% | 383 | +166 | 44 | 0 |
 | `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.7% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,896 | +81 | 2.5% | 55 | — | 12 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **193,019** | +79,127 | | **1920** | +975 | | |
+| **Total** | **193,232** | +79,340 | | **1920** | +975 | | |
 
 The top three crates are **80.4%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1134 | 237 | 105 | 8 | 10 | 173 | 95 | **1762** |
-| `somnium_renderer` | 644 | 155 | 9 | 1 | 2 | 123 | 88 | **1022** |
+| `somnium_renderer` | 646 | 156 | 9 | 1 | 2 | 123 | 88 | **1025** |
 | `somnium_core` | 317 | 106 | 23 | 3 | 3 | 46 | 40 | **538** |
 | `somnium_script` | 126 | 35 | 9 | 3 | 3 | 18 | 11 | **205** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 119 (+23 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 120 (+24 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 
