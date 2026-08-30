@@ -531,6 +531,7 @@ mod tests {
         std::fs::write(root.join("spin.luau"), b"return {}").unwrap();
         std::fs::write(root.join("rock.png"), b"png").unwrap();
         std::fs::write(root.join("level.somnium"), b"{}").unwrap();
+        std::fs::write(root.join("surf.ogg"), b"ogg").unwrap();
         let db = somnium_asset::database::AssetDb::scan(&root).unwrap();
         (root, db)
     }
@@ -671,6 +672,28 @@ mod tests {
         );
         // The same slot refuses a mesh.
         assert!(drop(DragPayload::Assets(vec![id("ship.glb")]), field).is_err());
+
+        // A clip onto an Audio Emitter's `audio` slot. The route is the same
+        // one the texture slot uses — the field's `asset_kind_mask` is the
+        // whole of the difference — and it is asserted separately because
+        // "the mask is wired through for audio too" is exactly the kind of
+        // claim that is true right up until a schema edit drops it.
+        let clip_slot = DropTarget::AssetField {
+            entity,
+            component: StableId::new("somnium.AudioEmitter"),
+            field: FieldId(1),
+            kind_mask: somnium_asset::database::ASSET_KIND_AUDIO,
+        };
+        assert_eq!(
+            drop(DragPayload::Assets(vec![id("surf.ogg")]), clip_slot.clone()),
+            Ok(DropRequest::SetAssetField {
+                asset: id("surf.ogg"),
+                entity,
+                component: StableId::new("somnium.AudioEmitter"),
+                field: FieldId(1),
+            })
+        );
+        assert!(drop(DragPayload::Assets(vec![id("rock.png")]), clip_slot).is_err());
 
         // .somnium into the viewport.
         assert_eq!(

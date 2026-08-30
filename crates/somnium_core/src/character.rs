@@ -34,14 +34,39 @@
 //!
 //! Jolt's shape cast is not exposed through `somnium_physics`, so there
 //! is no honest "is there floor under me" query available. `grounded` is
-//! therefore derived from vertical speed: a body resting on something has
-//! its gravity cancelled by the contact and sits at roughly zero. The
-//! known false positive is the apex of a jump, where vertical speed also
-//! passes through zero — which is why the shipped controller carries a
-//! short cooldown after jumping rather than trusting this flag alone.
+//! inferred instead — but from the right quantity.
 //!
-//! Replacing it with a real cast is a `somnium_physics` job, and the
-//! field's meaning does not change when that happens.
+//! The first version of this compared vertical *speed* against a small
+//! threshold: `velocity.y.abs() < 0.35`. That is only true of a body
+//! standing on **flat** ground. A body walking a slope is constrained to
+//! the surface and therefore has a perfectly legitimate vertical speed of
+//! `horizontal_speed * tan(slope)` — 0.39 m/s on a five-degree rise at
+//! walking pace, past the threshold. Every character on every hill in the
+//! engine read as airborne, which cost the shipped controller its
+//! footsteps and its jump. The probe that found it is
+//! `slopes_do_not_read_as_airborne` below.
+//!
+//! What actually separates standing from falling is not speed but
+//! **acceleration**: a contact cancels gravity, so a supported body's
+//! vertical speed barely changes across a step, whatever that speed is,
+//! while a falling one loses `g * dt` every step without fail. Comparing
+//! the change against half a step of gravity separates the two cleanly at
+//! any slope, and — unlike the old test — it does *not* fire at the apex
+//! of a jump, where speed passes through zero but gravity is still fully
+//! in effect.
+//!
+//! Two details make it survive contact with real ground:
+//!
+//! * The comparison is against the velocity **handed to Jolt**, not the
+//!   one read at the start of the step, so a script writing a jump is not
+//!   mistaken for a step of free fall.
+//! * Support is allowed to lapse for [`COYOTE_STEPS`] before `grounded`
+//!   goes false. Walking a heightfield leaves the ground for a step at a
+//!   time over every triangle edge, and a flag that flickered would be a
+//!   flag no gameplay code could use.
+//!
+//! Replacing this with a real cast is still a `somnium_physics` job, and
+//! the field's meaning does not change when that happens.
 
 use somnium_ecs::component_schema;
 use somnium_ecs::reflect::{ComponentSchema, TypeRegistry};
@@ -49,12 +74,22 @@ use somnium_ecs::{Component, Entity, World};
 use somnium_physics::body::BodyId;
 use somnium_physics::world::PhysicsWorld;
 
-/// Vertical speed under which a body counts as standing on something.
+/// How much of a step's gravity may survive before a body counts as
+/// falling, as a fraction of `g * dt`.
 ///
-/// Generous rather than tight: Jolt leaves a resting body with a small
-/// non-zero velocity from contact resolution, and a threshold that only
-/// accepted exact zero would report a standing character as airborne.
-const GROUNDED_SPEED: f32 = 0.35;
+/// A supported body keeps none of it and a falling one keeps all of it, so
+/// anything strictly between zero and one separates them. Half leaves the
+/// widest margin on both sides, which is what absorbs the small velocity
+/// noise Jolt's contact resolution leaves behind.
+const FALLING_FRACTION: f32 = 0.5;
+
+/// Fixed steps a body keeps `grounded` after support disappears.
+///
+/// Coyote time, and also the fix for a real artefact: a capsule walking a
+/// heightfield is momentarily unsupported over every triangle edge it
+/// crosses. Four steps is 67 ms at the engine's fixed rate — long enough
+/// to bridge those gaps, far too short to bridge a jump.
+const COYOTE_STEPS: u8 = 4;
 
 /// A Jolt body, as a script sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,7 +104,7 @@ pub struct RigidBodyComponent {
     /// surface**: read what physics did, write what you want next.
     pub velocity: glam::Vec3,
     /// Whether the body appears to be resting on something. See the module
-    /// docs — this is a vertical-speed heuristic, not a cast.
+    /// docs — this is inferred from cancelled gravity, not a cast.
     pub grounded: bool,
     /// Whether the engine writes `velocity` back to Jolt.
     ///
@@ -77,6 +112,16 @@ pub struct RigidBodyComponent {
     /// boat — so that reading its velocity from a script does not also
     /// mean overwriting it every step.
     pub script_driven: bool,
+    /// The vertical speed handed to Jolt at the end of the previous step.
+    ///
+    /// Private engine bookkeeping for the `grounded` test, and the reason
+    /// that test survives a jump: the comparison is against what the step
+    /// was *given*, so a script writing an upward velocity is not read as
+    /// a step of free fall. Neither saved nor reflected — a value from the
+    /// last run describes a step that did not happen in this one.
+    settled_vertical_speed: f32,
+    /// Consecutive fixed steps without support, saturating.
+    air_steps: u8,
 }
 
 impl Component for RigidBodyComponent {}
@@ -88,6 +133,8 @@ impl Default for RigidBodyComponent {
             velocity: glam::Vec3::ZERO,
             grounded: false,
             script_driven: true,
+            settled_vertical_speed: 0.0,
+            air_steps: 0,
         }
     }
 }
@@ -140,7 +187,16 @@ pub(crate) fn rigid_body_schema() -> ComponentSchema {
 /// Also writes the body's position and rotation onto the entity's
 /// `Transform`, so a script reading `ctx.self.transform` sees where
 /// physics actually put it rather than where it was last frame.
-pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld) {
+///
+/// `fixed_dt` is the step Jolt is about to be run at. It is an argument
+/// rather than a constant because it, together with the world's gravity,
+/// is the whole scale of the `grounded` test — see the module docs.
+pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld, fixed_dt: f32) {
+    // One step of free fall, as a change in vertical speed: negative under
+    // ordinary gravity, and clamped so a zero-gravity world reports every
+    // body as supported rather than none of them.
+    let falling_threshold = (physics.gravity().y * fixed_dt * FALLING_FRACTION).min(0.0);
+
     let bodies: Vec<(Entity, RigidBodyComponent)> = world
         .entities()
         .filter_map(|entity| Some((entity, *world.get::<RigidBodyComponent>(entity)?)))
@@ -151,8 +207,21 @@ pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld) {
             continue;
         };
         let velocity = physics.get_linear_velocity(body);
+        // How much of the step's gravity survived. A contact cancels it
+        // whatever the body's speed along the surface, which is why this
+        // works on a slope where comparing the speed itself does not.
+        let kept = velocity.y - component.settled_vertical_speed;
+        if kept >= falling_threshold {
+            component.air_steps = 0;
+        } else {
+            component.air_steps = component.air_steps.saturating_add(1);
+        }
         component.velocity = velocity;
-        component.grounded = velocity.y.abs() < GROUNDED_SPEED;
+        component.grounded = component.air_steps <= COYOTE_STEPS;
+        // The default for a body nothing writes back: what Jolt has now is
+        // what the coming step starts from. `write_world_into_physics`
+        // overwrites this for the driven bodies it actually pushes.
+        component.settled_vertical_speed = velocity.y;
         if let Some(slot) = world.get_mut::<RigidBodyComponent>(entity) {
             *slot = component;
         }
@@ -174,25 +243,37 @@ pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld) {
 
 /// Push script-written velocities back into Jolt, after the command
 /// apply and before the step.
-pub fn write_world_into_physics(world: &World, physics: &mut PhysicsWorld) {
-    let driven: Vec<(BodyId, glam::Vec3)> = world
+///
+/// Also records the vertical speed every body is left with, which is what
+/// the next [`read_physics_into_world`] measures gravity against. Recording
+/// it *here* rather than at read time is what stops a scripted jump from
+/// looking like a step of free fall: the comparison is against the
+/// velocity the step was given, not the one it started from.
+pub fn write_world_into_physics(world: &mut World, physics: &mut PhysicsWorld) {
+    let driven: Vec<(Entity, BodyId, glam::Vec3)> = world
         .entities()
         .filter_map(|entity| {
             let component = world.get::<RigidBodyComponent>(entity)?;
             component
                 .script_driven
-                .then(|| Some((component.body_id()?, component.velocity)))
+                .then(|| Some((entity, component.body_id()?, component.velocity)))
                 .flatten()
         })
         .collect();
 
-    for (body, velocity) in driven {
+    for (entity, body, velocity) in driven {
         // A NaN here would take the body to infinity three steps later and
         // surface somewhere else entirely. The command applier already
         // refuses non-finite writes; this is the second gate, for a value
         // that arrived some other way.
         if velocity.is_finite() {
             physics.set_linear_velocity(body, velocity);
+            // The step starts from what was just pushed, not from what was
+            // read at the top of it. That distinction is the whole reason a
+            // scripted jump does not read as a step of free fall.
+            if let Some(slot) = world.get_mut::<RigidBodyComponent>(entity) {
+                slot.settled_vertical_speed = velocity.y;
+            }
         }
         // A rotation lock, which is what an upright character needs and
         // what Jolt's own `AllowedDOFs` would give if `somnium_physics`

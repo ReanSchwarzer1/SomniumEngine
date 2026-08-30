@@ -1287,7 +1287,23 @@ could set it would be able to point one entity's controls at another's body, and
 an index saved from the last run names a different body in this one.
 
 The examples include a scripted first-person character. Its grounded state is
-a documented heuristic, not a general character-controller guarantee.
+a documented heuristic, not a general character-controller guarantee — but it
+is a heuristic about the right quantity. `grounded` asks whether a step's
+gravity was **cancelled**, not whether vertical speed is near zero: a contact
+cancels gravity whatever the body's speed along the surface, while a falling
+body loses `g * dt` every step. The comparison is against the velocity handed
+to Jolt rather than the one read back, so a scripted jump is not mistaken for
+free fall, and support may lapse for four steps before the flag drops, which
+bridges the gaps a capsule crosses walking over heightfield triangle edges.
+
+The earlier test was `velocity.y.abs() < 0.35`, which is only true of a body
+standing on *flat* ground. A character walking a five-degree rise at 4.5 m/s
+has a vertical speed of 0.39, so every character on every hill read as
+airborne: no jump, and no footsteps. Nothing on flat ground could see it, which
+is why `crates/somnium_core/tests/first_person.rs` now runs its walk on a
+tilted floor as well as a level one. A real shape cast is still the honest
+answer and still a `somnium_physics` job; the field's meaning does not change
+when that lands.
 
 Navigation meshes, pathfinding, behavior trees, and perception are not in the
 tree.
@@ -1338,7 +1354,11 @@ during Play. The runtime reconciles the two instead of saving backend handles;
 Pause suspends live voices, Stop releases them, and duplication, deletion,
 hierarchy transforms, and property edits remain ordinary ECS operations. The
 schema-generated Details panel, `Create Audio Emitter` command, audio-only asset
-picker, and cyan range/cone gizmos all consume the same authored component.
+picker, and cyan range/cone gizmos all consume the same authored component. The
+picker is a searchable dropdown over the asset database filtered by the field's
+`asset_kind_mask`, and that same mask makes the row a drop target: dragging a
+clip out of the Content Drawer onto it assigns the field in one undo step, and
+dragging a texture onto it is refused with a reason.
 
 ```mermaid
 flowchart TB
@@ -1370,7 +1390,14 @@ nobody tests. The caller does the trace and passes a number.
 
 The Coastal and Island acceptance maps ship overlapping spatial surf and splash
 emitters, while the first-person controller drives four distance-based footstep
-one-shots through `ctx:playAudio`. All seven CC0 fixtures are decoded by the
+one-shots through `ctx:playAudio`. Their cadence is a property of the character,
+not of the audio crate: the first shipped version accumulated distance only
+while `grounded`, and reset it otherwise, so the old vertical-speed heuristic
+starved it on any hill — footsteps arrived seconds late or not at all. It now
+also fires the first footfall on the step you start walking rather than a full
+stride later, because audio that trails the key by a fifth of a second reads as
+broken rather than as latency. `playAudio` with no audio backend now says so
+instead of returning silence. All seven CC0 fixtures are decoded by the
 workspace tests; their sources, licences, and hashes are recorded in
 [`ATTRIBUTION.md`](ATTRIBUTION.md). On 2026-08-30 the complete serial workspace
 test run passed with zero failures. This proves decoding, reconciliation, input,
@@ -1656,6 +1683,17 @@ does not overlap. STALKER waits for both relevant outputs.
 - `context.md` and several old phase preambles had drifted. This rewrite makes
   the current ledger explicit, but those historical files still need care when
   used as plans.
+- A gizmo drag on a **child** entity is anchored correctly but still writes a
+  world-space delta into a local transform, so it is only right while the
+  parent is unrotated and unscaled. The anchor fix made this visible; mapping
+  the delta through the inverse parent transform is the remaining half.
+- The terrain layer palette and the foliage picker are fixed built-in lists,
+  not asset fields. They therefore have no `asset_kind_mask` and are not drop
+  targets, and the Content Drawer cannot supply a terrain layer texture or a
+  foliage kind. Making them asset-backed is a scene-format change, not a UI one.
+- Viewport ray picking requires a `MeshComponent`, so the piercing menu cannot
+  reach an Audio Emitter, a light or a decal. The rubber band, which selects on
+  projected origin, can.
 
 ### Missing systems
 
@@ -1860,6 +1898,17 @@ the property surface was maintained by hand at a cost of 675 identifiers: 106
 generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
 hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
+
+**The transform gizmo is anchored from the world every frame, not pushed on
+selection change.** The anchor used to be written to the renderer only from
+selection events, which meant the gizmo tracked *events* rather than the
+selected entity. `Create` sets the selection through the undo stack without
+raising one, so a newly created Audio Emitter — or light, or particle emitter —
+arrived fully editable in Details and with no working handle in the viewport;
+Undo, Redo and a typed Details translation all moved an entity and left the
+gizmo behind. A value recomputed from the world cannot drift out of step with
+it. The same read is where locked and hidden finally withhold the handle, which
+the code had claimed in a comment for some time without doing.
 
 **Curves are a reflected value, not a widget.** `FieldType::Curve` means a curve
 gets its Details row, its scoped undo entry, its drag coalescing and its scene

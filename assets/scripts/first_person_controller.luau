@@ -11,6 +11,17 @@
 -- Every field below shows up in the Details panel. Change one while Play
 -- is running and it takes effect on the next frame.
 
+-- Metres of travel between footfalls. Distance rather than a timer, so one
+-- number covers walking and sprinting.
+local STRIDE_METRES = 1.8
+
+local FOOTSTEP_CLIPS = {
+	"audio/footsteps/footstep_01_cc0.ogg",
+	"audio/footsteps/footstep_02_cc0.ogg",
+	"audio/footsteps/footstep_03_cc0.ogg",
+	"audio/footsteps/footstep_04_cc0.ogg",
+}
+
 return Script.define({
 	apiVersion = 1,
 	schemaVersion = 1,
@@ -59,6 +70,7 @@ return Script.define({
 		self.jumpCooldown = self.jumpCooldown or 0
 		self.footstepDistance = self.footstepDistance or 0.0
 		self.footstepIndex = self.footstepIndex or 1
+		self.walking = self.walking or false
 	end,
 
 	onStart = function(self, ctx)
@@ -130,20 +142,29 @@ return Script.define({
 		-- Grounded cadence drives four short CC0 variants through the same
 		-- audio command path gameplay uses. Distance, not a timer, keeps steps
 		-- matched to both walk and sprint speed.
-		if body.grounded and (newX * newX + newZ * newZ) > 0.25 then
-			self.footstepDistance += math.sqrt(newX * newX + newZ * newZ) * dt
-			if self.footstepDistance >= 1.8 then
-				self.footstepDistance -= 1.8
-				local clips = {
-					"audio/footsteps/footstep_01_cc0.ogg",
-					"audio/footsteps/footstep_02_cc0.ogg",
-					"audio/footsteps/footstep_03_cc0.ogg",
-					"audio/footsteps/footstep_04_cc0.ogg",
-				}
-				ctx:playAudio(clips[self.footstepIndex], 0.45)
-				self.footstepIndex = self.footstepIndex % #clips + 1
+		--
+		-- `grounded` is the engine's gravity-cancellation test, so this holds
+		-- on a slope. It did not always: while `grounded` meant "vertical speed
+		-- near zero", walking any hill reset the accumulator every step and the
+		-- footsteps arrived seconds late or never.
+		local speed2 = newX * newX + newZ * newZ
+		if body.grounded and speed2 > 0.25 then
+			if not self.walking then
+				-- The first footfall belongs to the moment you start moving,
+				-- not to a stride later. Priming rather than waiting is the
+				-- difference between audio that answers the key and audio that
+				-- trails it by a fifth of a second, every single time.
+				self.walking = true
+				self.footstepDistance = STRIDE_METRES
+			end
+			self.footstepDistance += math.sqrt(speed2) * dt
+			while self.footstepDistance >= STRIDE_METRES do
+				self.footstepDistance -= STRIDE_METRES
+				ctx:playAudio(FOOTSTEP_CLIPS[self.footstepIndex], 0.45)
+				self.footstepIndex = self.footstepIndex % #FOOTSTEP_CLIPS + 1
 			end
 		else
+			self.walking = false
 			self.footstepDistance = 0.0
 		end
 	end,
@@ -151,7 +172,8 @@ return Script.define({
 	-- Only pure data survives a reload; this is all of it.
 	saveState = function(self)
 		return { yaw = self.yaw, jumpCooldown = self.jumpCooldown,
-			footstepDistance = self.footstepDistance, footstepIndex = self.footstepIndex }
+			footstepDistance = self.footstepDistance, footstepIndex = self.footstepIndex,
+			walking = self.walking }
 	end,
 
 	loadState = function(self, state)
@@ -159,5 +181,6 @@ return Script.define({
 		self.jumpCooldown = state.jumpCooldown
 		self.footstepDistance = state.footstepDistance or 0.0
 		self.footstepIndex = state.footstepIndex or 1
+		self.walking = state.walking or false
 	end,
 })

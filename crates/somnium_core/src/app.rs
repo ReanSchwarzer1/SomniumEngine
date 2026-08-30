@@ -1877,13 +1877,41 @@ impl<G: GameApp> Engine<G> {
             self.terrain_edit_active = false;
             self.terrain_stroke = None;
         }
-        if let Some(entity) = self.selection.primary {
-            let translation = self.world.get::<Transform>(entity).map(|t| t.translation);
-            if let (Some(pos), Some(r)) = (translation, self.renderer.as_mut()) {
-                r.set_gizmo_world_pos(pos);
+        self.refresh_gizmo_anchor();
+    }
+
+    /// Put the transform gizmo where the primary selection actually is.
+    ///
+    /// Called once per frame as well as on selection change, and that is the
+    /// point. The anchor used to be pushed to the renderer only when the
+    /// selection changed, which quietly meant the gizmo tracked *selection
+    /// events* rather than the selected entity:
+    ///
+    /// * `Create` sets `selection.primary` through the undo stack without
+    ///   raising a selection event, so a newly created Audio Emitter — or
+    ///   light, or particle emitter — arrived with the gizmo still parked on
+    ///   whatever was selected before it, or with no gizmo at all. The
+    ///   Details panel edited it perfectly; the viewport had no handle on it.
+    ///   That is the bug this function exists for.
+    /// * Undo, Redo and a typed Details translation all move an entity
+    ///   without changing the selection, and all left the gizmo behind.
+    ///
+    /// A value recomputed from the world every frame cannot drift out of
+    /// step with it, which is why this replaced the push rather than gaining
+    /// another caller.
+    fn refresh_gizmo_anchor(&mut self) {
+        // Terrain sculpting, foliage painting and Play each own the viewport
+        // and have already cleared the gizmo; re-placing it here would undo
+        // that every frame.
+        if self.play_session_active || self.terrain_edit_active || self.foliage_paint_active {
+            return;
+        }
+        let anchor = gizmo_anchor(&self.world, self.selection.primary);
+        if let Some(renderer) = self.renderer.as_mut() {
+            match anchor {
+                Some(pos) => renderer.set_gizmo_world_pos(pos),
+                None => renderer.clear_gizmo(),
             }
-        } else if let Some(r) = &mut self.renderer {
-            r.clear_gizmo();
         }
     }
 
@@ -2980,13 +3008,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     // actually has after last step's collisions rather
                     // than the one it asked for.
                     if let Some(physics) = self.physics.as_ref() {
-                        crate::character::read_physics_into_world(&mut self.world, physics);
+                        crate::character::read_physics_into_world(
+                            &mut self.world,
+                            physics,
+                            fixed_dt,
+                        );
                     }
                     self.script_fixed_update(fixed_dt, dt);
                     // Components → Jolt, after the command apply, so a
                     // script's write is the last word before integration.
                     if let Some(physics) = self.physics.as_mut() {
-                        crate::character::write_world_into_physics(&self.world, physics);
+                        crate::character::write_world_into_physics(&mut self.world, physics);
                     }
                     self.script_input.end_step();
                     self.script_step += 1;
@@ -3802,6 +3834,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.submit_decals();
         self.sync_terrain_colliders();
         if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+
+        // The gizmo follows the entity, not the last selection event. After
+        // the game layer has propagated transforms, so a child is anchored
+        // where it is drawn rather than where its parent's origin is.
+        self.refresh_gizmo_anchor();
 
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         if !self.play_session_active {
@@ -8683,6 +8720,47 @@ impl SnapSettings {
     }
 }
 
+/// Where the transform gizmo belongs for `primary`, or `None` for no gizmo.
+///
+/// Split out from [`SomniumApp::refresh_gizmo_anchor`] because the method
+/// needs a renderer and therefore a GPU, and this is the half that decides
+/// anything. Everything the tests at the bottom of this file assert about
+/// gizmo placement is asserted here.
+fn gizmo_anchor(
+    world: &somnium_ecs::World,
+    primary: Option<somnium_ecs::entity::Entity>,
+) -> Option<glam::Vec3> {
+    let entity = primary?;
+    // Locked and hidden are the two flags whose whole job is "do not let the
+    // viewport move this". The Outliner keeps the row selected, so the
+    // Details panel still reads and edits it.
+    let flags = world
+        .get::<EditorFlags>(entity)
+        .copied()
+        .unwrap_or_default();
+    if flags.locked || flags.hidden {
+        return None;
+    }
+    // A root's local translation *is* its world position and is always
+    // current. A child's is an offset from its parent, and only
+    // `WorldTransform` says where it is on screen — anchoring a child by its
+    // local translation puts the gizmo near the world origin, nowhere near
+    // the thing it is supposed to be a handle for.
+    if world.get::<crate::Parent>(entity).is_none() {
+        return world
+            .get::<Transform>(entity)
+            .map(|transform| transform.translation);
+    }
+    world
+        .get::<WorldTransform>(entity)
+        .map(|world| world.0.to_scale_rotation_translation().2)
+        .or_else(|| {
+            world
+                .get::<Transform>(entity)
+                .map(|transform| transform.translation)
+        })
+}
+
 fn apply_gizmo_drag(
     drag: &GizmoDragState,
     camera_pos: glam::Vec3,
@@ -8876,7 +8954,7 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
-    use super::{SnapSettings, ray_aabb_distance};
+    use super::{EditorFlags, SnapSettings, Transform, WorldTransform, ray_aabb_distance};
 
     /// Snapping rounds the *result*, so an object already off the grid lands
     /// on it. Rounding the delta instead would preserve the original error
@@ -8962,6 +9040,76 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+    }
+
+    // ── Gizmo placement ────────────────────────────────────────────
+
+    /// The bug: `Create` sets the selection through the undo stack without
+    /// raising a selection event, and the gizmo anchor used to be pushed
+    /// only from selection events. A freshly created Audio Emitter was
+    /// therefore fully editable in the Details panel and had no working
+    /// handle in the viewport — the gizmo was still on whatever came
+    /// before it. Reading the anchor out of the world is what makes that
+    /// unrepresentable, so this asserts the read rather than a push.
+    #[test]
+    fn the_anchor_is_wherever_the_entity_currently_is() {
+        let mut world = somnium_ecs::World::new();
+        let entity = world.spawn((
+            Transform::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
+            WorldTransform::identity(),
+        ));
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(entity)),
+            Some(glam::Vec3::new(1.0, 2.0, 3.0))
+        );
+
+        // A typed Details translation, an Undo and a script write are all
+        // this: the transform moved and nothing raised a selection event.
+        world.get_mut::<Transform>(entity).unwrap().translation = glam::Vec3::new(-4.0, 0.5, 9.0);
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(entity)),
+            Some(glam::Vec3::new(-4.0, 0.5, 9.0)),
+            "the gizmo has to follow the entity, not the last selection event"
+        );
+    }
+
+    /// A child's local translation is an offset, so anchoring by it would
+    /// park the gizmo near the parent's origin rather than on the child.
+    #[test]
+    fn a_child_is_anchored_where_it_is_drawn() {
+        let mut world = somnium_ecs::World::new();
+        let parent = world.spawn((
+            Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0))),
+        ));
+        let child = world.spawn((
+            Transform::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 2.0, 0.0))),
+            crate::Parent { entity: parent },
+        ));
+        assert_eq!(
+            super::gizmo_anchor(&world, Some(child)),
+            Some(glam::Vec3::new(10.0, 2.0, 0.0))
+        );
+    }
+
+    /// Locked and hidden exist to stop the viewport moving something. The
+    /// gizmo is the viewport moving something.
+    #[test]
+    fn a_locked_or_hidden_entity_offers_no_handle() {
+        for flags in [
+            EditorFlags { locked: true, ..EditorFlags::default() },
+            EditorFlags { hidden: true, ..EditorFlags::default() },
+        ] {
+            let mut world = somnium_ecs::World::new();
+            let entity = world.spawn((
+                Transform::from_translation(glam::Vec3::ONE),
+                WorldTransform::identity(),
+                flags,
+            ));
+            assert_eq!(super::gizmo_anchor(&world, Some(entity)), None);
+        }
+        assert_eq!(super::gizmo_anchor(&somnium_ecs::World::new(), None), None);
     }
 
     /// A ray that starts inside a box hits it at zero, not at a negative
