@@ -119,6 +119,11 @@ dev records/phase DOOM/*
 !dev records/phase DOOM/DOOM-J_*.somtime
 !dev records/phase DOOM/DOOM-K.md
 !dev records/phase DOOM/DOOM-K_*.somtime
+!dev records/phase DOOM/DOOM-L.md
+!dev records/phase DOOM/DOOM-L_*.somtime
+!dev records/phase DOOM/DOOM-L_*.png
+!dev records/phase DOOM/DOOM-M.md
+!dev records/phase DOOM/DOOM-M_*.somtime
 
 # ── Phase PORTAL-0 (Source) ──────────────────────────────────────────────────
 # Same allowlist shape, and added in the same commit as the phase rather than

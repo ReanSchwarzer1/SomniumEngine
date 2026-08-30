@@ -215,6 +215,48 @@ than its numbers — and the naga trap that an alias inside a
 
 ---
 
+# DOOM-L — subgroup operations
+
+Completed and **reverted** 2026-08-30.
+
+Most of the stage was picking the site. Two of the three the plan named do not
+survive contact with the tree — the terrain strongest-four scan is per-lane with
+nothing to reduce across lanes, and cluster assignment is CPU-side. Of the five
+workgroup reductions actually in the shader tree, only auto exposure has a
+spread tight enough to resolve a change (0.0455 ± 0.0013 ms); Hi-Z's σ is 91% of
+its mean.
+
+Its 256-wide tree — eight barriers, 255 shared read-modify-writes — became one
+`subgroupAdd` per lane, one elected write, one barrier. Two back-to-back
+repetitions: −0.0003 ms and −0.0011 ms, both inside the band. The mechanism says
+why: `build_histogram` runs ~7 740 workgroups and `resolve_exposure` runs one.
+
+**The finding that outlives the experiment is a toolchain one.** naga 30 rejects
+`enable subgroups;` as unimplemented and does not know `subgroupElect`. The
+hardware reports subgroups available at 32–32 lanes; the shader language cannot
+say so. [`DOOM-L.md`](DOOM-L.md).
+
+---
+
+# DOOM-M — close-out
+
+Phase DOOM closed 2026-08-30. Final runs on both shipped maps, all defaults,
+1920×1032, 180/300: **Coastal 20.385 ± 1.968 ms** and **Island 13.179 ± 0.836
+ms**, unattributed 0.6% and 1.1% against a 5% gate, with `Shadows` at 0.0023 ms
+— DOOM-D still working at close-out.
+
+**These do not compare to the DOOM-A baselines.** Those were taken at 2560×1392
+and every continuation run is at 1920×1032, a 46% difference in pixel count on a
+frame the census showed to be per-pixel cost. `38.392 → 20.385` is not a 47%
+improvement and must not be quoted as one.
+
+Of eleven stages: five produced instruments, three produced changes that hold,
+three produced nulls kept as records rather than code. The kill-switch
+inventory, the deletions deliberately not made, and seven named open threads:
+[`DOOM-M.md`](DOOM-M.md).
+
+---
+
 # DOOM-B — the pixel census
 
 `SOMNIUM_CENSUS=1` adds a compute pass that classifies every pixel of the

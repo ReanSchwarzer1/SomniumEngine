@@ -1663,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | A–K done; C/E/G are default-off measured experiments and K is a reverted one; D, H, I, J complete; L and M open |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | **Closed.** Five stages produced instruments, three produced changes that hold, three produced nulls kept as records; C/E/G remain default-off experiments, K and L were measured and deleted. §9's budgets are not closed against — see [DOOM-M](<dev records/phase DOOM/DOOM-M.md>) |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -2215,6 +2215,23 @@ baseline's 1920x1032, `draw_calls` said 195 against 66, and `Shading.frag` said
 921 600 against 1 981 440. The controls are in the header, and a comparison whose
 controls moved is not a comparison. Two already-published Island runs were found
 the same way and re-measured. ([DOOM-K](<dev records/phase DOOM/DOOM-K.md>))
+
+**Subgroups are blocked by the toolchain, not the hardware.** naga 30 rejects
+`enable subgroups;` as unimplemented and does not know `subgroupElect`, while
+the adapter reports subgroups available at 32–32 lanes. The intrinsics work
+without the directive, gated on `Features::SUBGROUP` from Rust — which means a
+shader cannot state its own requirement, and no default path can depend on one
+yet. The reduction that was converted moved 0.0011 ms at most, because it runs
+in one workgroup out of about 7 740.
+([DOOM-L](<dev records/phase DOOM/DOOM-L.md>))
+
+**A resolution change between sessions invalidates every earlier baseline.**
+DOOM-A measured Coastal at 2560×1392 and the whole continuation at 1920×1032,
+because "maximized Native" resolved differently on a different display. On a
+frame the census showed to be per-pixel cost, that 46% pixel difference means
+`38.392 → 20.385 ms` is not an improvement at all. Phase DOOM's §9 budgets are
+therefore *not* closed against, and closing them needs the baseline re-taken.
+([DOOM-M](<dev records/phase DOOM/DOOM-M.md>))
 
 **Half precision in the terrain inner loop is a null result, twice.** The
 thirty-two entry splat-weight array and its scan were compiled at f16 behind a
