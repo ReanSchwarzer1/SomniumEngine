@@ -1,0 +1,74 @@
+# somtime v1
+# label	DOOM-I coastal-ground startup, warmup 0, no voxel
+# frames	600 measured after 0 warmup, 448 profiler samples
+# adapter	NVIDIA GeForce RTX 5080 Laptop GPU / Vulkan
+# driver	NVIDIA 610.74
+# render	1920x1032
+# columns	kind	name	depth	mean_ms	stddev_ms	min_ms	max_ms	samples
+gpu	Auto exposure	1	0.0456	0.0021	0.0365	0.0572	448
+gpu	Bloom	1	0.0806	0.0043	0.0643	0.1081	448
+gpu	Census	1	0.0021	0.0001	0.0019	0.0028	448
+gpu	Cloud composite	1	0.0023	0.0001	0.0020	0.0034	448
+gpu	Clouds	1	0.0021	0.0001	0.0020	0.0031	448
+gpu	Cull (phase 1)	1	0.0341	0.0708	0.0112	0.3435	448
+gpu	Cull (phase 2)	1	0.0125	0.0011	0.0095	0.0181	448
+gpu	DDGI	1	0.0022	0.0002	0.0020	0.0035	448
+gpu	DoF	1	0.0024	0.0002	0.0021	0.0036	448
+gpu	Editor overlays	1	0.0050	0.0003	0.0045	0.0075	448
+gpu	FSR	1	0.7817	0.1188	0.4652	1.8211	448
+gpu	Frame	0	19.8783	1.8274	16.0473	30.2628	448
+gpu	GTAO	1	0.7927	0.1031	0.6346	1.5681	448
+gpu	Game UI	2	0.0095	0.0003	0.0086	0.0116	448
+gpu	Hi-Z	1	0.0688	0.0610	0.0391	0.3399	448
+gpu	Hi-Z (phase 2)	1	0.0492	0.0113	0.0351	0.2811	448
+gpu	Lighting extra	1	0.0022	0.0003	0.0019	0.0045	448
+gpu	Motion Blur	1	0.0023	0.0001	0.0020	0.0028	448
+gpu	Post + present	1	0.0510	0.0030	0.0416	0.0745	448
+gpu	ReSTIR DI	1	0.2697	0.0123	0.2113	0.3447	448
+gpu	ReSTIR GI	1	2.7394	1.2088	1.5105	11.7389	448
+gpu	ReSTIR clear	1	0.0022	0.0003	0.0020	0.0036	448
+gpu	Shading	1	11.4728	0.7341	7.9820	15.5255	448
+gpu	Shadows	1	0.0045	0.0335	0.0020	0.6125	448
+gpu	TAA	1	0.0023	0.0001	0.0020	0.0027	448
+gpu	TLAS build	1	0.1039	0.1854	0.0700	4.0225	448
+gpu	Terrain clipmap	1	0.0021	0.0001	0.0020	0.0035	448
+gpu	Transparent	1	0.0023	0.0001	0.0020	0.0028	448
+gpu	UI	1	0.1197	0.0061	0.0924	0.1537	448
+gpu	Velocity	1	0.0225	0.0023	0.0124	0.0403	448
+gpu	Visibility (phase 1)	1	0.3272	0.1051	0.0635	0.4729	448
+gpu	Visibility (phase 2)	1	0.0234	0.0018	0.0166	0.0303	448
+gpu	Volumetrics	1	0.1315	0.0064	0.0882	0.1639	448
+gpu	Water prepass	1	2.1885	0.7145	0.1552	2.9242	448
+gpu	Water reflection	1	0.1098	0.0060	0.0965	0.1384	448
+gpu	Water shade	1	0.2977	0.0157	0.2312	0.3950	448
+cpu	Cluster cull	0	0.0162	0.0059	0.0109	0.1126	448
+cpu	Editor panels	0	0.2887	0.0860	0.1794	0.6742	448
+cpu	Environment	0	0.0342	0.0098	0.0181	0.1040	448
+cpu	Foliage	1	0.0003	0.0001	0.0001	0.0005	448
+cpu	Instances	0	0.0054	0.0011	0.0039	0.0137	448
+cpu	Jobs & assets	0	0.0787	0.2953	0.0030	1.7663	448
+cpu	Lighting extra	0	0.0110	0.0113	0.0066	0.2335	448
+cpu	Scene submit	0	0.0064	0.0050	0.0042	0.1089	448
+cpu	Terrain	0	0.0344	0.0075	0.0255	0.0857	448
+cpu	Frame wall	0	19.8834	2.0508	9.7939	30.5305	599
+cpu	Frame CPU	0	19.4551	5.1047	3.4130	117.4533	599
+cpu	Surface acquire	0	15.1028	3.1827	0.0334	25.7284	600
+hitch	startup_ms	0	8210.7598	0.0000	8210.7598	8210.7598	1
+hitch	median_ms	0	19.7102	0.0000	19.7102	19.7102	599
+hitch	p99_ms	0	28.3718	0.0000	28.3718	28.3718	599
+hitch	worst_ms	0	30.5305	0.0000	30.5305	30.5305	599
+hitch	over_2x_median	0	0.0000	0.0000	0.0000	0.0000	599
+hitch	worst_frame	0	246.0000	0.0000	246.0000	246.0000	599
+hitch	last_over_2x_frame	0	0.0000	0.0000	0.0000	0.0000	599
+count	draw_calls	0	66	0	66	66	1
+count	triangles	0	336364	0	336364	336364	1
+count	instances	0	66	0	66	66	1
+count	terrain_chunks	0	65	0	65	65	1
+count	terrain_cpu_culled	0	191	0	191	191	1
+count	tlas_instances	0	66	0	66	66	1
+count	shadow_casters	0	218	0	218	218	1
+count	shadow_cascades_rendered	0	0	0	0	0	1
+count	virtual_shadow_pages	0	0	0	0	0	1
+count	virtual_shadow_resident	0	0	0	0	0	1
+stat	Shading.frag	0	1981440	0	1981440	1981440	1
+stat	Shading.prim	0	1	0	1	1	1

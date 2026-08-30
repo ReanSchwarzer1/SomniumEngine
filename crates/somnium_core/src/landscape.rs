@@ -99,12 +99,21 @@ pub fn create_default_landscape(
     renderer: &mut somnium_renderer::SomniumRenderer,
     render_ctx: &somnium_renderer::RenderContext,
 ) -> Result<BuiltLandscape, String> {
+    // DOOM-I: building a map is the largest stall in a session and reported
+    // nothing at all — a `.somtime` run showed 8.2 s between the renderer being
+    // constructed and the first presented frame, with no log line inside it.
+    // These spans exist so the next person reads a breakdown instead of
+    // bisecting one. `debug!` would have hidden them from exactly the run that
+    // needs them.
+    let started = std::time::Instant::now();
     let preset = DefaultLandscapePreset::current();
     let terrain_id = renderer.create_terrain(render_ctx, preset.terrain);
+    let allocated = started.elapsed();
     if let Some(terrain) = renderer.terrain_mut(terrain_id) {
         terrain.apply_default_relief(preset.relief_metres);
         somnium_renderer::terrain::brush::auto_splat(terrain, preset.auto_splat_height);
     }
+    let relieved = started.elapsed();
     let [width, depth] = preset.terrain.world_size();
     let water_id = renderer.allocate_water_body_id();
     let mut water = WaterComponent::great_lakes(water_id, terrain_id, [0.0, 0.0, width, depth]);
@@ -119,6 +128,13 @@ pub fn create_default_landscape(
     }
     renderer.ensure_water_body(render_ctx, water.descriptor())?;
     let allocation = renderer.upload_water_body_mesh(render_ctx, water_id)?;
+    tracing::info!(
+        terrain_alloc_ms = allocated.as_secs_f32() * 1000.0,
+        relief_splat_ms = (relieved - allocated).as_secs_f32() * 1000.0,
+        water_ms = (started.elapsed() - relieved).as_secs_f32() * 1000.0,
+        total_ms = started.elapsed().as_secs_f32() * 1000.0,
+        "Coastal landscape built"
+    );
     let (terrain, water_snapshot) = landscape_snapshots(
         &preset,
         terrain_id,

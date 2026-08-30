@@ -18,9 +18,9 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 62,629 | +12,423 | 32.5% | 428 | +100 | 91 | 55 |
+| `somnium_renderer` | 62,969 | +12,763 | 32.6% | 436 | +108 | 91 | 55 |
 | `somnium_ui` | 58,234 | +30,704 | 30.2% | 594 | +379 | 98 | 2 |
-| `somnium_core` | 33,812 | +14,592 | 17.6% | 383 | +166 | 44 | 0 |
+| `somnium_core` | 33,910 | +14,690 | 17.6% | 383 | +166 | 44 | 0 |
 | `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.7% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,896 | +81 | 2.5% | 55 | — | 12 | 0 |
@@ -30,15 +30,15 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.0% | 57 | +57 | 5 | 0 |
 | `somnium_jobs` | 1,697 | +1,697 | 0.9% | 18 | +18 | 5 | 0 |
-| `somnium_audio` | 1,585 | +1,492 | 0.8% | 40 | +40 | 6 | 0 |
-| `somnium_voxel` | 1,099 | +99 | 0.6% | 13 | +2 | 6 | 0 |
+| `somnium_audio` | 1,581 | +1,488 | 0.8% | 40 | +40 | 6 | 0 |
+| `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **192,588** | +78,696 | | **1912** | +967 | | |
+| **Total** | **193,019** | +79,127 | | **1920** | +975 | | |
 
-The top three crates are **80.3%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.4%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
-`examples/hello_engine` is **2,963 lines** (+317 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
+`examples/hello_engine` is **2,962 lines** (+316 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
 ## 2. Public API surface per crate
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1134 | 237 | 105 | 8 | 10 | 173 | 95 | **1762** |
-| `somnium_renderer` | 642 | 154 | 9 | 1 | 2 | 123 | 88 | **1019** |
+| `somnium_renderer` | 644 | 155 | 9 | 1 | 2 | 123 | 88 | **1022** |
 | `somnium_core` | 317 | 106 | 23 | 3 | 3 | 46 | 40 | **538** |
 | `somnium_script` | 126 | 35 | 9 | 3 | 3 | 18 | 11 | **205** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |

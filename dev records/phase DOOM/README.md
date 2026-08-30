@@ -138,6 +138,29 @@ fixed, and the matched runs: [`DOOM-H.md`](DOOM-H.md).
 
 ---
 
+# DOOM-I — off the critical path
+
+Completed 2026-08-30. The stage's own exit criterion was a hitch metric, so that
+was built first: `hitch` rows carrying the run's median, p99, worst, the count of
+frames over **2x the median**, and where in the run those were.
+
+It found its own blind spot immediately — the first tick had no previous tick, so
+the largest stall in any session was never recorded — and then it found the
+stall. **Steady state was already hitch-free** on both maps; the whole problem
+was startup, at 8.2 s, of which **6.9 s was thirty-two average colours**.
+`mean_albedo_from_sources` decoded every layer's surface map as well as its
+albedo, Lanczos3-resized each 2048 source to 256 before averaging, and did both
+serially.
+
+Coastal startup **8210.8 -> 1574.3 ms (-80.8%)**; Island 2070.8 ms; median frame
+and hitch count unchanged. The worst mean-albedo disagreement over the shipped
+packs is 0.0184 in linear albedo.
+
+Method, the instrumentation added to the map build, the correctness audit, and
+why a tone-mapped capture could not settle it: [`DOOM-I.md`](DOOM-I.md).
+
+---
+
 # DOOM-B — the pixel census
 
 `SOMNIUM_CENSUS=1` adds a compute pass that classifies every pixel of the

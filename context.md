@@ -1663,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration | A–H in tree; C/E/G are default-off measured experiments; D and H complete; I through M open |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric | A–I in tree; C/E/G are default-off measured experiments; D, H and I complete; J through M open |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -2177,6 +2177,30 @@ removes terrain streaming, clipmap recentring and LOD transitions from the
 measurement. A flythrough is a different experiment, and it is the one that
 matters for hitches rather than for steady-state cost. Conflating them produces a
 mean that describes neither. ([DOOM-A](<dev records/phase_DOOM.md>))
+
+**A metric that cannot see the first frame cannot see the largest stall.**
+`Frame wall` is a tick-to-tick interval, so the first tick had no previous tick
+and its interval was dropped. Runs reported a 120 ms CPU maximum beside a 31.9 ms
+wall maximum — impossible of one frame, and true only because the frame in
+question had no interval at all. Startup is now its own `hitch startup_ms` row
+rather than folded into the frame statistics, because an eight-second outlier
+takes a 20.0 ± 2.1 ms mean to 33.7 ± 336.5 ms and quietly changes what every
+later comparison is measuring. ([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
+
+**A hitch threshold is relative to the run, not absolute.** `hitch
+over_2x_median` counts frames longer than twice the run's own median. An absolute
+threshold calls every frame of a 30 fps scene a hitch and none of a 240 fps one,
+and the question being asked is whether the frame rate visibly broke step.
+`worst_frame` and `last_over_2x_frame` say *where*, which is what separates
+one-off startup cost from a steady-state fault.
+([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
+
+**A tone-mapped capture cannot resolve a change smaller than its own variance.**
+Two runs of one unchanged build differ at frame 120 by 2.80% of pixels with a
+peak channel delta of 53. A candidate differing by 3.03% and 59 is therefore
+evidence of nothing, in either direction — which is why DOOM-I's correctness
+claim rests on a numeric audit of the values themselves and not on a picture.
+([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
 
 **A standard deviation from one run cannot judge a comparison across two.**
 Between-session drift on this hardware is larger than within-run spread: the same

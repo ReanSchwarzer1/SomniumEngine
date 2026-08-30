@@ -27,9 +27,35 @@ where
     }
 }
 
+/// Map `f` over `items` in parallel regardless of how few there are.
+///
+/// [`for_each_mut`]'s [`PARALLEL_THRESHOLD`] is a *count*, which is the right
+/// question for AABB tests and the wrong one for work measured in hundreds of
+/// milliseconds per element. DOOM-I found thirty-two PNG decodes taking 6.9
+/// seconds of startup on one thread; thirty-two is far below the threshold and
+/// the threshold was never meant to say anything about them.
+///
+/// Still fork-join inside a single call, not background work: the caller blocks
+/// until every element is done. Nothing here is a second scheduler.
+pub fn map_expensive<T, R, F>(items: &[T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync + Send,
+{
+    items.par_iter().map(f).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_expensive_preserves_order() {
+        let input: Vec<u32> = (0..64).collect();
+        let out = map_expensive(&input, |&x| x * x);
+        assert_eq!(out, input.iter().map(|x| x * x).collect::<Vec<_>>());
+    }
 
     #[test]
     fn serial_path_visits_every_item() {

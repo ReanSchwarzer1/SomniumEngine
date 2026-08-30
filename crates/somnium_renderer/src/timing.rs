@@ -237,6 +237,21 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
             ));
         }
     }
+    // Hitches before the counters, and without a noise band. A band is a claim
+    // about a mean; these are order statistics and a count, and the movement
+    // worth seeing in them is in the tail, which a band would hide.
+    for a in after.rows.iter().filter(|r| r.kind == "hitch") {
+        let Some(b) = before.find("hitch", &a.name, 0) else {
+            continue;
+        };
+        out.push(format!(
+            "{:<28} {:>9.3} {:>9.3} {:>+9.3}          hitch",
+            a.name,
+            b.mean,
+            a.mean,
+            a.mean - b.mean
+        ));
+    }
     // Counters last, and never given a noise band: they are exact integers, so
     // "different" and "different by more than the noise" are the same question.
     for a in after
@@ -257,6 +272,82 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
         }
     }
     out
+}
+
+/// A run's hitch profile: the typical frame, the tail, and what exceeded it.
+///
+/// A *hitch* is defined here as a presented-frame interval above **twice the
+/// run's own median**, deliberately a relative threshold. An absolute one would
+/// call every frame of a 30 fps scene a hitch and none of a 240 fps one, and
+/// the thing being measured is *"the frame rate visibly broke step"*, not *"the
+/// frame took longer than a number picked in advance"*.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hitches {
+    /// Median presented-frame interval, in milliseconds.
+    pub median_ms: f32,
+    /// 99th percentile interval, in milliseconds.
+    pub p99_ms: f32,
+    /// Longest interval in the run.
+    pub worst_ms: f32,
+    /// Frames whose interval exceeded `2 x median_ms`.
+    pub over_2x: u64,
+    /// Measured-frame index of the longest interval.
+    pub worst_frame: u64,
+    /// Measured-frame index of the *last* hitch, or zero if there were none.
+    ///
+    /// With `worst_frame`, this is what separates the two diagnoses that matter
+    /// and that a count alone cannot tell apart: hitches clustered at the front
+    /// of a run are one-off startup cost — pipeline compilation, the first
+    /// streaming burst — while hitches that keep arriving are a steady-state
+    /// fault. Naming which one a run has is DOOM-I's whole job.
+    pub last_over_2x_frame: u64,
+    /// Intervals considered.
+    pub samples: u64,
+}
+
+/// Summarise wall intervals into a [`Hitches`].
+///
+/// Returns `None` below eight samples, where a median is a coin toss and a
+/// "0 hitches" row would be a claim the run cannot support.
+#[must_use]
+pub fn hitches(intervals: &[f32]) -> Option<Hitches> {
+    if intervals.len() < 8 {
+        return None;
+    }
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let median = percentile(&sorted, 0.50);
+    let threshold = median * 2.0;
+    let mut over_2x = 0;
+    let mut worst_frame = 0;
+    let mut last_over_2x_frame = 0;
+    for (index, &value) in intervals.iter().enumerate() {
+        if value > threshold {
+            over_2x += 1;
+            last_over_2x_frame = index as u64;
+        }
+        if value > intervals[worst_frame] {
+            worst_frame = index;
+        }
+    }
+    Some(Hitches {
+        median_ms: median,
+        p99_ms: percentile(&sorted, 0.99),
+        worst_ms: *sorted.last().unwrap_or(&0.0),
+        over_2x,
+        worst_frame: worst_frame as u64,
+        last_over_2x_frame,
+        samples: intervals.len() as u64,
+    })
+}
+
+/// Nearest-rank percentile over an ascending slice.
+fn percentile(sorted: &[f32], q: f64) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (q * sorted.len() as f64).ceil() as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 /// Accumulates a run and writes it out.
@@ -285,6 +376,29 @@ pub struct TimingRun {
     /// number for a hitch baseline — CONTROL-A/C use it for the synchronous
     /// thumbnail decoder — because a hitch is an interval, whatever caused it.
     wall_frame: Accum,
+    /// Renderer construction to the first presented frame, in milliseconds.
+    ///
+    /// The largest stall in any session, and until DOOM-I it was reported by
+    /// nothing: the first tick had no previous tick, so its interval was
+    /// dropped. That produced runs whose `Frame CPU` maximum was 120 ms beside
+    /// a `Frame wall` maximum of 31.9 ms — impossible of one frame, and true
+    /// only because the frame in question had no interval at all.
+    ///
+    /// Kept out of `wall_frame` and `wall_samples` deliberately. Folding an
+    /// eight-second outlier into a mean and a standard deviation destroys both
+    /// — it took `Frame wall` from 20.0 ± 2.1 ms to 33.7 ± 336.5 ms — and every
+    /// comparison against an earlier run would have been reading a different
+    /// statistic. Startup is a different question from the frame rate, so it
+    /// gets its own row.
+    startup_ms: Option<f32>,
+    /// Every wall interval *after* the first, kept rather than summarised.
+    ///
+    /// DOOM-I's exit criterion is a *hitch* metric — "no frame above 2x the
+    /// median" — and neither half of that is recoverable from `wall_frame`'s
+    /// mean and standard deviation. A median needs the samples, and a count of
+    /// frames over a threshold needs the threshold, which is not known until
+    /// the run ends. Six hundred `f32`s is 2.4 KB.
+    wall_samples: Vec<f32>,
     /// Engine frame body on the CPU, excluding the frame limiter (PORTAL-0-B).
     frame_cpu: Accum,
     /// Of which, blocked acquiring the swap-chain texture (PORTAL-0-B).
@@ -320,9 +434,23 @@ impl TimingRun {
             gpu: BTreeMap::new(),
             cpu: BTreeMap::new(),
             wall_frame: Accum::default(),
+            wall_samples: Vec::new(),
+            startup_ms: None,
             frame_cpu: Accum::default(),
             surface_acquire: Accum::default(),
-            last_tick_at: None,
+            // Seeded, not `None`. `from_env` runs while the renderer is being
+            // built, so this makes the *first* recorded interval cover device
+            // and pipeline creation, map load and the first present — the
+            // largest stall in any session, and the one a `None` first tick
+            // silently discarded. DOOM-I found it that way: a run reported a
+            // 120 ms `Frame CPU` maximum next to a 31.9 ms `Frame wall`
+            // maximum, which cannot both be true of the same frame, and the
+            // reason was that the frame in question had no interval at all.
+            //
+            // It is reported as `hitch startup_ms` and kept out of the frame
+            // statistics; see `TimingRun::startup_ms` for why folding it in
+            // was tried and reverted.
+            last_tick_at: Some(Instant::now()),
             counters: FrameCounters::default(),
             stats: Vec::new(),
             census: CensusResult::default(),
@@ -359,7 +487,12 @@ impl TimingRun {
             return;
         }
         if let Some(ms) = wall_ms {
-            self.wall_frame.push(ms);
+            if self.rendered == 1 {
+                self.startup_ms = Some(ms);
+            } else {
+                self.wall_frame.push(ms);
+                self.wall_samples.push(ms);
+            }
         }
         // PORTAL-0-B: pushed beside the wall interval rather than with the GPU
         // zones, because both are produced once per rendered frame and neither
@@ -527,6 +660,30 @@ impl TimingRun {
             );
         }
 
+        // DOOM-I. A separate kind rather than more `count` rows, for the same
+        // reason DOOM-B's census got its own: a comparison should show the
+        // frame rate breaking step separately from the scene changing size,
+        // because those are different questions with different fixes.
+        if let Some(ms) = self.startup_ms {
+            let _ = writeln!(s, "hitch	startup_ms	0	{ms:.4}	0.0000	{ms:.4}	{ms:.4}	1");
+        }
+        if let Some(h) = hitches(&self.wall_samples) {
+            for (name, v) in [
+                ("median_ms", h.median_ms),
+                ("p99_ms", h.p99_ms),
+                ("worst_ms", h.worst_ms),
+                ("over_2x_median", h.over_2x as f32),
+                ("worst_frame", h.worst_frame as f32),
+                ("last_over_2x_frame", h.last_over_2x_frame as f32),
+            ] {
+                let _ = writeln!(
+                    s,
+                    "hitch	{name}	0	{v:.4}	0.0000	{v:.4}	{v:.4}	{}",
+                    h.samples
+                );
+            }
+        }
+
         let c = self.counters;
         for (name, v) in [
             ("draw_calls", c.draw_calls),
@@ -623,6 +780,69 @@ pub fn rows_from_scopes(kind: &str, scopes: &[ScopeResult]) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── DOOM-I: the hitch metric ───────────────────────────────────────────
+
+    #[test]
+    fn a_steady_run_reports_no_hitches() {
+        let steady: Vec<f32> = (0..600).map(|i| 16.6 + (i % 3) as f32 * 0.1).collect();
+        let h = hitches(&steady).expect("enough samples");
+        assert_eq!(h.over_2x, 0);
+        assert!((h.median_ms - 16.7).abs() < 0.2, "median {}", h.median_ms);
+        assert!(h.worst_ms < 17.0);
+    }
+
+    #[test]
+    fn a_spike_is_counted_and_does_not_move_the_median() {
+        // One 120 ms frame in 600. A mean would absorb it; the whole point of
+        // the metric is that it does not.
+        let mut run: Vec<f32> = vec![16.6; 600];
+        run[300] = 120.0;
+        let h = hitches(&run).expect("enough samples");
+        assert_eq!(h.over_2x, 1);
+        assert!((h.median_ms - 16.6).abs() < 0.001);
+        assert!((h.worst_ms - 120.0).abs() < 0.001);
+        assert_eq!(h.worst_frame, 300);
+        assert_eq!(h.last_over_2x_frame, 300);
+    }
+
+    #[test]
+    fn where_the_hitches_are_separates_startup_from_steady_state() {
+        // Startup: everything over the threshold is in the first few frames.
+        let mut startup: Vec<f32> = vec![16.6; 300];
+        for frame in [1usize, 4, 9] {
+            startup[frame] = 90.0;
+        }
+        let h = hitches(&startup).unwrap();
+        assert_eq!(h.over_2x, 3);
+        assert_eq!(h.last_over_2x_frame, 9);
+
+        // Steady-state fault: the last one arrives near the end of the run.
+        let mut ongoing: Vec<f32> = vec![16.6; 300];
+        for frame in [1usize, 150, 280] {
+            ongoing[frame] = 90.0;
+        }
+        assert_eq!(hitches(&ongoing).unwrap().last_over_2x_frame, 280);
+    }
+
+    #[test]
+    fn the_threshold_is_relative_to_the_run() {
+        // The same absolute 40 ms frame is a hitch at 120 fps and ordinary at
+        // 30 fps. An absolute threshold could not say both.
+        let mut fast: Vec<f32> = vec![8.3; 100];
+        fast[10] = 40.0;
+        assert_eq!(hitches(&fast).unwrap().over_2x, 1);
+
+        let mut slow: Vec<f32> = vec![33.3; 100];
+        slow[10] = 40.0;
+        assert_eq!(hitches(&slow).unwrap().over_2x, 0);
+    }
+
+    #[test]
+    fn too_few_samples_report_nothing_rather_than_zero() {
+        assert!(hitches(&[16.6; 7]).is_none());
+        assert!(hitches(&[16.6; 8]).is_some());
+    }
 
     fn run_of(rows: &[(&str, u8, f32, f32)]) -> Run {
         Run {
