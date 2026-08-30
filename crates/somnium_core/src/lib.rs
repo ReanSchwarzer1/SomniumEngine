@@ -50,7 +50,6 @@ pub mod app;
 mod audio_scene;
 pub mod autosave;
 pub mod character;
-pub mod spline;
 pub mod clipboard;
 pub mod config;
 pub mod context;
@@ -67,6 +66,7 @@ pub mod light_units;
 pub mod log_capture;
 pub mod map;
 pub mod reflect_registry;
+pub mod spline;
 /// The `.somnium` container: a framed header the Content Drawer can read
 /// without parsing the scene, and the three-format routing that goes with it.
 ///
@@ -101,7 +101,6 @@ pub mod world_partition;
 
 pub use app::{Engine, GameApp};
 pub use character::RigidBodyComponent;
-pub use spline::SplineComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
@@ -124,6 +123,7 @@ pub use script_host::{
     apply_animation_parameter,
 };
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
+pub use spline::SplineComponent;
 pub use time::TimeState;
 
 // Re-export input types so game code does not need a direct `winit` dependency.
@@ -1737,7 +1737,10 @@ mod post_process_tests {
         pp.set_cas_enabled(true);
         assert!(pp.cas_enabled);
         assert!(!pp.fsr_enabled(), "FSR RCAS and CAS must not both run");
-        assert!(pp.taa_enabled(), "the step-down must keep a temporal resolve");
+        assert!(
+            pp.taa_enabled(),
+            "the step-down must keep a temporal resolve"
+        );
     }
 
     #[test]

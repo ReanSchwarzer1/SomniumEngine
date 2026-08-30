@@ -30,9 +30,10 @@ impl ScriptInputTracker {
             .filter(|map| map.enabled)
             .flat_map(|map| &map.actions)
         {
-            let value = input.actions().value(&action.name).unwrap_or_else(|| {
-                ActionValue::zero(action.kind)
-            });
+            let value = input
+                .actions()
+                .value(&action.name)
+                .unwrap_or_else(|| ActionValue::zero(action.kind));
             let axes = value.as_vec2();
             // A render frame may complete without a fixed step. Preserve an
             // activation edge until `end_step` consumes it, or a quick tap at

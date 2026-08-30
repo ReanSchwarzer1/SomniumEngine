@@ -56,8 +56,7 @@ pub use property_row::{PropertyRow, PropertyRowBuilder, PropertyRowMessage};
 pub use scroll_viewer::{ScrollViewer, ScrollViewerBuilder};
 pub use search_box::{
     Breadcrumb, BreadcrumbBuilder, BreadcrumbMessage, SearchBox, SearchBoxBuilder,
-    SearchBoxMessage, Tooltip, TooltipBuilder, build_property_row, place_tooltip,
-    tooltip_size,
+    SearchBoxMessage, Tooltip, TooltipBuilder, build_property_row, place_tooltip, tooltip_size,
 };
 pub use slider::{Slider, SliderBuilder, SliderMessage};
 pub use splitter::{Splitter, SplitterBuilder, SplitterMessage, SplitterOrientation};

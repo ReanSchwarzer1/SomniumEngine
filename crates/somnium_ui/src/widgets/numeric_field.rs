@@ -744,13 +744,19 @@ mod tests {
                 "w={w}: field ends at {right}, widget ends at {}",
                 b.x + b.w
             );
-            assert!(field.x >= b.x - 0.01, "w={w}: field starts left of the widget");
+            assert!(
+                field.x >= b.x - 0.01,
+                "w={w}: field starts left of the widget"
+            );
             if let Some(s) = slider {
                 assert!(
                     s.x + s.w + SLIDER_GAP <= field.x + 0.01,
                     "w={w}: the track overlaps the field"
                 );
-                assert!(s.w >= MIN_SLIDER_W - 0.01, "w={w}: a track too small to use");
+                assert!(
+                    s.w >= MIN_SLIDER_W - 0.01,
+                    "w={w}: a track too small to use"
+                );
             }
         }
     }

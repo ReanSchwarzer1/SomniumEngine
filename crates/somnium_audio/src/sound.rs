@@ -21,10 +21,7 @@ impl SoundHandle {
     /// Whether playback has drained or has been stopped.
     #[must_use]
     pub fn is_stopped(&self) -> bool {
-        matches!(
-            self.handle.state(),
-            kira::sound::PlaybackState::Stopped
-        )
+        matches!(self.handle.state(), kira::sound::PlaybackState::Stopped)
     }
 
     /// Update gain, stereo placement and pitch for a live spatial voice.

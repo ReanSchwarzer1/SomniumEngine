@@ -271,9 +271,8 @@ impl AudioEngine {
         doppler_scale: f32,
     ) -> Spatial {
         let spatial = evaluate(&self.listener, emitter, doppler_scale);
-        let gain = settings.volume.max(0.0)
-            * f64::from(self.mixer.gain(bus))
-            * f64::from(spatial.gain);
+        let gain =
+            settings.volume.max(0.0) * f64::from(self.mixer.gain(bus)) * f64::from(spatial.gain);
         handle.set_spatial(
             gain,
             f64::from(spatial.pan * 0.5 + 0.5),

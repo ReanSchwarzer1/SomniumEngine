@@ -921,7 +921,10 @@ mod datum_tests {
             "the waterline should land between 2 m and 3 m of baked depth"
         );
         assert_eq!(out_depth[3], 1.0, "a 3 m cell is 1 m deep two metres down");
-        assert!(out_depth[0] >= 0.0, "dry cells must not report negative depth");
+        assert!(
+            out_depth[0] >= 0.0,
+            "dry cells must not report negative depth"
+        );
         // Sign convention: positive inside the water, negative outside.
         assert!(sdf[0] < 0.0 && sdf[7] > 0.0, "sdf = {sdf:?}");
     }

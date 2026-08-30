@@ -167,15 +167,14 @@ enum GeneratedEdit {
     /// element edit addresses the same schema field as any other — the write
     /// path rebuilds the whole array and sends it, so undo, multi-select and
     /// serialization need to know nothing about collections.
-    Element { index: u16, lane: u8 },
+    Element {
+        index: u16,
+        lane: u8,
+    },
 }
 
 /// One lane of one array element, as a number, when it is one.
-fn element_lane(
-    items: &[somnium_ecs::reflect::ReflectValue],
-    index: u16,
-    lane: u8,
-) -> Option<f32> {
+fn element_lane(items: &[somnium_ecs::reflect::ReflectValue], index: u16, lane: u8) -> Option<f32> {
     use somnium_ecs::reflect::ReflectValue as RV;
     #[allow(clippy::cast_possible_truncation)]
     match items.get(index as usize)? {
@@ -5355,12 +5354,12 @@ impl UiManager {
                 asset_actions,
                 collection_actions,
             ) = build_generated_details(
-                    &mut self.native_ui,
-                    self.inspector_stack,
-                    self.font_id,
-                    &panels,
-                    &self.asset_db,
-                );
+                &mut self.native_ui,
+                self.inspector_stack,
+                self.font_id,
+                &panels,
+                &self.asset_db,
+            );
             self.generated_root = root;
             self.generated_bindings = bindings;
             self.generated_rows = rows;
@@ -6211,18 +6210,14 @@ impl UiManager {
                                 .iter()
                                 .map(|(_, entry)| entry)
                                 .find(|entry| {
-                                    !entry.is_dir
-                                        && self.content_selection.contains(&entry.path)
+                                    !entry.is_dir && self.content_selection.contains(&entry.path)
                                 })
                                 .and_then(|entry| entry.asset_id);
                             match (chosen, self.selected_entity) {
                                 (Some(asset), Some(entity)) => {
-                                    let accepted = self
-                                        .asset_db
-                                        .get(asset)
-                                        .is_some_and(|record| {
-                                            record.kind.bit() & binding.asset_kind_mask != 0
-                                        });
+                                    let accepted = self.asset_db.get(asset).is_some_and(|record| {
+                                        record.kind.bit() & binding.asset_kind_mask != 0
+                                    });
                                     if accepted {
                                         let gesture = self.allocate_property_gesture();
                                         self.editor_events.push_back(
@@ -6230,14 +6225,11 @@ impl UiManager {
                                                 entity,
                                                 component: binding.component,
                                                 field: binding.field,
-                                                value:
-                                                    somnium_ecs::reflect::ReflectValue::Asset(
-                                                        Some(
-                                                            somnium_ecs::reflect::AssetRef::from_raw(
-                                                                asset.raw(),
-                                                            ),
-                                                        ),
-                                                    ),
+                                                value: somnium_ecs::reflect::ReflectValue::Asset(
+                                                    Some(somnium_ecs::reflect::AssetRef::from_raw(
+                                                        asset.raw(),
+                                                    )),
+                                                ),
                                                 gesture,
                                                 live: false,
                                             },
@@ -6248,8 +6240,9 @@ impl UiManager {
                                         );
                                     }
                                 }
-                                (None, _) => self
-                                    .push_toast("Select a file in the Content Drawer first"),
+                                (None, _) => {
+                                    self.push_toast("Select a file in the Content Drawer first")
+                                }
                                 (_, None) => self.push_toast("Select an entity first"),
                             }
                         }
