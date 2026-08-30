@@ -380,6 +380,15 @@ pub(crate) fn build_editor_layout(
         IconId::Pause,
         &command_tooltip("editor.simulation.pause"),
     );
+    // MORROWIND-N. Between Pause and Stop because that is where the transport
+    // grammar puts it: the control you reach for *while* paused sits next to
+    // the thing that paused you.
+    let step_button = icon_tool_button(
+        ui,
+        main_tb_stack_h,
+        IconId::Step,
+        &command_tooltip("editor.simulation.step"),
+    );
     let stop_button = icon_tool_button(
         ui,
         main_tb_stack_h,
@@ -1732,6 +1741,7 @@ pub(crate) fn build_editor_layout(
         camera_speed_label,
         viewport_res_combo,
         play_button,
+        step_button,
         play_label,
         immersive_button,
         pause_button,

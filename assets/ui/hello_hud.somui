@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "reference": [1920.0, 1080.0],
+  "root": {
+    "kind": "panel",
+    "name": "Root",
+    "anchor_min": [0.0, 0.0],
+    "anchor_max": [1.0, 1.0],
+    "offsets": [0.0, 0.0, 0.0, 0.0],
+    "pivot": [0.0, 0.0],
+    "children": [
+      {
+        "kind": "text",
+        "name": "Title",
+        "anchor_min": [0.5, 0.0],
+        "anchor_max": [0.5, 0.0],
+        "offsets": [0.0, 180.0, 520.0, 34.0],
+        "pivot": [0.5, 0.0],
+        "properties": { "text": { "Text": "Authored HUD — assets/ui/hello_hud.somui" } }
+      },
+      {
+        "kind": "text",
+        "name": "Score",
+        "anchor_min": [0.5, 0.0],
+        "anchor_max": [0.5, 0.0],
+        "offsets": [0.0, 222.0, 520.0, 30.0],
+        "pivot": [0.5, 0.0],
+        "properties": { "text": { "Text": "Score 0" } }
+      },
+      {
+        "kind": "text",
+        "name": "Hint",
+        "anchor_min": [0.5, 0.0],
+        "anchor_max": [0.5, 0.0],
+        "offsets": [0.0, 258.0, 720.0, 28.0],
+        "pivot": [0.5, 0.0],
+        "properties": {
+          "text": {
+            "Text": "Select Hello UI Canvas -> Details -> Document to swap or clear this"
+          }
+        }
+      },
+      {
+        "kind": "button",
+        "name": "MapButton",
+        "anchor_min": [0.5, 0.0],
+        "anchor_max": [0.5, 0.0],
+        "offsets": [0.0, 300.0, 180.0, 40.0],
+        "pivot": [0.5, 0.0]
+      }
+    ]
+  }
+}

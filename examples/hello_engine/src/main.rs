@@ -633,6 +633,20 @@ struct HelloGame {
     /// starter tree is drawn; the widget tree itself remains game-owned.
     runtime_ui: somnium_core::UiCanvas,
     runtime_ui_enabled: bool,
+    /// MORROWIND-M2. `.somui` documents instantiated for the canvases that
+    /// reference one, keyed by the entity's `document` asset so the editor can
+    /// change the field and see the result without a restart.
+    ///
+    /// Registered by name with the engine, which is what makes them reachable
+    /// from `ctx:setUiProperty` in a Luau script — the editor and the game get
+    /// at an authored HUD the same way.
+    authored_ui: somnium_core::somui_host::UiDocuments,
+    /// Which asset `authored_ui` currently holds, so a Details edit or a
+    /// Content Drawer drop reloads and an unchanged field does not.
+    authored_ui_asset: Option<somnium_asset::database::AssetId>,
+    /// An asset the inventory has not published yet, so the wait is logged once
+    /// rather than once a frame.
+    authored_ui_missing: Option<somnium_asset::database::AssetId>,
 }
 
 impl HelloGame {
@@ -708,6 +722,9 @@ impl HelloGame {
             camera_asset: None,
             runtime_ui,
             runtime_ui_enabled: true,
+            authored_ui: somnium_core::somui_host::UiDocuments::new(),
+            authored_ui_asset: None,
+            authored_ui_missing: None,
         }
     }
 
@@ -981,6 +998,16 @@ impl HelloGame {
 }
 
 impl GameApp for HelloGame {
+    /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
+    ///
+    /// This is what makes `assets/ui/hello_hud.somui` a *runtime* asset rather
+    /// than a picture: attach a script to anything and
+    /// `ctx:setUiProperty("canvas", "Score", "text", "…")` rewrites the HUD the
+    /// editor is showing, with no editor-private path between the two.
+    fn ui_documents(&mut self) -> Option<&mut dyn somnium_core::script_host::UiDocumentSink> {
+        Some(&mut self.authored_ui)
+    }
+
     fn on_init(&mut self, ctx: &mut EngineContext) {
         info!("HelloGame initialised â€” loading scene...");
 
@@ -1457,7 +1484,17 @@ impl GameApp for HelloGame {
                 Transform::from_translation(Vec3::ZERO),
                 Name::new("Hello UI Canvas"),
                 WorldTransform::identity(),
-                UiCanvasComponent::default(),
+                UiCanvasComponent {
+                    // MORROWIND-M2. Pointed at the shipped document on first
+                    // launch rather than left blank: an authoring feature you
+                    // have to already know about in order to find is one nobody
+                    // finds. Clear the field in Details to get the old
+                    // code-built canvas back, or point it at your own `.somui`.
+                    document: somnium_asset::database::AssetId::from_relative_path(
+                        "ui/hello_hud.somui",
+                    ),
+                    ..UiCanvasComponent::default()
+                },
             ));
         }
 
@@ -1845,6 +1882,70 @@ impl GameApp for HelloGame {
             canvas.enabled.then_some((canvas, transform))
         });
         self.runtime_ui_enabled = authored_canvas.is_some();
+
+        // MORROWIND-M2. The canvas entity's `document` field is an ordinary
+        // asset reference, so this is reached three ways without any of them
+        // knowing about the others: typing a path in Details, picking one from
+        // the asset dropdown, or dragging a `.somui` out of the Content Drawer
+        // onto the row. Reloading only when the asset actually changed is what
+        // keeps a per-frame check from rebuilding the widget tree every frame.
+        let wanted = authored_canvas
+            .map(|(settings, _)| settings.document)
+            .filter(|asset| asset.raw() != 0);
+        if wanted != self.authored_ui_asset {
+            self.authored_ui = somnium_core::somui_host::UiDocuments::new();
+            match wanted {
+                None => self.authored_ui_asset = None,
+                Some(asset) => {
+                    // The id is a hash of a path, so the database that hashed
+                    // it is what turns it back into a file.
+                    let record = ctx
+                        .ui
+                        .asset_record(asset)
+                        .map(|record| (record.relative_path.clone(), record.absolute_path.clone()));
+                    match record {
+                        // **Not resolved yet is not the same as broken.** The
+                        // asset inventory is a background job, so on the frames
+                        // before it publishes, a perfectly good reference is
+                        // simply unknown. Leaving `authored_ui_asset` alone
+                        // makes the next frame try again; caching the failure
+                        // here meant a HUD that never appeared and one
+                        // confusing line about rescanning.
+                        None => {
+                            if self.authored_ui_missing != Some(asset) {
+                                self.authored_ui_missing = Some(asset);
+                                tracing::debug!(
+                                    "UI document {asset} is not in the asset inventory yet"
+                                );
+                            }
+                        }
+                        Some((relative, absolute)) => {
+                            // Resolved, so the outcome is final either way and
+                            // the reference is recorded rather than retried.
+                            self.authored_ui_asset = wanted;
+                            self.authored_ui_missing = None;
+                            match std::fs::read_to_string(&absolute) {
+                                Ok(text) => match self.authored_ui.load("canvas", &text) {
+                                    Ok(()) => tracing::info!("UI document {relative} loaded"),
+                                    // Named, not swallowed. A `.somui` with a
+                                    // typo in a widget kind is the common case,
+                                    // and the Output Log is where somebody
+                                    // editing one is looking.
+                                    Err(errors) => {
+                                        for error in errors {
+                                            tracing::warn!("UI document {relative}: {error}");
+                                        }
+                                    }
+                                },
+                                Err(error) => tracing::warn!(
+                                    "UI document {relative} could not be read: {error}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some((settings, transform)) = authored_canvas {
             use somnium_ui::runtime::{Canvas, CanvasMode, Layer};
 
@@ -1877,6 +1978,18 @@ impl GameApp for HelloGame {
                 },
             )));
             canvas.visible = settings.enabled;
+            // MORROWIND-M2. The authored document's canvas gets the *same*
+            // placement as the code-built one, because they are two contents of
+            // one authored canvas entity and not two canvases. Without this the
+            // document loads, resolves its anchors and draws into a canvas the
+            // compositor has no placement for — which looks exactly like the
+            // document being broken.
+            for authored in self.authored_ui.iter_mut() {
+                authored.canvas.set_canvas(canvas.clone());
+                authored
+                    .canvas
+                    .set_world_pixels_per_unit(settings.pixels_per_unit);
+            }
             self.runtime_ui.set_canvas(canvas);
             self.runtime_ui
                 .set_world_pixels_per_unit(settings.pixels_per_unit);
@@ -2391,6 +2504,25 @@ impl GameApp for HelloGame {
     }
 
     fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
+        // Authored documents first, then the code-built canvas over them: the
+        // pause banner is chrome and belongs on top of whatever the game drew.
+        for authored in self.authored_ui.iter_mut() {
+            let viewport = authored.canvas.ui().screen_size;
+            authored.relayout(viewport);
+            frame.draw(&mut authored.canvas);
+            if std::env::var("SOMNIUM_SOMUI_DEBUG").as_deref() == Ok("1")
+                && let Some(handle) = authored.instance.handle("Title")
+            {
+                let probe = authored.canvas.ui().a11y_probe(handle);
+                tracing::info!(
+                    ?viewport,
+                    bounds = ?probe.as_ref().map(|p| p.bounds),
+                    visible = ?probe.as_ref().map(|p| p.visible),
+                    name = ?probe.as_ref().map(|p| p.name.clone()),
+                    "somui debug"
+                );
+            }
+        }
         if self.runtime_ui_enabled {
             frame.draw(&mut self.runtime_ui);
         }

@@ -46,6 +46,8 @@ pub enum IconId {
     Play,
     Pause,
     Stop,
+    /// MORROWIND-N: advance one fixed step while paused.
+    Step,
     Translate,
     Rotate,
     Scale,
@@ -134,6 +136,7 @@ impl IconId {
         Self::Play,
         Self::Pause,
         Self::Stop,
+        Self::Step,
         Self::Translate,
         Self::Rotate,
         Self::Scale,
@@ -583,6 +586,14 @@ impl IconAtlas {
                 self.line(s(16.0), t(6.0), s(16.0), t(18.0), w + 1.2);
             }
             IconId::Stop => self.rect_stroke(s(7.0), t(7.0), 10.0, 10.0, w + 0.4),
+            // A play triangle against a bar: the transport grammar everything
+            // from a tape deck to a debugger uses for "one more, then hold".
+            IconId::Step => {
+                self.line(s(7.0), t(6.0), s(7.0), t(18.0), w);
+                self.line(s(7.0), t(6.0), s(15.0), t(12.0), w);
+                self.line(s(15.0), t(12.0), s(7.0), t(18.0), w);
+                self.line(s(17.0), t(6.0), s(17.0), t(18.0), w + 1.2);
+            }
             IconId::Translate => {
                 self.line(s(12.0), t(4.0), s(12.0), t(20.0), w);
                 self.line(s(4.0), t(12.0), s(20.0), t(12.0), w);

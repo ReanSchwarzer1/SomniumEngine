@@ -120,6 +120,13 @@ pub enum AssetKind {
     Font,
     Json,
     Prefab,
+    /// A `.somui` authored UI document (MORROWIND-M2).
+    ///
+    /// Its own kind rather than `Json` so a UI-document field can be a drop
+    /// target for exactly these and not for every `.json` in the project —
+    /// which is the difference between a picker that helps and one that lists
+    /// everything.
+    UiDocument,
     Unknown,
 }
 
@@ -143,6 +150,7 @@ impl AssetKind {
             Self::Font => "Font",
             Self::Json => "JSON",
             Self::Prefab => "Prefab",
+            Self::UiDocument => "UI Document",
             Self::Unknown => "File",
         }
     }
@@ -152,6 +160,7 @@ pub const ASSET_KIND_ALL: u64 = u64::MAX;
 pub const ASSET_KIND_TEXTURE: u64 = AssetKind::Texture.bit();
 pub const ASSET_KIND_MESH: u64 = AssetKind::Mesh.bit();
 pub const ASSET_KIND_MATERIAL: u64 = AssetKind::Material.bit();
+pub const ASSET_KIND_UI_DOCUMENT: u64 = AssetKind::UiDocument.bit();
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetMetadata {
@@ -507,6 +516,7 @@ pub fn classify(path: &Path, is_dir: bool) -> AssetKind {
         "sommat" => AssetKind::Material,
         "somnium" => AssetKind::Scene,
         "somprefab" => AssetKind::Prefab,
+        "somui" => AssetKind::UiDocument,
         "luau" | "lua" | "rs" => AssetKind::Script,
         "wav" | "ogg" | "mp3" | "flac" => AssetKind::Audio,
         "wgsl" | "hlsl" | "glsl" => AssetKind::Shader,

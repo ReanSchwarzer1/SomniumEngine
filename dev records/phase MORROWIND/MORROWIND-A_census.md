@@ -19,9 +19,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `somnium_renderer` | 63,247 | +13,041 | 32.0% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 61,426 | +33,896 | 31.1% | 656 | +441 | 102 | 2 |
-| `somnium_core` | 34,803 | +15,583 | 17.6% | 394 | +177 | 46 | 0 |
-| `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
+| `somnium_ui` | 61,472 | +33,942 | 31.1% | 656 | +441 | 102 | 2 |
+| `somnium_core` | 34,813 | +15,593 | 17.6% | 394 | +177 | 46 | 0 |
+| `somnium_asset` | 6,242 | +4,603 | 3.2% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
@@ -34,11 +34,11 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **197,500** | +83,608 | | **1993** | +1,048 | | |
+| **Total** | **197,566** | +83,674 | | **1993** | +1,048 | | |
 
 The top three crates are **80.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
-`examples/hello_engine` is **2,962 lines** (+316 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
+`examples/hello_engine` is **3,094 lines** (+448 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
 ## 2. Public API surface per crate
 
@@ -49,12 +49,12 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1196 | 251 | 111 | 8 | 12 | 185 | 100 | **1864** |
+| `somnium_ui` | 1197 | 251 | 111 | 8 | 12 | 185 | 100 | **1865** |
 | `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
 | `somnium_core` | 330 | 110 | 23 | 4 | 3 | 46 | 41 | **557** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
-| `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 12 | 8 | **159** |
+| `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 13 | 8 | **160** |
 | `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
 | `somnium_shader` | 48 | 11 | 2 | 0 | 0 | 1 | 3 | **65** |
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 120 (+24 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 121 (+25 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 

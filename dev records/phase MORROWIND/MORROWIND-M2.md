@@ -112,6 +112,47 @@ Read-back goes through `a11y_probe` rather than a new inspection API: a `Text`
 control already reports its string as its accessibility name, and that is the
 same string a screen reader speaks.
 
+## In the editor
+
+`vvardenfell` proves the seam; `hello_engine` is where it can be used.
+
+- **`.somui` is an asset kind.** `AssetKind::UiDocument`, its own kind rather
+  than `Json`, so a UI-document field is a drop target for exactly these and not
+  for every `.json` in the project — the difference between a picker that helps
+  and one that lists everything.
+- **`UiCanvasComponent` gained a `document` field** carrying an `AssetId` with
+  `asset_kind_mask: ASSET_KIND_UI_DOCUMENT`. Being an ordinary asset field means
+  three ways in without any of them knowing about the others: type a path in
+  Details, pick from the asset dropdown, or drag a `.somui` out of the Content
+  Drawer onto the row.
+- **`assets/ui/hello_hud.somui` ships**, and the auto-spawned *Hello UI Canvas*
+  points at it on first launch. An authoring feature you have to already know
+  about in order to find is one nobody finds; clearing the field gives the old
+  code-built canvas back.
+- **`HelloGame::ui_documents`** makes it a runtime asset in the editor too:
+  attach a script to anything and `ctx:setUiProperty("canvas", "Score", "text",
+  …)` rewrites the HUD the editor is showing.
+
+Two bugs the integration found, both of the same family — *it loaded, so it must
+be working*:
+
+1. **The reference resolved before the asset inventory existed.** The inventory
+   is a background job, so on early frames a perfectly good reference is simply
+   unknown. The first version cached that failure and never retried, producing a
+   HUD that never appeared and one misleading line about rescanning. Not
+   resolved *yet* is not the same as broken, and only a resolved outcome is
+   recorded now.
+2. **The document drew into a canvas with no placement.** The component's space,
+   size and layer were applied to the code-built canvas and not to the authored
+   one, so the widgets laid out correctly and composited nowhere. They are two
+   contents of one canvas entity, not two canvases, and they now share a
+   placement.
+
+Neither was visible from a log line saying the document loaded, which is why
+`SOMNIUM_SOMUI_DEBUG=1` prints the resolved bounds, visibility and text of an
+element after the draw. It is what distinguished *not drawn* from *drawn where
+the editor's own toolbar covers it* — which is what was actually happening.
+
 ## What remains
 
 Item 5 needs MORROWIND-O's prefabs, which have not shipped. The plan is explicit

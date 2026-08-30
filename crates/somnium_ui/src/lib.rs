@@ -496,6 +496,8 @@ struct EditorLayout {
     play_label: NodeHandle,
     immersive_button: NodeHandle,
     pause_button: NodeHandle,
+    /// MORROWIND-N: advance one fixed step while paused.
+    step_button: NodeHandle,
     pause_label: NodeHandle,
     stop_button: NodeHandle,
     stop_label: NodeHandle,
@@ -698,6 +700,8 @@ pub struct UiManager {
     play_label: NodeHandle,
     immersive_button: NodeHandle,
     pause_button: NodeHandle,
+    /// MORROWIND-N: advance one fixed step while paused.
+    step_button: NodeHandle,
     #[allow(dead_code)]
     pause_label: NodeHandle,
     stop_button: NodeHandle,
@@ -1406,6 +1410,7 @@ impl UiManager {
             play_label: layout.play_label,
             immersive_button: layout.immersive_button,
             pause_button: layout.pause_button,
+            step_button: layout.step_button,
             pause_label: layout.pause_label,
             stop_button: layout.stop_button,
             stop_label: layout.stop_label,
@@ -4628,6 +4633,20 @@ impl UiManager {
     }
 
     /// Atomically replace the drawer's inventory with a worker-built snapshot.
+    /// Resolve an asset reference back to its record.
+    ///
+    /// An `AssetId` is a hash of a path, so a component that stores one cannot
+    /// recover the path on its own — it needs the database that hashed it. The
+    /// shell already holds the snapshot; a game reading an authored asset field
+    /// should not have to keep a second copy of it in step.
+    #[must_use]
+    pub fn asset_record(
+        &self,
+        id: somnium_asset::database::AssetId,
+    ) -> Option<&somnium_asset::database::AssetRecord> {
+        self.asset_db.get(id)
+    }
+
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
@@ -6440,6 +6459,10 @@ impl UiManager {
                     self.run_command_id("editor.viewport.immersive");
                     continue;
                 }
+                if msg.destination == self.step_button {
+                    self.run_command_id("editor.simulation.step");
+                    continue;
+                }
                 if msg.destination == self.pause_button {
                     self.run_command_id("editor.simulation.pause");
                     continue;
@@ -7925,6 +7948,7 @@ mod zeta_layout_tests {
             layout.play_button,
             layout.immersive_button,
             layout.pause_button,
+            layout.step_button,
             layout.stop_button,
             layout.palette_button,
         ] {
@@ -8011,6 +8035,7 @@ mod must_not_break {
             ("foliage mode", l.foliage_toolbar_button),
             ("play", l.play_button),
             ("pause", l.pause_button),
+            ("step", l.step_button),
             ("stop", l.stop_button),
             ("immersive play", l.immersive_button),
             ("file menu", l.file_button),

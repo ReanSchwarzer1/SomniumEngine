@@ -1244,6 +1244,7 @@ fn ui_canvas_schema() -> ComponentSchema {
         UiCanvasComponent as "somnium.UiCanvas", display "UI Canvas", version 1,
         fields {
             enabled { group: "Canvas" },
+            document { group: "Canvas", asset_kind_mask: somnium_asset::database::ASSET_KIND_UI_DOCUMENT },
             space { group: "Canvas" },
             width { min: 0.01, soft_max: 3840.0, group: "Resolution" },
             height { min: 0.01, soft_max: 2160.0, group: "Resolution" },

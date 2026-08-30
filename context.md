@@ -1830,8 +1830,14 @@ does not overlap. STALKER waits for both relevant outputs.
   so nothing moved. What is missing is the shell resolving tiles directly, a
   drag-to-dock affordance, real `winit` child windows, and a renderer that
   draws more than one view per frame (MORROWIND-J steps 2 and 3).
-- Data-table editing and the GUI layout editor (MORROWIND Construction Set M
-  items 2–3, and M2). **Play-in-editor is complete** — play/pause/step, a
+- Data-table editing and the asset dependency view (MORROWIND Construction Set
+  M items 2–3). **The GUI layout editor is complete through item 4**: `.somui`
+  documents with a widget registry that is also the palette, validation that
+  names every problem, and a live property write reachable from Rust and from
+  Luau. In `hello_engine` a `.somui` is an asset kind, `UiCanvasComponent` has a
+  `document` field that is a Content Drawer drop target, and the shipped
+  `assets/ui/hello_hud.somui` is loaded on first launch. Item 5 waits on
+  MORROWIND-O's prefabs. **Play-in-editor is complete** — play/pause/step, a
   `WorldCheckpoint` snapshot restored exactly on Stop, separate input focus, a
   survivable error path, and `ctx.stepping` so a script can tell a hand-driven
   step from a running frame.

@@ -725,6 +725,14 @@ pub enum UiCanvasSpace {
 pub struct UiCanvasComponent {
     /// Whether the game should draw this canvas.
     pub enabled: bool,
+    /// The `.somui` document instantiated into this canvas (MORROWIND-M2).
+    ///
+    /// An `AssetId` rather than a path so it survives a file being moved, and
+    /// so the Details row is an asset picker *and* a Content Drawer drop target
+    /// — the same field shape every other asset reference in the engine uses.
+    /// Unset means a canvas whose contents the game builds in code, which is
+    /// what every canvas was before this field existed.
+    pub document: somnium_asset::database::AssetId,
     /// Placement mode used by the game-owned widget tree.
     pub space: UiCanvasSpace,
     /// Logical reference width for screen canvases, or world width in metres.
@@ -743,6 +751,7 @@ impl Default for UiCanvasComponent {
     fn default() -> Self {
         Self {
             enabled: true,
+            document: somnium_asset::database::AssetId::default(),
             space: UiCanvasSpace::Screen,
             width: 1920.0,
             height: 1080.0,
