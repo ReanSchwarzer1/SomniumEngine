@@ -1789,17 +1789,25 @@ does not overlap. STALKER waits for both relevant outputs.
   context menu, and `Use Selected` on every asset row in Details. Unreal ships
   that second button for the same reason a drag has a dozen ways to not quite
   happen, and every one of them looks like a broken feature.
-- A gizmo drag on a **child** entity is anchored correctly but still writes a
-  world-space delta into a local transform, so it is only right while the
-  parent is unrotated and unscaled. The anchor fix made this visible; mapping
-  the delta through the inverse parent transform is the remaining half.
+- A gizmo drag on a **child** entity now solves translation in world space and
+  crosses one explicit inverse-parent seam before writing the local
+  `Transform`. Group followers carry their own inverse because they need not
+  share a parent. Singular parents refuse the gesture rather than writing
+  `NaN`, and follower capture is atomic so a multi-selection never moves only
+  its invertible members. `editor_gizmo` owns that transaction rather than the
+  `Engine` host. Local axes are rotated consistently for drawing, picking and
+  drag solving. This closes the rotated/non-uniformly-scaled-parent failure.
 - The terrain layer palette and the foliage picker are fixed built-in lists,
   not asset fields. They therefore have no `asset_kind_mask` and are not drop
   targets, and the Content Drawer cannot supply a terrain layer texture or a
   foliage kind. Making them asset-backed is a scene-format change, not a UI one.
-- Viewport ray picking requires a `MeshComponent`, so the piercing menu cannot
-  reach an Audio Emitter, a light or a decal. The rubber band, which selects on
-  projected origin, can.
+- Viewport ray picking no longer requires `MeshComponent`. One shared
+  `entity_ray_hit_distance` path serves ordinary selection, the piercing menu,
+  and placement: render meshes use their geometry AABB, decals use their
+  projection box, and lights/audio/particle emitters expose a deliberately
+  small authoring proxy rather than claiming their full effect radius. Their
+  visible authoring shapes and pick proxies both use propagated world matrices,
+  including when parented.
 - The left tool bar is still a narrow mode strip rather than a coherent
   authoring workspace. Its terrain and foliage buttons expose no owned options,
   weakly communicate the active tool, and compete with the Content Drawer for

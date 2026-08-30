@@ -56,6 +56,7 @@ pub mod context;
 /// Phase CONTROL-O: deferred decals.
 pub mod decal;
 pub mod editor_commands;
+mod editor_gizmo;
 pub mod error;
 pub mod event;
 pub mod i18n;

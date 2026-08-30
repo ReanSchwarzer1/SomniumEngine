@@ -237,6 +237,9 @@ pub struct SomniumRenderer {
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
     pub gizmo_world_pos: Option<glam::Vec3>,
+    /// Orientation of the gizmo axes. Identity in world mode; the selected
+    /// entity's propagated rotation in local mode.
+    pub gizmo_world_rotation: glam::Quat,
 
     /// Phase 11.5I: Selection outline pass.
     outline_pass: OutlinePass,
@@ -915,6 +918,7 @@ impl SomniumRenderer {
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
+            gizmo_world_rotation: glam::Quat::IDENTITY,
             light_gizmo_pass,
             light_gizmo_queue: Vec::new(),
             line_gizmo_queue: Vec::new(),
@@ -1610,6 +1614,12 @@ impl SomniumRenderer {
     /// Update the world-space position the gizmo should appear at.
     pub fn set_gizmo_world_pos(&mut self, pos: glam::Vec3) {
         self.gizmo_world_pos = Some(pos);
+    }
+
+    /// Update both halves of the transform gizmo's world-space frame.
+    pub fn set_gizmo_world_transform(&mut self, pos: glam::Vec3, rotation: glam::Quat) {
+        self.gizmo_world_pos = Some(pos);
+        self.gizmo_world_rotation = rotation.normalize();
     }
 
     /// Hide the gizmo (e.g. when no entity is selected).
@@ -4364,6 +4374,7 @@ impl SomniumRenderer {
             let dist = (self.camera_pos - gizmo_pos).length().max(0.5);
             let scale = dist * 0.15;
             let model = glam::Mat4::from_translation(gizmo_pos)
+                * glam::Mat4::from_quat(self.gizmo_world_rotation)
                 * glam::Mat4::from_scale(glam::Vec3::splat(scale));
             self.gizmo_pass.update_transform(&ctx.queue, model);
             self.gizmo_pass

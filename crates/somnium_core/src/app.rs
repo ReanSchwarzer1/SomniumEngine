@@ -26,13 +26,17 @@ use crate::editor_commands::{
     FieldUndoSnapshot, SetFieldCmd, SetTransformCmd, TerrainEditCmd, TerrainRestoreOp,
     TerrainRestoreQueue, UndoStack,
 };
+use crate::editor_gizmo::{
+    GizmoFollower, apply_followers, capture_followers, entity_world_matrix, invert_affine,
+    parent_world_matrix, world_to_local_translation,
+};
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::jobs::{JobHandle, JobPriority, JobSystem};
 use crate::time::TimeState;
 use crate::{
-    CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
+    AudioEmitterComponent, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
     WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
@@ -402,13 +406,22 @@ struct GizmoDragState {
     ring_bitangent: glam::Vec3,
     /// Gizmo world position at drag start.
     gizmo_pos: glam::Vec3,
+    /// Parent model transform at drag start. Identity for a root entity.
+    ///
+    /// The gizmo solves its gesture in world space; authored `Transform` is
+    /// local. Keeping both directions here is what lets the seam convert once
+    /// instead of making every drag caller understand hierarchy algebra.
+    parent_world: glam::Mat4,
+    parent_world_inverse: glam::Mat4,
+    /// The selected entity's world rotation at drag start, for local axes.
+    start_world_rotation: glam::Quat,
     /// The rest of the selection, with the transform each started at.
     ///
     /// CONTROL-F made the selection a set; a gizmo that still moved one thing
     /// would have made multi-select a lie the moment anyone dragged. The
     /// *deltas* are applied to these, not the primary's final value, so twelve
     /// objects keep their relative positions.
-    followers: Vec<(u32, Transform)>,
+    followers: Vec<GizmoFollower>,
     /// Whether the drag axes follow the object's own rotation.
     local_space: bool,
 }
@@ -1804,28 +1817,8 @@ impl<G: GameApp> Engine<G> {
                 !flags.locked && !flags.hidden
             })
             .filter_map(|entity| {
-                let mesh = self.world.get::<MeshComponent>(entity)?;
-                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
-                let model = self
-                    .world
-                    .get::<WorldTransform>(entity)
-                    .map(|w| w.0)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(entity)
-                            .map(Transform::to_matrix)
-                    })?;
-                let inverse = model.inverse();
-                let local_origin = inverse.transform_point3(origin);
-                let local_direction = inverse.transform_vector3(direction);
-                let t = ray_aabb_distance(
-                    local_origin,
-                    local_direction,
-                    glam::Vec3::from_array(min),
-                    glam::Vec3::from_array(max),
-                )?;
-                let world_hit = model.transform_point3(local_origin + local_direction * t);
-                Some((origin.distance_squared(world_hit), entity))
+                entity_ray_hit_distance(&self.world, renderer, entity, origin, direction)
+                    .map(|distance| (distance, entity))
             })
             .collect();
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1927,7 +1920,19 @@ impl<G: GameApp> Engine<G> {
         let anchor = gizmo_anchor(&self.world, self.selection.primary);
         if let Some(renderer) = self.renderer.as_mut() {
             match anchor {
-                Some(pos) => renderer.set_gizmo_world_pos(pos),
+                Some(pos) => {
+                    let rotation = if self.settings.editor().gizmo_local_space {
+                        self.selection
+                            .primary
+                            .and_then(|entity| self.world.get::<WorldTransform>(entity))
+                            .map_or(glam::Quat::IDENTITY, |world| {
+                                world.0.to_scale_rotation_translation().1
+                            })
+                    } else {
+                        glam::Quat::IDENTITY
+                    };
+                    renderer.set_gizmo_world_transform(pos, rotation);
+                }
                 None => renderer.clear_gizmo(),
             }
         }
@@ -2853,6 +2858,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &self.selection.primary,
                     self.cursor_pos,
                     self.viewport_size(),
+                    self.settings.editor().gizmo_local_space,
                 );
                 let blocked = started.is_some() && self.settings.editor().select_only;
                 if blocked {
@@ -2866,18 +2872,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let drag = if blocked {
                     None
                 } else {
-                    started.map(|mut drag| {
-                        drag.local_space = self.settings.editor().gizmo_local_space;
-                        drag.followers = self
-                            .selection
-                            .as_slice()
-                            .iter()
-                            .filter(|entity| entity.index() != drag.entity_index)
-                            .filter_map(|entity| {
-                                Some((entity.index(), *self.world.get::<Transform>(*entity)?))
-                            })
-                            .collect();
-                        drag
+                    started.and_then(|mut drag| {
+                        drag.followers = capture_followers(
+                            &self.world,
+                            self.selection.as_slice(),
+                            drag.entity_index,
+                        )?;
+                        Some(drag)
                     })
                 };
                 if drag.is_some() {
@@ -2897,10 +2898,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ..
             } = &event
             {
-                if let Some(band) = self.marquee.take()
-                    && band.is_dragged()
-                {
-                    self.apply_marquee(band);
+                if let Some(band) = self.marquee.take() {
+                    if band.is_dragged() {
+                        self.apply_marquee(band);
+                    } else {
+                        let hit = self.entities_under_cursor().into_iter().next();
+                        self.selection.set_single(hit);
+                        self.after_selection_change();
+                    }
                     gizmo_consumed = true;
                 }
                 if let Some(drag) = self.gizmo_drag.take() {
@@ -3127,9 +3132,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     .gizmo_drag
                     .as_ref()
                     .is_some_and(|drag| drag.mode == GizmoMode::Translate)
-                && let Some(height) = self.surface_height_at(new_t.translation)
+                && let Some(mut world_position) = self
+                    .gizmo_drag
+                    .as_ref()
+                    .map(|drag| drag.parent_world.transform_point3(new_t.translation))
+                && let Some(height) = self.surface_height_at(world_position)
             {
-                new_t.translation.y = height;
+                world_position.y = height;
+                if let Some(drag) = self.gizmo_drag.as_ref() {
+                    new_t.translation = drag.parent_world_inverse.transform_point3(world_position);
+                }
             }
             let start = self
                 .gizmo_drag
@@ -3143,7 +3155,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // The same delta, applied to every follower's own starting
             // transform. Rotation composes and scale multiplies, because that
             // is what those operations mean; translation adds.
-            let offset = new_t.translation - start.translation;
+            let world_offset = self.gizmo_drag.as_ref().map_or_else(
+                || new_t.translation - start.translation,
+                |drag| drag.parent_world.transform_point3(new_t.translation) - drag.gizmo_pos,
+            );
             let spin = new_t.rotation * start.rotation.inverse();
             let growth = glam::Vec3::new(
                 safe_ratio(new_t.scale.x, start.scale.x),
@@ -3161,27 +3176,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .as_ref()
                 .map(|drag| drag.followers.clone())
                 .unwrap_or_default();
-            for (index, began) in followers {
-                let Some(entity) = self.world.find_entity_by_index(index) else {
-                    continue;
-                };
-                let Some(transform) = self.world.get_mut::<Transform>(entity) else {
-                    continue;
-                };
-                let mut moved = began;
-                moved.translation = began.translation + offset;
-                moved.rotation = spin * began.rotation;
-                moved.scale = began.scale * growth;
-                if let Some(pivot) = pivot {
-                    // Pivot mode: the selection turns and grows about its
-                    // shared centre rather than about each object's origin.
-                    let arm = began.translation - pivot;
-                    moved.translation = pivot + spin * (arm * growth) + offset;
-                }
-                *transform = moved;
-            }
+            apply_followers(
+                &mut self.world,
+                &followers,
+                world_offset,
+                spin,
+                growth,
+                pivot,
+            );
             if let Some(r) = &mut self.renderer {
-                r.set_gizmo_world_pos(new_t.translation);
+                let world_position = self.gizmo_drag.as_ref().map_or(new_t.translation, |drag| {
+                    drag.parent_world.transform_point3(new_t.translation)
+                });
+                r.set_gizmo_world_pos(world_position);
             }
         }
 
@@ -4813,28 +4820,8 @@ impl<G: GameApp> Engine<G> {
                 if flags.locked || flags.hidden {
                     return None;
                 }
-                let mesh = self.world.get::<MeshComponent>(entity)?;
-                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
-                let model = self
-                    .world
-                    .get::<WorldTransform>(entity)
-                    .map(|w| w.0)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(entity)
-                            .map(Transform::to_matrix)
-                    })?;
-                let inverse = model.inverse();
-                let local_origin = inverse.transform_point3(origin);
-                let local_direction = inverse.transform_vector3(direction);
-                let t = ray_aabb_distance(
-                    local_origin,
-                    local_direction,
-                    glam::Vec3::from_array(min),
-                    glam::Vec3::from_array(max),
-                )?;
-                let world_hit = model.transform_point3(local_origin + local_direction * t);
-                Some((origin.distance_squared(world_hit), entity))
+                entity_ray_hit_distance(&self.world, renderer, entity, origin, direction)
+                    .map(|distance| (distance, entity))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, entity)| entity)
@@ -5609,12 +5596,12 @@ impl<G: GameApp> Engine<G> {
                 if !decal.enabled || decal.opacity <= 0.001 {
                     return None;
                 }
-                let transform = self.world.get::<Transform>(entity)?;
+                let transform = entity_world_matrix(&self.world, entity)?;
                 let material = self
                     .world
                     .get::<MaterialComponent>(entity)
                     .map(|m| m.runtime_id);
-                Some((transform.to_matrix(), *decal, material))
+                Some((transform, *decal, material))
             })
             .collect();
 
@@ -6592,7 +6579,8 @@ impl<G: GameApp> Engine<G> {
             .entities()
             .filter_map(|e| {
                 let light = self.world.get::<LightComponent>(e)?;
-                let transform = self.world.get::<Transform>(e)?;
+                let transform = entity_world_matrix(&self.world, e)?;
+                let (_, rotation, position) = transform.to_scale_rotation_translation();
                 let kind = match light.light_type {
                     LightType::Directional => LightGizmoKind::Directional,
                     LightType::Point | LightType::Rect | LightType::Disc => LightGizmoKind::Point,
@@ -6600,8 +6588,8 @@ impl<G: GameApp> Engine<G> {
                 };
                 Some(LightGizmoDesc {
                     kind,
-                    position: transform.translation,
-                    direction: transform.rotation.mul_vec3(glam::Vec3::NEG_Z),
+                    position,
+                    direction: rotation.mul_vec3(glam::Vec3::NEG_Z),
                     color: light.color,
                     range: light.range,
                     inner_angle: light.inner_angle,
@@ -6715,15 +6703,16 @@ impl<G: GameApp> Engine<G> {
             .entities()
             .filter_map(|entity| {
                 let audio = self.world.get::<crate::AudioEmitterComponent>(entity)?;
-                let transform = self.world.get::<Transform>(entity)?;
+                let transform = entity_world_matrix(&self.world, entity)?;
+                let (_, rotation, position) = transform.to_scale_rotation_translation();
                 Some(LightGizmoDesc {
                     kind: if audio.cone_enabled {
                         LightGizmoKind::AudioCone
                     } else {
                         LightGizmoKind::AudioOmni
                     },
-                    position: transform.translation,
-                    direction: transform.rotation * glam::Vec3::NEG_Z,
+                    position,
+                    direction: rotation * glam::Vec3::NEG_Z,
                     color: glam::Vec3::new(0.15, 0.85, 1.0),
                     range: audio.max_distance,
                     inner_angle: audio.cone_inner_degrees.to_radians(),
@@ -8977,6 +8966,7 @@ fn try_start_gizmo_drag(
     selected_entity: &Option<somnium_ecs::entity::Entity>,
     cursor_pos: (f32, f32),
     viewport_size: (f32, f32),
+    local_space: bool,
 ) -> Option<GizmoDragState> {
     let renderer = renderer?;
     if !renderer.editor_overlays_enabled() {
@@ -8996,22 +8986,41 @@ fn try_start_gizmo_drag(
         .normalize_or_zero();
 
     let mode = renderer.gizmo_mode;
-    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode)?;
+    let gizmo_rotation = if local_space {
+        renderer.gizmo_world_rotation
+    } else {
+        glam::Quat::IDENTITY
+    };
+    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode, gizmo_rotation)?;
 
     let start_transform = world
         .get::<Transform>(entity)
         .copied()
         .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
+    let parent_world = parent_world_matrix(world, entity);
+    // A collapsed parent has no local-space answer for a world-space gesture.
+    // Refuse the drag instead of letting `Mat4::inverse` manufacture NaNs that
+    // poison the authored transform and the undo record.
+    let parent_world_inverse = invert_affine(parent_world)?;
+    let start_world_rotation = world.get::<WorldTransform>(entity).map_or_else(
+        || {
+            (parent_world * start_transform.to_matrix())
+                .to_scale_rotation_translation()
+                .1
+        },
+        |world| world.0.to_scale_rotation_translation().1,
+    );
 
+    let axis_dir = gizmo_rotation * axis.world_dir();
     let (start_axis_param, start_angle, ring_tangent, ring_bitangent) = match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
-            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis.world_dir()).unwrap_or(0.0);
+            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis_dir).unwrap_or(0.0);
             (s, 0.0, glam::Vec3::ZERO, glam::Vec3::ZERO)
         }
         GizmoMode::Rotate => {
             let (tan, bitan) = ring_plane_basis(axis);
-            let a = ring_angle(camera_pos, ray_dir, gizmo_pos, axis.world_dir(), tan, bitan)
-                .unwrap_or(0.0);
+            let (tan, bitan) = (gizmo_rotation * tan, gizmo_rotation * bitan);
+            let a = ring_angle(camera_pos, ray_dir, gizmo_pos, axis_dir, tan, bitan).unwrap_or(0.0);
             (0.0, a, tan, bitan)
         }
     };
@@ -9020,7 +9029,7 @@ fn try_start_gizmo_drag(
         // Filled by the caller, which is the only place that knows the
         // selection and the settings.
         followers: Vec::new(),
-        local_space: false,
+        local_space,
         axis,
         mode,
         entity_index: entity.index(),
@@ -9030,6 +9039,9 @@ fn try_start_gizmo_drag(
         ring_tangent,
         ring_bitangent,
         gizmo_pos,
+        parent_world,
+        parent_world_inverse,
+        start_world_rotation,
     })
 }
 
@@ -9130,14 +9142,16 @@ fn gizmo_axis_under_ray(
     ray_dir: glam::Vec3,
     gizmo_pos: glam::Vec3,
     mode: GizmoMode,
+    rotation: glam::Quat,
 ) -> Option<GizmoAxis> {
     if ray_dir == glam::Vec3::ZERO {
         return None;
     }
     let dist = (camera_pos - gizmo_pos).length().max(0.5);
     let scale = dist * 0.15;
-    let model =
-        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let model = glam::Mat4::from_translation(gizmo_pos)
+        * glam::Mat4::from_quat(rotation)
+        * glam::Mat4::from_scale(glam::Vec3::splat(scale));
     let inv_model = model.inverse();
     gizmo_hit_test(
         inv_model.transform_point3(camera_pos),
@@ -9207,7 +9221,7 @@ fn apply_gizmo_drag(
     // default because a scene's grid is a world-space idea; local is what you
     // want the moment anything is rotated.
     let axis_dir = if drag.local_space {
-        (drag.start_transform.rotation * drag.axis.world_dir()).normalize_or_zero()
+        (drag.start_world_rotation * drag.axis.world_dir()).normalize_or_zero()
     } else {
         drag.axis.world_dir()
     };
@@ -9218,16 +9232,17 @@ fn apply_gizmo_drag(
     match drag.mode {
         GizmoMode::Translate => {
             if let Some(s) = ray_axis_param(camera_pos, ray_dir, drag.gizmo_pos, axis_dir) {
-                let moved =
-                    drag.start_transform.translation + (s - drag.start_axis_param) * axis_dir;
+                let moved = drag.gizmo_pos + (s - drag.start_axis_param) * axis_dir;
                 // Snap the *result*, not the delta: an object already off the
                 // grid should land on it, which is what "snap to grid" means
                 // to everyone who has used one.
-                result.translation = glam::Vec3::new(
+                let snapped_world = glam::Vec3::new(
                     SnapSettings::quantise(moved.x, snap.translate_m),
                     SnapSettings::quantise(moved.y, snap.translate_m),
                     SnapSettings::quantise(moved.z, snap.translate_m),
                 );
+                result.translation =
+                    world_to_local_translation(drag.parent_world_inverse, snapped_world);
             }
         }
         GizmoMode::Scale => {
@@ -9294,6 +9309,12 @@ fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> 
     if world.get::<crate::ParticleEmitter>(entity).is_some() {
         tags.push("particles");
     }
+    if world.get::<AudioEmitterComponent>(entity).is_some() {
+        tags.push("audio");
+    }
+    if world.get::<crate::decal::DecalComponent>(entity).is_some() {
+        tags.push("decal");
+    }
     if world.get::<PostProcessComponent>(entity).is_some() {
         tags.push("postfx");
     }
@@ -9348,11 +9369,65 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+/// Choose the component-neutral local bounds used by all viewport ray picks.
+fn entity_pick_aabb(
+    world: &somnium_ecs::World,
+    renderer: &SomniumRenderer,
+    entity: somnium_ecs::Entity,
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    if let Some(mesh) = world.get::<MeshComponent>(entity)
+        && let Some((min, max)) = renderer.geometry.mesh_aabb(mesh.vertex_offset)
+    {
+        return Some((glam::Vec3::from_array(min), glam::Vec3::from_array(max)));
+    }
+
+    // Non-mesh authoring volumes still need a viewport handle. Decals use the
+    // transform's full scale as their projection box, so a unit local box is
+    // exact. Lights and emitters use a deliberately small proxy: selecting a
+    // lamp must not claim its whole 40 m illumination range and hide every
+    // object behind it.
+    authored_proxy_aabb(world, entity)
+}
+
+fn authored_proxy_aabb(
+    world: &somnium_ecs::World,
+    entity: somnium_ecs::Entity,
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    if world.get::<crate::decal::DecalComponent>(entity).is_some() {
+        Some((glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)))
+    } else if world.get::<LightComponent>(entity).is_some()
+        || world.get::<AudioEmitterComponent>(entity).is_some()
+        || world.get::<crate::ParticleEmitter>(entity).is_some()
+    {
+        Some((glam::Vec3::splat(-0.35), glam::Vec3::splat(0.35)))
+    } else {
+        None
+    }
+}
+
+fn entity_ray_hit_distance(
+    world: &somnium_ecs::World,
+    renderer: &SomniumRenderer,
+    entity: somnium_ecs::Entity,
+    origin: glam::Vec3,
+    direction: glam::Vec3,
+) -> Option<f32> {
+    let (min, max) = entity_pick_aabb(world, renderer, entity)?;
+    let model = world
+        .get::<WorldTransform>(entity)
+        .map(|world| world.0)
+        .or_else(|| world.get::<Transform>(entity).map(Transform::to_matrix))?;
+    let inverse = invert_affine(model)?;
+    let local_origin = inverse.transform_point3(origin);
+    let local_direction = inverse.transform_vector3(direction);
+    let t = ray_aabb_distance(local_origin, local_direction, min, max)?;
+    let world_hit = model.transform_point3(local_origin + local_direction * t);
+    Some(origin.distance_squared(world_hit))
+}
+
 /// Slab-test a ray against a local-space AABB, returning the nearest positive
 /// hit distance along `direction`. `direction` need not be normalised, so the
-/// result is expressed in the same parameterisation the caller passed in —
-/// which is what lets CONTROL-E's picker transform the ray into model space
-/// once instead of transforming every box into world space.
+/// result is expressed in the same parameterisation the caller passed in.
 fn ray_aabb_distance(
     origin: glam::Vec3,
     direction: glam::Vec3,
@@ -9380,7 +9455,10 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
-    use super::{EditorFlags, SnapSettings, Transform, WorldTransform, ray_aabb_distance};
+    use super::{
+        EditorFlags, SnapSettings, Transform, WorldTransform, authored_proxy_aabb,
+        ray_aabb_distance, world_to_local_translation,
+    };
 
     /// Snapping rounds the *result*, so an object already off the grid lands
     /// on it. Rounding the delta instead would preserve the original error
@@ -9468,6 +9546,30 @@ mod viewport_control_tests {
         );
     }
 
+    #[test]
+    fn non_mesh_authoring_entities_have_pickable_proxy_bounds() {
+        let mut world = somnium_ecs::World::new();
+        let light = world.spawn((Transform::default(), crate::LightComponent::default()));
+        let audio = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+        let particles = world.spawn((Transform::default(), crate::ParticleEmitter::default()));
+        let decal = world.spawn((
+            Transform::default(),
+            crate::decal::DecalComponent::default(),
+        ));
+        let plain = world.spawn((Transform::default(),));
+
+        for entity in [light, audio, particles, decal] {
+            assert!(
+                authored_proxy_aabb(&world, entity).is_some(),
+                "an authored viewport volume had no pick proxy"
+            );
+        }
+        assert!(authored_proxy_aabb(&world, plain).is_none());
+    }
+
     // ── Assigning an asset without a drag ──────────────────────────
 
     /// A clip lands on the Audio Emitter's clip field and nowhere else.
@@ -9547,7 +9649,34 @@ mod viewport_control_tests {
             (world - camera).normalize_or_zero(),
             glam::Vec3::ZERO,
             super::GizmoMode::Translate,
+            glam::Quat::IDENTITY,
         )
+    }
+
+    #[test]
+    fn local_gizmo_hit_testing_uses_the_same_rotation_as_drawing() {
+        let surface = (1920.0, 1080.0);
+        let (camera, view_proj) = look_at_origin(surface);
+        let cursor = (surface.0 * 0.5, surface.1 * 0.5 - 68.0);
+        let world = super::ndc_to_world(
+            cursor.0,
+            cursor.1,
+            surface.0,
+            surface.1,
+            &view_proj.inverse(),
+        );
+        let rotation = glam::Quat::from_rotation_z(90.0_f32.to_radians());
+        assert_eq!(
+            super::gizmo_axis_under_ray(
+                camera,
+                (world - camera).normalize_or_zero(),
+                glam::Vec3::ZERO,
+                super::GizmoMode::Translate,
+                rotation,
+            ),
+            Some(super::GizmoAxis::X),
+            "local X is drawn along world +Y after the quarter turn"
+        );
     }
 
     /// **The bug that made every gizmo inert.** `viewport_size` was a cache
@@ -9653,6 +9782,34 @@ mod viewport_control_tests {
         assert_eq!(
             super::gizmo_anchor(&world, Some(child)),
             Some(glam::Vec3::new(10.0, 2.0, 0.0))
+        );
+    }
+
+    /// A world-space gizmo result must cross the inverse parent transform
+    /// before it is stored in the child's local `Transform`. Translation-only
+    /// parents hid this bug; rotation and non-uniform scale expose it.
+    #[test]
+    fn a_child_gizmo_world_delta_is_written_back_in_parent_local_space() {
+        let parent = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::new(2.0, 3.0, 4.0),
+            glam::Quat::from_rotation_y(90.0_f32.to_radians()),
+            glam::Vec3::new(10.0, -2.0, 5.0),
+        );
+        let start_local = glam::Vec3::new(1.0, 2.0, 3.0);
+        let start_world = parent.transform_point3(start_local);
+        let delta = glam::Vec3::new(4.0, -3.0, 2.0);
+        let new_local = world_to_local_translation(parent.inverse(), start_world + delta);
+
+        assert!(
+            parent
+                .transform_point3(new_local)
+                .abs_diff_eq(start_world + delta, 1e-4),
+            "the stored local point did not reproduce the gizmo's world result"
+        );
+        assert_ne!(
+            new_local,
+            start_local + delta,
+            "adding the world delta directly would only be valid for an identity parent"
         );
     }
 
