@@ -2,10 +2,9 @@
 //!
 //! Adapts bevy_voxel_world's `ChunkThread` task pattern and `NeedsRemesh` /
 //! `NeedsDespawn` marker components (ATTRIBUTION.md §13.10) to Somnium:
-//! tasks run on the rayon global pool and report back over an `mpsc` channel;
-//! remesh/despawn markers become per-chunk dirty flags plus a version counter
-//! that lets the main thread discard results that were obsoleted by an edit
-//! while the worker was still meshing.
+//! tasks run through the engine's one `somnium_jobs` scheduler; remesh/despawn
+//! markers become per-chunk dirty flags plus a version counter that lets the
+//! main thread discard results obsoleted by an edit while a worker was meshing.
 
 use crate::chunk::{
     CHUNK_SIZE, ChunkCoord, PADDED_CHUNK_SIZE, chunk_origin, chunks_touching_voxel,
@@ -15,8 +14,8 @@ use crate::terrain::TerrainConfig;
 use crate::voxel::Voxel;
 use glam::{IVec3, Vec3};
 use ndshape::{RuntimeShape, Shape};
+use somnium_jobs::{JobDesc, JobHandle, JobPriority, JobSystem};
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// Tuning knobs for the chunk streaming system.
 #[derive(Debug, Clone)]
@@ -95,6 +94,13 @@ struct TaskResult {
     mesh: Option<ChunkMeshData>,
 }
 
+struct PendingTask {
+    coord: ChunkCoord,
+    lod: u8,
+    version: u64,
+    handle: JobHandle<TaskResult>,
+}
+
 /// Streaming voxel world: owns chunk lifecycle state and the edit overlay,
 /// but no GPU resources — the caller uploads meshes and submits draws.
 pub struct VoxelWorld {
@@ -104,21 +110,19 @@ pub struct VoxelWorld {
     /// this overlay on top of the deterministic terrain function, so chunks
     /// never need their voxel arrays persisted.
     edits: HashMap<IVec3, Voxel>,
-    tx: Sender<TaskResult>,
-    rx: Receiver<TaskResult>,
-    in_flight: usize,
+    /// One entry per outstanding mesh job. This vector *is* the in-flight
+    /// count — there is no second counter to drift out of step with it.
+    tasks: Vec<PendingTask>,
 }
 
 impl VoxelWorld {
     pub fn new(config: VoxelWorldConfig) -> Self {
-        let (tx, rx) = channel();
+        let capacity = config.max_in_flight;
         Self {
             config,
             chunks: HashMap::new(),
             edits: HashMap::new(),
-            tx,
-            rx,
-            in_flight: 0,
+            tasks: Vec::with_capacity(capacity),
         }
     }
 
@@ -143,9 +147,9 @@ impl VoxelWorld {
         }
     }
 
-    /// Number of chunk generation tasks currently running.
+    /// Number of chunk generation jobs currently queued or running.
     pub fn in_flight(&self) -> usize {
-        self.in_flight
+        self.tasks.len()
     }
 
     /// The configuration this world was created with.
@@ -158,18 +162,28 @@ impl VoxelWorld {
     /// Collects finished meshes, despawns out-of-range chunks, and queues
     /// generation tasks (nearest first) for missing, dirty, or LOD-changed
     /// chunks, up to `max_in_flight`.
-    pub fn update(&mut self, camera_pos: Vec3) -> VoxelWorldUpdate {
+    pub fn update(&mut self, jobs: &mut JobSystem, camera_pos: Vec3) -> VoxelWorldUpdate {
         let mut result = VoxelWorldUpdate::default();
 
         // ── 1. Drain finished tasks ─────────────────────────────────────────
-        while let Ok(task) = self.rx.try_recv() {
-            self.in_flight = self.in_flight.saturating_sub(1);
+        let mut pending = std::mem::take(&mut self.tasks);
+        for task in pending.drain(..) {
+            let Some(outcome) = task.handle.try_take() else {
+                self.tasks.push(task);
+                continue;
+            };
             let Some(state) = self.chunks.get_mut(&task.coord) else {
                 continue; // chunk despawned while meshing
             };
             if state.pending == Some((task.version, task.lod)) {
                 state.pending = None;
             }
+            let Ok(task) = outcome else {
+                // Queue expiry, cancellation and worker failure all leave the
+                // chunk eligible for a later retry.
+                state.dirty = true;
+                continue;
+            };
             if task.version != state.version {
                 continue; // edited while meshing — a remesh is already due
             }
@@ -219,6 +233,11 @@ impl VoxelWorld {
                 false
             }
         });
+        for task in &self.tasks {
+            if result.despawned.contains(&task.coord) {
+                task.handle.cancel();
+            }
+        }
 
         // ── 4. Queue generation tasks, nearest chunks first ─────────────────
         let mut candidates: Vec<(i64, ChunkCoord, u8)> = desired
@@ -239,16 +258,16 @@ impl VoxelWorld {
         candidates.sort_unstable_by_key(|&(d, ..)| d);
 
         for (_, coord, lod) in candidates {
-            if self.in_flight >= self.config.max_in_flight {
+            if self.tasks.len() >= self.config.max_in_flight {
                 break;
             }
-            self.spawn_task(coord, lod);
+            self.spawn_task(jobs, coord, lod);
         }
 
         result
     }
 
-    fn spawn_task(&mut self, coord: ChunkCoord, lod: u8) {
+    fn spawn_task(&mut self, jobs: &mut JobSystem, coord: ChunkCoord, lod: u8) {
         let state = self.chunks.entry(coord).or_insert(ChunkState {
             uploaded_lod: None,
             pending: None,
@@ -256,24 +275,42 @@ impl VoxelWorld {
             dirty: false,
         });
         let version = state.version;
-        state.pending = Some((version, lod));
-        state.dirty = false;
-        self.in_flight += 1;
 
         let terrain = self.config.terrain.clone();
         let edits = snapshot_edits(&self.edits, coord);
-        let tx = self.tx.clone();
-
-        rayon::spawn(move || {
+        // `Visible`, because a missing chunk is a hole in the view the camera
+        // is pointed at — but `housekeeping`, because nobody asked for this
+        // chunk by name and cancelling one of sixteen means nothing to a
+        // person. The scheduler and the status bar need different answers.
+        let desc = JobDesc::new("voxel.chunk_mesh")
+            .priority(JobPriority::Visible)
+            .housekeeping();
+        let submitted = jobs.submit_with(desc, move |ctx| {
+            ctx.check_cancelled()
+                .map_err(|error| format!("{error:?}"))?;
             let voxels = generate_padded(&terrain, &edits, coord);
+            ctx.check_cancelled()
+                .map_err(|error| format!("{error:?}"))?;
             let mesh = mesh_chunk(&voxels, lod);
-            // Receiver gone only during engine shutdown — safe to ignore.
-            let _ = tx.send(TaskResult {
+            Ok(TaskResult {
                 coord,
                 lod,
                 version,
                 mesh,
-            });
+            })
+        });
+        let Ok(handle) = submitted else {
+            // The bounded queue is allowed to refuse a burst. `pending` stays
+            // empty, so the nearest-first candidate pass retries next frame.
+            return;
+        };
+        state.pending = Some((version, lod));
+        state.dirty = false;
+        self.tasks.push(PendingTask {
+            coord,
+            lod,
+            version,
+            handle,
         });
     }
 }
@@ -323,14 +360,14 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    fn pump(world: &mut VoxelWorld, camera: Vec3) -> VoxelWorldUpdate {
+    fn pump(world: &mut VoxelWorld, jobs: &mut JobSystem, camera: Vec3) -> VoxelWorldUpdate {
         // Generation is async; poll until all in-flight tasks land.
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mut total = world.update(camera);
+        let mut total = world.update(jobs, camera);
         while world.in_flight() > 0 {
             assert!(Instant::now() < deadline, "chunk tasks timed out");
             std::thread::sleep(Duration::from_millis(10));
-            let upd = world.update(camera);
+            let upd = world.update(jobs, camera);
             total.ready.extend(upd.ready);
             total.despawned.extend(upd.despawned);
         }
@@ -344,7 +381,8 @@ mod tests {
             max_in_flight: 64,
             ..Default::default()
         });
-        let upd = pump(&mut world, Vec3::ZERO);
+        let mut jobs = JobSystem::single_threaded();
+        let upd = pump(&mut world, &mut jobs, Vec3::ZERO);
         // radius 1 → 5 columns (diamond) × 2 vertical chunks.
         assert_eq!(upd.ready.len(), 10);
         assert!(upd.ready.iter().any(|c| c.mesh.is_some()));
@@ -358,8 +396,13 @@ mod tests {
             max_in_flight: 64,
             ..Default::default()
         });
-        pump(&mut world, Vec3::ZERO);
-        let upd = pump(&mut world, Vec3::new(10.0 * CHUNK_SIZE as f32, 0.0, 0.0));
+        let mut jobs = JobSystem::single_threaded();
+        pump(&mut world, &mut jobs, Vec3::ZERO);
+        let upd = pump(
+            &mut world,
+            &mut jobs,
+            Vec3::new(10.0 * CHUNK_SIZE as f32, 0.0, 0.0),
+        );
         assert!(!upd.despawned.is_empty());
     }
 
@@ -370,11 +413,12 @@ mod tests {
             max_in_flight: 64,
             ..Default::default()
         });
-        pump(&mut world, Vec3::ZERO);
+        let mut jobs = JobSystem::single_threaded();
+        pump(&mut world, &mut jobs, Vec3::ZERO);
 
         // Place a floating stone block well above the terrain surface.
         world.set_voxel(IVec3::new(5, 25, 5), Voxel::Stone);
-        let upd = pump(&mut world, Vec3::ZERO);
+        let upd = pump(&mut world, &mut jobs, Vec3::ZERO);
         let remeshed: Vec<_> = upd
             .ready
             .iter()
@@ -382,5 +426,55 @@ mod tests {
             .collect();
         assert_eq!(remeshed.len(), 1, "edited chunk should remesh exactly once");
         assert_eq!(world.get_voxel(IVec3::new(5, 25, 5)), Voxel::Stone);
+    }
+
+    // ── DOOM-H: the real scheduler, not the inline one ─────────────────────
+    //
+    // The three tests above run every job inline, which proves the streaming
+    // logic and nothing about the move off Rayon. These two exercise what the
+    // bounded shared queue actually does to a streamer: refuse submissions
+    // during a burst, and hand back `Err` for chunks that were cancelled.
+
+    #[test]
+    fn a_full_queue_delays_chunks_rather_than_losing_them() {
+        // Capacity 4 against 40 wanted chunks: most `submit_with` calls in the
+        // first frame are refused. Under Rayon's unbounded global pool this
+        // case did not exist, so the retry path is new and worth pinning.
+        let mut jobs = JobSystem::with_workers_and_capacity(2, 4);
+        let mut world = VoxelWorld::new(VoxelWorldConfig {
+            radius_chunks: 2,
+            max_in_flight: 64,
+            ..Default::default()
+        });
+        let upd = pump(&mut world, &mut jobs, Vec3::ZERO);
+        // radius 2 → 13 columns (diamond) × 2 vertical chunks, all eventually
+        // delivered even though the queue refused most of the first burst.
+        assert_eq!(upd.ready.len(), 26);
+        assert_eq!(world.in_flight(), 0);
+    }
+
+    #[test]
+    fn despawning_cancels_in_flight_chunks_and_frees_their_slots() {
+        let mut jobs = JobSystem::with_workers_and_capacity(1, 64);
+        let mut world = VoxelWorld::new(VoxelWorldConfig {
+            radius_chunks: 2,
+            keep_margin: 0,
+            max_in_flight: 64,
+            ..Default::default()
+        });
+        // One update queues the chunks; the next teleports the camera far
+        // enough that every one of them is out of range while still meshing.
+        world.update(&mut jobs, Vec3::ZERO);
+        assert!(world.in_flight() > 0, "expected work to still be queued");
+        world.update(&mut jobs, Vec3::new(400.0 * CHUNK_SIZE as f32, 0.0, 0.0));
+
+        // Cancellation is cooperative, so the slots come back as the workers
+        // notice — the invariant is that they all come back.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while world.in_flight() > 0 {
+            assert!(Instant::now() < deadline, "cancelled chunks never drained");
+            std::thread::sleep(Duration::from_millis(5));
+            world.update(&mut jobs, Vec3::new(400.0 * CHUNK_SIZE as f32, 0.0, 0.0));
+        }
     }
 }

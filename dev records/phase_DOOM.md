@@ -4,7 +4,7 @@
 > cycle on anything the player could not see, and measuring before believing.*
 
 > **Codename:** DOOM (id Tech 6/7/8)
-> **Status:** **A, B, C, E, F IN TREE** (2026-08-16). D and G–M deferred.
+> **Status:** **A–G IN TREE** (updated 2026-08-30). C, E, and G are measured default-off experiments; D is complete. H–M remain open, with H's premise superseded by MORROWIND-B's shipped `somnium_jobs` scheduler.
 > See **§15 As shipped** at the end of this file before reading the plan above:
 > §1's thesis did not survive DOOM-B, and C and E are default **off**.
 > **Predecessor:** Phase CR (Crysis) established *where* the frame goes.
@@ -843,3 +843,41 @@ Anything further on Coastal ground is the terrain material's 8 splatmap fetches,
 32-wide scan and four layer samples. Distance does not reduce them (DOOM-E
 proved that). The designed cheap path remains Phase DF's clipmap, still default
 off and still gated on DF-E.
+
+---
+
+## 16. Continuation — 2026-08-30
+
+Section 15 remains the dated 2026-08-16 close-out and is not rewritten as if D
+had existed then. Work resumed after MORROWIND and the wgpu 30 migration changed
+several premises.
+
+### DOOM-D is complete
+
+The conventional atlas now caches each cascade independently. On the matched
+static Coastal-ground gate, cache on reports **0/4 cascades and 0.0028 ms**;
+`SOMNIUM_SHADOW_CACHE=0` reports **4/4 and 0.9633 ms**, both with 218 casters.
+See [`phase DOOM/DOOM-D.md`](phase%20DOOM/DOOM-D.md) for the invalidation
+contract, failure archaeology, commands, timings, and tone-mapped captures.
+
+### G–M rebase before implementation
+
+| Stage | Current-tree reading | Next gate |
+|---|---|---|
+| **G — draw submission** | **Measured, default off.** Dense args remain authoritative; the cull phases can append survivors into fixed single-/double-sided partitions consumed by `multi_draw_indirect_count`. At 66 objects, combined cull + visibility changed 0.3270 → 0.3198 ms, inside noise. Atomic append also does not preserve draw order. | Keep `SOMNIUM_DRAW_COMPACTION=1` for a future scale sweep; do not deepen into stable scan compaction without evidence. See [`DOOM-G.md`](phase%20DOOM/DOOM-G.md). |
+| **H — real jobs** | **Complete.** The planned Rayon replacement was obsolete — MORROWIND-B had already shipped the bounded scheduler — so H became migration and proof. Voxel chunk meshing, the last `rayon::spawn` in the tree and a GHOSTFENCE exemption since PORTAL-0-C, now runs on `somnium_jobs`; the exemption is gone. Installing ~118 chunk meshes held the main-thread drain to 1.83 ms against its 2 ms budget. | Done. See [`DOOM-H.md`](phase%20DOOM/DOOM-H.md). The chunk *upload* is still main-thread and unbudgeted — that belongs to I. |
+| **I — off critical path** | Streaming, previews, cook, shader work, and HLOD landed across later phases, so the 2026-08-16 task list is no longer an inventory. | Re-profile startup and steady-state, then name exact remaining decode/compile/upload stalls before changing code. GPU uploads remain main-thread/device-owned even when preparation is a job. |
+| **J — bandwidth/formats/allocations** | Persistent buffers and later rendering phases already changed several allocations; the old predicted table is stale. | Capture allocation/format inventory and change only rows with measured traffic or churn. |
+| **K — fp16** | Adapter capability is now available through wgpu 30; shader precision policy has not been proved. | One isolated shader family, parity capture, and matched timing. Revert on noise or visible drift. |
+| **L — subgroups** | Capability is reported, but no default path may depend on it without a portable fallback. | Restrict the experiment to a reduction/shuffle with an existing scalar path and measure occupancy/timing. |
+| **M — close-out** | Open. C and E remain negative/default-off results and are part of the phase, not unfinished successes. | Re-run the current 180/300 contract, remove dead experimental branches only when evidence no longer needs them, update Help/kill switches, and close only against current budgets. |
+
+The remaining dependency order is **I → J → K → L → M**. D and H are complete;
+G is closed as a measured default-off experiment.
+
+Two harness variables were added by this continuation and are documented in
+[`phase DOOM/README.md`](phase%20DOOM/README.md): `SOMNIUM_TIME_STATIC=1`
+(suppress the demo boat, so D's zero-work gate can be measured) and
+`SOMNIUM_VOXEL=1` (spawn the voxel terrain at map load, so H's streaming is
+visible to a timing run at all). Both are opt-in and neither changes normal
+play.

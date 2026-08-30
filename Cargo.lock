@@ -3979,8 +3979,8 @@ dependencies = [
  "block-mesh",
  "glam 0.29.3",
  "ndshape",
- "rayon",
  "somnium_asset",
+ "somnium_jobs",
 ]
 
 [[package]]

@@ -536,6 +536,7 @@ impl TimingRun {
             ("terrain_cpu_culled", c.terrain_cpu_culled),
             ("tlas_instances", c.tlas_instances),
             ("shadow_casters", c.shadow_casters),
+            ("shadow_cascades_rendered", c.shadow_cascades_rendered),
             ("virtual_shadow_pages", c.virtual_shadow_pages),
             ("virtual_shadow_resident", c.virtual_shadow_resident),
         ] {

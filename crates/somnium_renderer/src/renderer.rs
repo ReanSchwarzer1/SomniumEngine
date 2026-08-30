@@ -80,7 +80,11 @@ pub struct SomniumRenderer {
     virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness,
     /// Explicit content revision for in-place mesh edits whose offsets/counts
     /// remain stable and therefore cannot be discovered by hashing commands.
-    virtual_shadow_caster_content_revision: u64,
+    shadow_caster_content_revision: u64,
+    /// DOOM-D: pure invalidation policy for the four persistent CSM quadrants.
+    cascade_shadow_cache: crate::shadow::cache::CascadeShadowCache,
+    /// Hash of the filtered caster content touching each resolved cascade.
+    cascade_shadow_revisions: [u64; crate::shadow::NUM_CASCADES],
 
     /// Global geometry storage.
     pub geometry: GeometryPool,
@@ -332,6 +336,8 @@ pub struct SomniumRenderer {
     gpu_driven: bool,
     /// Whether the device supports it at all (gates the runtime toggle).
     supports_gpu_driven: bool,
+    /// Whether the device may consume GPU-authored compact draw counts.
+    supports_counted_draws: bool,
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
@@ -797,7 +803,9 @@ impl SomniumRenderer {
             virtual_shadow_gpu: None,
             virtual_shadow_work: Vec::with_capacity(64),
             virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness::default(),
-            virtual_shadow_caster_content_revision: 0,
+            shadow_caster_content_revision: 0,
+            cascade_shadow_cache: crate::shadow::cache::CascadeShadowCache::default(),
+            cascade_shadow_revisions: [0; crate::shadow::NUM_CASCADES],
             geometry,
             materials_pool,
             texture_pool,
@@ -948,6 +956,7 @@ impl SomniumRenderer {
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
             supports_gpu_driven: ctx.supports_gpu_driven(),
+            supports_counted_draws: ctx.supports_counted_draws(),
             water_pass,
             water_queue: Vec::new(),
             underwater_pass,
@@ -1404,11 +1413,10 @@ impl SomniumRenderer {
             .effective(self.virtual_shadow_readiness)
     }
 
-    /// Invalidate cached VSM depth after an in-place caster geometry edit.
+    /// Invalidate cached shadow depth after an in-place caster geometry edit.
     /// Transform/index/range changes are detected automatically each frame.
-    pub fn invalidate_virtual_shadow_casters(&mut self) {
-        self.virtual_shadow_caster_content_revision =
-            self.virtual_shadow_caster_content_revision.wrapping_add(1);
+    pub fn invalidate_shadow_casters(&mut self) {
+        self.shadow_caster_content_revision = self.shadow_caster_content_revision.wrapping_add(1);
     }
 
     /// Add a local light (Point or Spot) for this frame (Phase 13C).
@@ -1553,6 +1561,15 @@ impl SomniumRenderer {
     /// Whether this device supports the GPU-driven path at all.
     pub fn supports_gpu_driven(&self) -> bool {
         self.supports_gpu_driven
+    }
+
+    /// DOOM-G counted submission. The measured small-scene result was inside
+    /// noise, so dense Phase-15 submission stays the default and this remains
+    /// an explicit experiment.
+    fn counted_draws_active(&self) -> bool {
+        self.gpu_driven
+            && self.supports_counted_draws
+            && std::env::var("SOMNIUM_DRAW_COMPACTION").as_deref() == Ok("1")
     }
 
     /// Submit one light's gizmo for this frame (Phase 13E).
@@ -1746,21 +1763,47 @@ impl SomniumRenderer {
         rpass.set_bind_group(1, &self.vis_pass.cutout_bind_group, &[]);
 
         if self.gpu_driven && !self.indirect.is_empty() {
-            // Phase 15A: the whole scene in one call per cull mode. Culled draws
-            // simply carry instance_count = 0 and cost nothing.
             let total = self.indirect.len();
             let split = self.single_sided_args.min(total);
-            if split > 0 {
-                rpass.set_pipeline(&self.vis_pass.pipeline);
-                rpass.multi_draw_indirect(&self.indirect.buffer, 0, split as u32);
-            }
-            if total > split {
-                rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
-                rpass.multi_draw_indirect(
-                    &self.indirect.buffer,
-                    (split as u64) * crate::indirect::ARGS_SIZE,
-                    (total - split) as u32,
-                );
+            if self.counted_draws_active() {
+                // DOOM-G: the cull phase copied only survivors into the two
+                // fixed partitions and authored their counts on the GPU. Dense
+                // args stay untouched as the phase-two/diagnostic contract.
+                if split > 0 {
+                    rpass.set_pipeline(&self.vis_pass.pipeline);
+                    rpass.multi_draw_indirect_count(
+                        self.cull_pass.compact_buffer(),
+                        0,
+                        self.cull_pass.count_buffer(),
+                        0,
+                        split as u32,
+                    );
+                }
+                if total > split {
+                    rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
+                    rpass.multi_draw_indirect_count(
+                        self.cull_pass.compact_buffer(),
+                        (split as u64) * crate::indirect::ARGS_SIZE,
+                        self.cull_pass.count_buffer(),
+                        std::mem::size_of::<u32>() as u64,
+                        (total - split) as u32,
+                    );
+                }
+            } else {
+                // Phase 15A fallback: submit the dense stream. Culled entries
+                // carry instance_count = 0 and cost no raster work.
+                if split > 0 {
+                    rpass.set_pipeline(&self.vis_pass.pipeline);
+                    rpass.multi_draw_indirect(&self.indirect.buffer, 0, split as u32);
+                }
+                if total > split {
+                    rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
+                    rpass.multi_draw_indirect(
+                        &self.indirect.buffer,
+                        (split as u64) * crate::indirect::ARGS_SIZE,
+                        (total - split) as u32,
+                    );
+                }
             }
         } else if clear {
             rpass.set_pipeline(&self.vis_pass.pipeline);
@@ -2468,7 +2511,15 @@ impl SomniumRenderer {
         // difference — which is why the shimmer vanished when TAA was switched
         // off: `jitter_ndc` returns zero when TAA is disabled, so the cascades
         // stopped moving.
-        let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
+        let cascade_candidates =
+            compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
+        let shadow_cache_enabled = std::env::var("SOMNIUM_SHADOW_CACHE").as_deref() != Ok("0");
+        let cascade_cache_frame = self.cascade_shadow_cache.begin_frame(
+            cascade_candidates,
+            self.light_direction,
+            shadow_cache_enabled,
+        );
+        let cascades = cascade_cache_frame.cascades;
         self.cascade_view_projs = std::array::from_fn(|i| cascades[i].view_proj);
 
         let shadow_debug = if self.shading_debug != 0.0 {
@@ -2532,6 +2583,7 @@ impl SomniumRenderer {
         let cpu_frustum = self.cpu_frustum_active();
         let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
         let mut cpu_culled = 0u32;
+        let mut shadow_geometry_changed = false;
         for &(id, model) in &self.terrain_queue {
             let shoreline_regions = self.water_bodies.shoreline_lod_regions(id);
             let terrain = &mut self.terrains[id as usize];
@@ -2540,6 +2592,7 @@ impl SomniumRenderer {
             terrain.select_lods(local_cam, &shoreline_regions);
             self.rebuilt_chunks.clear();
             terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut self.rebuilt_chunks);
+            shadow_geometry_changed |= !self.rebuilt_chunks.is_empty();
             terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
             terrain.splatmap.upload_dirty(&ctx.queue);
 
@@ -2647,6 +2700,9 @@ impl SomniumRenderer {
                 }
             }
         }
+        if shadow_geometry_changed {
+            self.invalidate_shadow_casters();
+        }
         self.profiler.counters.terrain_cpu_culled = cpu_culled;
         self.profiler.cpu_end();
 
@@ -2690,12 +2746,18 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
-            self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
+            self.instances.add_instance(gpu_instance_from_cmd(
+                &self.terrain_lod_by_vertex,
+                cmd,
+                shadow_debug,
+            ));
         }
         for cmd in &self.shadow_only_queue {
-            self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
+            self.instances.add_instance(gpu_instance_from_cmd(
+                &self.terrain_lod_by_vertex,
+                cmd,
+                shadow_debug,
+            ));
         }
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones (vis + shadow-only). The visibility pass only
@@ -2800,6 +2862,7 @@ impl SomniumRenderer {
             }
             self.indirect
                 .upload(&ctx.device, &ctx.queue, &self.cluster_args);
+            let counted_draws = self.counted_draws_active();
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
@@ -2819,6 +2882,8 @@ impl SomniumRenderer {
                 self.hiz_pass.mip_count(),
                 self.hiz_ready && !self.occlusion_off,
                 self.camera_pos,
+                self.single_sided_args,
+                counted_draws,
             );
             self.profiler.cpu_end();
         }
@@ -2892,6 +2957,13 @@ impl SomniumRenderer {
         // them reach the atlas. Phase CR-E also drops casters that miss every
         // cascade volume. See `rebuild_shadow_casters`.
         self.rebuild_shadow_casters();
+        let dirty_cascades = self.cascade_shadow_cache.finish_frame(
+            self.cascade_shadow_revisions,
+            cascade_cache_frame.view_dirty,
+            shadow_cache_enabled,
+        );
+        self.profiler.counters.shadow_cascades_rendered =
+            dirty_cascades.into_iter().map(u32::from).sum();
         self.prepare_virtual_shadow_cache(&ctx.queue, &cascades);
         self.profiler.counters.shadow_casters =
             u32::try_from(self.shadow_caster_scratch.len()).unwrap_or(u32::MAX);
@@ -2921,6 +2993,7 @@ impl SomniumRenderer {
                 &self.shadow_resources.atlas_view,
                 &self.global_pool.bind_group,
                 &self.shadow_caster_scratch,
+                dirty_cascades,
             ),
             crate::shadow::virtual_map::ShadowTechnique::Virtual => {
                 // Keep a coarse CSM render as the authored policy's
@@ -2931,6 +3004,7 @@ impl SomniumRenderer {
                     &self.shadow_resources.atlas_view,
                     &self.global_pool.bind_group,
                     &self.shadow_caster_scratch,
+                    dirty_cascades,
                 );
             }
         }
@@ -2949,6 +3023,7 @@ impl SomniumRenderer {
         // the camera moves. The second phase is what makes that safe: anything
         // wrongly rejected gets a look at fresh depth within the same frame.
         let cull_active = self.gpu_driven && !self.indirect.is_empty();
+        let counted_draws = self.counted_draws_active();
 
         if cull_active {
             // Phase DOOM-A: bracketed. This was one of the passes the §17.7
@@ -2963,6 +3038,7 @@ impl SomniumRenderer {
                 &self.hiz_pass.view,
                 0,
                 self.indirect.len(),
+                counted_draws,
             );
             self.profiler.end(&mut encoder);
         }
@@ -2992,6 +3068,7 @@ impl SomniumRenderer {
                 &self.hiz_pass.view,
                 1,
                 self.indirect.len(),
+                counted_draws,
             );
             self.profiler.end(&mut encoder);
 
@@ -4591,7 +4668,7 @@ impl SomniumRenderer {
             *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
         }
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        mix(&mut hash, self.virtual_shadow_caster_content_revision);
+        mix(&mut hash, self.shadow_caster_content_revision);
         mix(&mut hash, self.materials_pool.revision());
         for cmd in &self.draw_queue {
             mix(&mut hash, u64::from(cmd.vertex_offset));
@@ -4681,7 +4758,7 @@ impl SomniumRenderer {
         let light_revision = virtual_shadow_light_revision(self.light_direction, cascades);
         let caster_revision = virtual_shadow_caster_revision(
             self.draw_queue.iter().chain(self.shadow_only_queue.iter()),
-            self.virtual_shadow_caster_content_revision,
+            self.shadow_caster_content_revision,
         );
         self.virtual_shadow_cache
             .begin_frame(light_revision, caster_revision);
@@ -4739,6 +4816,13 @@ impl SomniumRenderer {
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
         self.shadow_caster_scratch.clear();
+        // A material edit can change alpha-tested depth without changing a
+        // command's material id. Conservatively invalidate every cascade on a
+        // pool revision; command transforms/ranges below remain per-cascade.
+        let global_shadow_revision =
+            self.shadow_caster_content_revision ^ self.materials_pool.revision().rotate_left(17);
+        self.cascade_shadow_revisions =
+            [0xcbf2_9ce4_8422_2325u64 ^ global_shadow_revision; crate::shadow::NUM_CASCADES];
         let frame_layout =
             frame_instance_layout(self.draw_queue.len(), self.shadow_only_queue.len());
         for (i, cmd) in self.draw_queue.iter().enumerate() {
@@ -4751,6 +4835,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 &self.geometry,
                 &mut self.shadow_caster_scratch,
+                &mut self.cascade_shadow_revisions,
             );
         }
         for (i, cmd) in self.shadow_only_queue.iter().enumerate() {
@@ -4765,6 +4850,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 &self.geometry,
                 &mut self.shadow_caster_scratch,
+                &mut self.cascade_shadow_revisions,
             );
         }
     }
@@ -4879,6 +4965,7 @@ fn consider_shadow_caster(
     camera_pos: glam::Vec3,
     geometry: &crate::geometry::GeometryPool,
     out: &mut Vec<crate::pass::shadow::ShadowCaster>,
+    cascade_revisions: &mut [u64; crate::shadow::NUM_CASCADES],
 ) {
     if !cmd.casts_shadow {
         return;
@@ -4889,27 +4976,55 @@ fn consider_shadow_caster(
     };
     let Some((min, max)) = geometry.mesh_aabb(cmd.vertex_offset) else {
         out.push(caster);
+        for revision in cascade_revisions {
+            mix_shadow_caster_revision(revision, cmd);
+        }
         return;
     };
     let min = glam::Vec3::from(min);
     let max = glam::Vec3::from(max);
-    if cascade_cull {
-        let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
-        if !crate::culling::aabb_in_any_frustum(cascade_planes, wmin, wmax) {
+    let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
+    let coverage: [bool; crate::shadow::NUM_CASCADES] = std::array::from_fn(|i| {
+        !cascade_cull || crate::culling::aabb_in_frustum(&cascade_planes[i], wmin, wmax)
+    });
+    if !coverage.into_iter().any(|inside| inside) {
+        return;
+    }
+    if threshold > 0.0 {
+        let half = cmd.transform.transform_vector3((max - min) * 0.5);
+        let radius = half.length();
+        let centre = cmd.transform.transform_point3((min + max) * 0.5);
+        let dist_sq = (centre - camera_pos).length_squared();
+        if !crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
             return;
         }
     }
-    if threshold <= 0.0 {
-        out.push(caster);
-        return;
+    out.push(caster);
+    for (i, inside) in coverage.into_iter().enumerate() {
+        if inside {
+            mix_shadow_caster_revision(&mut cascade_revisions[i], cmd);
+        }
     }
-    let half = cmd.transform.transform_vector3((max - min) * 0.5);
-    let radius = half.length();
-    let centre = cmd.transform.transform_point3((min + max) * 0.5);
-    let dist_sq = (centre - camera_pos).length_squared();
-    if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
-        out.push(caster);
+}
+
+fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
+    // Queue order is not shadow content. Foliage and off-camera terrain may be
+    // collected through maps whose iteration order changes while the set does
+    // not; folding each independent fingerprint with wrapping addition keeps
+    // the revision commutative while still counting duplicate draws.
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |word: u32| {
+        fingerprint ^= u64::from(word);
+        fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(command.vertex_offset);
+    mix(command.index_offset);
+    mix(command.index_count);
+    mix(command.material_id);
+    for value in command.transform.to_cols_array() {
+        mix(value.to_bits());
     }
+    *hash = hash.wrapping_add(fingerprint);
 }
 
 /// Build a full mip chain by repeated 2×2 box filtering.
@@ -5162,7 +5277,7 @@ mod mip_tests {
 
 #[cfg(test)]
 mod frame_instance_layout_tests {
-    use super::{frame_instance_layout, gpu_instance_from_cmd};
+    use super::{frame_instance_layout, gpu_instance_from_cmd, mix_shadow_caster_revision};
     use crate::command::{DrawCommand, SortKey};
 
     fn draw(vertex: u32, index: u32, material: u32, tx: f32) -> DrawCommand {
@@ -5192,12 +5307,31 @@ mod frame_instance_layout_tests {
     }
 
     #[test]
+    fn shadow_content_revision_is_order_independent_but_transform_sensitive() {
+        let a = draw(11, 101, 1, 10.0);
+        let b = draw(22, 202, 2, 20.0);
+        let mut ab = 7;
+        mix_shadow_caster_revision(&mut ab, &a);
+        mix_shadow_caster_revision(&mut ab, &b);
+        let mut ba = 7;
+        mix_shadow_caster_revision(&mut ba, &b);
+        mix_shadow_caster_revision(&mut ba, &a);
+        assert_eq!(ab, ba, "collection order is not shadow content");
+
+        let moved = draw(22, 202, 2, 21.0);
+        let mut changed = 7;
+        mix_shadow_caster_revision(&mut changed, &a);
+        mix_shadow_caster_revision(&mut changed, &moved);
+        assert_ne!(ab, changed, "moving a caster must invalidate its depth");
+    }
+
+    #[test]
     fn final_consumer_indices_recover_each_draws_ids_on_both_visibility_paths() {
         let visible = draw(11, 101, 1, 10.0);
         let shadow_only = draw(22, 202, 2, 20.0);
         let transparent = draw(33, 303, 3, 30.0);
-        let uploaded =
-            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
+        let uploaded = [&visible, &shadow_only, &transparent]
+            .map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
         let layout = frame_instance_layout(1, 1);
 
         for gpu_driven in [false, true] {

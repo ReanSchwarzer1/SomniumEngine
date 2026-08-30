@@ -24,6 +24,10 @@ pub struct CullPass {
     params_buffers: [wgpu::Buffer; 2],
     /// Phase 15E2: per-draw record of what phase one rejected on occlusion.
     flags_buffer: wgpu::Buffer,
+    /// DOOM-G: phase-local survivors, partitioned at `single_sided_args`.
+    compact_buffer: wgpu::Buffer,
+    /// Two GPU-authored counts: single-sided then double-sided.
+    count_buffer: wgpu::Buffer,
     /// Capacity in draws.
     capacity: usize,
     /// CPU staging for the AABB array, reused across frames.
@@ -105,6 +109,28 @@ impl CullPass {
                     },
                     count: None,
                 },
+                // 6: compacted survivor arguments (read_write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 7: atomic draw counts for the two cull modes
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -145,6 +171,8 @@ impl CullPass {
                 })
             }),
             flags_buffer: Self::alloc_flags(device, INITIAL_CAPACITY),
+            compact_buffer: Self::alloc_compact(device, INITIAL_CAPACITY),
+            count_buffer: Self::alloc_counts(device),
             capacity: INITIAL_CAPACITY,
             staging: Vec::with_capacity(INITIAL_CAPACITY),
         }
@@ -170,6 +198,26 @@ impl CullPass {
         })
     }
 
+    fn alloc_compact(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Compacted Indirect Draw Args"),
+            size: (capacity as u64) * crate::indirect::ARGS_SIZE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn alloc_counts(device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Compacted Indirect Draw Counts"),
+            size: 2 * std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     /// Upload this frame's AABBs and frustum planes.
     ///
     /// `aabbs` must be parallel to the indirect argument array — entry `i`
@@ -186,6 +234,8 @@ impl CullPass {
         hiz_mip_count: u32,
         occlusion_enabled: bool,
         camera_pos: glam::Vec3,
+        single_sided_args: usize,
+        counted_draws: bool,
     ) {
         self.staging.clear();
         self.staging.extend_from_slice(aabbs);
@@ -197,6 +247,7 @@ impl CullPass {
             }
             self.aabb_buffer = Self::alloc_aabbs(device, cap);
             self.flags_buffer = Self::alloc_flags(device, cap);
+            self.compact_buffer = Self::alloc_compact(device, cap);
             self.capacity = cap;
         }
 
@@ -213,7 +264,9 @@ impl CullPass {
             view_proj: view_proj.to_cols_array_2d(),
             hiz_size: [hiz_size.0 as f32, hiz_size.1 as f32],
             hiz_mip_count,
-            _pad: 0,
+            single_sided_args: u32::try_from(single_sided_args).unwrap_or(u32::MAX),
+            counted_draws: u32::from(counted_draws),
+            _pad: [0; 3],
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
         };
         queue.write_buffer(&self.params_buffers[0], 0, bytemuck::bytes_of(&params));
@@ -234,9 +287,16 @@ impl CullPass {
         hiz_view: &wgpu::TextureView,
         phase: usize,
         draw_count: usize,
+        counted_draws: bool,
     ) {
         if draw_count == 0 {
             return;
+        }
+
+        // Each cull phase produces a complete, independent survivor stream.
+        // Clear immediately before the dispatch that repopulates it.
+        if counted_draws {
+            encoder.clear_buffer(&self.count_buffer, 0, None);
         }
 
         // Rebuilt per frame because the indirect buffer can be reallocated when
@@ -269,6 +329,14 @@ impl CullPass {
                     binding: 5,
                     resource: self.flags_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.compact_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.count_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -283,5 +351,15 @@ impl CullPass {
         cpass.set_pipeline(&self.pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
         cpass.dispatch_workgroups((draw_count as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
+    }
+
+    /// DOOM-G compacted arguments written by the most recent cull phase.
+    pub fn compact_buffer(&self) -> &wgpu::Buffer {
+        &self.compact_buffer
+    }
+
+    /// Two u32 counts parallel to the single-/double-sided partitions.
+    pub fn count_buffer(&self) -> &wgpu::Buffer {
+        &self.count_buffer
     }
 }

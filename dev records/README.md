@@ -49,7 +49,7 @@ work does not overlap. STALKER waits for the relevant outputs of both.
 
 ## Phase index
 
-The status column is current as of 2026-08-29. The linked file still contains
+The status column is current as of 2026-08-30. The linked file still contains
 its own historical snapshot and revision notes.
 
 | Phase | Focus | Current status | Plan or record |
@@ -64,7 +64,7 @@ its own historical snapshot and revision notes.
 | 26 / Metaphor | Editor information architecture | Most work in tree; selected follow-ups open | [`phase_26.md`](phase_26.md) |
 | 26-Zeta / Nocturne Atelier | Editor visual system, tokens, type, icons | In tree; final human sign-off remains | [`phase_26_Zeta.md`](phase_26_Zeta.md) |
 | 27 / Hades | Editor paint, motion, elevation, first impression | Partial; H through J not started | [`phase_27.md`](phase_27.md) |
-| DOOM / id Tech | Profiler, timing format, pixel census, measured optimization | A, B, C, E, F in tree; other work deferred | [`phase_DOOM.md`](phase_DOOM.md) |
+| DOOM / id Tech | Profiler, timing format, pixel census, measured optimization | A–G in tree; C/E/G are default-off measured experiments; D complete; H–M open | [`phase_DOOM.md`](phase_DOOM.md) |
 | CONTROL / Northlight | Schema-driven editor reach and world authoring | A through O complete | [`phase_CONTROL.md`](phase_CONTROL.md) |
 | PORTAL-0 / Source | Focused performance and engineering audit | A through G complete | [`phase_PORTAL-0.md`](phase_PORTAL-0.md) |
 | MORROWIND / NetImmerse | Runtime UI, cook, streaming, animation, game framework, rendering gaps | Active and partial | [`phase_MORROWIND.md`](phase_MORROWIND.md) |

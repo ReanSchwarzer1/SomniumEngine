@@ -120,6 +120,9 @@ pub struct FrameCounters {
     /// Draws that survived shadow-caster culling (Phase 24AE). Next to
     /// `draw_calls` because the pair is the whole story of the shadow pass.
     pub shadow_casters: u32,
+    /// CSM atlas quadrants redrawn this frame (DOOM-D). A static frame should
+    /// report zero while `shadow_casters` can remain non-zero.
+    pub shadow_cascades_rendered: u32,
     /// Physical VSM tiles rasterised this frame and total resident tiles.
     pub virtual_shadow_pages: u32,
     pub virtual_shadow_resident: u32,
@@ -972,6 +975,10 @@ impl GpuProfiler {
         out.push(format!(
             "{:<26} {} of {} draws",
             "shadow casters", c.shadow_casters, c.draw_calls
+        ));
+        out.push(format!(
+            "{:<26} {} of 4",
+            "shadow cascades", c.shadow_cascades_rendered
         ));
         out.push(format!(
             "{:<26} {} rendered / {} resident",

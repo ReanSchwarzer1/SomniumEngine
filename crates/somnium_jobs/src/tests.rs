@@ -587,3 +587,37 @@ fn prune_drops_only_terminal_jobs() {
     jobs.prune_finished();
     assert!(!jobs.cancel(1), "a pruned job is no longer cancellable");
 }
+
+// ---------------------------------------------------------------------------
+// DOOM-H — housekeeping is asked separately from priority
+// ---------------------------------------------------------------------------
+
+#[test]
+fn housekeeping_is_independent_of_priority() {
+    let mut jobs = JobSystem::single_threaded();
+
+    // A continuous system can be both urgent and unattributable to a person.
+    let streaming = jobs
+        .submit_with(
+            JobDesc::new("test.stream")
+                .priority(JobPriority::Visible)
+                .housekeeping(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(streaming.snapshot().priority, JobPriority::Visible);
+    assert!(streaming.snapshot().housekeeping);
+
+    // Work a person started at the same class is not.
+    let action = jobs
+        .submit("test.import", JobPriority::Visible, |_| Ok(()))
+        .unwrap();
+    assert!(!action.snapshot().housekeeping);
+
+    // Background still implies it, so no existing call site had to be edited
+    // to keep the status bar behaving the way CONTROL-I left it.
+    let sweep = jobs
+        .submit("test.sweep", JobPriority::Background, |_| Ok(()))
+        .unwrap();
+    assert!(sweep.snapshot().housekeeping);
+}

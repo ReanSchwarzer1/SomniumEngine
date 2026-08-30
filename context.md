@@ -675,6 +675,26 @@ the camera has already left, costs nothing to abandon. The completion drain is
 budgeted for the same reason the frame limiter exists, since a burst of finished
 work arriving at once would move the hitch rather than remove it.
 
+**One scheduler, and it is now literally one.** Voxel chunk meshing was the last
+system detaching work onto rayon's global pool, and it had been carried as a
+stated GHOSTFENCE exemption since PORTAL-0-C because paying it off meant
+changing `VoxelWorld::update`'s signature. DOOM-H paid it: `EngineContext`
+carries `jobs`, chunk meshing submits like anything else, a chunk that leaves
+the keep radius has its job cancelled, and a submission the bounded queue
+refuses is retried next frame rather than lost. The exemption is gone. Only two
+uses of another thread survive, both deliberate: `for_each_mut`'s fork-join over
+a slice inside one frame, and two single-shot tests whose whole assertion is
+that something works off the main thread.
+
+A job also declares whether it is **housekeeping** — engine work that runs on
+its own — separately from its priority. The status bar had been using
+`priority != Background` as a stand-in for *"a person started this"*, which held
+only while every continuous system happened to sit at that class. Chunk meshing
+does not: a missing chunk is a hole in the view, so `Visible` is the honest
+scheduling class, and using priority to keep it out of the status bar would have
+meant lying to the scheduler to fix a label. Two questions, two answers.
+([DOOM-H](<dev records/phase DOOM/DOOM-H.md>))
+
 ## ECS, scenes, and editing
 
 The ECS groups entities by component signature and stores component columns
@@ -811,6 +831,16 @@ In tree:
 - GPU skinning into the same geometry path used by static meshes.
 - Voxel chunks and terrain submit through the visibility-buffer contract.
 
+The default indirect stream stays dense: argument `i` carries an explicit
+`first_instance` and GPU culling rejects work by writing `instance_count = 0`.
+DOOM-G added an opt-in counted consumer without weakening that invariant. With
+`SOMNIUM_DRAW_COMPACTION=1`, each cull phase appends survivors into fixed
+single-/double-sided partitions and visibility uses
+`multi_draw_indirect_count`; dense args still own phase-two revival, IDs, and
+diagnostics. The 66-object gate changed combined cull + visibility by only
+0.0072 ms, inside noise, and atomic append is not order-stable. Dense submission
+therefore remains the default. See [DOOM-G](<dev records/phase DOOM/DOOM-G.md>).
+
 ### Lighting and atmosphere
 
 In tree:
@@ -852,6 +882,22 @@ flowchart TB
 
 Cloud shadows fold into the same `shadow_factor`, so terrain, water and meshes
 read one value rather than three sources that can disagree.
+
+The conventional CSM atlas is persistent and cached per quadrant (DOOM-D).
+`CascadeShadowCache` is a pure policy module: it resolves the matrices first,
+the caster cull hashes the filtered contents touching each resolved cascade,
+and `ShadowPass` receives one dirty mask. Camera motion is quantised in shadow
+texels, sun motion has distance-scaled angular tolerances, and caster command
+changes invalidate affected volumes. In-place geometry/material edits cannot be
+identified from an unchanged command, so they conservatively invalidate all
+four. Simultaneous distant view updates are interleaved. A clean quadrant is
+never cleared or drawn. This
+ordering is a correctness rule: culling, depth raster, and shading must all use
+the same resolved matrix, including while a distant update is deferred.
+`SOMNIUM_SHADOW_CACHE=0` restores four redraws per frame, and the profiler plus
+`.somtime` publish `shadow_cascades_rendered`. The matched static gate measured
+0/4 cascades at 0.0028 ms versus 4/4 at 0.9633 ms; the detailed contract and
+evidence are in [DOOM-D](<dev records/phase DOOM/DOOM-D.md>).
 
 
 ### Materials, terrain, and water
@@ -1617,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution | A, B, C, E, F in tree; D and G through M deferred |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration | A–H in tree; C/E/G are default-off measured experiments; D and H complete; I through M open |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -1754,6 +1800,11 @@ does not overlap. STALKER waits for both relevant outputs.
 - Viewport ray picking requires a `MeshComponent`, so the piercing menu cannot
   reach an Audio Emitter, a light or a decal. The rubber band, which selects on
   projected origin, can.
+- The left tool bar is still a narrow mode strip rather than a coherent
+  authoring workspace. Its terrain and foliage buttons expose no owned options,
+  weakly communicate the active tool, and compete with the Content Drawer for
+  horizontal hierarchy. Redesign it only after those tool options are backed by
+  assets; otherwise a new shell would merely decorate the same missing model.
 
 ### Missing systems
 
@@ -1765,7 +1816,9 @@ does not overlap. STALKER waits for both relevant outputs.
 - Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
   textures. Importing a brush alpha is the next step and needs the same asset
   field the other pickers use.
-- Docking, large-list virtualisation, GUI authoring, and isolated play-in-editor.
+- Docking/floating/multiple viewports, large-list virtualisation and data-table
+  editing, the GUI layout editor, and isolated play-in-editor (MORROWIND
+  Construction Set J, M, M2, and N).
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.

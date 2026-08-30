@@ -11,6 +11,7 @@
 //! └──────────┴──────────┘
 //! ```
 
+pub mod cache;
 pub mod cascade;
 pub mod virtual_map;
 

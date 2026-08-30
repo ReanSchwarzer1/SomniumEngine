@@ -2376,6 +2376,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2450,6 +2451,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.world,
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
+                    &mut self.jobs,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -2482,6 +2484,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2731,6 +2734,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2844,8 +2848,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let drag = if blocked {
                     None
                 } else {
-                    started
-                    .map(|mut drag| {
+                    started.map(|mut drag| {
                         drag.local_space = self.settings.editor().gizmo_local_space;
                         drag.followers = self
                             .selection
@@ -2942,6 +2945,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3013,6 +3017,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         &mut self.world,
                         self.physics.as_mut().unwrap(),
                         self.audio.as_mut().unwrap(),
+                        &mut self.jobs,
                         self.render_ctx.as_ref(),
                         self.renderer.as_mut(),
                         &mut self.selection.primary,
@@ -3160,6 +3165,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3219,7 +3225,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
         // quote about editor cost.
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Editor panels"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Editor panels");
+        }
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
             let mut names: Vec<(u32, String, Option<u32>)> = all_entities
@@ -3765,13 +3773,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Jobs & assets"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Jobs & assets");
+        }
         self.pump_shader_reload();
         self.pump_jobs();
         self.update_asset_pipeline();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
                 ui.begin_frame(window);
@@ -3785,6 +3803,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3853,12 +3872,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Scene submit"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Scene submit");
+        }
         self.submit_terrains();
         self.submit_foliage();
         self.submit_decals();
         self.sync_terrain_colliders();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
         // The gizmo follows the entity, not the last selection event. After
         // the game layer has propagated transforms, so a child is anchored
@@ -3873,14 +3898,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Environment"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Environment");
+        }
         self.apply_time_of_day(dt);
         self.apply_sky(dt);
         self.apply_weather(dt);
         self.publish_time_of_day();
         self.apply_post_process();
         self.apply_camera_settings();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -3953,6 +3984,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.world,
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
+                    &mut self.jobs,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -4525,10 +4557,16 @@ impl<G: GameApp> Engine<G> {
             // flashing it there taught people to ignore the one place an
             // import or a bake reports itself. The Jobs panel below still
             // lists everything, which is where CONTROL-I said it belonged.
+            //
+            // DOOM-H: the test used to be `priority != Background`, which only
+            // worked while every continuous system sat at that class. Voxel
+            // chunk meshing is `Visible` and correctly so, and it would have
+            // parked "voxel.chunk_mesh — 0%" and a meaningless Cancel button on
+            // the status line for as long as the camera kept moving.
             let status: Vec<_> = active
                 .iter()
                 .rev()
-                .filter(|job| job.priority != crate::jobs::JobPriority::Background)
+                .filter(|job| !job.housekeeping)
                 .map(|job| somnium_ui::UiJobStatus {
                     id: job.id,
                     name: job.name,
@@ -4571,6 +4609,7 @@ impl<G: GameApp> Engine<G> {
             &mut self.world,
             self.physics.as_mut().unwrap(),
             self.audio.as_mut().unwrap(),
+            &mut self.jobs,
             self.render_ctx.as_ref(),
             self.renderer.as_mut(),
             &mut self.selection.primary,
@@ -4825,9 +4864,7 @@ impl<G: GameApp> Engine<G> {
         // Ids are minted from the path *relative to the content root*, which
         // is the whole point of `AssetId`: the same file names the same asset
         // whatever the project happens to be checked out at.
-        let relative = path
-            .strip_prefix(&self.config.content_root)
-            .unwrap_or(path);
+        let relative = path.strip_prefix(&self.config.content_root).unwrap_or(path);
         let asset = somnium_asset::database::AssetId::from_relative_path(relative);
         let name = path
             .file_name()
@@ -4848,9 +4885,7 @@ impl<G: GameApp> Engine<G> {
             entity,
             component,
             field,
-            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(
-                asset.raw(),
-            ))),
+            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(asset.raw()))),
             gesture: GestureId(u64::MAX - 2),
             live: false,
         });
@@ -7431,21 +7466,18 @@ impl<G: GameApp> Engine<G> {
                 // code path: the audio runtime asks where the sound is, and a
                 // spline answers "at your nearest point" while everything else
                 // answers "at my origin".
-                let audio = matches!(
-                    kind,
-                    CreateKind::AudioEmitter | CreateKind::ShorelineAudio
-                )
-                .then(|| {
-                    let mut emitter = crate::AudioEmitterComponent::default();
-                    if kind == CreateKind::ShorelineAudio {
-                        // A shoreline is heard from far further than a point
-                        // source, and it loops: surf does not stop.
-                        emitter.max_distance = 120.0;
-                        emitter.min_distance = 6.0;
-                        emitter.looping = true;
-                    }
-                    emitter
-                });
+                let audio = matches!(kind, CreateKind::AudioEmitter | CreateKind::ShorelineAudio)
+                    .then(|| {
+                        let mut emitter = crate::AudioEmitterComponent::default();
+                        if kind == CreateKind::ShorelineAudio {
+                            // A shoreline is heard from far further than a point
+                            // source, and it loops: surf does not stop.
+                            emitter.max_distance = 120.0;
+                            emitter.min_distance = 6.0;
+                            emitter.looping = true;
+                        }
+                        emitter
+                    });
                 let spline = matches!(kind, CreateKind::Spline | CreateKind::ShorelineAudio)
                     .then(|| crate::SplineComponent::straight(4, 12.0));
 
@@ -7523,7 +7555,11 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
-                let spawn_dist = if light.is_some() || audio.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if light.is_some() || audio.is_some() {
+                    5.0
+                } else {
+                    8.0
+                };
                 let spawn_dist = if spline.is_some() { 18.0 } else { spawn_dist };
                 let (spawn_pos, look, right) =
                     camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
@@ -8048,7 +8084,10 @@ impl<G: GameApp> Engine<G> {
                         .map(|n| Name::new(&format!("{}_copy", n.as_str())))
                         .unwrap_or_else(|| Name::new("Entity_copy"));
                     let light = self.world.get::<LightComponent>(entity).copied();
-                    let audio = self.world.get::<crate::AudioEmitterComponent>(entity).cloned();
+                    let audio = self
+                        .world
+                        .get::<crate::AudioEmitterComponent>(entity)
+                        .cloned();
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
@@ -9440,12 +9479,8 @@ mod viewport_control_tests {
     fn look_at_origin(surface: (f32, f32)) -> (glam::Vec3, glam::Mat4) {
         let camera = glam::Vec3::new(0.0, 0.0, 12.0);
         let view = glam::Mat4::look_at_rh(camera, glam::Vec3::ZERO, glam::Vec3::Y);
-        let proj = glam::Mat4::perspective_rh(
-            60.0_f32.to_radians(),
-            surface.0 / surface.1,
-            0.1,
-            1000.0,
-        );
+        let proj =
+            glam::Mat4::perspective_rh(60.0_f32.to_radians(), surface.0 / surface.1, 0.1, 1000.0);
         (camera, proj * view)
     }
 
@@ -9554,11 +9589,15 @@ mod viewport_control_tests {
         let mut world = somnium_ecs::World::new();
         let parent = world.spawn((
             Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
-            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0))),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(
+                10.0, 0.0, 0.0,
+            ))),
         ));
         let child = world.spawn((
             Transform::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
-            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 2.0, 0.0))),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(
+                10.0, 2.0, 0.0,
+            ))),
             crate::Parent { entity: parent },
         ));
         assert_eq!(
@@ -9572,8 +9611,14 @@ mod viewport_control_tests {
     #[test]
     fn a_locked_or_hidden_entity_offers_no_handle() {
         for flags in [
-            EditorFlags { locked: true, ..EditorFlags::default() },
-            EditorFlags { hidden: true, ..EditorFlags::default() },
+            EditorFlags {
+                locked: true,
+                ..EditorFlags::default()
+            },
+            EditorFlags {
+                hidden: true,
+                ..EditorFlags::default()
+            },
         ] {
             let mut world = somnium_ecs::World::new();
             let entity = world.spawn((

@@ -47,6 +47,13 @@ pub struct RenderContext {
 /// the renderer falls back to the per-draw CPU loop instead.
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 
+/// DOOM-G: GPU-authored draw counts for compacted indirect streams.
+///
+/// Optional even when the dense GPU-driven path is available. Without it the
+/// cull shader keeps zeroing `instance_count` in place and the visibility pass
+/// uses `multi_draw_indirect`, preserving the Phase 15 fallback exactly.
+pub const DRAW_COUNT_FEATURES: wgpu::Features = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+
 /// Feature needed to build and trace acceleration structures (Phase 24J).
 ///
 /// In wgpu 30 `EXPERIMENTAL_RAY_QUERY` still covers both building acceleration
@@ -186,6 +193,21 @@ impl RenderContext {
         }
         let required_features = if gpu_driven {
             required_features | GPU_DRIVEN_FEATURES
+        } else {
+            required_features
+        };
+
+        // DOOM-G: counted submission is a second optional tier. The compacted
+        // stream is only a draw consumer; dense args remain authoritative for
+        // two-phase culling and diagnostics.
+        let counted_draws = gpu_driven && available_features.contains(DRAW_COUNT_FEATURES);
+        if counted_draws {
+            info!("GPU-counted indirect submission available");
+        } else if gpu_driven {
+            info!("GPU-counted indirect submission unavailable — keeping dense zero-count args");
+        }
+        let required_features = if counted_draws {
+            required_features | DRAW_COUNT_FEATURES
         } else {
             required_features
         };
@@ -373,6 +395,11 @@ impl RenderContext {
     /// Whether the GPU-driven indirect draw path (Phase 15) can be used.
     pub fn supports_gpu_driven(&self) -> bool {
         self.features.contains(GPU_DRIVEN_FEATURES)
+    }
+
+    /// Whether DOOM-G may issue `multi_draw_indirect_count`.
+    pub fn supports_counted_draws(&self) -> bool {
+        self.features.contains(DRAW_COUNT_FEATURES)
     }
 
     /// Whether BC7 terrain packs may be uploaded (Phase XV-E).

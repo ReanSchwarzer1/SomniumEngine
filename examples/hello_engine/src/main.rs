@@ -22,11 +22,12 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    AudioAttenuationModel, AudioEmitterComponent, BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
-    EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, GameUiFrame,
-    InputState, KeyCode, LightComponent, LightShadowTechnique, LightType, MapKind, MapLoadResult,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, SimulationState, Transform,
-    UiCanvasComponent, UiCanvasSpace, WorldTransform, camera_view_from_world, propagate_transforms,
+    AudioAttenuationModel, AudioEmitterComponent, BuoyantVessel, CameraSettingsComponent, Children,
+    Component, ComponentId, ComponentSet, EditorFlags, Engine, EngineConfig, EngineContext,
+    EngineEvent, Entity, GameApp, GameUiFrame, InputState, KeyCode, LightComponent,
+    LightShadowTechnique, LightType, MapKind, MapLoadResult, MaterialComponent, MeshComponent,
+    MeshKind, Name, Parent, SimulationState, Transform, UiCanvasComponent, UiCanvasSpace,
+    WorldTransform, camera_view_from_world, propagate_transforms,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::layer::{LAYER_MOVING, LAYER_NON_MOVING};
@@ -541,11 +542,12 @@ impl VoxelTerrain {
     /// and recycle GPU memory of despawned chunks.
     fn update(
         &mut self,
+        jobs: &mut somnium_core::jobs::JobSystem,
         camera_pos: Vec3,
         renderer: &mut somnium_renderer::SomniumRenderer,
         render_ctx: &somnium_renderer::context::RenderContext,
     ) {
-        let upd = self.world.update(camera_pos);
+        let upd = self.world.update(jobs, camera_pos);
 
         for coord in upd.despawned {
             if let Some(Some(alloc)) = self.chunks.remove(&coord) {
@@ -639,11 +641,9 @@ impl HelloGame {
             MapKind::Coastal => "audio/ambient/coastal_waves_cc0.flac",
             MapKind::Island => "audio/ambient/island_waves_cc0.flac",
         };
-        let surface_y = result
-            .water
-            .map_or(result.camera_position.y, |water| {
-                result.preset.terrain_translation.y + water.surface_level + 0.5
-            });
+        let surface_y = result.water.map_or(result.camera_position.y, |water| {
+            result.preset.terrain_translation.y + water.surface_level + 0.5
+        });
         let wave_position = Vec3::new(
             result.camera_position.x + 12.0,
             surface_y,
@@ -885,8 +885,13 @@ impl HelloGame {
             }
         }
         if matches!(result.kind, MapKind::Coastal | MapKind::Island) {
-            if let (Some(renderer), Some(render_ctx), Some(water_component)) =
-                (ctx.renderer.as_mut(), ctx.render_ctx.as_ref(), result.water)
+            // DOOM-D's zero-work acceptance needs a genuinely static scene.
+            // Both canonical maps normally spawn a buoyant dynamic vessel, so
+            // the timing harness can suppress that demo-only caster explicitly.
+            // This is deliberately opt-in and does not alter normal play.
+            if std::env::var("SOMNIUM_TIME_STATIC").as_deref() != Ok("1")
+                && let (Some(renderer), Some(render_ctx), Some(water_component)) =
+                    (ctx.renderer.as_mut(), ctx.render_ctx.as_ref(), result.water)
             {
                 self.spawn_default_vessel(
                     renderer,
@@ -898,6 +903,20 @@ impl HelloGame {
                 );
             }
             self.spawn_map_audio(ctx, result);
+        }
+        // DOOM-H needs voxel chunk streaming to be present in a *reproducible*
+        // run. It is normally created by hand from Create > Voxel Terrain, so
+        // a timing harness could never see the work that was just moved onto
+        // the shared scheduler. Opt-in, and it spawns exactly what the menu
+        // item spawns, so the measured path is the shipped one.
+        if std::env::var("SOMNIUM_VOXEL").as_deref() == Ok("1") {
+            ctx.world.spawn((
+                Transform::from_translation(Vec3::ZERO),
+                WorldTransform::identity(),
+                Name::new("Voxel Terrain"),
+                somnium_core::VoxelTerrainComponent::default(),
+            ));
+            info!("SOMNIUM_VOXEL=1 - voxel terrain spawned for the timing harness");
         }
         info!(
             "Map {:?} preset v{} active",
@@ -1805,7 +1824,7 @@ impl GameApp for HelloGame {
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
-            vt.update(eye, renderer, render_ctx);
+            vt.update(ctx.jobs, eye, renderer, render_ctx);
         }
 
         // Handle mesh-creating IPC commands that require renderer access.

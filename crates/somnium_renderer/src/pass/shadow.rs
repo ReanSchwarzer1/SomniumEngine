@@ -292,10 +292,11 @@ impl ShadowPass {
         }
     }
 
-    /// Record shadow draw calls for all 4 cascades into `encoder`.
+    /// Record shadow draw calls for invalidated cascades into `encoder`.
     ///
-    /// One render pass clears the full atlas then draws geometry 4× with
-    /// different viewports.
+    /// The atlas is persistent. Each dirty quadrant is cleared with a
+    /// viewport-scoped depth draw and then repopulated; clean quadrants are
+    /// loaded and never touched. An all-false mask records no render pass.
     ///
     /// `casters` is the *filtered* list, not the draw queue: `instance_index`
     /// still indexes the global instance buffer, because the vertex shader
@@ -308,7 +309,11 @@ impl ShadowPass {
         atlas_view: &wgpu::TextureView,
         global_bind_group: &wgpu::BindGroup,
         casters: &[ShadowCaster],
+        dirty: [bool; NUM_CASCADES],
     ) {
+        if !dirty.into_iter().any(|dirty| dirty) {
+            return;
+        }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Shadow Pass"),
             multiview_mask: None,
@@ -316,7 +321,7 @@ impl ShadowPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: atlas_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -325,12 +330,22 @@ impl ShadowPass {
             occlusion_query_set: None,
         });
 
-        rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, global_bind_group, &[]);
-
         for cascade in 0..NUM_CASCADES {
+            if !dirty[cascade] {
+                continue;
+            }
             let (vx, vy, vw, vh) = CASCADE_VIEWPORTS[cascade];
             rpass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            rpass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+
+            // A render-pass depth clear applies to the whole attachment, not
+            // the viewport. Draw 1.0 with Compare::Always so this quadrant is
+            // reset without destroying the three cached neighbours.
+            rpass.set_pipeline(&self.page_clear_pipeline);
+            rpass.draw(0..3, 0..1);
+
+            rpass.set_pipeline(&self.pipeline);
+            rpass.set_bind_group(0, global_bind_group, &[]);
             rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[0]);
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
