@@ -159,6 +159,56 @@ enum GeneratedEdit {
     Whole,
     Lane(u8),
     Euler(u8),
+    /// One lane of one element of an `Array` field.
+    ///
+    /// A spline's control points are the first array anyone actually edits,
+    /// and before this they arrived in Details as `Array([Vec3([...]), ...])`
+    /// printed as a caption: visible, accurate, and completely unusable. An
+    /// element edit addresses the same schema field as any other — the write
+    /// path rebuilds the whole array and sends it, so undo, multi-select and
+    /// serialization need to know nothing about collections.
+    Element { index: u16, lane: u8 },
+}
+
+/// One lane of one array element, as a number, when it is one.
+fn element_lane(
+    items: &[somnium_ecs::reflect::ReflectValue],
+    index: u16,
+    lane: u8,
+) -> Option<f32> {
+    use somnium_ecs::reflect::ReflectValue as RV;
+    #[allow(clippy::cast_possible_truncation)]
+    match items.get(index as usize)? {
+        RV::F64(v) => Some(*v as f32),
+        RV::I64(v) => Some(*v as f32),
+        RV::Vec2(v) => v.get(lane as usize).copied(),
+        RV::Vec3(v) => v.get(lane as usize).copied(),
+        RV::Vec4(v) => v.get(lane as usize).copied(),
+        _ => None,
+    }
+}
+
+/// How many numeric boxes one element of an array needs.
+fn element_lane_count(value: &somnium_ecs::reflect::ReflectValue) -> usize {
+    use somnium_ecs::reflect::ReflectValue as RV;
+    match value {
+        RV::Vec2(_) => 2,
+        RV::Vec3(_) => 3,
+        RV::Vec4(_) => 4,
+        RV::F64(_) | RV::I64(_) => 1,
+        _ => 0,
+    }
+}
+
+/// What an array row's buttons do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionAction {
+    /// Append a copy of the last element, or a zero if there is none.
+    Append,
+    /// Drop element `index`.
+    Remove(u16),
+    /// Insert a copy of element `index` directly after it.
+    Duplicate(u16),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +226,14 @@ pub(crate) enum AssetPickerAction {
     Edit,
     Locate,
     MakeUnique,
+    /// Take whatever is selected in the Content Drawer and put it here.
+    ///
+    /// Unreal's left-arrow, and the reason it exists there too: a drag is a
+    /// gesture with a dozen ways to not quite happen — a threshold not
+    /// crossed, a pointer a few pixels off the row, a window that lost focus
+    /// mid-drag — and every one of them looks identical to a broken feature.
+    /// This is the same assignment as one click that cannot miss.
+    UseDrawerSelection,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -703,6 +761,14 @@ pub struct UiManager {
         GeneratedEdit,
     )>,
     generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    generated_collection_actions: HashMap<
+        NodeHandle,
+        (
+            somnium_ecs::reflect::StableId,
+            somnium_ecs::reflect::FieldId,
+            CollectionAction,
+        ),
+    >,
     /// What the last drop probe resolved to, in words, for the message a
     /// failed drop shows. Diagnostic state, not authoring state.
     drop_probe: String,
@@ -1179,6 +1245,40 @@ impl UiManager {
         }
     }
 
+    fn collection_result(
+        value: &somnium_ecs::reflect::ReflectValue,
+        action: CollectionAction,
+    ) -> Option<somnium_ecs::reflect::ReflectValue> {
+        use somnium_ecs::reflect::ReflectValue as RV;
+        let RV::Array(items) = value else {
+            return None;
+        };
+        let mut items = items.clone();
+        match action {
+            CollectionAction::Append => {
+                // A copy of the last element, not a zero: appending to a
+                // shoreline should extend it near where it already is, and a
+                // new point at the world origin is a point the author has to
+                // go and find before they can use it.
+                let next = items.last().cloned().unwrap_or(RV::Vec3([0.0; 3]));
+                items.push(next);
+            }
+            CollectionAction::Remove(index) => {
+                let index = index as usize;
+                if index >= items.len() {
+                    return None;
+                }
+                items.remove(index);
+            }
+            CollectionAction::Duplicate(index) => {
+                let index = index as usize;
+                let copy = items.get(index)?.clone();
+                items.insert(index + 1, copy);
+            }
+        }
+        Some(RV::Array(items))
+    }
+
     fn numeric_reflect_value(
         binding: &GeneratedBinding,
         edited: f32,
@@ -1201,6 +1301,19 @@ impl UiManager {
                 let mut v = *current;
                 v[lane as usize] = edited;
                 RV::Vec4(v)
+            }
+            (RV::Array(items), GeneratedEdit::Element { index, lane }) => {
+                let mut items = items.clone();
+                let slot = items.get_mut(index as usize)?;
+                match slot {
+                    RV::F64(v) => *v = f64::from(edited),
+                    RV::I64(v) => *v = edited.round() as i64,
+                    RV::Vec2(v) => *v.get_mut(lane as usize)? = edited,
+                    RV::Vec3(v) => *v.get_mut(lane as usize)? = edited,
+                    RV::Vec4(v) => *v.get_mut(lane as usize)? = edited,
+                    _ => return None,
+                }
+                RV::Array(items)
             }
             (RV::Quat(current), GeneratedEdit::Euler(lane)) => {
                 let (x, y, z) = glam::Quat::from_array(*current).to_euler(glam::EulerRot::XYZ);
@@ -1328,6 +1441,7 @@ impl UiManager {
             generated_entity: None,
             generated_signature: Vec::new(),
             generated_bindings: HashMap::new(),
+            generated_collection_actions: HashMap::new(),
             drop_probe: String::new(),
             generated_rows: HashMap::new(),
             generated_gestures: HashMap::new(),
@@ -2165,10 +2279,20 @@ impl UiManager {
             };
             ids.sort_by_key(|id| id.raw());
             ids.dedup();
-            if !ids.is_empty() {
-                self.native_ui
-                    .arm_drag(crate::drag_drop::DragPayload::Assets(ids));
+            if ids.is_empty() {
+                // The tile is on screen but the asset index has no id for it.
+                // Silence here reads as "drag and drop is broken"; naming it
+                // reads as "wait for the scan", which is what it means.
+                tracing::warn!(
+                    path = %entry.path.display(),
+                    "drag: this item is not in the asset index yet, so it cannot be dragged"
+                );
+                self.push_toast("Not indexed yet — refresh the Content Drawer and try again");
+                return;
             }
+            tracing::info!(count = ids.len(), "drag: armed from the Content Drawer");
+            self.native_ui
+                .arm_drag(crate::drag_drop::DragPayload::Assets(ids));
             return;
         }
         if self.native_ui.is_under(hit, self.outliner_tree) {
@@ -2279,6 +2403,7 @@ impl UiManager {
             crate::drag_drop::DropTarget::Viewport { .. } => "the viewport".to_string(),
             crate::drag_drop::DropTarget::DrawerFolder(_) => "the Content Drawer".to_string(),
         };
+        tracing::debug!(target = %self.drop_probe, "drag: pointer is over a target");
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
         let acceptance = match crate::drag_drop::semantic_request(
             &self.asset_db,
@@ -2341,8 +2466,14 @@ impl UiManager {
                 let message = refused.unwrap_or_else(|| {
                     format!("Released over {} — nothing was assigned", self.drop_probe)
                 });
-                tracing::warn!(probe = %self.drop_probe, "{message}");
+                tracing::warn!(probe = %self.drop_probe, "drag: {message}");
                 self.push_toast(&message);
+            } else {
+                // Nothing was ever dragging. Either the press never armed, or
+                // the pointer never travelled the four logical pixels that
+                // promote an armed drag into a live one. Both are invisible
+                // from the outside and both look exactly like a dead feature.
+                tracing::debug!("drag: release with no drag in progress");
             }
             return;
         };
@@ -3532,7 +3663,7 @@ impl UiManager {
             }
             self.settings_bindings.clear();
             self.settings_rows.clear();
-            let (root, bindings, rows, _, _, _) = build_generated_details(
+            let (root, bindings, rows, _, _, _, _) = build_generated_details(
                 &mut self.native_ui,
                 self.preferences.settings_body,
                 self.font_id,
@@ -4343,10 +4474,19 @@ impl UiManager {
             Some((_, since))
                 if now.duration_since(since).as_millis() >= self.tooltip_delay_ms as u128 =>
             {
+                let size = crate::widgets::tooltip_size(
+                    self.native_ui
+                        .draw_ctx
+                        .font_atlas
+                        .measure_text(&text, 11.0, self.font_id),
+                );
+                let window = self.native_ui.screen_size;
                 self.native_ui
                     .send(TextMessage::set_text(self.tooltip, text));
-                self.native_ui
-                    .set_desired_position(self.tooltip, Vec2::new(pos.x + 12.0, pos.y + 18.0));
+                self.native_ui.set_desired_position(
+                    self.tooltip,
+                    crate::widgets::place_tooltip(pos, size, window),
+                );
                 self.native_ui.set_visibility(self.tooltip, true);
             }
             Some(_) => {}
@@ -5171,6 +5311,22 @@ impl UiManager {
                         (0..n).map(GeneratedEdit::Lane).collect()
                     }
                     PropertyEditorKind::Euler => (0..3).map(GeneratedEdit::Euler).collect(),
+                    // The element count is part of this editor's *shape*, not
+                    // of its values: adding a spline point has to rebuild the
+                    // rows, and a signature that ignored the length would
+                    // refresh three boxes and never draw the fourth.
+                    PropertyEditorKind::Collection => {
+                        let len = match &row.value {
+                            somnium_ecs::reflect::ReflectValue::Array(items) => items.len(),
+                            _ => 0,
+                        };
+                        (0..=len)
+                            .map(|index| GeneratedEdit::Element {
+                                index: index as u16,
+                                lane: 0,
+                            })
+                            .collect()
+                    }
                     _ => vec![GeneratedEdit::Whole],
                 };
                 edits
@@ -5189,8 +5345,16 @@ impl UiManager {
             self.generated_asset_choices.clear();
             self.generated_asset_searches.clear();
             self.generated_asset_actions.clear();
-            let (root, bindings, rows, asset_choices, asset_searches, asset_actions) =
-                build_generated_details(
+            self.generated_collection_actions.clear();
+            let (
+                root,
+                bindings,
+                rows,
+                asset_choices,
+                asset_searches,
+                asset_actions,
+                collection_actions,
+            ) = build_generated_details(
                     &mut self.native_ui,
                     self.inspector_stack,
                     self.font_id,
@@ -5203,6 +5367,7 @@ impl UiManager {
             self.generated_asset_choices = asset_choices;
             self.generated_asset_searches = asset_searches;
             self.generated_asset_actions = asset_actions;
+            self.generated_collection_actions = collection_actions;
             self.generated_entity = entity;
             self.generated_signature = signature;
             self.native_ui.invalidate_ancestors(self.inspector_stack);
@@ -5251,6 +5416,15 @@ impl UiManager {
                         *handle,
                         value[lane as usize],
                     ))
+                }
+                (
+                    somnium_ecs::reflect::ReflectValue::Array(items),
+                    GeneratedEdit::Element { index, lane },
+                ) => {
+                    if let Some(value) = element_lane(items, index, lane) {
+                        self.native_ui
+                            .send(NumericFieldMessage::set_value(*handle, value));
+                    }
                 }
                 (somnium_ecs::reflect::ReflectValue::Curve(curve), GeneratedEdit::Whole) => self
                     .native_ui
@@ -5987,6 +6161,38 @@ impl UiManager {
                     }
                     continue;
                 }
+                if let Some((component, field, action)) = self
+                    .generated_collection_actions
+                    .get(&msg.destination)
+                    .copied()
+                {
+                    // Add, duplicate and remove all rebuild the whole array
+                    // and send it down the ordinary field-write path, so each
+                    // is one undo step and the serializer, the multi-select
+                    // fan-out and the script boundary need to know nothing
+                    // about collections.
+                    let current = self
+                        .generated_rows
+                        .values()
+                        .find(|binding| binding.component == component && binding.field == field)
+                        .map(|binding| binding.value.clone());
+                    if let Some(current) = current
+                        && let Some(next) = Self::collection_result(&current, action)
+                        && let Some(entity) = self.selected_entity
+                    {
+                        let gesture = self.allocate_property_gesture();
+                        self.editor_events
+                            .push_back(EditorEvent::SetComponentField {
+                                entity,
+                                component,
+                                field,
+                                value: next,
+                                gesture,
+                                live: false,
+                            });
+                    }
+                    continue;
+                }
                 if let Some((combo, action)) =
                     self.generated_asset_actions.get(&msg.destination).copied()
                 {
@@ -5999,6 +6205,54 @@ impl UiManager {
                         _ => None,
                     });
                     match (action, binding, record) {
+                        (AssetPickerAction::UseDrawerSelection, Some(binding), _) => {
+                            let chosen = self
+                                .content_entries
+                                .iter()
+                                .map(|(_, entry)| entry)
+                                .find(|entry| {
+                                    !entry.is_dir
+                                        && self.content_selection.contains(&entry.path)
+                                })
+                                .and_then(|entry| entry.asset_id);
+                            match (chosen, self.selected_entity) {
+                                (Some(asset), Some(entity)) => {
+                                    let accepted = self
+                                        .asset_db
+                                        .get(asset)
+                                        .is_some_and(|record| {
+                                            record.kind.bit() & binding.asset_kind_mask != 0
+                                        });
+                                    if accepted {
+                                        let gesture = self.allocate_property_gesture();
+                                        self.editor_events.push_back(
+                                            EditorEvent::SetComponentField {
+                                                entity,
+                                                component: binding.component,
+                                                field: binding.field,
+                                                value:
+                                                    somnium_ecs::reflect::ReflectValue::Asset(
+                                                        Some(
+                                                            somnium_ecs::reflect::AssetRef::from_raw(
+                                                                asset.raw(),
+                                                            ),
+                                                        ),
+                                                    ),
+                                                gesture,
+                                                live: false,
+                                            },
+                                        );
+                                    } else {
+                                        self.push_toast(
+                                            "This field does not accept that kind of asset",
+                                        );
+                                    }
+                                }
+                                (None, _) => self
+                                    .push_toast("Select a file in the Content Drawer first"),
+                                (_, None) => self.push_toast("Select an entity first"),
+                            }
+                        }
                         (AssetPickerAction::Locate, _, Some(record)) => {
                             self.navigate_content(record.parent);
                         }
@@ -7880,6 +8134,124 @@ mod must_not_break {
         assert!(
             MANUAL_ONLY.len() <= 6,
             "too much is being deferred to a human"
+        );
+    }
+}
+
+#[cfg(test)]
+mod collection_editor_tests {
+    use super::{CollectionAction, GeneratedEdit, UiManager, element_lane, element_lane_count};
+    use somnium_ecs::reflect::ReflectValue as RV;
+
+    fn points() -> RV {
+        RV::Array(vec![
+            RV::Vec3([0.0, 1.0, 2.0]),
+            RV::Vec3([3.0, 4.0, 5.0]),
+            RV::Vec3([6.0, 7.0, 8.0]),
+        ])
+    }
+
+    /// Appending copies the last element rather than inserting a zero.
+    /// A new spline point at the world origin is a point the author has to go
+    /// and find before they can use it; one beside the end of the path is one
+    /// they can drag straight away.
+    #[test]
+    fn adding_a_point_extends_the_path_where_it_already_is() {
+        let RV::Array(items) = UiManager::collection_result(&points(), CollectionAction::Append)
+            .expect("append always succeeds on an array")
+        else {
+            panic!("append must return an array");
+        };
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[3], RV::Vec3([6.0, 7.0, 8.0]));
+    }
+
+    /// An empty collection still has to accept a first point, or a freshly
+    /// created spline can never be given one.
+    #[test]
+    fn the_first_point_can_be_added_to_an_empty_collection() {
+        let RV::Array(items) =
+            UiManager::collection_result(&RV::Array(Vec::new()), CollectionAction::Append).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(items, vec![RV::Vec3([0.0; 3])]);
+    }
+
+    #[test]
+    fn removing_takes_the_addressed_element_and_nothing_else() {
+        let RV::Array(items) =
+            UiManager::collection_result(&points(), CollectionAction::Remove(1)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            items,
+            vec![RV::Vec3([0.0, 1.0, 2.0]), RV::Vec3([6.0, 7.0, 8.0])]
+        );
+    }
+
+    /// Duplicating inserts *after* the original, which is what makes it a way
+    /// to add detail to the middle of a path rather than a way to append.
+    #[test]
+    fn duplicating_inserts_directly_after_the_original() {
+        let RV::Array(items) =
+            UiManager::collection_result(&points(), CollectionAction::Duplicate(0)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], items[1]);
+        assert_eq!(items[2], RV::Vec3([3.0, 4.0, 5.0]));
+    }
+
+    /// An index that is not there is a refusal, not a panic and not a silent
+    /// no-op on the wrong element. Stale indices are ordinary here: the rows
+    /// are rebuilt a frame after a removal.
+    #[test]
+    fn an_out_of_range_index_changes_nothing() {
+        assert!(UiManager::collection_result(&points(), CollectionAction::Remove(9)).is_none());
+        assert!(UiManager::collection_result(&points(), CollectionAction::Duplicate(9)).is_none());
+        assert!(
+            UiManager::collection_result(&RV::Vec3([0.0; 3]), CollectionAction::Append).is_none(),
+            "and a non-array is not a collection"
+        );
+    }
+
+    /// Editing one lane of one point leaves every other number alone. The
+    /// write path rebuilds the whole array, so this is the test that it
+    /// rebuilds it *faithfully*.
+    #[test]
+    fn editing_one_lane_touches_exactly_that_lane() {
+        let binding = super::GeneratedBinding {
+            component: somnium_ecs::reflect::StableId::new("somnium.Spline"),
+            field: somnium_ecs::reflect::FieldId(0),
+            value: points(),
+            default: RV::Nil,
+            edit: GeneratedEdit::Element { index: 1, lane: 2 },
+            asset_kind_mask: u64::MAX,
+        };
+        let RV::Array(items) = UiManager::numeric_reflect_value(&binding, -42.0).unwrap() else {
+            panic!()
+        };
+        assert_eq!(items[0], RV::Vec3([0.0, 1.0, 2.0]), "untouched");
+        assert_eq!(items[1], RV::Vec3([3.0, 4.0, -42.0]), "one lane changed");
+        assert_eq!(items[2], RV::Vec3([6.0, 7.0, 8.0]), "untouched");
+    }
+
+    #[test]
+    fn lanes_are_read_back_by_index_and_refuse_what_they_cannot_show() {
+        let RV::Array(items) = points() else { panic!() };
+        assert_eq!(element_lane(&items, 2, 1), Some(7.0));
+        assert_eq!(element_lane(&items, 9, 0), None, "past the end");
+        assert_eq!(element_lane(&items, 0, 7), None, "past the lanes");
+
+        assert_eq!(element_lane_count(&RV::Vec3([0.0; 3])), 3);
+        assert_eq!(element_lane_count(&RV::F64(1.0)), 1);
+        assert_eq!(
+            element_lane_count(&RV::Str(String::new())),
+            0,
+            "a type with no numeric lanes draws no row rather than a broken one"
         );
     }
 }

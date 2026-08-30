@@ -965,14 +965,24 @@ Current conservative defaults matter:
   opt-in. The last two measured slower in their original tests.
 - Weighted OIT is off unless authored.
 
-The night sky's stars are procedural, sized in **pixels** rather than in
-radians. The first two versions used a fixed angular radius roughly a seventh
-of a pixel at a normal field of view, so every star was smaller than the pixel
-it landed in, the smoothstep meant to soften it had no sub-pixel room, and the
-result was a grid of hard-edged fully-lit pixels — the blocky squares. The core
-is now a multiple of `fwidth(dir)` with a Gaussian profile and a weak wide
-skirt, brighter stars are drawn slightly larger, and the density is about a
-third of what it was so the field reads as a sky rather than as noise.
+The night sky's stars are procedural, and sized in pixels rather than in
+radians. That took two goes to get right. The original used a fixed angular
+radius of about a seventh of a pixel at a normal field of view, so every star
+was smaller than the pixel it landed in, the smoothstep meant to soften it had
+no sub-pixel room to work in, and what reached the screen was a grid of
+hard-edged fully-lit pixels: blocky squares. The first fix over-corrected. A
+core wider than a pixel plus a ten-percent *exponential* skirt has a fat tail,
+and the skirt stayed visible six or seven pixels out, so the sky filled with
+soft glowing blobs instead. Both terms are Gaussian now, so the halo falls off
+as fast as the core does. The core is a multiple of `fwidth(dir)` and
+sub-pixel at the faint end, brighter stars are drawn slightly larger, and the
+density is roughly a sixth of where this started.
+
+Wicked, Flax and Godot all render a night sky from a star-map texture rather
+than from a hash. A 4K panorama is the higher-fidelity answer and is still
+available. The procedural field is what works with no asset in the project, and
+both of its failures were profile bugs rather than anything inherent to the
+approach.
 
 ### Post processing and anti-aliasing
 
@@ -1415,26 +1425,35 @@ output device is audible remains an interactive acceptance check.
 
 ### Splines
 
-`SplineComponent` is an authored path: a list of control points in entity-local
-space and a `closed` flag. The curve through them is uniform Catmull-Rom, which
-**interpolates** its control points — the curve passes exactly through what the
-author placed, and needs no tangent handles. Queries run against a sampled
-polyline rather than the analytic curve: it is the same polyline the viewport
-draws, so what an author sees is what the engine uses, and the error is bounded
-by a sampling rate they can read.
+`SplineComponent` is an authored path: control points in entity-local space and
+a `closed` flag. The curve through them is uniform Catmull-Rom, which
+*interpolates* its control points. The curve passes exactly through what the
+author placed, and it needs no tangent handles, which is why it is the usual
+choice for level-editor paths.
 
-The spline knows nothing about audio. It exists as its own component because a
-road, a river, a fence line, a patrol route and a camera rail are the same
-primitive, and each would otherwise have arrived with its own point list, its
-own serialization and its own handles.
+Queries run against a sampled polyline rather than the analytic curve. Solving
+for the nearest point on the real curve means a numerical pass per segment per
+query; sampling is a few hundred dot products against the same polyline the
+viewport draws. What an author sees is therefore what the engine uses, and the
+error is bounded by a sampling rate they can read.
 
-An **audio emitter on a spline** is an ordinary Audio Emitter whose entity also
-carries one. There is no second component and no second code path: the audio
-runtime asks where a sound is, and a spline answers "at your nearest point"
-while everything else answers "at my origin". That is what lets one emitter
-cover a whole shoreline — walk the beach and the surf stays beside you, walk
-inland and it fades with distance from the water rather than from a marker out
-at sea. `Create → Shoreline Audio` makes both at once.
+The spline knows nothing about audio. It is its own component because a road, a
+river, a fence line and a camera rail are the same primitive, and each would
+otherwise have arrived carrying its own point list, its own serialization and
+its own editor handles.
+
+Control points are edited in Details like any other field, through the
+collection editor described under *Why things are the way they are*: a numeric
+strip per point, duplicate and remove beside each, an append at the foot.
+
+An audio emitter on a spline is an ordinary Audio Emitter whose entity also
+carries one. There is no second component and no second code path. The audio
+runtime asks where a sound is; a spline answers "at your nearest point" and
+everything else answers "at my origin". That one difference is what lets a
+single emitter cover a whole shoreline. Walk the beach and the surf stays
+beside you; walk inland and it fades with distance from the water rather than
+from a marker somewhere out at sea. `Create → Shoreline Audio` makes both at
+once.
 
 ### Localisation
 
@@ -1716,12 +1735,14 @@ does not overlap. STALKER waits for both relevant outputs.
   the current ledger explicit, but those historical files still need care when
   used as plans.
 - Dragging an asset out of the Content Drawer onto a Details asset field has a
-  complete and tested semantic route, and has still been reported as doing
-  nothing in the running editor twice. Every failed drop now reports what the
-  pointer was over, which is the diagnostic the two earlier attempts lacked —
-  the first fix only spoke when a target had been resolved *and* refused, and
-  the failure is upstream of that. `Assign to Selection` in the drawer's
-  context menu is the route that does not depend on a drag.
+  complete and tested semantic route, and has now been reported as doing
+  nothing in the running editor three separate times. Every stage of the drag
+  leaves a breadcrumb in the Output Log, so the next run names the link that
+  breaks instead of costing another round of reading. Two routes that do not
+  depend on a drag at all ship beside it: `Assign to Selection` in the drawer's
+  context menu, and `Use Selected` on every asset row in Details. Unreal ships
+  that second button for the same reason a drag has a dozen ways to not quite
+  happen, and every one of them looks like a broken feature.
 - A gizmo drag on a **child** entity is anchored correctly but still writes a
   world-space delta into a local transform, so it is only right while the
   parent is unrotated and unscaled. The anchor fix made this visible; mapping
@@ -1945,43 +1966,64 @@ generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
 hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
 
+**A widget that measures itself must also be aligned, or arrange throws the
+measure away.** `Tooltip::measure_override` returned the size of its text plus
+padding, correctly, for as long as the widget existed. But `WidgetBuilder`
+defaults to `Stretch`, nothing overrode it, and the tooltip hangs off the root.
+So every tooltip in the editor painted as a slab reaching from the cursor to
+the bottom-right corner of the window. The measure was right; arrange threw it
+away. Floating widgets set `Left`/`Top` at the builder now. Placement flips
+near an edge instead of clamping flush against it, since clamping would park
+the tooltip on top of the control the pointer is resting on.
+
+**An array field is a row of editors, not a printed debug value.** Details had
+no collection editor. `FieldType::Array` fell into the same branch as
+`Unsupported` and printed `Array([Vec3([...])])` as a caption: perfectly
+accurate and completely unusable. That cost nothing while no component had an
+array. The moment splines arrived it was the one field authors needed to edit.
+Each element is now a strip of numeric lanes with duplicate and remove beside
+it, over a footer that appends a copy of the last element rather than a zero at
+the world origin. All of those writes rebuild the whole array and send it down
+the ordinary field path, so undo and serialization never learn that collections
+exist.
+
 **A mode that refuses a gesture says so, at the moment it refuses.** Every
-transform gizmo in the editor was inert — translate, rotate and scale alike,
-on every object — and nothing said why. The cause was `select_only`, a
+transform gizmo in the editor was inert. Translate, rotate, scale, on every
+object, and nothing anywhere said why. The cause was `select_only`, a
 deliberate Godot-style mode that stops a click on a gizmo axis from moving the
-thing you were only trying to select. It is persisted in `editor.toml`, so once
-it is on it stays on across every session, and the press it swallowed produced
-no toast, no log line and no visible difference from a broken feature. Two
-sessions of investigation went into the ray maths and the anchor before anyone
-looked at the setting. A refusal is now announced by the code that refuses,
-which is the only place that knows the reason.
+thing you were only trying to select. It lives in `editor.toml`, so once it is
+on it stays on across every session, and the press it swallowed left no toast
+and no log line. There was nothing to distinguish it from a dead feature. Two
+sessions went into the ray maths and the gizmo anchor before anyone thought to
+read the settings file. The code that refuses now says so, because it is the
+only code that knows the reason.
 
 **Every viewport ray reads the live surface size, never a cached one.** The
 editor kept a `viewport_size` filled from winit's `Resized`, and
 `window_event` drops every event that arrives before the lifecycle reaches
-`Running` — which on Windows includes the window's first one. So the cache
-held the *requested* size for the whole session unless the user happened to
-drag a window edge, and that requested size is **logical** while the cursor and
-the surface are both **physical**, so on any display with a scale factor the
+`Running`, and on Windows the window's first `Resized` is one of them. So the
+cache held the *requested* size for the whole session unless someone happened
+to drag a window edge. That requested size is also logical, while the cursor
+and the surface are both physical, so on any display with a scale factor the
 two disagreed by the scale even after a resize did land. Everything that turns
 a cursor position into a world ray went through it: the transform gizmo, the
 terrain and foliage brushes, the rubber band, the drop probe. The gizmo drew in
-the right place, the click landed on the arrow, and the drag simply never
-started — no error, no log line, nothing to see. The size now comes from
+the right place, the click landed on the arrow, and the drag never started. No
+error, no log line, nothing to look at. The size now comes from
 `RenderContext::config`, which is the surface's own record of itself and cannot
 go stale. Picking also uses `picking_view_proj`, the unjittered matrix the
 overlays are drawn with, rather than the TAA-jittered one.
 
 **The transform gizmo is anchored from the world every frame, not pushed on
 selection change.** The anchor used to be written to the renderer only from
-selection events, which meant the gizmo tracked *events* rather than the
-selected entity. `Create` sets the selection through the undo stack without
-raising one, so a newly created Audio Emitter — or light, or particle emitter —
-arrived fully editable in Details and with no working handle in the viewport;
-Undo, Redo and a typed Details translation all moved an entity and left the
-gizmo behind. A value recomputed from the world cannot drift out of step with
-it. The same read is where locked and hidden finally withhold the handle, which
-the code had claimed in a comment for some time without doing.
+selection events, so the gizmo tracked *events* rather than the selected
+entity. `Create` sets the selection through the undo stack without raising one.
+A newly created Audio Emitter therefore arrived fully editable in Details with
+no working handle in the viewport, and the same went for lights and particle
+emitters. Undo, Redo and a typed Details translation all moved an entity and
+left the gizmo behind. A value recomputed from the world every frame cannot
+drift out of step with it. That same read is where locked and hidden finally
+withhold the handle, which a comment had claimed for some time without doing.
 
 **Curves are a reflected value, not a widget.** `FieldType::Curve` means a curve
 gets its Details row, its scoped undo entry, its drag coalescing and its scene

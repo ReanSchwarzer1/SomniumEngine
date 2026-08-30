@@ -381,7 +381,18 @@ impl TooltipBuilder {
     }
     pub fn build(self) -> UiNode {
         UiNode::new(
-            self.widget.with_hit_test_visibility(false).build(),
+            self.widget
+                .with_hit_test_visibility(false)
+                // Left/Top, not the default Stretch. A tooltip measures itself
+                // from its text — see `measure_override` above — but a
+                // stretched widget is *arranged* to fill whatever it was given,
+                // and this one is parented to the root. The measure was
+                // correct and ignored, so every tooltip in the editor painted
+                // as a slab from the cursor to the bottom-right corner of the
+                // window. Alignment is what makes arrange honour the measure.
+                .with_horizontal_alignment(crate::types::HorizontalAlignment::Left)
+                .with_vertical_alignment(crate::types::VerticalAlignment::Top)
+                .build(),
             Box::new(Tooltip {
                 text: self.text,
                 font_id: self.font_id,
@@ -390,9 +401,94 @@ impl TooltipBuilder {
     }
 }
 
+/// The size a tooltip will take for `text`, before it is placed.
+///
+/// Mirrors [`Tooltip::measure_override`]; kept beside it so the placement
+/// arithmetic and the measurement cannot drift apart.
+#[must_use]
+pub fn tooltip_size(measured_text: Vec2) -> Vec2 {
+    measured_text + Vec2::new(12.0, 8.0)
+}
+
+/// Keep a tooltip on screen.
+///
+/// Below-right of the pointer by default, because that is where every
+/// desktop toolkit puts one and because it leaves the thing being described
+/// unobscured. Near an edge it flips to the other side rather than being
+/// clamped flush against it, which would cover the control the pointer is
+/// resting on.
+#[must_use]
+pub fn place_tooltip(cursor: Vec2, size: Vec2, window: Vec2) -> Vec2 {
+    const GAP: Vec2 = Vec2::new(12.0, 18.0);
+    let mut x = cursor.x + GAP.x;
+    if x + size.x > window.x {
+        x = (cursor.x - GAP.x - size.x).max(0.0);
+    }
+    let mut y = cursor.y + GAP.y;
+    if y + size.y > window.y {
+        y = (cursor.y - GAP.y - size.y).max(0.0);
+    }
+    Vec2::new(x, y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tooltip is as big as its words. It stretched to fill the window for
+    /// as long as this widget existed, because `WidgetBuilder`'s default
+    /// alignment is `Stretch` and nothing here overrode it — the measure was
+    /// right and arrange threw it away.
+    #[test]
+    fn a_tooltip_is_not_stretched_to_its_parent() {
+        let node = TooltipBuilder::new(WidgetBuilder::new())
+            .with_text("Show or hide the profiler overlay.")
+            .build();
+        assert_eq!(
+            node.widget.horizontal_alignment,
+            crate::types::HorizontalAlignment::Left
+        );
+        assert_eq!(
+            node.widget.vertical_alignment,
+            crate::types::VerticalAlignment::Top
+        );
+    }
+
+    /// Below-right of the pointer when there is room.
+    #[test]
+    fn a_tooltip_sits_below_and_right_of_the_pointer() {
+        let placed = place_tooltip(
+            Vec2::new(400.0, 300.0),
+            Vec2::new(220.0, 24.0),
+            Vec2::new(1920.0, 1080.0),
+        );
+        assert_eq!(placed, Vec2::new(412.0, 318.0));
+    }
+
+    /// And flips rather than hanging off the edge. Clamping flush to the
+    /// border instead would park the tooltip on top of the control the
+    /// pointer is resting on, which is the one thing it must not cover.
+    #[test]
+    fn a_tooltip_near_an_edge_flips_to_the_other_side() {
+        let window = Vec2::new(1000.0, 700.0);
+        let size = Vec2::new(240.0, 24.0);
+        let placed = place_tooltip(Vec2::new(980.0, 690.0), size, window);
+        assert!(placed.x + size.x <= window.x, "stayed inside horizontally");
+        assert!(placed.y + size.y <= window.y, "and vertically");
+        assert!(placed.x < 980.0 && placed.y < 690.0, "flipped, not clamped");
+    }
+
+    /// A tooltip wider than the whole window is pinned to the left rather
+    /// than pushed off it, which is the degenerate case the `max(0.0)` is for.
+    #[test]
+    fn an_over_wide_tooltip_starts_at_the_edge() {
+        let placed = place_tooltip(
+            Vec2::new(50.0, 50.0),
+            Vec2::new(2000.0, 24.0),
+            Vec2::new(800.0, 600.0),
+        );
+        assert_eq!(placed.x, 0.0);
+    }
 
     #[test]
     fn search_starts_empty() {

@@ -228,6 +228,14 @@ pub(crate) fn build_generated_details(
     HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
     HashMap<NodeHandle, GeneratedAssetPicker>,
     HashMap<NodeHandle, (NodeHandle, AssetPickerAction)>,
+    HashMap<
+        NodeHandle,
+        (
+            somnium_ecs::reflect::StableId,
+            somnium_ecs::reflect::FieldId,
+            CollectionAction,
+        ),
+    >,
 ) {
     let root = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .with_orientation(Orientation::Vertical)
@@ -238,6 +246,7 @@ pub(crate) fn build_generated_details(
     let mut asset_choices = HashMap::new();
     let mut asset_searches = HashMap::new();
     let mut asset_actions = HashMap::new();
+    let mut collection_actions = HashMap::new();
 
     for panel in panels {
         let heading =
@@ -509,6 +518,7 @@ pub(crate) fn build_generated_details(
                         .build();
                     let actions = ui.add_node(actions, column);
                     for (label, action) in [
+                        ("Use Selected", AssetPickerAction::UseDrawerSelection),
                         ("Edit", AssetPickerAction::Edit),
                         ("Locate", AssetPickerAction::Locate),
                         ("Make Unique", AssetPickerAction::MakeUnique),
@@ -579,9 +589,127 @@ pub(crate) fn build_generated_details(
                     );
                     bindings.insert(handle, base);
                 }
-                PropertyEditorKind::EntityPicker
-                | PropertyEditorKind::Collection
-                | PropertyEditorKind::Unsupported => {
+                PropertyEditorKind::Collection => {
+                    // One row per element, each a strip of numeric lanes, and
+                    // a footer that adds. Before this the row printed
+                    // `Array([Vec3([...])])` as a caption - accurate, and
+                    // completely unusable for the one field anybody has that
+                    // is an array: a spline's control points.
+                    let items = match &model.value {
+                        somnium_ecs::reflect::ReflectValue::Array(items) => items.as_slice(),
+                        _ => &[],
+                    };
+                    let column =
+                        StackPanelBuilder::new(widget.with_background(theme::TRANSPARENT))
+                            .with_orientation(Orientation::Vertical)
+                            .build();
+                    let column = ui.add_node(column, row_handle);
+
+                    for (index, item) in items.iter().enumerate() {
+                        let lanes = crate::element_lane_count(item);
+                        if lanes == 0 {
+                            continue;
+                        }
+                        // Index label, the lanes, then the two per-element
+                        // buttons. A grid rather than a stack so the numbers
+                        // grow with the panel instead of being pinned at build
+                        // time - the same reason the vector editor above uses
+                        // one.
+                        let mut grid = GridBuilder::new(
+                            WidgetBuilder::new().with_margin(Thickness::axes(0.0, 1.0)),
+                        )
+                        .add_row(Row::auto())
+                        .add_column(Column::strict(26.0));
+                        for _ in 0..lanes {
+                            grid = grid.add_column(Column::stretch());
+                        }
+                        grid = grid.add_column(Column::strict(22.0));
+                        grid = grid.add_column(Column::strict(22.0));
+                        let strip = ui.add_node(grid.build(), column);
+
+                        let label = TextBuilder::new(
+                            WidgetBuilder::new()
+                                .with_row(0)
+                                .with_column(0)
+                                .with_margin(Thickness::axes(2.0, 3.0)),
+                        )
+                        .with_role(TextRole::Caption)
+                        .with_text(format!("{index}"))
+                        .build();
+                        ui.add_node(label, strip);
+
+                        for lane in 0..lanes {
+                            let value =
+                                crate::element_lane(items, index as u16, lane as u8).unwrap_or(0.0);
+                            let handle = ui.add_node(
+                                NumericFieldBuilder::new(
+                                    WidgetBuilder::new()
+                                        .with_row(0)
+                                        .with_column(lane + 1)
+                                        .with_margin(Thickness::axes(1.0, 0.0)),
+                                )
+                                .with_value(value)
+                                .with_drag_step(model.step.unwrap_or(0.05) as f32)
+                                .with_unit(model.unit.unwrap_or(""))
+                                .build(),
+                                strip,
+                            );
+                            let mut binding = base.clone();
+                            binding.edit = GeneratedEdit::Element {
+                                index: index as u16,
+                                lane: lane as u8,
+                            };
+                            bindings.insert(handle, binding);
+                        }
+
+                        for (offset, glyph, action) in [
+                            (lanes + 1, "+", CollectionAction::Duplicate(index as u16)),
+                            (lanes + 2, "\u{2212}", CollectionAction::Remove(index as u16)),
+                        ] {
+                            let button = ui.add_node(
+                                ButtonBuilder::new(
+                                    WidgetBuilder::new()
+                                        .with_row(0)
+                                        .with_column(offset)
+                                        .with_margin(Thickness::axes(1.0, 0.0)),
+                                )
+                                .build(),
+                                strip,
+                            );
+                            let glyph = TextBuilder::new(
+                                WidgetBuilder::new().with_margin(Thickness::axes(6.0, 2.0)),
+                            )
+                            .with_role(TextRole::Caption)
+                            .with_text(glyph)
+                            .build();
+                            ui.add_node(glyph, button);
+                            collection_actions.insert(button, (base.component, base.field, action));
+                        }
+                    }
+
+                    let add = ui.add_node(
+                        ButtonBuilder::new(
+                            WidgetBuilder::new()
+                                .with_height(theme::ROW_HEIGHT)
+                                .with_margin(Thickness::axes(0.0, 2.0)),
+                        )
+                        .build(),
+                        column,
+                    );
+                    let add_label =
+                        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 3.0)))
+                            .with_role(TextRole::Caption)
+                            .with_text(if items.is_empty() {
+                                "Add first point"
+                            } else {
+                                "Add point"
+                            })
+                            .build();
+                    ui.add_node(add_label, add);
+                    collection_actions
+                        .insert(add, (base.component, base.field, CollectionAction::Append));
+                }
+                PropertyEditorKind::EntityPicker | PropertyEditorKind::Unsupported => {
                     let value = TextBuilder::new(widget)
                         .with_role(TextRole::Caption)
                         .with_text(format!("{:?}", model.value))
@@ -598,5 +726,6 @@ pub(crate) fn build_generated_details(
         asset_choices,
         asset_searches,
         asset_actions,
+        collection_actions,
     )
 }
