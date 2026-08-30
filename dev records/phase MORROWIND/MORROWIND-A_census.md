@@ -18,14 +18,14 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,236 | +13,030 | 32.5% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 59,520 | +31,990 | 30.6% | 618 | +403 | 99 | 2 |
+| `somnium_renderer` | 63,236 | +13,030 | 32.4% | 436 | +108 | 91 | 55 |
+| `somnium_ui` | 59,918 | +32,388 | 30.7% | 629 | +414 | 100 | 2 |
 | `somnium_core` | 33,910 | +14,690 | 17.4% | 383 | +166 | 44 | 0 |
 | `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.7% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,896 | +81 | 2.5% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,773 | +316 | 2.5% | 59 | +1 | 9 | 0 |
-| `somnium_anim` | 4,380 | +4,380 | 2.3% | 46 | +46 | 4 | 0 |
+| `somnium_script_luau` | 4,773 | +316 | 2.4% | 59 | +1 | 9 | 0 |
+| `somnium_anim` | 4,380 | +4,380 | 2.2% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.6% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,954 | +1,954 | 1.0% | 57 | +57 | 5 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **194,572** | +80,680 | | **1944** | +999 | | |
+| **Total** | **194,970** | +81,078 | | **1955** | +1,010 | | |
 
-The top three crates are **80.5%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.6%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **2,962 lines** (+316 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,7 +49,7 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1150 | 242 | 108 | 8 | 12 | 176 | 96 | **1792** |
+| `somnium_ui` | 1160 | 244 | 108 | 8 | 12 | 178 | 97 | **1807** |
 | `somnium_renderer` | 648 | 156 | 9 | 1 | 2 | 125 | 88 | **1029** |
 | `somnium_core` | 317 | 106 | 23 | 3 | 3 | 46 | 40 | **538** |
 | `somnium_script` | 126 | 35 | 9 | 3 | 3 | 18 | 11 | **205** |

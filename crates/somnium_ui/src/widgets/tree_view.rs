@@ -58,7 +58,11 @@ pub struct TreeView {
     pub selected: Option<u32>,
     /// Every selected row. Contains the primary once the host has published a
     /// set; empty means "primary only", which is what a fresh tree shows.
-    pub selected_set: Vec<u32>,
+    ///
+    /// Held by key and kept sorted — see [`crate::virtual_list::KeySelection`]
+    /// for why an index-based selection is the thing that appears to jump when
+    /// a list is filtered or scrolled.
+    pub selection: crate::virtual_list::KeySelection,
     pub font_id: u8,
     pub px: f32,
     /// Index of the row under the cursor, so hover is a row wash rather than a
@@ -107,11 +111,26 @@ impl Control for TreeView {
         // grammar reads weight before it reads the fill.
         let selected_style = text_style(TextRole::BodyStrong);
         let rest_style = text_style(TextRole::Body);
-        for (i, item) in self.items.iter().enumerate() {
+        // MORROWIND-M. This loop used to run over every item, shaping a label
+        // for each, whether or not the row was on screen — O(total rows) to
+        // show the thirty that fit. Inside a scroll viewer the widget is as
+        // tall as its content, so the clip is the only thing that knows what
+        // is visible.
+        let window = crate::virtual_list::RowWindow::new(
+            b.y,
+            theme::TREE_ROW_HEIGHT,
+            self.items.len(),
+            ctx.clip_rect(),
+        );
+        for i in window.range() {
+            let item = &self.items[i];
             let y = b.y + i as f32 * theme::TREE_ROW_HEIGHT;
             let row = Rect::new(b.x, y, b.w, theme::TREE_ROW_HEIGHT);
             let primary = self.selected == Some(item.id);
-            let selected = primary || self.selected_set.contains(&item.id);
+            // Binary search, not a scan. `Vec::contains` per row is
+            // O(rows x selected) per frame, which is invisible at ten rows and
+            // quadratic at a hundred thousand.
+            let selected = primary || self.selection.contains(item.id);
             let interaction = if selected {
                 Interaction::Selected
             } else if self.hovered == Some(i) {
@@ -248,7 +267,7 @@ impl Control for TreeView {
             return;
         }
         if let Some(TreeViewMessage::SetSelectedSet(ids)) = msg.data::<TreeViewMessage>() {
-            self.selected_set = ids.clone();
+            self.selection = crate::virtual_list::KeySelection::from_keys(ids.iter().copied());
             msg.handled = true;
             return;
         }
@@ -426,7 +445,7 @@ impl TreeViewBuilder {
             Box::new(TreeView {
                 items: Vec::new(),
                 selected: None,
-                selected_set: Vec::new(),
+                selection: crate::virtual_list::KeySelection::default(),
                 font_id: self.font_id,
                 px: self.px,
                 hovered: None,
@@ -446,12 +465,92 @@ impl TreeViewMessage {
 mod tests {
     use super::*;
 
+    /// A tree of `n` rows, laid out as a scroll viewer would lay it out: as
+    /// tall as its content.
+    fn tree_of(n: usize) -> (Widget, TreeView) {
+        let mut widget = Widget::default();
+        widget.actual_local_position = Vec2::new(0.0, 0.0);
+        widget.actual_local_size = Vec2::new(300.0, n as f32 * theme::TREE_ROW_HEIGHT);
+        let view = TreeView {
+            items: (0..n)
+                .map(|i| TreeItem {
+                    id: i as u32,
+                    label: format!("Entity {i}"),
+                    depth: 0,
+                    icon: crate::metaphor::icon_for_entity_name("Cube"),
+                    has_children: false,
+                    expanded: false,
+                    hidden: false,
+                    locked: false,
+                    script_error: false,
+                })
+                .collect(),
+            selected: None,
+            selection: crate::virtual_list::KeySelection::default(),
+            font_id: 0,
+            px: 12.0,
+            hovered: None,
+            badge_drag: None,
+        };
+        (widget, view)
+    }
+
+    /// Primitives emitted for `n` rows through a 660 px viewport.
+    fn primitives_for(n: usize) -> usize {
+        let (widget, view) = tree_of(n);
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+        ctx.instances.len()
+    }
+
+    /// MORROWIND-M. The acceptance criterion is 100,000 rows at 60 fps, and the
+    /// only way there is for the per-frame work to stop depending on the total.
+    ///
+    /// This is that, measured through the real draw path rather than asserted
+    /// about the windowing arithmetic: the same viewport emits the same number
+    /// of primitives whether the tree holds a hundred rows or a hundred
+    /// thousand. Before virtualisation the second number was a thousand times
+    /// the first, and every one of those primitives carried a shaped label.
+    #[test]
+    fn drawing_a_hundred_thousand_rows_costs_what_thirty_rows_cost() {
+        let small = primitives_for(100);
+        let huge = primitives_for(100_000);
+        assert!(small > 0, "the fixture drew nothing");
+        assert_eq!(
+            small, huge,
+            "100 rows emitted {small} primitives and 100,000 emitted {huge}"
+        );
+    }
+
+    #[test]
+    fn scrolling_deep_into_a_long_tree_costs_the_same_as_not_scrolling() {
+        // A thousand rows down, the work is the same size and it is *different*
+        // work — the labels drawn are the ones under the clip.
+        let (mut widget, view) = tree_of(100_000);
+        widget.actual_local_position = Vec2::new(0.0, -1000.0 * theme::TREE_ROW_HEIGHT);
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+        let scrolled = ctx.instances.len();
+
+        // Not exactly equal, and the difference is the point rather than slop:
+        // at scroll zero there is no row above the clip, so the top overscan
+        // row does not exist. One row of difference is the whole budget.
+        let unscrolled = primitives_for(100_000);
+        let one_row = primitives_for(1);
+        assert!(
+            scrolled >= unscrolled && scrolled <= unscrolled + one_row,
+            "scrolled {scrolled}, unscrolled {unscrolled}, one row {one_row}"
+        );
+    }
+
     #[test]
     fn empty_tree_has_no_selection() {
         let t = TreeView {
             items: Vec::new(),
             selected: None,
-            selected_set: Vec::new(),
+            selection: crate::virtual_list::KeySelection::default(),
             font_id: 0,
             px: 12.0,
             hovered: None,

@@ -1706,6 +1706,16 @@ timeline, the audio track view, and MORROWIND-H's UI animation. Reference:
 
 #### MORROWIND-M — Virtualisation, data tables, and the localisation editor
 
+**Step 1 partially shipped 2026-08-30** — see [`MORROWIND-M.md`](phase%20MORROWIND/MORROWIND-M.md).
+`somnium_ui::virtual_list` windows a uniform-height list against the clip
+rectangle a widget is drawing inside, and `KeySelection` holds a selection by
+key so scrolling and filtering cannot renumber it. The outliner is retrofitted:
+**a hundred rows and a hundred thousand rows now emit the identical number of
+primitives**, measured through `TreeView::draw`. The content drawer and asset
+browser are a different shape — one widget per entry — so they need widget
+recycling rather than draw windowing, and are not started. Items 2 and 3 are not
+started.
+
 1. A **virtualising container** — recycled rows, windowed hit-testing, stable
    selection across scroll — retro-fitted to the outliner, the content drawer
    and the asset browser. Acceptance is 100,000 rows at 60 fps; nobody has

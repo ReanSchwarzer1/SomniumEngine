@@ -32,6 +32,7 @@ pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
+pub mod virtual_list;
 pub mod widget;
 pub mod widgets;
 pub mod workspace;

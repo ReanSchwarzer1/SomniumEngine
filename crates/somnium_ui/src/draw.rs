@@ -125,6 +125,16 @@ impl DrawingContext {
         self.transform_stack.clear();
     }
 
+    /// The clip a widget is currently drawing inside.
+    ///
+    /// MORROWIND-M: a widget in a scroll viewer is as tall as its content, so
+    /// its own bounds say nothing about what can be seen. This is what a long
+    /// list has to consult in order to draw only the rows that are visible.
+    #[must_use]
+    pub fn clip_rect(&self) -> Rect {
+        self.current_clip
+    }
+
     pub fn push_clip_rect(&mut self, rect: Rect) {
         self.clip_stack.push(self.current_clip);
         self.current_clip = self.current_clip.intersect(&rect);

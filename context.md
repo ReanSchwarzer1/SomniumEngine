@@ -1822,8 +1822,13 @@ does not overlap. STALKER waits for both relevant outputs.
   so nothing moved. What is missing is the shell resolving tiles directly, a
   drag-to-dock affordance, real `winit` child windows, and a renderer that
   draws more than one view per frame (MORROWIND-J steps 2 and 3).
-- Large-list virtualisation and data-table editing, the GUI layout editor, and
-  isolated play-in-editor (MORROWIND Construction Set M, M2, and N).
+- Data-table editing, the GUI layout editor, and isolated play-in-editor
+  (MORROWIND Construction Set M items 2–3, M2, and N).
+- Virtualisation for the **content drawer and asset browser**. The outliner is
+  done — `somnium_ui::virtual_list` windows its draw against the clip, so a
+  hundred thousand rows cost what thirty cost — but the drawer builds one widget
+  per asset, so it needs widget recycling rather than draw windowing
+  (MORROWIND-M step 1).
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2161,6 +2166,21 @@ path had never heard of. Despawn happens only after persistence succeeds.
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
 into lower detail instead of into a missing object. ([MORROWIND-R](<dev records/phase MORROWIND/MORROWIND-R.md>))
+
+**A widget inside a scroll viewer is as tall as its content, so its own bounds
+say nothing about what can be seen.** The outliner's draw loop ran over every
+item — laying out, shaping a label and painting — whether or not the row was on
+screen, which is O(total rows) to show the thirty that fit, with a linear scan of
+the selection on top of each. Virtualising against the **clip rectangle** rather
+than the scroll offset means the windowing never learns what scrolling is and
+cannot disagree with the scroll viewer about it. A hundred rows and a hundred
+thousand rows now emit the identical number of primitives.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A selection is held by key, never by index.** Filtering, sorting, expanding a
+parent and scrolling all renumber positions; the key is the thing the user
+picked. Storing indices is why a selection appears to jump when a list changes
+underneath it. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
 **A dock arrangement is a tree, and the five-region shell is a projection of
 it.** The tree owns the collapse rules — a tile that loses its last tab is
