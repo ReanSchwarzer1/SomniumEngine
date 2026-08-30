@@ -19,6 +19,11 @@ use glam::Vec2;
 /// drag-down bulk toggle to work.
 pub const BADGE_COLUMN: f32 = 34.0;
 
+/// The faintest an unset badge may be drawn.
+///
+/// Below this it stops being a quiet affordance and becomes an invisible one.
+const GHOST_MIN_ALPHA: u8 = 40;
+
 #[derive(Clone, Debug)]
 pub struct TreeItem {
     pub id: u32,
@@ -191,14 +196,51 @@ impl Control for TreeView {
                 let dot = Rect::new(badge_x - 14.0, mid - 3.0, 6.0, 6.0);
                 ctx.push_round_rect(dot, 3.0, t.semantic.status.error.bytes());
             }
-            if item.locked {
-                let bar = Rect::new(badge_x + 2.0, mid - 5.0, 8.0, 10.0);
-                ctx.push_round_rect_border(bar, 2.0, 1.0, t.semantic.text.secondary.bytes());
-            }
-            if item.hidden {
-                let bar = Rect::new(badge_x + 14.0, mid - 1.0, 12.0, 2.0);
-                ctx.push_rect_filled(bar, t.semantic.text.secondary.bytes());
-            }
+            // **Both badges are drawn on every row**, which is the whole
+            // affordance. Before this they appeared only when the flag was
+            // *set*, so a visible unlocked row showed an empty gutter — the
+            // click target was there and worked, and nothing on screen said so.
+            // A control you have to already know about is one nobody finds.
+            //
+            // The states differ by weight rather than by position, after
+            // Unreal: a set flag is at full secondary colour, an unset one is a
+            // ghost that firms up when the pointer is on the row. That keeps a
+            // long outliner scannable — the hidden rows are the ones you can
+            // see from across the column — while leaving every row clickable.
+            let hovered_row = self.hovered == Some(i);
+            let badge_tint = |set: bool| {
+                if set {
+                    t.semantic.text.secondary.bytes()
+                } else if hovered_row {
+                    t.semantic.text.disabled.bytes()
+                } else {
+                    // Floored, not just divided. `disabled / 3` on a `u8` is
+                    // zero for any theme whose disabled text is already
+                    // translucent, and a fully transparent badge is the empty
+                    // gutter this change exists to remove — reintroduced by a
+                    // token change, in a way the primitive-count test cannot
+                    // see.
+                    let mut ghost = t.semantic.text.disabled.bytes();
+                    ghost[3] = (ghost[3] / 3).max(GHOST_MIN_ALPHA);
+                    ghost
+                }
+            };
+            let badge = |ctx: &mut DrawingContext, x: f32, icon: IconId, set: bool| {
+                let rect = Rect::new(x, mid - 6.0, 12.0, 12.0);
+                let (uv, tex) = icon.draw_quad(rect);
+                ctx.push_textured_rect(rect, uv, badge_tint(set), tex);
+            };
+            badge(ctx, badge_x, IconId::Locked, item.locked);
+            badge(
+                ctx,
+                badge_x + 14.0,
+                if item.hidden {
+                    IconId::VisibilityOff
+                } else {
+                    IconId::Visibility
+                },
+                item.hidden,
+            );
             let indent = 8.0 + item.depth as f32 * 14.0;
             // Hierarchy guides: one hairline per ancestor level, so a deep
             // tree reads as a tree rather than as a list of varying margins.
@@ -542,6 +584,30 @@ mod tests {
         assert!(
             scrolled >= unscrolled && scrolled <= unscrolled + one_row,
             "scrolled {scrolled}, unscrolled {unscrolled}, one row {one_row}"
+        );
+    }
+
+    /// The affordance has to exist *before* you use it.
+    ///
+    /// Both badges are drawn on every row, so a visible unlocked row costs the
+    /// same primitives as a hidden locked one. Before this the gutter was empty
+    /// until a flag was set: the click target worked and nothing said so, which
+    /// is the bug this asserts against.
+    #[test]
+    fn every_row_draws_its_badges_whatever_state_it_is_in() {
+        let plain = primitives_for(1);
+
+        let (widget, mut view) = tree_of(1);
+        view.items[0].hidden = true;
+        view.items[0].locked = true;
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+
+        assert_eq!(
+            plain,
+            ctx.instances.len(),
+            "a visible unlocked row must draw the same badges as a hidden locked one"
         );
     }
 

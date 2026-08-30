@@ -2212,6 +2212,25 @@ parent and scrolling all renumber positions; the key is the thing the user
 picked. Storing indices is why a selection appears to jump when a list changes
 underneath it. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**An affordance that only appears once you have used it is not an affordance.**
+The Outliner's hide and lock badges were drawn only when the flag was *set*, so
+a visible unlocked row showed an empty gutter — the click target was there and
+worked, and nothing on screen said so. Both badges now draw on every row, an eye
+and a padlock, differing by weight rather than by position: a set flag at full
+secondary colour, an unset one a ghost that firms up under the pointer. That
+keeps a long list scannable — the hidden rows are the ones visible from across
+the column — while leaving every row clickable. The ghost alpha is floored
+rather than merely scaled, because a token change that made disabled text
+translucent would otherwise divide it to zero and restore the invisible gutter
+in a way a primitive-count test cannot see.
+
+**`EditorFlags::hidden` is an authoring state, not an unload.** A hidden UI
+canvas keeps its `.somui` loaded and registered, so a script writing to that
+document does not start failing because somebody clicked an eye — the first
+version conflated *which canvas* with *whether it draws*, and with hidden as the
+shipped default that meant a rejection line per frame in the Output Log. Which
+document is wanted comes from the canvas; whether it draws comes from the eye.
+
 **A dock arrangement is a tree, and the five-region shell is a projection of
 it.** The tree owns the collapse rules — a tile that loses its last tab is
 removed and its sibling promoted, a closed tab never steals focus from the

@@ -647,6 +647,9 @@ struct HelloGame {
     /// An asset the inventory has not published yet, so the wait is logged once
     /// rather than once a frame.
     authored_ui_missing: Option<somnium_asset::database::AssetId>,
+    /// Whether the canvas entity's Outliner eye is on. Kept apart from whether
+    /// the document is *loaded*, so hiding does not unload.
+    authored_ui_visible: bool,
 }
 
 impl HelloGame {
@@ -725,6 +728,7 @@ impl HelloGame {
             authored_ui: somnium_core::somui_host::UiDocuments::new(),
             authored_ui_asset: None,
             authored_ui_missing: None,
+            authored_ui_visible: false,
         }
     }
 
@@ -1495,6 +1499,14 @@ impl GameApp for HelloGame {
                     ),
                     ..UiCanvasComponent::default()
                 },
+                // Hidden on first launch. A HUD drawn over the viewport before
+                // anybody asked for one is chrome in the way of the scene; the
+                // eye in the Outliner is how you ask. This is also the shipped
+                // example of the eye doing something you can see immediately.
+                EditorFlags {
+                    hidden: true,
+                    locked: false,
+                },
             ));
         }
 
@@ -1872,6 +1884,11 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        // **Which canvas** and **whether it draws** are two questions, and
+        // conflating them costs more than it looks. `EditorFlags::hidden` is an
+        // authoring state — *"not submitted for drawing"* — not an unload: a
+        // hidden canvas still owns its document, and a script writing to that
+        // document must not start failing because somebody clicked an eye.
         let authored_canvas = ctx.world.entities().find_map(|entity| {
             let canvas = ctx.world.get::<UiCanvasComponent>(entity).copied()?;
             let transform = ctx
@@ -1879,9 +1896,20 @@ impl GameApp for HelloGame {
                 .get::<Transform>(entity)
                 .copied()
                 .unwrap_or_default();
-            canvas.enabled.then_some((canvas, transform))
+            let hidden = ctx
+                .world
+                .get::<EditorFlags>(entity)
+                .copied()
+                .unwrap_or_default()
+                .hidden;
+            canvas.enabled.then_some((canvas, transform, hidden))
         });
-        self.runtime_ui_enabled = authored_canvas.is_some();
+        // The Outliner's eye applies to a canvas like it applies to a mesh: a
+        // canvas that ignored it would be the one thing in the scene the eye
+        // could not turn off, which reads as the eye being broken rather than
+        // as canvases being special.
+        self.runtime_ui_enabled = authored_canvas.is_some_and(|(_, _, hidden)| !hidden);
+        self.authored_ui_visible = self.runtime_ui_enabled;
 
         // MORROWIND-M2. The canvas entity's `document` field is an ordinary
         // asset reference, so this is reached three ways without any of them
@@ -1889,8 +1917,10 @@ impl GameApp for HelloGame {
         // the asset dropdown, or dragging a `.somui` out of the Content Drawer
         // onto the row. Reloading only when the asset actually changed is what
         // keeps a per-frame check from rebuilding the widget tree every frame.
+        // Deliberately keyed on the canvas and not on its visibility: hiding
+        // it must not unload the document out from under a script.
         let wanted = authored_canvas
-            .map(|(settings, _)| settings.document)
+            .map(|(settings, _, _)| settings.document)
             .filter(|asset| asset.raw() != 0);
         if wanted != self.authored_ui_asset {
             self.authored_ui = somnium_core::somui_host::UiDocuments::new();
@@ -1946,7 +1976,7 @@ impl GameApp for HelloGame {
                 }
             }
         }
-        if let Some((settings, transform)) = authored_canvas {
+        if let Some((settings, transform, _)) = authored_canvas {
             use somnium_ui::runtime::{Canvas, CanvasMode, Layer};
 
             let mut canvas = match settings.space {
@@ -2506,7 +2536,13 @@ impl GameApp for HelloGame {
     fn on_render_ui(&mut self, frame: &mut GameUiFrame) {
         // Authored documents first, then the code-built canvas over them: the
         // pause banner is chrome and belongs on top of whatever the game drew.
+        // Loaded but not drawn while the eye is off. The document stays
+        // registered so a script can keep writing to it.
+        let visible = self.authored_ui_visible;
         for authored in self.authored_ui.iter_mut() {
+            if !visible {
+                continue;
+            }
             let viewport = authored.canvas.ui().screen_size;
             authored.relayout(viewport);
             frame.draw(&mut authored.canvas);

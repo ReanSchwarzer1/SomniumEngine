@@ -64,6 +64,10 @@ pub enum IconId {
     Chevron,
     ChevronDown,
     Visibility,
+    /// The same eye, struck through: hidden.
+    VisibilityOff,
+    /// A closed padlock: locked against viewport edits.
+    Locked,
     Add,
     Delete,
     Duplicate,
@@ -153,6 +157,8 @@ impl IconId {
         Self::Chevron,
         Self::ChevronDown,
         Self::Visibility,
+        Self::VisibilityOff,
+        Self::Locked,
         Self::Add,
         Self::Delete,
         Self::Duplicate,
@@ -668,6 +674,25 @@ impl IconAtlas {
                 self.line(s(16.0), t(8.0), s(21.0), t(12.0), w);
                 self.line(s(3.0), t(12.0), s(8.0), t(16.0), w);
                 self.line(s(16.0), t(16.0), s(21.0), t(12.0), w);
+            }
+            // The same eye with a stroke through it. Drawn as the eye *plus* a
+            // slash rather than as a different glyph, so the two states read as
+            // one control in two positions instead of two unrelated symbols —
+            // which is what makes the column scannable down a long outliner.
+            IconId::VisibilityOff => {
+                self.circle(s(12.0), t(12.0), 3.0, w, false);
+                self.line(s(3.0), t(12.0), s(8.0), t(8.0), w);
+                self.line(s(16.0), t(8.0), s(21.0), t(12.0), w);
+                self.line(s(3.0), t(12.0), s(8.0), t(16.0), w);
+                self.line(s(16.0), t(16.0), s(21.0), t(12.0), w);
+                self.line(s(4.0), t(20.0), s(20.0), t(4.0), w + 0.4);
+            }
+            IconId::Locked => {
+                self.rect_stroke(s(6.0), t(11.0), 12.0, 9.0, w);
+                self.line(s(9.0), t(11.0), s(9.0), t(8.0), w);
+                self.line(s(9.0), t(8.0), s(12.0), t(5.0), w);
+                self.line(s(12.0), t(5.0), s(15.0), t(8.0), w);
+                self.line(s(15.0), t(8.0), s(15.0), t(11.0), w);
             }
             IconId::Add => {
                 self.line(s(12.0), t(5.0), s(12.0), t(19.0), w);
