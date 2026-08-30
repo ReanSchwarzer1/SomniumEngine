@@ -1853,11 +1853,6 @@ does not overlap. STALKER waits for both relevant outputs.
   `WorldCheckpoint` snapshot restored exactly on Stop, separate input focus, a
   survivable error path, and `ctx.stepping` so a script can tell a hand-driven
   step from a running frame.
-- Virtualisation for the **content drawer and asset browser**. The outliner is
-  done — `somnium_ui::virtual_list` windows its draw against the clip, so a
-  hundred thousand rows cost what thirty cost — but the drawer builds one widget
-  per asset, so it needs widget recycling rather than draw windowing
-  (MORROWIND-M step 1).
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2218,6 +2213,20 @@ than the scroll offset means the windowing never learns what scrolling is and
 cannot disagree with the scroll viewer about it. A hundred rows and a hundred
 thousand rows now emit the identical number of primitives.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**Windowing a draw and windowing a widget tree are different problems.** The
+outliner's `TreeView` is one widget that paints rows, so virtualising it is a
+matter of which rows the draw loop touches. The content drawer's tile is a real
+button with a real icon and label, and it is a drop target, a drag source and a
+double-click target *by being one* — so the window has to decide which widgets
+**exist**. The drawer's container is therefore a `Canvas` with an explicit
+height covering every row in the folder, and each of the ~40 built tiles is
+placed at the rectangle its index *in the whole folder* earns. A flow layout
+cannot do this: it works out where the fourth tile goes by having been given the
+first three. Two traps came with it — a canvas that clipped to its own bounds
+would crop the empty state of an empty folder out of existence, and an inline
+rename is a text box parented to a tile, so a rename holds the window still
+until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
 **A selection is held by key, never by index.** Filtering, sorting, expanding a
 parent and scrolling all renumber positions; the key is the thing the user

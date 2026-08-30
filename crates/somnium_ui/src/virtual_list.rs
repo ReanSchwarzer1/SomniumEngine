@@ -109,6 +109,98 @@ impl RowWindow {
     }
 }
 
+/// The slice of a uniform grid that intersects a clip rectangle.
+///
+/// The content drawer's problem rather than the outliner's. A list windows on
+/// one axis; a grid of tiles wraps, so the window is *rows of columns* and the
+/// caller has to say how many columns the panel fits.
+///
+/// Kept beside [`RowWindow`] rather than folded into it: the two take different
+/// inputs and a single function with a `columns: Option<usize>` would make
+/// every list caller answer a question about grids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridWindow {
+    /// First tile index to materialise.
+    pub first: usize,
+    /// How many tiles from `first`.
+    pub count: usize,
+    /// Tiles per row, as used to compute the window.
+    pub columns: usize,
+    /// Rows the whole grid needs, for the scrollable height.
+    ///
+    /// **This is what keeps the scrollbar honest.** A virtualised view that
+    /// only ever builds thirty widgets must still report the height of all
+    /// hundred thousand, or the scrollbar says the list is one screen long.
+    pub total_rows: usize,
+}
+
+impl GridWindow {
+    /// The tiles of `total` that intersect `clip`, given a tile size and the
+    /// width available for a row.
+    #[must_use]
+    pub fn new(
+        content_top: f32,
+        tile: (f32, f32),
+        available_w: f32,
+        total: usize,
+        clip: Rect,
+    ) -> Self {
+        let (tile_w, tile_h) = tile;
+        let columns = if tile_w > 0.0 {
+            ((available_w / tile_w).floor() as usize).max(1)
+        } else {
+            1
+        };
+        let total_rows = total.div_ceil(columns);
+        if total == 0 || tile_h <= 0.0 || clip.h <= 0.0 || clip.w <= 0.0 {
+            return Self {
+                first: 0,
+                count: 0,
+                columns,
+                total_rows,
+            };
+        }
+        let rows = RowWindow::new(content_top, tile_h, total_rows, clip);
+        // `min(total)` because the last row is usually short: a window of two
+        // rows at four columns is eight tiles even when only five exist, and
+        // indexing the other three is how a virtualised grid panics.
+        let first = rows.first * columns;
+        let last = ((rows.first + rows.count) * columns).min(total);
+        Self {
+            first,
+            count: last.saturating_sub(first),
+            columns,
+            total_rows,
+        }
+    }
+
+    /// The half-open range to iterate.
+    #[must_use]
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.first..self.first + self.count
+    }
+
+    /// Where tile `index` sits, relative to the grid's own origin.
+    #[must_use]
+    pub fn tile_rect(&self, index: usize, tile: (f32, f32)) -> Rect {
+        let (tile_w, tile_h) = tile;
+        let column = index % self.columns.max(1);
+        let row = index / self.columns.max(1);
+        Rect::new(column as f32 * tile_w, row as f32 * tile_h, tile_w, tile_h)
+    }
+
+    /// The height the grid must report so the scrollbar is right.
+    #[must_use]
+    pub fn content_height(&self, tile_h: f32) -> f32 {
+        self.total_rows as f32 * tile_h
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// A selection held by key rather than by row index.
 ///
 /// **This is what "stable selection across scroll" means.** An index is a
@@ -259,6 +351,106 @@ mod tests {
         assert!(RowWindow::new(700.0, ROW, 100, clip(0.0, 660.0)).is_empty());
         // The empty window must still be safe to iterate.
         assert_eq!(RowWindow::EMPTY.range().count(), 0);
+    }
+
+    // ── The grid the content drawer needs ──────────────────────────────────
+
+    const TILE: (f32, f32) = (96.0, 116.0);
+
+    #[test]
+    fn a_grid_window_is_bounded_by_the_viewport_and_not_the_asset_count() {
+        // The drawer's half of MORROWIND-M's acceptance. Ten tiles across, six
+        // rows visible, so the window is bounded no matter how many assets the
+        // project has.
+        let view = clip(0.0, 700.0);
+        let mut counts = Vec::new();
+        for total in [40usize, 40_000, 4_000_000] {
+            let window = GridWindow::new(0.0, TILE, 960.0, total, view);
+            assert_eq!(window.columns, 10);
+            counts.push(window.count);
+        }
+        assert!(
+            counts[1] == counts[2],
+            "the window grew with the total: {counts:?}"
+        );
+        assert!(counts[1] <= 10 * (7 + 2 * OVERSCAN), "{}", counts[1]);
+    }
+
+    #[test]
+    fn the_last_row_is_short_and_that_does_not_run_off_the_end() {
+        // Five tiles in a four-column grid is two rows, the second holding one.
+        // A window that returned eight indices here would panic the caller on
+        // the three that do not exist.
+        let window = GridWindow::new(0.0, TILE, 400.0, 5, clip(0.0, 700.0));
+        assert_eq!(window.columns, 4);
+        assert_eq!(window.first, 0);
+        assert_eq!(window.count, 5, "{window:?}");
+        assert_eq!(window.range().end, 5);
+    }
+
+    #[test]
+    fn the_scrollable_height_counts_every_row_not_the_visible_ones() {
+        // The bug a virtualised grid ships with if nobody thinks about it: the
+        // scrollbar says the list is one screen long because only one screen of
+        // widgets exists.
+        let window = GridWindow::new(0.0, TILE, 400.0, 4_000, clip(0.0, 700.0));
+        assert_eq!(window.total_rows, 1_000);
+        assert!((window.content_height(TILE.1) - 116_000.0).abs() < 0.5);
+        assert!(window.count < 100, "still only a screenful is built");
+    }
+
+    #[test]
+    fn tiles_are_placed_in_reading_order() {
+        let window = GridWindow::new(0.0, TILE, 400.0, 12, clip(0.0, 700.0));
+        assert_eq!(window.tile_rect(0, TILE), Rect::new(0.0, 0.0, 96.0, 116.0));
+        assert_eq!(
+            window.tile_rect(3, TILE),
+            Rect::new(288.0, 0.0, 96.0, 116.0)
+        );
+        // Index 4 wraps to the start of the second row.
+        assert_eq!(
+            window.tile_rect(4, TILE),
+            Rect::new(0.0, 116.0, 96.0, 116.0)
+        );
+    }
+
+    #[test]
+    fn a_panel_narrower_than_one_tile_still_shows_one_column() {
+        // Dragging the drawer narrow must not divide by zero columns.
+        let window = GridWindow::new(0.0, TILE, 10.0, 20, clip(0.0, 700.0));
+        assert_eq!(window.columns, 1);
+        assert_eq!(window.total_rows, 20);
+    }
+
+    #[test]
+    fn scrolling_a_grid_moves_the_window_without_changing_its_size() {
+        let view = clip(0.0, 700.0);
+        let top = GridWindow::new(0.0, TILE, 400.0, 4_000, view);
+        let deep = GridWindow::new(-TILE.1 * 500.0, TILE, 400.0, 4_000, view);
+        assert!(deep.first > top.first, "the window did not move");
+        // One row of difference, and only one: at scroll zero there is no row
+        // above the clip for the top overscan to reach.
+        assert_eq!(deep.count - top.count, top.columns, "{top:?} vs {deep:?}");
+        assert!(deep.range().end <= 4_000);
+    }
+
+    #[test]
+    fn a_window_scrolled_past_the_end_is_still_a_range_you_can_slice() {
+        // Walk into a folder of 40,000 assets, scroll to the bottom, then walk
+        // into one with six. The scroll offset does not reset, so the window is
+        // asked about content that is no longer there. `first` past the end
+        // with a count of zero is still an out-of-bounds slice, and the drawer
+        // slices its entry list with exactly this range.
+        let assets: Vec<usize> = (0..6).collect();
+        let window = GridWindow::new(-500_000.0, TILE, 400.0, assets.len(), clip(0.0, 700.0));
+        assert!(window.is_empty());
+        let range = window.range();
+        assert!(
+            range.end <= assets.len() && range.start <= range.end,
+            "{range:?} would panic slicing {} entries",
+            assets.len()
+        );
+        let _ = &assets[range];
     }
 
     // ── Selection ──────────────────────────────────────────────────────────

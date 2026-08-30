@@ -405,6 +405,10 @@ pub struct UiJobStatus {
 /// Rows the overlay can show before it starts dropping them.
 pub const PROFILER_ROWS: usize = 40;
 
+/// Space between content-drawer tiles, in both axes. This was the wrap panel's
+/// gap; now it is the difference between a tile and the cell it is placed in.
+const CONTENT_GAP: f32 = 10.0;
+
 /// Names shown in the foliage picker (Phase 17F).
 ///
 /// Mirrors `somnium_core::FOLIAGE_PALETTE` by index. The UI crate deliberately
@@ -921,7 +925,16 @@ pub struct UiManager {
     help_menu_open: bool,
     tooltip_since: Option<(NodeHandle, std::time::Instant)>,
     help_page: u8,
+    /// The tiles that currently exist, in the order they were built.
     content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
+    /// Every entry the last query returned, whether or not it has a tile.
+    ///
+    /// MORROWIND-M. This is the list the drawer *shows*; `content_entries` is
+    /// the screenful of it that was built. Keeping both is what lets the
+    /// window move without asking the asset database anything.
+    content_all: Vec<crate::metaphor::ContentEntry>,
+    /// The window `content_entries` was built for, or `None` if it is stale.
+    content_window: Option<crate::virtual_list::GridWindow>,
     outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
     outliner_selection: Vec<u32>,
     clipboard_filled: bool,
@@ -1563,6 +1576,8 @@ impl UiManager {
             tooltip_since: None,
             help_page: 0,
             content_entries: Vec::new(),
+            content_all: Vec::new(),
+            content_window: None,
             outliner_entity_handles: HashMap::new(),
             outliner_selection: Vec::new(),
             clipboard_filled: false,
@@ -1929,6 +1944,11 @@ impl UiManager {
         let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
+        // MORROWIND-M. Between the two layout passes on purpose: the first
+        // gives the drawer's canvas the bounds this reads, and the second
+        // arranges whatever tiles the new window built, so a scroll costs one
+        // frame's rebuild rather than a frame of empty drawer.
+        self.sync_content_tiles();
         self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
@@ -4720,27 +4740,92 @@ impl UiManager {
                     .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
             );
         }
+        self.content_all = entries;
+        // Forget the window rather than the tiles: the folder changed, so the
+        // tiles the old window named are about to describe different assets.
+        self.content_window = None;
+        self.sync_content_tiles();
+        self.refresh_content_breadcrumb();
+    }
+
+    /// Which tiles the drawer can show, given the layout it last had.
+    ///
+    /// The seam is the outliner's — a clip rectangle and a content origin —
+    /// but the answer is put to a different use: here it decides which tiles
+    /// *exist*, not which of the existing ones paint.
+    fn content_grid_window(&self) -> crate::virtual_list::GridWindow {
+        let (tile_w, tile_h, _) = self.content_density.metrics();
+        let canvas = self.native_ui.screen_bounds(self.content_list);
+        // Pitch, not size: the gap belongs to the cell. The last column has no
+        // gap after it, so the width offered is one gap wider than the panel —
+        // without that, a panel that fits four tiles is told it fits three.
+        crate::virtual_list::GridWindow::new(
+            canvas.y,
+            (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP),
+            canvas.w + CONTENT_GAP,
+            self.content_all.len(),
+            self.native_ui.screen_bounds(self.content_scroll),
+        )
+    }
+
+    /// Build exactly the tiles the window names, and nothing else.
+    ///
+    /// MORROWIND-M. The outliner virtualises its *draw*, because a `TreeView`
+    /// is one widget that paints rows itself. The drawer cannot: a tile is a
+    /// real button with a real icon and a real label, and it is a drop target
+    /// and a drag source by being one. So here the window decides which
+    /// widgets are built, and the canvas is left as tall as all of them.
+    ///
+    /// Cheap to call every frame: it compares the window it would build
+    /// against the one it did, and a drawer nobody scrolled does nothing.
+    fn sync_content_tiles(&mut self) {
+        let window = self.content_grid_window();
+        if self.content_window == Some(window) {
+            return;
+        }
+        // An inline rename is a text box parented to a tile. Rebuilding under
+        // it would delete the field being typed into, so a scroll during a
+        // rename leaves the window stale until the rename lands. Never on the
+        // first build, or the rename would be parented to nothing.
+        if self.content_inline_rename.is_some() && self.content_window.is_some() {
+            return;
+        }
+
         let (tile_w, tile_h, icon_px) = self.content_density.metrics();
-        self.native_ui.clear_children(self.content_list);
-        self.content_entries.clear();
+        let pitch = (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP);
         let font_id = self.font_id;
         let parent = self.content_list;
+        self.native_ui.clear_children(parent);
+        self.content_entries.clear();
+        self.content_window = Some(window);
 
         // Phase 27-G. A drawer with nothing in it used to be a blank grey
         // rectangle, which reads as broken rather than as empty. A filtered
         // miss and a genuinely empty folder are different situations and get
         // different copy — offering "import a model" to someone who mistyped a
         // search would be the wrong advice.
-        if entries.is_empty() {
+        if self.content_all.is_empty() {
             let state = if self.content_filter.is_empty() {
                 crate::metaphor::empty::CONTENT
             } else {
                 crate::metaphor::empty::CONTENT_FILTERED
             };
+            // The height still gets set, to the nought rows an empty folder
+            // is: the canvas does not clip, so the empty state is visible
+            // regardless, and the scrollbar correctly says there is nowhere to
+            // scroll to.
+            self.native_ui.set_height(parent, 0.0);
             crate::editor::parts::build_empty_state(&mut self.native_ui, parent, font_id, state);
+            return;
         }
 
-        for entry in entries {
+        // As tall as the whole folder, though only a screenful was built.
+        self.native_ui
+            .set_height(parent, window.content_height(pitch.1));
+
+        let visible = self.content_all[window.range()].to_vec();
+        for (offset, entry) in visible.into_iter().enumerate() {
+            let index = window.first + offset;
             // A selected tile keeps the raised fill but gains the selection
             // wash, so selection reads the same way here as in the Outliner.
             let selected = self.content_selection.contains(&entry.path);
@@ -4836,8 +4921,17 @@ impl UiManager {
                 self.native_ui.add_node(badge, col_h);
             }
 
+            // Absolute placement is what the window rests on: a tile sits
+            // where its index *in the whole folder* puts it, not where its
+            // position among the built widgets would.
+            let cell = window.tile_rect(index, pitch);
+            self.native_ui
+                .place_node(bh, crate::types::Rect::new(cell.x, cell.y, tile_w, tile_h));
             self.content_entries.push((bh, entry));
         }
+    }
+
+    fn refresh_content_breadcrumb(&mut self) {
         let mut parts = vec!["Game".to_string()];
         if !self.content_path.is_empty() {
             for p in self.content_path.split(['/', '\\']) {
@@ -7448,6 +7542,171 @@ mod elysium_tests {
             ui.draw_ctx.instance_count() > 0,
             "an empty state that draws nothing is the bug it exists to prevent"
         );
+    }
+
+    #[test]
+    fn the_drawer_canvas_carries_the_whole_folders_height_and_scrolls_by_it() {
+        // MORROWIND-M. The two facts the windowed drawer rests on, neither of
+        // which is visible from `GridWindow`'s own tests:
+        //
+        //   1. a canvas given an explicit height makes the scroll viewer above
+        //      it scrollable to that height, even with a screenful of children;
+        //   2. the canvas's screen `y` is the content origin the window reads,
+        //      and it moves by exactly the scroll.
+        //
+        // Get either wrong and the drawer builds the right number of tiles for
+        // the wrong part of the folder.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.perform_layout();
+
+        // 40,000 assets at the comfortable density, four rows of which exist.
+        let (tile_w, tile_h, _) = crate::metaphor::ContentDensity::Comfortable.metrics();
+        let pitch = (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP);
+        let canvas_before = ui.screen_bounds(layout.content_list);
+        let window = crate::virtual_list::GridWindow::new(
+            canvas_before.y,
+            pitch,
+            canvas_before.w + CONTENT_GAP,
+            40_000,
+            ui.screen_bounds(layout.content_scroll),
+        );
+        ui.set_height(layout.content_list, window.content_height(pitch.1));
+        let mut tiles = Vec::new();
+        for index in window.range() {
+            let cell = window.tile_rect(index, pitch);
+            let tile = ui.add_node(
+                ButtonBuilder::new(WidgetBuilder::new()).build(),
+                layout.content_list,
+            );
+            ui.place_node(
+                tile,
+                crate::types::Rect::new(cell.x, cell.y, tile_w, tile_h),
+            );
+            tiles.push((index, tile));
+        }
+        ui.perform_layout();
+
+        assert!(
+            !tiles.is_empty() && tiles.len() < 200,
+            "a screenful, not a folder: {}",
+            tiles.len()
+        );
+        let first = ui.screen_bounds(tiles[0].1);
+        assert!(
+            (first.y - canvas_before.y).abs() < 0.5,
+            "the first tile should sit at the top of the canvas, not {first:?}"
+        );
+
+        // Scroll a hundred rows down. The canvas rises by exactly that much,
+        // which is what tells the next window which rows are now in view.
+        let scroll = 100.0 * pitch.1;
+        ui.send(UiMessage::new(
+            layout.content_scroll,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseWheel {
+                pos: {
+                    let b = ui.screen_bounds(layout.content_scroll);
+                    glam::Vec2::new(b.x + b.w * 0.5, b.y + b.h * 0.5)
+                },
+                // Negative is downward: the viewer subtracts the delta.
+                delta: -scroll,
+                mods: Modifiers::default(),
+            },
+        ));
+        let _ = ui.update();
+        ui.perform_layout();
+
+        let canvas_after = ui.screen_bounds(layout.content_list);
+        assert!(
+            (canvas_before.y - canvas_after.y - scroll).abs() < 1.0,
+            "the canvas moved by {} rather than {scroll}",
+            canvas_before.y - canvas_after.y
+        );
+        let moved = crate::virtual_list::GridWindow::new(
+            canvas_after.y,
+            pitch,
+            canvas_after.w + CONTENT_GAP,
+            40_000,
+            ui.screen_bounds(layout.content_scroll),
+        );
+        // Row 100 is the one the scroll landed on. The window must never
+        // start *below* it — that is a band of empty drawer along the top —
+        // and must not start far above it either, or the saving is spent on
+        // tiles nobody can see. The slack is the overscan row plus the one the
+        // canvas's own margin straddles.
+        let first_row = moved.first / moved.columns;
+        assert!(
+            first_row <= 100 && first_row + 2 >= 100,
+            "a hundred rows of scroll built from row {first_row}"
+        );
+    }
+
+    #[test]
+    fn an_empty_folder_does_not_crop_its_own_empty_state() {
+        // MORROWIND-M, and the trap under it. The canvas is given an explicit
+        // height so the scroll viewer knows how deep the folder is — but an
+        // empty folder is nought rows deep. A canvas that cropped to its own
+        // bounds would build the "this folder is empty" panel perfectly and
+        // then crop it out of existence, which reads to the user exactly like
+        // the blank grey rectangle the empty state exists to replace.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.set_height(layout.content_list, 0.0);
+        let column = crate::editor::parts::build_empty_state(
+            &mut ui,
+            layout.content_list,
+            font_id,
+            crate::metaphor::empty::CONTENT,
+        );
+        assert!(column.is_some(), "the empty state must build a container");
+        ui.perform_layout();
+
+        assert_eq!(
+            ui.screen_bounds(layout.content_list).h,
+            0.0,
+            "fixture: an empty folder is nought rows tall"
+        );
+        let clip = ui.clip_bounds(column);
+        assert!(
+            clip.h > 0.0 && clip.w > 0.0,
+            "the empty state was clipped away by its own container: {clip:?}"
+        );
+        // It is still clipped by the drawer, which is the clip that matters.
+        let drawer = ui.screen_bounds(layout.content_scroll);
+        assert!(clip.h <= drawer.h + 0.5, "{clip:?} escaped {drawer:?}");
+    }
+
+    #[test]
+    fn setting_the_height_a_node_already_has_does_not_invalidate_layout() {
+        // `sync_content_tiles` runs every frame. If the same height counted as
+        // a change, an idle drawer would re-lay-out the whole shell forever.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.set_height(layout.content_list, 4_000.0);
+        ui.perform_layout();
+        ui.set_height(layout.content_list, 4_000.0);
+        assert!(ui.is_layout_valid(layout.content_list));
+        // NaN is never equal to itself, so the same-value check has to say so.
+        ui.set_height(layout.content_list, f32::NAN);
+        ui.perform_layout();
+        ui.set_height(layout.content_list, f32::NAN);
+        assert!(ui.is_layout_valid(layout.content_list));
     }
 }
 

@@ -1,14 +1,14 @@
 # MORROWIND-M — virtualisation, data tables, the localisation editor
 
-**Status:** step 1 partially complete, 2026-08-30. The virtualising container
-exists and the outliner is retrofitted with the acceptance property measured
-through the real draw path.
+**Status:** step 1 complete, 2026-08-30. The virtualising container exists; the
+outliner virtualises its draw and the content drawer virtualises its *widgets*,
+both with the acceptance property measured rather than asserted.
 
 ## The three items, and where this one stops
 
 | Item | State |
 |---|---|
-| 1. A virtualising container, retro-fitted to the outliner, content drawer and asset browser | Container **done**; **outliner done**; drawer and browser **not started** — they are a different shape, see below |
+| 1. A virtualising container, retro-fitted to the outliner, content drawer and asset browser | Container **done**; **outliner done**; **content drawer done** — a different shape, see below. The asset browser is the drawer under another name and inherits it |
 | 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | **Model done**, with the localisation table as its first customer; the grid widget is not built |
 | 3. Asset dependency view, built on MORROWIND-Q's dependency graph | Not started |
 
@@ -93,23 +93,80 @@ the frame time.** A `.somtime` run with a hundred thousand entities in the
 outliner is the remaining half of the acceptance criterion, and it needs the
 content drawer done too or the drawer becomes the new ceiling.
 
-## Why the drawer and the browser are not done
+## The drawer is a different shape, and that is the whole story
 
-They are a **different shape**, and it matters. `refresh_content_list` builds
-`content_entries: Vec<(NodeHandle, ContentEntry)>` — one real widget per asset —
-so virtualising the drawer means *recycling widgets*: creating a fixed pool of
-tiles and rebinding them as the window moves, rather than windowing a loop that
-already had all the data.
+The outliner virtualises its **draw**, because a `TreeView` is one widget that
+paints rows itself. The drawer cannot: a tile is a real `Button` with a real
+`Image` and a real `Text` inside it, and it is a drop target, a drag source and
+a double-click target *by being one*. Windowing the paint would save nothing —
+the widgets would still exist.
 
-That is the harder half of *"recycled rows"* and it is a change to how the
-drawer is populated, not to how it is drawn. Doing it badly — recycling a tile
-whose thumbnail request is still in flight, or losing the drop target under a
-recycled handle — would break two features that work today.
+So in the drawer the window decides **which widgets exist**:
 
-Worth noting that the drawer is not naive about the viewport already:
-`request_visible_thumbnails` promotes only tiles intersecting the scroll
-viewport, so the *expensive* per-tile work is already windowed. What is not
-windowed is the widget count.
+```
+  ScrollViewer  ── clips, owns the scroll offset
+      │
+      └── Canvas ── explicit height = every row in the folder
+               │      (so the scrollbar is honest about a folder
+               │       whose widgets do not exist)
+               │
+               ├── tile 1078  placed at row 98, column 0
+               ├── tile 1079  placed at row 98, column 1
+               └── …          ~40 of them, never more
+```
+
+`refresh_content_list` now does one thing — ask the asset database — and stores
+the answer in `content_all`. `sync_content_tiles` does the other: compute a
+`GridWindow`, and if it differs from the one already built, build it.
+
+Three consequences worth naming, because each was a decision:
+
+- **A wrap panel could not do this.** A flow layout works out where the fourth
+  tile goes by having been given the first three, so it needs all 40,000 to
+  place the ones you can see. The container is a `Canvas` and every tile is
+  placed by `place_node` at the rectangle its index *in the whole folder*
+  earns. Nothing downstream knows the difference.
+- **The canvas must not clip to its own bounds.** An empty folder is nought
+  rows tall, and a canvas that cropped to its bounds would build the "this
+  folder is empty" panel perfectly and then crop it out of existence — the
+  blank grey rectangle that panel exists to replace. The scroll viewer above
+  still clips, which is the clip that matters, and hit-testing consults the
+  clip too, so the overscan row above the viewport is drawn nowhere and
+  clickable nowhere.
+- **Rebuilding is not recycling, and here it is the better answer.** Rebinding
+  a pool would mean a tile whose thumbnail request is in flight being pointed at
+  a different asset, and a drop target whose handle outlives the entry under it.
+  The cost that matters is *bounded work per frame*, and building forty tiles
+  when the window moves is bounded. The one thing that genuinely cannot be
+  rebuilt under the user is an inline rename — a text box parented to a tile —
+  so a rename holds the window still until it lands.
+
+`request_visible_thumbnails` was already windowing the *expensive* per-tile
+work against the viewport; it now runs over a list that is a screenful long
+rather than a folder long, and is left otherwise alone.
+
+### What the tests hold down
+
+`GridWindow` is `RowWindow`'s grid, and it inherits the three bugs already paid
+for there. Its own are the ones a grid adds:
+
+- **The short last row.** Five assets in a four-column grid is two rows, and a
+  window that returned eight indices would panic the caller on the three that
+  do not exist.
+- **The height is every row, not the visible ones.** The scrollbar is the only
+  thing that tells the user 40,000 assets are down there.
+- **A window scrolled past the end is still sliceable.** Walk into a huge
+  folder, scroll to the bottom, walk into a small one: the scroll offset does
+  not reset, so the window is asked about content that is gone. `first` past
+  the end with a count of zero is still an out-of-bounds slice, and the drawer
+  slices with exactly this range.
+
+Two more are integration facts that `GridWindow` cannot see, and they are
+tested through the real editor layout: a canvas given an explicit height makes
+the scroll viewer scrollable to it *with only a screenful of children*, and the
+canvas's screen `y` moves by exactly the scroll — which is the number the next
+window is computed from. Get the second wrong and the drawer builds the right
+number of tiles for the wrong part of the folder.
 
 ## Item 2 — the data table model
 
@@ -150,8 +207,17 @@ lists only what the default locale has. `Table::keys` was added to
 
 ## What this step does not claim
 
-- No frame time was measured. The property was.
-- The outliner is retrofitted; the content drawer and asset browser are not.
+- No frame time was measured. The property was, in both panels.
+- One pre-existing edge is unchanged and now easier to see: a scroll viewer
+  clamps its offset on input, not on layout, so walking from a deep folder into
+  a shallow one leaves the drawer scrolled past its own content until the next
+  wheel event. It showed a blank drawer before this change and shows a blank
+  drawer after it; the windowed build is simply the reason it is worth writing
+  down.
+- A freshly built tile has no bounds until the next arrange, so thumbnails for
+  a row scrolled into view are requested one frame later. The thumbnail pump is
+  already asynchronous and bounded per frame, so this is a frame of icon rather
+  than a frame of nothing.
 - Nothing here touches items 2 and 3 — the data table editor and the dependency
   view — and the localisation table, which item 2 names as its first customer,
   is still edited outside the editor.

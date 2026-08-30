@@ -18,6 +18,7 @@ use crate::{
     widgets::{
         border::BorderBuilder,
         button::ButtonBuilder,
+        canvas::CanvasBuilder,
         check_box::CheckBoxBuilder,
         grid::{Column, GridBuilder, Row},
         popup::PopupBuilder,
@@ -25,7 +26,6 @@ use crate::{
         search_box::{BreadcrumbBuilder, SearchBoxBuilder},
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
-        wrap_panel::WrapPanelBuilder,
     },
 };
 
@@ -148,12 +148,26 @@ pub(crate) fn build_content_drawer(
     )
     .build();
     let list_scroll_h = ui.add_node(list_scroll, grid_h);
-    let list = WrapPanelBuilder::new(
+    // MORROWIND-M. A canvas, not a wrap panel: the drawer places the tiles it
+    // built at absolute positions, because with a folder of 40,000 assets only
+    // the screenful in view exists as widgets and a flow layout would have to
+    // be handed all of them to know where any of them go.
+    let list = CanvasBuilder::new(
         WidgetBuilder::new()
             .with_margin(Thickness::uniform(8.0))
+            // Top, not the default stretch: the canvas is given an explicit
+            // height covering the whole folder, and a stretched child with an
+            // explicit height is *centred* in the space it was handed — which
+            // for a folder shorter than the drawer would float the tiles in
+            // the middle of it.
+            .with_vertical_alignment(VerticalAlignment::Top)
+            // And so it must not clip: an empty folder is nought rows tall, and
+            // a canvas that cropped to its own bounds would build the "this
+            // folder is empty" panel and then crop it out of existence. The
+            // scroll viewer above still clips, which is the clip that matters.
+            .with_clip_to_bounds(false)
             .with_background(theme::TRANSPARENT),
     )
-    .with_gap(10.0, 10.0)
     .build();
     let list_h = ui.add_node(list, list_scroll_h);
 
