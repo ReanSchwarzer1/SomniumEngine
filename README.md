@@ -52,6 +52,52 @@ The engine is organized around three deliberate commitments:
 > **Architecture reference:** [`context.md`](context.md) — living, continuously
 > updated, and the file to read before the source.
 
+## What is in here
+
+Sixteen engine crates, two example games, and the tools that keep the
+documentation honest. `somnium_core` is deliberately the widest: it coordinates
+subsystems without absorbing their internals.
+
+```mermaid
+flowchart TB
+    OS["winit and the operating system"] --> CORE["somnium_core<br/>lifecycle, GameApp, editor, scene schema"]
+
+    subgraph Foundation["Foundations"]
+        ECS["somnium_ecs<br/>archetype storage"]
+        JOBS["somnium_jobs<br/>priorities and deadlines"]
+        SHADER["somnium_shader<br/>WGSL composition"]
+        ANIM["somnium_anim"]
+        INPUT["somnium_input"]
+        I18N["somnium_i18n"]
+    end
+
+    subgraph Boundaries["Boundaries to the outside"]
+        ASSET["somnium_asset<br/>glTF, cook, residency"]
+        SCRIPT["somnium_script + _luau"]
+        PHYS["somnium_physics<br/>Jolt"]
+        AUDIO["somnium_audio<br/>Kira"]
+    end
+
+    subgraph Present["What you see"]
+        RENDER["somnium_renderer<br/>visibility buffer, terrain, water"]
+        UI["somnium_ui<br/>editor shell and game canvas"]
+        VOXEL["somnium_voxel"]
+    end
+
+    CORE --> Foundation
+    CORE --> Boundaries
+    CORE --> Present
+    RENDER --> ECS
+    RENDER --> ASSET
+    RENDER --> ANIM
+    RENDER --> SHADER
+    UI --> SHADER
+    ASSET --> JOBS
+
+    CORE --> GAMES["examples:<br/>hello_engine, vvardenfell"]
+    TOOLS["tools: census, ghostfence,<br/>shadercook, reachability, assetcook"] -.->|"gate the tree"| CORE
+```
+
 ## Screenshots
 
 ![The Somnium editor](media/editor.png)
@@ -136,6 +182,31 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 
 See [`context.md`](context.md) for prerequisites, open work, and the distinction
 between current capability and planned design.
+
+## How a frame becomes a pixel
+
+Geometry is rasterized once into identity, not colour. One fullscreen pass then
+shades each visible pixel exactly once, which is why the shading cost tracks the
+framebuffer rather than the scene.
+
+```mermaid
+flowchart LR
+    ECS["ECS draw queue"] --> CULL["cull<br/>CPU frustum, GPU compute,<br/>meshlets, Hi-Z"]
+    CULL --> VIS["visibility buffer<br/>instance + triangle id"]
+    VIS --> SHADE["fullscreen shading<br/>one invocation per pixel"]
+    SHADOW["shadows<br/>CSM or virtual"] --> SHADE
+    GI["GI<br/>ReSTIR or DDGI"] --> SHADE
+    SHADE --> HDR["HDR"]
+    HDR --> WATER["water and transparency"]
+    WATER --> POST["post, AA, tone map"]
+    POST --> UIP["game UI, then editor shell"]
+    UIP --> OUT["present"]
+```
+
+Measured on the default Coastal view at 1920x1032, the shading pass reports
+exactly 1,981,440 fragment invocations for 1,981,440 pixels. No overdraw, by
+construction. Where the rest of the frame goes is in
+[context.md](context.md#where-the-frame-actually-goes).
 
 ## Highlights
 

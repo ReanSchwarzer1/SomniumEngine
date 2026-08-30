@@ -707,6 +707,35 @@ flowchart LR
 Scene files are authored truth. GPU slots, loaded pointers, preview textures,
 and other process-local values are derived state and do not belong in them.
 
+The round trip is where that promise is kept or broken. A build missing a
+component must hand back what it could not understand, or opening and saving a
+scene deletes work:
+
+```mermaid
+sequenceDiagram
+    participant Disk as .somnium on disk
+    participant Load as Loader
+    participant Schema as Registered schemas
+    participant World as ECS world
+    participant Save as Serializer
+
+    Disk->>Load: open, route by format
+    Load->>Schema: match each component by name and version
+    Schema-->>Load: known fields, typed and defaulted
+    Load->>Load: keep unknown components and fields verbatim
+    Load->>World: spawn entities with known components
+    Note over Load,World: retained unknowns stay beside the entity,<br/>not in the ECS
+    World->>Save: edited state
+    Load->>Save: retained unknowns, untouched
+    Save->>Disk: known fields re-serialized, unknowns written back
+    Note over Disk: a scene opened in a build missing a<br/>component still saves that component
+```
+
+Before CONTROL-J the loader dropped what it did not recognise with a warning, so
+that path was silent data loss rather than a version mismatch. The header
+thumbnail is written into the container so the asset drawer can show a scene
+without parsing its body.
+
 ## Renderer
 
 ### Core pipeline
@@ -857,6 +886,30 @@ SSR owns the near field where it is confident, the traced ray fills the rest,
 and the cube is the miss. That ordering is why turning ray tracing off degrades
 rather than breaks.
 
+Terrain is worth its own picture, because it is effectively the whole shading
+pass. One pixel of ground walks all of this:
+
+```mermaid
+flowchart TB
+    HM["heightmap"] --> CHUNK["chunk LOD<br/>stitched, crack-free"]
+    CHUNK --> VIS["visibility buffer<br/>same pass as everything else"]
+    VIS --> EVAL["evaluate_terrain_material"]
+    SPLAT["8 splatmaps<br/>32 layer weights"] --> SCAN["strongest-four scan<br/>one pass, top four in scalars"]
+    SCAN --> EVAL
+    EVAL --> SRC{"where do the<br/>texels come from?"}
+    SRC -->|"live path"| LAYERS["4 layer samples<br/>hex tiling, parallax, height blend"]
+    SRC -->|"clipmap, off by default"| CLIP["nested macro + detail rings<br/>blended once into the cache"]
+    SRC -->|"virtual texturing"| VT["paired BC7 pages<br/>64 MiB atlas, LRU"]
+    LAYERS --> OUT["surface: albedo, normal, roughness"]
+    CLIP --> OUT
+    VT --> OUT
+    OUT --> SHADE["shading pass"]
+```
+
+Phase 25A is why the visibility buffer is in that chain at all. Terrain used to
+shade in its own pass afterwards, which meant it missed GTAO, contact shadows and
+traced visibility, and every lighting change had to be written twice.
+
 Current conservative defaults matter:
 
 - Terrain hex tiling and parallax are off on the shipped maps.
@@ -933,6 +986,31 @@ In tree:
 
 Text shaping with `cosmic-text`, bidi, and broad fallback is still open. The
 current text path should not be described as full international shaping.
+
+The same widget system serves two trees with different owners. Layout is two
+passes and paint is a third, and all three walk the tree every frame.
+
+```mermaid
+flowchart TB
+    subgraph Trees["Two trees, one system"]
+        SHELL["editor shell<br/>engine-owned"]
+        CANVAS["UiCanvas<br/>game-owned"]
+    end
+    SHELL --> MEASURE
+    CANVAS --> MEASURE
+    MEASURE["measure, bottom-up<br/>each node asks for a size"] --> ARRANGE["arrange, top-down<br/>each node is given a rect"]
+    ARRANGE --> DRAW["draw, with clip stack"]
+    DRAW --> PRIM["Primitive instances<br/>100 bytes each"]
+    PRIM --> UIPASS["UiPass"]
+    ARRANGE --> A11Y["semantic tree"]
+    A11Y --> ACC["AccessKit"]
+    UIPASS --> SURFACE["swapchain, after the scene"]
+```
+
+Measure results are cached and only invalidated upward, which is why
+`invalidate_ancestors` has to walk to the root rather than to the parent. The
+accessibility tree comes off the same arrange, so a control cannot be visible and
+unreachable, or reachable and mispositioned.
 
 ### Authoring surfaces
 
@@ -1107,6 +1185,28 @@ Open:
 - Clip compression.
 - Pose task graph work.
 
+The renderer never evaluates an animation graph. It receives matrices.
+
+```mermaid
+flowchart LR
+    CLIP["clips<br/>validated tracks, looping"] --> BLEND
+    PARAM["typed parameters<br/>and triggers"] --> MACHINE
+    BLEND["Blend1D / triangulated Blend2D"] --> LAYERS["masked layers<br/>per-bone weights"]
+    MACHINE["state machine<br/>transitions, sync tracks"] --> BLEND
+    LAYERS --> CACHE["bounded pose cache<br/>keyed by generation, lane,<br/>graph id, version, node"]
+    CACHE --> POSE["local pose"]
+    POSE --> MODEL["model pose"]
+    MODEL --> PALETTE["matrix palette"]
+    PALETTE --> SKIN["one compute dispatch<br/>four-weight skinning"]
+    SKIN --> POOL["posed vertices<br/>back into the shared geometry pool"]
+    POOL --> CULL["culling and visibility"]
+```
+
+Skinning writes into the same geometry pool everything else lives in, before
+culling, which is what keeps the renderer's seam unchanged: it draws posed
+vertices the same way it draws static ones. Graph and machine versions reject
+stale live instances rather than indexing a replacement definition.
+
 ### Physics and characters
 
 Jolt is wrapped by safe body, shape, contact, layer, and world modules. The raw
@@ -1124,8 +1224,17 @@ tree.
 
 The input stack separates hardware controls from game actions:
 
-```text
-device event -> ControlPath -> Processor -> Interaction -> ActionValue
+```mermaid
+flowchart LR
+    DEV["keyboard, mouse, gamepad<br/>hot-plug aware"] --> PATH["ControlPath<br/>names a physical control"]
+    PATH --> PROC["Processor<br/>dead zone, invert, scale"]
+    PROC --> INT["Interaction<br/>tap, hold, multi-tap"]
+    INT --> VAL["ActionValue"]
+    COMP["composite binding<br/>WASD as one 2D axis"] --> VAL
+    PATH --> COMP
+    MAP["action map<br/>per context"] --> VAL
+    VAL --> GAME["game or editor"]
+    REBIND["runtime rebinding"] -.->|"conflict reported,<br/>not silently accepted"| MAP
 ```
 
 It supports keyboard and gamepad controls, radial dead zones, inversion,
