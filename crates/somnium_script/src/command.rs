@@ -84,6 +84,20 @@ pub enum AnimationParameterValue {
 /// what stops this enum growing a case for every component the engine
 /// will ever have — the failure mode visible in engines that hand-wrote
 /// one binding file per subsystem.
+/// A value a script may write into an authored UI element.
+///
+/// Deliberately three variants and not `ReflectObject`. `somnium_script` must
+/// not learn `somnium_ui`'s types — a script crate that depends on the widget
+/// crate is how a headless build stops building — so this is the narrow
+/// intersection both sides can name, mapped to `somui::Value` at the point the
+/// game applies it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiValue {
+    Bool(bool),
+    Number(f64),
+    Text(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptCommand {
     /// Write some fields of a component the entity already has.
@@ -157,6 +171,22 @@ pub enum ScriptCommand {
         /// Payload.
         payload: ReflectObject,
     },
+    /// Set one property of one element of an authored `.somui` document.
+    ///
+    /// Addressed **by name**, never by handle. A script asking for `Score` is
+    /// asking for the thing the author called Score; a pool index changes on
+    /// every load and would make a saved script wrong for reasons nobody could
+    /// see. MORROWIND-M2.
+    SetUiProperty {
+        /// The document the game registered, by its own name for it.
+        document: String,
+        /// The element's authored name.
+        element: String,
+        /// The property key the widget kind understands.
+        property: String,
+        /// The value.
+        value: UiValue,
+    },
     /// Write a line to the output log, tagged with the emitting script.
     Log {
         /// Severity.
@@ -186,6 +216,7 @@ impl ScriptCommand {
             Self::SetAnimationParameter { .. } => C::WRITE_FIELDS,
             Self::PlayAudio { .. } => C::AUDIO,
             Self::EmitEvent { .. } => C::EVENTS,
+            Self::SetUiProperty { .. } => C::UI,
             Self::Log { .. } => C::LOG,
         }
     }
@@ -203,6 +234,7 @@ impl ScriptCommand {
             Self::SetAnimationParameter { .. } => "setAnimationParameter",
             Self::PlayAudio { .. } => "playAudio",
             Self::EmitEvent { .. } => "emit",
+            Self::SetUiProperty { .. } => "setUiProperty",
             Self::Log { .. } => "log",
         }
     }

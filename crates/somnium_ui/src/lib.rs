@@ -24,6 +24,8 @@ pub mod pool;
 pub mod primitive;
 pub mod runtime;
 pub mod shaped;
+pub mod somui;
+pub mod somui_editor;
 pub mod style;
 pub mod text;
 pub mod theme;

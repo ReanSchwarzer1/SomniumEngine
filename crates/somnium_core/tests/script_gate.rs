@@ -46,6 +46,9 @@ struct Gate {
     step: u64,
     /// MORROWIND-N: what the host tells scripts about this frame.
     stepping: bool,
+    /// MORROWIND-M2: the authored documents a script may drive, when the test
+    /// asked for some.
+    ui: Option<somnium_core::somui_host::UiDocuments>,
     forces: Arc<AtomicU32>,
 }
 
@@ -90,6 +93,7 @@ impl Gate {
             instance,
             step: 0,
             stepping: false,
+            ui: None,
             forces,
         }
     }
@@ -121,6 +125,10 @@ impl Gate {
         let mut services = HostServices {
             physics: self.physics.as_mut(),
             audio: None,
+            ui: self
+                .ui
+                .as_mut()
+                .map(|documents| documents as &mut dyn somnium_core::script_host::UiDocumentSink),
         };
         self.host.sync(&mut self.world, &phase, &mut services);
         self.host
@@ -405,5 +413,110 @@ fn a_script_can_tell_a_hand_driven_step_from_a_running_one() {
     assert!(
         gate.log().iter().any(|line| line == "stepped"),
         "a hand-driven step must reach the script"
+    );
+}
+
+// ── MORROWIND-M2: a `.somui` driven from script ────────────────────────────
+
+const HUD_DOCUMENT: &str = r#"{
+    "version": 1,
+    "reference": [1920.0, 1080.0],
+    "root": {
+        "kind": "panel", "name": "Root",
+        "anchor_min": [0.0, 0.0], "anchor_max": [1.0, 1.0],
+        "offsets": [0.0, 0.0, 0.0, 0.0], "pivot": [0.0, 0.0],
+        "children": [{
+            "kind": "text", "name": "Score",
+            "anchor_min": [1.0, 0.0], "anchor_max": [1.0, 0.0],
+            "offsets": [-232.0, 28.0, 204.0, 32.0], "pivot": [0.0, 0.0],
+            "properties": { "text": { "Text": "0" } }
+        }]
+    }
+}"#;
+
+/// A script that writes the step count into the HUD every fixed step.
+const HUD_DRIVER: &str = r#"
+return Script.define({
+	apiVersion = 1,
+	schemaVersion = 1,
+	uses = {},
+	fields = {},
+	onFixedUpdate = function(self, ctx)
+		ctx:setUiProperty("hud", "Score", "text", tostring(ctx.step))
+	end,
+})
+"#;
+
+/// MORROWIND-M2's proof clause, below the window.
+///
+/// > *"If a `.somui` authored in the editor cannot be loaded by
+/// > `examples/vvardenfell` and driven by script, Track 1 built a framework
+/// > nobody can reach."*
+///
+/// This is the whole chain in one test: Luau calls `setUiProperty`, the command
+/// buffer carries it, the bridge validates and collects it, the host hands it to
+/// the game's document registry, and a live retained widget changes. Nothing
+/// here is a window, and nothing here is a mock.
+#[test]
+fn a_luau_script_drives_an_authored_somui_document() {
+    let mut gate = Gate::new();
+    let mut documents = somnium_core::somui_host::UiDocuments::new();
+    documents
+        .load("hud", HUD_DOCUMENT)
+        .expect("the fixture document is valid");
+    gate.ui = Some(documents);
+
+    let asset = ScriptAssetId::mint();
+    gate.host
+        .load_script(asset, "hud_driver.luau", HUD_DRIVER)
+        .unwrap_or_else(|d| panic!("the driver must compile:\n{d}"));
+    let entity = gate.world.spawn((
+        Name::new("HudDriver"),
+        Transform::default(),
+        ScriptSet::new(),
+    ));
+    gate.world
+        .get_mut::<ScriptSet>(entity)
+        .unwrap()
+        .attach(ScriptAttachment::new(asset));
+
+    gate.frame(&InputSnapshot::default());
+    gate.frame(&InputSnapshot::default());
+
+    let documents = gate.ui.as_mut().expect("the registry is still there");
+    let hud = documents.get_mut("hud").expect("hud is registered");
+    hud.canvas.ui_mut().update();
+    let handle = hud.instance.handle("Score").expect("Score is live");
+    assert_eq!(
+        hud.canvas.ui().a11y_probe(handle).unwrap().name,
+        "1",
+        "the second frame's step should be showing in the HUD"
+    );
+}
+
+/// A game that never answered `ui_documents` gets told, not ignored.
+#[test]
+fn a_ui_write_with_no_documents_is_reported_rather_than_dropped() {
+    let mut gate = Gate::new();
+    let asset = ScriptAssetId::mint();
+    gate.host
+        .load_script(asset, "hud_driver.luau", HUD_DRIVER)
+        .unwrap();
+    let entity = gate.world.spawn((
+        Name::new("HudDriver"),
+        Transform::default(),
+        ScriptSet::new(),
+    ));
+    gate.world
+        .get_mut::<ScriptSet>(entity)
+        .unwrap()
+        .attach(ScriptAttachment::new(asset));
+
+    gate.frame(&InputSnapshot::default());
+
+    let rejections = gate.host.take_rejections();
+    assert!(
+        rejections.iter().any(|line| line.contains("ui_documents")),
+        "a silently dropped HUD write is the failure this guards: {rejections:?}"
     );
 }

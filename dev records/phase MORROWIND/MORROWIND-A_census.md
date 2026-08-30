@@ -18,13 +18,13 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,247 | +13,041 | 32.2% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 61,138 | +33,608 | 31.1% | 651 | +436 | 102 | 2 |
-| `somnium_core` | 34,316 | +15,096 | 17.5% | 388 | +171 | 45 | 0 |
+| `somnium_renderer` | 63,247 | +13,041 | 32.0% | 436 | +108 | 91 | 55 |
+| `somnium_ui` | 61,426 | +33,896 | 31.1% | 656 | +441 | 102 | 2 |
+| `somnium_core` | 34,803 | +15,583 | 17.6% | 394 | +177 | 46 | 0 |
 | `somnium_asset` | 6,232 | +4,593 | 3.2% | 48 | +42 | 12 | 0 |
-| `somnium_ecs` | 5,227 | +1,209 | 2.7% | 69 | +15 | 9 | 0 |
-| `somnium_script` | 4,910 | +95 | 2.5% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,776 | +319 | 2.4% | 59 | +1 | 9 | 0 |
+| `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
+| `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
+| `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.2% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.6% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.6% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **196,624** | +82,732 | | **1982** | +1,037 | | |
+| **Total** | **197,500** | +83,608 | | **1993** | +1,048 | | |
 
 The top three crates are **80.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -49,10 +49,10 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1195 | 251 | 110 | 8 | 12 | 185 | 100 | **1862** |
+| `somnium_ui` | 1196 | 251 | 111 | 8 | 12 | 185 | 100 | **1864** |
 | `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
-| `somnium_core` | 323 | 107 | 23 | 3 | 3 | 46 | 40 | **545** |
-| `somnium_script` | 126 | 35 | 9 | 3 | 3 | 18 | 11 | **205** |
+| `somnium_core` | 330 | 110 | 23 | 4 | 3 | 46 | 41 | **557** |
+| `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 82 | 47 | 10 | 0 | 0 | 12 | 8 | **159** |
 | `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
@@ -95,7 +95,7 @@ is a system this phase still owes.
 |---|---:|---:|---:|---|
 | `bone` | 5 | 0 | +5 | No skeletal animation of any kind (Track 5). |
 | `armature` | 1 | 0 | +1 | As above. |
-| `skin` | 29 | 8 | +21 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
+| `skin` | 30 | 8 | +22 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |
 | `pathfind` | 0 | 0 | — | As above. |
 | `gamepad` | 8 | 0 | +8 | No input abstraction (Track 8, Seam 5). |
@@ -104,7 +104,7 @@ is a system this phase still owes.
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
 | `prefab` | 6 | 2 | +4 | Both are comments in the scripting crate. No prefab system (Track 3). |
 | `dock` | 10 | 5 | +5 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
-| `accessib` | 11 | 1 | +10 | A doc comment about script-accessible fields. No accessibility (Track 1). |
+| `accessib` | 12 | 1 | +11 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |
 
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)

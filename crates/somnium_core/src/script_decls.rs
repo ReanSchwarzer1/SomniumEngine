@@ -138,6 +138,15 @@ export type Context = {
 	--- Queue a spawn. Returns a token, not an entity — the entity does
 	--- not exist until the phase commits.
 	spawn: (self: Context) -> SpawnToken,
+	--- Set one property of one element of an authored `.somui` document.
+	---
+	--- Addressed by the names the author gave: the document as the game
+	--- registered it, then the element, then the property the widget kind
+	--- understands (`text` on a text element, `visible` on any). Deferred
+	--- like every other write, and refused unless the script holds the `UI`
+	--- capability.
+	setUiProperty: (self: Context, document: string, element: string,
+		property: string, value: boolean | number | string) -> (),
 	--- Queue a despawn. An entity may despawn itself; the callback
 	--- finishes first.
 	despawn: (self: Context, entity: Entity) -> (),

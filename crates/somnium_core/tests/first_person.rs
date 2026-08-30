@@ -176,6 +176,7 @@ impl Rig {
             let mut services = HostServices {
                 physics: Some(&mut self.physics),
                 audio: None,
+                ui: None,
             };
             self.host.sync(&mut self.world, &phase, &mut services);
         }
@@ -185,6 +186,7 @@ impl Rig {
             let mut services = HostServices {
                 physics: Some(&mut self.physics),
                 audio: None,
+                ui: None,
             };
             self.host
                 .fixed_update(&mut self.world, time, input, &mut services);

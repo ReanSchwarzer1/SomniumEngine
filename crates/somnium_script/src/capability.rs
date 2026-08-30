@@ -34,6 +34,12 @@ impl Capabilities {
     /// Nothing at all. A script with this can compute and log nothing.
     pub const NONE: Self = Self(0);
 
+    /// How many capability bits are defined.
+    ///
+    /// Named so [`Self::PROJECT`] and the test that checks it cannot drift
+    /// apart from the list above without somebody noticing.
+    pub const BIT_COUNT: u32 = 10;
+
     /// Write fields of a component an entity already has.
     pub const WRITE_FIELDS: Self = Self(1 << 0);
     /// Attach a component.
@@ -52,13 +58,20 @@ impl Capabilities {
     pub const EVENTS: Self = Self(1 << 7);
     /// Write to the output log.
     pub const LOG: Self = Self(1 << 8);
+    /// Drive an authored `.somui` document.
+    ///
+    /// Its own capability rather than `WRITE_FIELDS`, because the authority is
+    /// different in kind: a HUD is what the player reads, and a script that may
+    /// set an entity's health should not automatically be able to rewrite the
+    /// number shown for it. MORROWIND-M2.
+    pub const UI: Self = Self(1 << 9);
 
     /// What a project's own scripts get: everything.
     ///
     /// Generous on purpose. These are written by the same people as the
     /// rest of the game, and a capability system that made ordinary
     /// gameplay work annoying would be turned off rather than tuned.
-    pub const PROJECT: Self = Self(0x1FF);
+    pub const PROJECT: Self = Self(0x3FF);
 
     /// What an untrusted package gets by default: nearly nothing.
     ///
@@ -116,6 +129,7 @@ impl Capabilities {
             Self::AUDIO => "play audio",
             Self::EVENTS => "emit events",
             Self::LOG => "write to the log",
+            Self::UI => "drive authored UI",
             Self::NONE => "nothing",
             _ => "several capabilities",
         }
@@ -148,8 +162,21 @@ mod tests {
 
     #[test]
     fn a_project_script_may_do_everything_a_command_can_express() {
-        for bit in 0..9 {
-            assert!(Capabilities::PROJECT.allows(Capabilities(1 << bit)));
+        // The bound is `BIT_COUNT` and not a literal on purpose: written as
+        // `0..9` this test kept passing when a tenth capability was added and
+        // `PROJECT` was not widened to include it, which is exactly the bug it
+        // exists to catch.
+        for bit in 0..Capabilities::BIT_COUNT {
+            let capability = Capabilities(1 << bit);
+            assert!(
+                Capabilities::PROJECT.allows(capability),
+                "PROJECT does not grant bit {bit}"
+            );
+            assert_ne!(
+                capability.name(),
+                "several capabilities",
+                "bit {bit} has no name"
+            );
         }
     }
 

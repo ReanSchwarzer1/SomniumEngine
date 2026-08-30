@@ -62,6 +62,7 @@ use somnium_asset::cook::{
     submit_cook,
 };
 use somnium_asset::residency::{AssetHandle, AssetRequest, ResidencyConfig, ResidencyManager};
+use somnium_core::somui_host::UiDocuments;
 use somnium_core::world_partition::{ActorRecord, CellCoord, PartitionStore, WorldPartition};
 use somnium_core::{
     DefaultLandscapePreset, Engine, EngineConfig, EngineContext, GameApp, GameUiFrame, Name,
@@ -101,6 +102,12 @@ struct Vvardenfell {
     hud: Option<HudTree>,
     /// The world-space name-plate, its own canvas because it is its own space.
     plate: Option<somnium_core::UiCanvas>,
+    /// MORROWIND-M2. Serialized `.somui` assets instantiated through the
+    /// public runtime seam and registered by name, so a Luau script can address
+    /// them. Deliberately separate from the hand-built HUD above: the example
+    /// has to prove both authoring paths are real, not that one replaces the
+    /// other.
+    authored_ui: UiDocuments,
     /// MORROWIND-K. The first graph consumer compiled through public APIs into
     /// the same material asset used by property authoring.
     graph_material: Option<material::CompiledMaterialGraph>,
@@ -122,6 +129,17 @@ struct Vvardenfell {
 }
 
 impl GameApp for Vvardenfell {
+    /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
+    ///
+    /// The documents belong to the game, so the engine asks for them rather
+    /// than owning them. Returning `None` here would leave the HUD driver
+    /// script producing one rejection line per frame instead of a number —
+    /// which is deliberately noisy, because a HUD that quietly never updates is
+    /// the harder failure to find.
+    fn ui_documents(&mut self) -> Option<&mut dyn somnium_core::script_host::UiDocumentSink> {
+        Some(&mut self.authored_ui)
+    }
+
     fn on_init(&mut self, ctx: &mut EngineContext) {
         // MORROWIND-AB. The game selects the portable GI tier through the
         // public reflected scene component, exactly as an editor-authored
@@ -205,6 +223,41 @@ impl GameApp for Vvardenfell {
             plate_layout.logical_size.x, plate_layout.logical_size.y
         );
         self.plate = Some(somnium_core::UiCanvas::with_canvas(plate, viewport));
+
+        self.authored_ui
+            .load("hud", include_str!("../assets/vvardenfell.somui"))
+            .expect("the checked-in .somui example is valid");
+        {
+            let hud = self.authored_ui.get("hud").expect("just registered");
+            println!(
+                "  authored UI -> {} widgets, Score is addressable: {}",
+                hud.document.elements().len(),
+                hud.instance.handle("Score").is_some()
+            );
+        }
+
+        // MORROWIND-M2's proof clause: the document is not an editor-only
+        // convenience, so a script drives it by the names its author chose.
+        let hud_asset = somnium_script::ids::ScriptAssetId::mint();
+        ctx.scripts
+            .load_script(
+                hud_asset,
+                "vvardenfell/hud.luau",
+                r#"
+                return Script.define({
+                    apiVersion = 1,
+                    schemaVersion = 1,
+                    onFixedUpdate = function(self, ctx)
+                        ctx:setUiProperty("hud", "Score", "text",
+                            string.format("Step %d", ctx.step))
+                    end,
+                })
+                "#,
+            )
+            .expect("the HUD driver compiles");
+        let mut hud_scripts = somnium_script::attachment::ScriptSet::new();
+        hud_scripts.attach(somnium_script::attachment::ScriptAttachment::new(hud_asset));
+        ctx.world.spawn((Name::new("HUD Driver"), hud_scripts));
 
         let catalogue = catalogues::material();
         let mut graph = Graph::new();
@@ -410,6 +463,14 @@ impl GameApp for Vvardenfell {
         }
         if let Some(plate) = self.plate.as_mut() {
             frame.draw(plate);
+        }
+        for authored in self.authored_ui.iter_mut() {
+            // Layout first, draw second. A frame drawn before the relayout
+            // shows the previous viewport's arrangement for one frame, which
+            // reads as a flicker on every resize.
+            let viewport = authored.canvas.ui().screen_size;
+            authored.relayout(viewport);
+            frame.draw(&mut authored.canvas);
         }
     }
 

@@ -513,6 +513,19 @@ pub trait GameApp {
 
     /// Called after a version-2 map factory finishes (drawer double-click or tests).
     fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
+
+    /// The game's authored `.somui` documents, for `ctx:setUiProperty`.
+    ///
+    /// MORROWIND-M2. Defaulted to `None` so no existing game changes; a game
+    /// that returns `None` and whose scripts write UI gets one rejection line
+    /// naming this method, rather than a HUD that quietly never updates.
+    ///
+    /// The engine does not own these because a HUD is part of the game: how
+    /// many documents there are and what they are called is not something an
+    /// engine can decide for it.
+    fn ui_documents(&mut self) -> Option<&mut dyn crate::script_host::UiDocumentSink> {
+        None
+    }
 }
 
 /// Joins a boxed [`GameApp`] to the renderer's [`somnium_ui::GameUi`] seam.
@@ -1235,6 +1248,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         let report = self.scripts.sync(&mut self.world, &phase, &mut services);
         if report.hit_cap {
@@ -1248,6 +1262,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts
             .fixed_update(&mut self.world, time, &input, &mut services);
@@ -1259,6 +1274,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts
             .update(&mut self.world, time, &input, &mut services);
@@ -2193,6 +2209,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts.shutdown(&mut self.world, &mut services);
         if let Some(checkpoint) = self.play_checkpoint.take() {

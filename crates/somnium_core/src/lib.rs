@@ -89,6 +89,7 @@ pub mod selection;
 pub mod settings;
 /// Phase CONTROL-M: the sky and its cloud layer.
 pub mod sky;
+pub mod somui_host;
 pub mod sun;
 pub mod time;
 /// Phase CONTROL-L: the day cycle.
