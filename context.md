@@ -308,6 +308,207 @@ The important seams are directional:
 | Cell ownership instead of proximity-only streaming | Unload can persist real authored entities transactionally | Cross-cell relationships need explicit treatment |
 | CSM as the measured default, VSM as authored | Small scenes keep the proven path while VSM remains available | Two shadow paths remain supported |
 
+## Core ideas, illustrated
+
+Five ideas explain most of what the code looks like. Each is a trade that was
+made deliberately, and each is cheap to verify in the tree.
+
+### 1. Shade every pixel exactly once
+
+A conventional forward or deferred renderer pays for **overdraw**: a pixel
+behind an opaque surface is shaded, then thrown away when something nearer
+draws over it. The visibility buffer removes that by separating *which surface
+is here* from *what does it look like*.
+
+```
+Pass 1 — rasterize all geometry, write (instance, primitive) identity per pixel
+Pass 2 — one fullscreen shader, look up that exact triangle, shade it once
+```
+
+```mermaid
+flowchart LR
+    GEO["scene geometry"] --> RASTER["rasterize<br/>identity only"]
+    RASTER --> VB["visibility buffer<br/>R32Uint: instance + primitive"]
+    RASTER --> DEPTH["depth"]
+    VB --> RESOLVE["fullscreen pass<br/>refetch the triangle"]
+    RESOLVE --> BARY["barycentrics and<br/>analytic UV gradients"]
+    BARY --> MAT["material evaluation"]
+    MAT --> HDR["HDR colour"]
+    DEPTH -.->|"reconstruct world position"| RESOLVE
+```
+
+Nothing is shaded twice, and bandwidth scales with the **framebuffer** rather
+than with scene complexity.
+
+That is a claim, so it is measured rather than asserted. Every `.somtime` run
+records pipeline statistics for the shading pass:
+
+| Render size | Pixels | `Shading.frag` (fragment invocations) |
+|---|---:|---:|
+| 1920 x 1032 | 1,981,440 | **1,981,440** |
+| 2560 x 1392 | 3,563,520 | **3,563,520** |
+
+Exactly one invocation per pixel, at both sizes. The cost of that pass is
+therefore entirely *per-pixel work* — never geometry, never overdraw — which is
+why the only levers that have ever moved it are pixel count and deleting
+material work.
+
+**The trade:** material evaluation becomes centralized and specialized, and a
+blended surface cannot go through a buffer that stores one triangle per pixel.
+That is why `pass/transparent.rs` and `pass/oit.rs` exist at all.
+
+### 2. One bind group for the whole scene
+
+Geometry, materials and textures are uploaded once and addressed by index.
+Every pass binds the *same* `@group(0)`, so a shader can reach any mesh or any
+texture in the scene without rebinding anything.
+
+```
+@group(0) — the global pool, bound once, shared by every pass
+├── 0  vertices          every mesh vertex, one storage buffer
+├── 1  indices           every mesh index
+├── 2  instances         rebuilt each frame
+├── 3  view              camera and matrices
+├── 4  textures[]        bindless array
+├── 5  materials         every material
+├── 6  light             the directional light
+├── 7  local_lights      point and spot
+├── 8  light_index_list  per-froxel light lists
+├── 9  cluster_offsets   per-froxel spans
+└── 10 cluster_params    grid dimensions
+```
+
+Meshes are drawn by **programmable vertex pulling**: no vertex buffer is bound,
+and the vertex shader reads `vertices[instance.vertex_offset + index]` itself.
+That is what lets one indirect draw cover unrelated meshes.
+
+### 3. Queries walk contiguous memory
+
+Entities sharing a component signature live in one archetype, stored as
+parallel columns — struct-of-arrays, not array-of-structs:
+
+```
+Archetype { Transform, MeshComponent, MaterialComponent }
+
+  entity slot:    [  0  |  1  |  2  |  3  ]
+  Transform:      [  T0 |  T1 |  T2 |  T3 ]   contiguous
+  MeshComponent:  [  M0 |  M1 |  M2 |  M3 ]   contiguous
+  MaterialComp:   [  C0 |  C1 |  C2 |  C3 ]   contiguous
+```
+
+Iterating `(Transform, Mesh, Material)` walks three dense slabs. A query selects
+archetypes whose component set is a superset of what was asked for, so the
+per-entity cost is a column index rather than a hash lookup.
+
+**The trade:** adding or removing a component moves an entity between
+archetypes. That is a structural change, not a field write.
+
+### 4. An asset has one identity and many states
+
+A handle is stable for the lifetime of the scene. Whether its bytes are
+resident is a separate question, and the answer can change every frame while
+the handle does not.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Requested: scene or editor asks
+    Requested --> Pending: resolver I/O submitted as a job
+    Pending --> Installing: bytes arrived, metered by upload budget
+    Installing --> Resident: published atomically
+    Pending --> Failed: read error
+    Failed --> Pending: retry or hot reload
+    Resident --> Evicted: LRU, byte budget exceeded
+    Evicted --> Requested: needed again
+    Resident --> Pending: source changed on disk
+```
+
+A typed placeholder is returned immediately, so nothing blocks on I/O, and
+nothing ever observes a half-installed asset: a value is published complete or
+not at all. Mesh LODs are independent residency keys, so coarse geometry can
+stay resident while LOD 0 is absent.
+
+**The trade:** every caller has to handle placeholder and pending states rather
+than assuming the data is there.
+
+### 5. The frame has a deadline, and meeting it takes two phases
+
+Sleeping to a deadline is inaccurate — OS timer granularity on Windows is around
+15 ms, far coarser than a frame. Spinning is accurate and burns a core. The
+limiter does both:
+
+```
+frame work done ──► wait_for_frame_budget()
+                        │
+                        ├─ remaining > 1 ms → thread::sleep(remaining − 1 ms)
+                        │                     coarse, cheap, covers most of it
+                        │
+                        └─ spin to the exact deadline
+                                              sub-microsecond, ~1 ms of core
+```
+
+The same instinct recurs across the engine: be cheap where precision does not
+matter, be exact only in the last stretch where it does.
+
+## Where the frame actually goes
+
+Measured, not estimated — from `dev records/phase PORTAL-0/`, on an RTX 5080
+Laptop at 1920 x 1032, release, 180 warm-up and 300 measured frames, at the
+default Coastal viewpoint with shipped settings.
+
+| GPU zone | ms | Share |
+|---|---:|---:|
+| **Shading** | **11.534** | **54%** |
+| ReSTIR GI | 2.906 | 14% |
+| Water prepass | 2.311 | 11% |
+| Shadows | 0.937 | 4% |
+| FSR 3 | 0.919 | 4% |
+| GTAO | 0.844 | 4% |
+| everything else | ~2.0 | 9% |
+| **Frame** | **21.439** | |
+
+This table is useful for two things.
+
+**It says where to look.** Shading is over half the frame, and a pixel-class
+ablation (`SOMNIUM_SHADE_ABLATE`) says what is inside it. Measured back to back
+in one batch, where the unablated pass was 11.463 ms:
+
+| Pixel class only | ms |
+|---|---:|
+| terrain | **11.461** |
+| sky | 0.169 |
+| meshes | 0.111 |
+| foliage | 0.113 |
+
+Terrain is effectively the whole pass. Serious work on this frame is terrain
+material work, and the measurement said so before anyone had to guess.
+
+**It says what the CPU is doing, which is mostly waiting.** The same run records
+`Frame CPU` at 21.185 ms, of which `Surface acquire` is **16.797 ms** — blocked
+waiting for the GPU. Real CPU work is about 4.4 ms. The frame is GPU-bound, so
+no amount of CPU optimization would move it.
+
+For contrast, the same viewpoint with the terrain clipmap enabled measures
+**Frame 9.096 ms, Shading 1.655 ms**, and the CPU blocks for 0.04 ms instead of
+16.8 — it stops waiting because there is nothing left to wait for.
+
+## Codenames
+
+Phases are named after an engine or game whose problem the phase resembles. The
+name is a mnemonic, not a claim of similarity.
+
+| Codename | After | The problem it names |
+|---|---|---|
+| Halcyon (VV) | — | Water reflections |
+| Crysis (CR) | Crytek | Culling: draw less |
+| Daggerfall (DF) | Bethesda | Terrain stretching further than the detail budget |
+| Metaphor (26) | Atlus | Editor information architecture |
+| Nocturne Atelier (26-Zeta) | — | The editor's visual identity |
+| Hades (27) | Supergiant | Paint, motion, and feel |
+| id Tech (DOOM) | id Software | Frame time, and being able to measure it |
+| Northlight (CONTROL) | Remedy | Editor reach: making authored state authorable |
+| NetImmerse (MORROWIND) | Gamebryo | Everything that is not the renderer |
+| Source (PORTAL-0) | Valve | Engineering health, and distrusting your own memory |
+
 ## Repository map
 
 ### Engine crates
