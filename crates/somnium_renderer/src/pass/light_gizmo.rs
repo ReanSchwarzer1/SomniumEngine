@@ -37,6 +37,10 @@ pub enum LightGizmoKind {
     Directional,
     Point,
     Spot,
+    /// Omnidirectional audio emitter with an attenuation radius.
+    AudioOmni,
+    /// Directional audio emitter with attenuation radius and cone.
+    AudioCone,
 }
 
 /// One light's gizmo, submitted by the editor each frame.
@@ -211,6 +215,22 @@ fn push_light(out: &mut Vec<LineVertex>, d: &LightGizmoDesc) {
             push_cone(out, d.position, dir, d.inner_angle, range, inner);
             // Centre line showing the aim direction.
             push_line(out, d.position, d.position + dir * range, color);
+        }
+        LightGizmoKind::AudioOmni => {
+            let range = d.range.max(0.01);
+            push_wire_sphere(out, d.position, range, color);
+            // Two short wave arcs make the marker read as sound instead of a
+            // point light even when both occupy the same position.
+            let (u, v) = dir.any_orthonormal_pair();
+            push_circle(out, d.position + dir * 0.25, u, v, 0.18, color);
+            push_circle(out, d.position + dir * 0.45, u, v, 0.32, color);
+        }
+        LightGizmoKind::AudioCone => {
+            let range = d.range.max(0.01);
+            push_wire_sphere(out, d.position, range, (hue * tint * 0.25).to_array());
+            push_cone(out, d.position, dir, d.outer_angle, range, color);
+            push_cone(out, d.position, dir, d.inner_angle, range, (hue * tint * 0.55).to_array());
+            push_arrow(out, d.position, d.position + dir * range.min(2.0), color);
         }
     }
 }

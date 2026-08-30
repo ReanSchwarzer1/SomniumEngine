@@ -19,17 +19,11 @@ use somnium_script::attachment::{ScriptAttachment, ScriptSet};
 use somnium_script::backend::Budget;
 use somnium_script::ids::{InstanceUuid, ScriptAssetId};
 use somnium_script::runtime::PhaseInput;
-use somnium_script::snapshot::{InputSnapshot, TimeSnapshot};
+use somnium_script::snapshot::{InputActionSnapshot, InputSnapshot, TimeSnapshot};
 use somnium_script::value::ScriptValue;
 
 const CONTROLLER: &str = include_str!("../../../assets/scripts/first_person_controller.luau");
 const CAMERA: &str = include_str!("../../../assets/scripts/first_person_camera.luau");
-
-/// Engine key numbers, as `script_input` defines them.
-const KEY_W: u32 = b'W' as u32;
-const KEY_A: u32 = b'A' as u32;
-const KEY_SPACE: u32 = 32;
-const KEY_SHIFT: u32 = 264;
 
 /// Serialises Jolt world creation across the cases in this binary.
 ///
@@ -221,32 +215,32 @@ impl Rig {
     }
 }
 
-fn keys(down: &[u32]) -> InputSnapshot {
-    let mut sorted = down.to_vec();
-    sorted.sort_unstable();
+fn action(name: &str, value: [f32; 2], pressed: bool) -> InputSnapshot {
+    let active = value[0].abs().max(value[1].abs()) > 0.5;
     InputSnapshot {
-        keys_down: sorted,
-        ..InputSnapshot::default()
+        actions: [(name.to_string(), InputActionSnapshot { value, active, pressed })]
+            .into_iter()
+            .collect(),
     }
 }
 
-/// Keys held *and* reported as newly pressed this step — what the tracker
-/// produces on the frame a key goes down.
-fn press(down: &[u32]) -> InputSnapshot {
-    let mut sorted = down.to_vec();
-    sorted.sort_unstable();
-    InputSnapshot {
-        keys_down: sorted.clone(),
-        keys_pressed: sorted,
-        ..InputSnapshot::default()
+fn movement(x: f32, y: f32, sprint: bool) -> InputSnapshot {
+    let mut input = action("Move", [x, y], false);
+    if sprint {
+        input.actions.insert(
+            "Sprint".to_string(),
+            InputActionSnapshot { value: [1.0, 0.0], active: true, pressed: false },
+        );
     }
+    input
 }
 
-fn mouse(dx: f32, dy: f32) -> InputSnapshot {
-    InputSnapshot {
-        mouse_delta: [dx, dy],
-        ..InputSnapshot::default()
-    }
+fn jump(pressed: bool) -> InputSnapshot {
+    action("Jump", [1.0, 0.0], pressed)
+}
+
+fn look(x: f32, y: f32) -> InputSnapshot {
+    action("Look", [x, y], false)
 }
 
 // ── The scripts themselves ─────────────────────────────────────────────
@@ -267,7 +261,7 @@ fn both_character_scripts_compile_and_declare_their_fields() {
             "airControl",
             "invertMouseX",
             "jumpSpeed",
-            "mouseSensitivity",
+            "lookSensitivity",
             "runSpeed",
             "walkSpeed"
         ],
@@ -289,7 +283,7 @@ fn both_character_scripts_compile_and_declare_their_fields() {
         vec![
             "eyeHeight",
             "invertMouseY",
-            "mouseSensitivity",
+            "lookSensitivity",
             "pitchLimit"
         ]
     );
@@ -328,7 +322,7 @@ fn w_walks_forward_and_releasing_it_stops_dead() {
     rig.run(10, &InputSnapshot::default());
     let start = rig.position();
 
-    rig.run(60, &keys(&[KEY_W]));
+    rig.run(60, &movement(0.0, -1.0, false));
     let walked = rig.position();
     let travelled = (walked - start).length();
     assert!(
@@ -358,11 +352,11 @@ fn shift_runs_and_it_is_measurably_faster_than_walking() {
     rig.run(10, &InputSnapshot::default());
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let walked = (rig.position() - before).length();
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W, KEY_SHIFT]));
+    rig.run(30, &movement(0.0, -1.0, true));
     let ran = (rig.position() - before).length();
 
     assert!(
@@ -379,11 +373,12 @@ fn strafing_diagonally_is_not_faster_than_walking_straight() {
     rig.run(10, &InputSnapshot::default());
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let straight = (rig.position() - before).length();
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W, KEY_A]));
+    let diagonal = -1.0 / 2.0_f32.sqrt();
+    rig.run(30, &movement(diagonal, diagonal, false));
     let diagonal = (rig.position() - before).length();
 
     assert!(
@@ -399,16 +394,16 @@ fn the_mouse_turns_the_player_and_walking_follows_the_new_facing() {
     let mut rig = Rig::new();
     rig.run(10, &InputSnapshot::default());
 
-    // A quarter turn: 90° at 0.12°/pixel is 750 pixels.
-    rig.step(&mouse(750.0, 0.0));
+    // The default mouse binding scales 750 pixels by 0.1 into 75 Look units.
+    rig.step(&look(75.0, 0.0));
     let yaw = rig.state(rig.controller, "yaw");
     assert!(
         (yaw + 90.0).abs() < 1.0,
-        "750 px at 0.12°/px should be about -90°, got {yaw}"
+        "75 Look units at 1.2°/unit should be about -90°, got {yaw}"
     );
 
     let before = rig.position();
-    rig.run(30, &keys(&[KEY_W]));
+    rig.run(30, &movement(0.0, -1.0, false));
     let moved = rig.position() - before;
     assert!(
         moved.x.abs() > moved.z.abs() * 3.0,
@@ -422,14 +417,14 @@ fn pitch_is_clamped_so_the_view_never_flips() {
     rig.run(5, &InputSnapshot::default());
 
     // Far more than enough to pass vertical.
-    rig.run(40, &mouse(0.0, -200.0));
+    rig.run(40, &look(0.0, -20.0));
     let pitch = rig.state(rig.camera_instance, "pitch");
     assert!(
         (pitch - 89.0).abs() < 0.001,
         "looking up must stop at the limit, got {pitch}"
     );
 
-    rig.run(80, &mouse(0.0, 200.0));
+    rig.run(80, &look(0.0, 20.0));
     let pitch = rig.state(rig.camera_instance, "pitch");
     assert!(
         (pitch + 89.0).abs() < 0.001,
@@ -440,7 +435,7 @@ fn pitch_is_clamped_so_the_view_never_flips() {
 #[test]
 fn the_camera_rides_at_eye_height_on_the_player() {
     let mut rig = Rig::new();
-    rig.run(20, &keys(&[KEY_W]));
+    rig.run(20, &movement(0.0, -1.0, false));
 
     let eye = rig.eye();
     let feet = rig.position();
@@ -464,10 +459,10 @@ fn space_jumps_and_the_character_comes_back_down() {
 
     // One press, then the key merely held — which is what the input
     // tracker reports for a key someone is resting a finger on.
-    rig.step(&press(&[KEY_SPACE]));
+    rig.step(&jump(true));
     let mut peak = ground;
     for _ in 0..40 {
-        rig.step(&keys(&[KEY_SPACE]));
+        rig.step(&jump(false));
         peak = peak.max(rig.position().y);
     }
     assert!(
@@ -497,7 +492,7 @@ fn the_cooldown_stops_a_free_second_jump_at_the_apex() {
 
     let mut peak = ground;
     for _ in 0..120 {
-        rig.step(&press(&[KEY_SPACE]));
+        rig.step(&jump(true));
         peak = peak.max(rig.position().y);
     }
     assert!(
@@ -513,7 +508,7 @@ fn the_cooldown_stops_a_free_second_jump_at_the_apex() {
 fn look_direction_survives_a_reload() {
     let mut rig = Rig::new();
     rig.run(5, &InputSnapshot::default());
-    rig.step(&mouse(300.0, -100.0));
+    rig.step(&look(30.0, -10.0));
 
     let yaw = rig.state(rig.controller, "yaw");
     let pitch = rig.state(rig.camera_instance, "pitch");

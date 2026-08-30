@@ -268,6 +268,7 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         RectLight => IconId::PointLight,
         DiscLight => IconId::PointLight,
         TubeLight => IconId::SpotLight,
+        AudioEmitter => IconId::Audio,
         Particle => IconId::Particle,
         Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,

@@ -591,6 +591,7 @@ pub struct Engine<G: GameApp> {
     type_registry: somnium_ecs::reflect::TypeRegistry,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
+    audio_scene: crate::audio_scene::AudioScene,
     window: Option<Arc<Window>>,
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
@@ -797,6 +798,8 @@ pub struct Engine<G: GameApp> {
     /// editor's own input handling because a script's view is a *sampled*
     /// snapshot per fixed step, not an event stream.
     script_input: crate::script_input::ScriptInputTracker,
+    /// Hardware-independent action maps shared by game code and scripts.
+    input: somnium_input::InputSystem,
     /// The authored world as it was when Play was pressed. Stop restores
     /// it, which is what stops a script dirtying the edit-time scene.
     play_checkpoint: Option<crate::script_input::WorldCheckpoint>,
@@ -862,6 +865,7 @@ impl<G: GameApp + 'static> Engine<G> {
             type_registry: crate::reflect_registry::component_registry(),
             physics: None,
             audio: None,
+            audio_scene: crate::audio_scene::AudioScene::default(),
             window: None,
             render_ctx: None,
             renderer: None,
@@ -942,6 +946,7 @@ impl<G: GameApp + 'static> Engine<G> {
             pending_map_load: None,
             scripts: crate::script_host::ScriptHost::default(),
             script_input: crate::script_input::ScriptInputTracker::new(),
+            input: somnium_input::InputSystem::with_default_maps(),
             play_checkpoint: None,
             script_step: 0,
         };
@@ -2122,6 +2127,7 @@ impl<G: GameApp> Engine<G> {
         // a file on disk is the only thing that survives a play session that
         // ends badly enough to need it.
         self.write_autosave(crate::autosave::AutosaveReason::BeforePlay);
+        self.audio_scene.stop_all();
         self.play_checkpoint = Some(crate::script_input::WorldCheckpoint::capture(
             &mut self.world,
             &self.type_registry,
@@ -2132,6 +2138,7 @@ impl<G: GameApp> Engine<G> {
 
     /// Tear every script down and restore the world exactly as it was.
     fn end_play_session(&mut self) {
+        self.audio_scene.stop_all();
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
@@ -2670,6 +2677,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        // Once the editor has declined the event, feed the same physical
+        // transition to the action system. Scripts never see this hardware
+        // event; they sample the named actions evaluated from it.
+        if self.play_session_active {
+            self.input.handle_window_event(&event);
+        }
+
         // ── 3.2 Route to the game (MORROWIND-E2) ─────────────────────────────
         //
         // After the editor shell and before the editor's own viewport tools, so
@@ -2855,15 +2869,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         let engine_event: Option<EngineEvent> = match event {
-            winit::event::DeviceEvent::MouseMotion { delta } => Some(EngineEvent::MouseMotion {
-                delta_x: delta.0 as f32,
-                delta_y: delta.1 as f32,
-            }),
+            winit::event::DeviceEvent::MouseMotion { delta } => {
+                if self.play_session_active {
+                    self.input
+                        .add_mouse_delta(glam::Vec2::new(delta.0 as f32, delta.1 as f32));
+                }
+                Some(EngineEvent::MouseMotion {
+                    delta_x: delta.0 as f32,
+                    delta_y: delta.1 as f32,
+                })
+            }
             _ => None,
         };
 
         if let Some(ev) = engine_event {
-            self.script_input.observe(&ev);
             let mut ctx = EngineContext::new(
                 &self.time,
                 &self.config,
@@ -2898,6 +2917,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
+        if self.play_session_active {
+            self.input.update(dt);
+            self.script_input.capture(&self.input);
+        }
         self.tick_autosave(dt);
         // Phase 16-F: the script profiler counters are per frame, and the
         // frame starts here.
@@ -3726,6 +3749,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // not from a stale ECS settings transform or last frame's renderer.
         self.update_world_partition();
 
+        // The active camera is the listener. Reconcile authored emitters only
+        // after `on_render` publishes that same-frame view.
+        if self.play_session_active
+            && let (Some(audio), Some(renderer)) = (self.audio.as_mut(), self.renderer.as_ref())
+        {
+            let (_, orientation, _) = renderer
+                .view_matrix
+                .inverse()
+                .to_scale_rotation_translation();
+            self.audio_scene.update(
+                &self.world,
+                self.asset_gate.published(),
+                audio,
+                renderer.camera_pos,
+                orientation,
+                dt,
+            );
+        }
+
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
@@ -3764,6 +3806,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Light gizmos (Phase 13E) ─────────────────────────────────────────
         if !self.play_session_active {
             self.submit_light_gizmos();
+            self.submit_audio_gizmos();
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
@@ -4459,10 +4502,6 @@ impl<G: GameApp> Engine<G> {
     /// path whether it came from the ordinary window route or from an editor
     /// shortcut that deliberately preserves its physical key transition.
     fn forward_engine_event(&mut self, event_loop: &ActiveEventLoop, engine_event: EngineEvent) {
-        // Phase 16-C: scripts see a sampled snapshot per fixed step rather
-        // than the event stream, so the tracker folds every event in here and
-        // the phase reads it later.
-        self.script_input.observe(&engine_event);
         let mut ctx = EngineContext::new(
             &self.time,
             &self.config,
@@ -5125,6 +5164,7 @@ impl<G: GameApp> Engine<G> {
                     runtime_id: node.material_id,
                 }),
                 light: None,
+                audio: None,
                 mesh_kind: None,
                 is_particle_emitter: false,
                 environment: false,
@@ -6312,6 +6352,40 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Queue attenuation and directivity shapes for authored audio emitters.
+    fn submit_audio_gizmos(&mut self) {
+        use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
+
+        let selected_idx = self.selection.primary.map(|entity| entity.index());
+        let gizmos: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|entity| {
+                let audio = self.world.get::<crate::AudioEmitterComponent>(entity)?;
+                let transform = self.world.get::<Transform>(entity)?;
+                Some(LightGizmoDesc {
+                    kind: if audio.cone_enabled {
+                        LightGizmoKind::AudioCone
+                    } else {
+                        LightGizmoKind::AudioOmni
+                    },
+                    position: transform.translation,
+                    direction: transform.rotation * glam::Vec3::NEG_Z,
+                    color: glam::Vec3::new(0.15, 0.85, 1.0),
+                    range: audio.max_distance,
+                    inner_angle: audio.cone_inner_degrees.to_radians(),
+                    outer_angle: audio.cone_outer_degrees.to_radians(),
+                    selected: selected_idx == Some(entity.index()),
+                })
+            })
+            .collect();
+        if let Some(renderer) = self.renderer.as_mut() {
+            for gizmo in gizmos {
+                renderer.submit_light_gizmo(gizmo);
+            }
+        }
+    }
+
     /// Queue every terrain entity for rendering this frame.
     fn submit_terrains(&mut self) {
         let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
@@ -6962,6 +7036,7 @@ impl<G: GameApp> Engine<G> {
                     transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
                     name: Some(Name::new("Voxel Terrain")),
                     light: None,
+                    audio: None,
                     mesh: None,
                     mat: None,
                     wt: Some(WorldTransform::identity()),
@@ -7065,6 +7140,8 @@ impl<G: GameApp> Engine<G> {
                     )),
                     _ => None,
                 };
+                let audio = (kind == CreateKind::AudioEmitter)
+                    .then(crate::AudioEmitterComponent::default);
 
                 // Determine mesh_kind for procedural mesh entities.
                 let mesh_kind = match kind {
@@ -7140,7 +7217,7 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
-                let spawn_dist = if light.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if light.is_some() || audio.is_some() { 5.0 } else { 8.0 };
                 let (spawn_pos, look, right) =
                     camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
                 let rotation = match kind {
@@ -7162,6 +7239,7 @@ impl<G: GameApp> Engine<G> {
                     transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
+                    audio,
                     mesh,
                     mat,
                     wt: Some(world),
@@ -7644,6 +7722,7 @@ impl<G: GameApp> Engine<G> {
                         .map(|n| Name::new(&format!("{}_copy", n.as_str())))
                         .unwrap_or_else(|| Name::new("Entity_copy"));
                     let light = self.world.get::<LightComponent>(entity).copied();
+                    let audio = self.world.get::<crate::AudioEmitterComponent>(entity).cloned();
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
@@ -7670,6 +7749,7 @@ impl<G: GameApp> Engine<G> {
                         transform: Some(dup_transform),
                         name: Some(name),
                         light,
+                        audio,
                         mesh,
                         mat,
                         wt: Some(WorldTransform::identity()),
@@ -8138,6 +8218,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
+                self.audio_scene.set_paused(false);
                 self.gizmo_drag = None;
                 self.terrain_stroke = None;
                 if let Some(r) = &mut self.renderer {
@@ -8152,6 +8233,7 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::PauseSimulation => {
                 self.simulation_clock.state = SimulationState::Paused;
+                self.audio_scene.set_paused(true);
                 if self.play_session_active {
                     if let Some(r) = &mut self.renderer {
                         r.set_editor_overlays_enabled(false);

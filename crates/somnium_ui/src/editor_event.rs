@@ -11,6 +11,8 @@ pub enum CreateKind {
     RectLight,
     DiscLight,
     TubeLight,
+    /// Authored spatial or non-spatial sound source.
+    AudioEmitter,
     Particle,
     Terrain,
     VoxelTerrain,
@@ -36,6 +38,7 @@ impl CreateKind {
             Self::RectLight => "Area Light",
             Self::DiscLight => "Disc Light",
             Self::TubeLight => "Tube Light",
+            Self::AudioEmitter => "Audio Emitter",
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",

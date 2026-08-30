@@ -45,6 +45,27 @@ export type GradientStop = { t: number, color: Color, alpha: number }
 
 -- ── Components, generated from the type registry ──────────────
 
+--- `somnium.AudioEmitter` (schema version 1).
+export type SomniumAudioEmitter = {
+	enabled: boolean,
+	audio: Asset?,
+	autoplay: boolean,
+	looping: boolean,
+	volume: number,
+	bus: number --[[ SFX | Music | Dialogue | UI ]],
+	spatial: boolean,
+	attenuation: number --[[ Linear | Inverse Square | Authored | None ]],
+	min_distance: number,
+	max_distance: number,
+	attenuation_curve: { CurveKey },
+	cone_enabled: boolean,
+	cone_inner_degrees: number,
+	cone_outer_degrees: number,
+	cone_outer_gain: number,
+	occlusion: number,
+	doppler_scale: number,
+}
+
 --- `somnium.BuoyantVessel` (schema version 1).
 export type SomniumBuoyantVessel = {
 	water_id: number,
@@ -399,6 +420,7 @@ export type SomniumWorldPartition = {
 
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
+	audioEmitter: SomniumAudioEmitter?,
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
 	decal: SomniumDecal?,
@@ -424,13 +446,13 @@ export type SelfComponents = {
 	worldPartition: SomniumWorldPartition?,
 }
 
---- Input as a fixed step sees it. Letters and digits are their uppercase
---- ASCII values, so `string.byte("W")` is the W key; the named keys are
---- listed in `docs/editor/scripting.md`.
+--- Named gameplay actions as a fixed step sees them. Bindings may come from
+--- keyboard, mouse, or gamepad without changing script code.
 export type Input = {
-	isKeyDown: (self: Input, key: number) -> boolean,
-	isKeyPressed: (self: Input, key: number) -> boolean,
-	isMouseDown: (self: Input, button: number) -> boolean,
+	actionDown: (self: Input, action: string) -> boolean,
+	actionPressed: (self: Input, action: string) -> boolean,
+	axis: (self: Input, action: string) -> number,
+	vector2: (self: Input, action: string) -> vector,
 }
 
 --- One delivered game event.
@@ -472,6 +494,8 @@ export type Context = {
 	--- finishes first.
 	despawn: (self: Context, entity: Entity) -> (),
 	applyForce: (self: Context, entity: Entity, force: Vec3, impulse: boolean?) -> (),
+	--- Play a registered content-relative audio asset as a one-shot.
+	playAudio: (self: Context, assetPath: string, volume: number?) -> (),
 	--- Set a typed animation-graph parameter. Changes are deferred to the
 	--- phase boundary and validated against the graph's parameter schema.
 	setAnimationBool: (self: Context, entity: Entity, name: string, value: boolean) -> (),

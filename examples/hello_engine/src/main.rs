@@ -22,7 +22,7 @@
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
-    BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
+    AudioAttenuationModel, AudioEmitterComponent, BuoyantVessel, CameraSettingsComponent, Children, Component, ComponentId, ComponentSet,
     EditorFlags, Engine, EngineConfig, EngineContext, EngineEvent, Entity, GameApp, GameUiFrame,
     InputState, KeyCode, LightComponent, LightShadowTechnique, LightType, MapKind, MapLoadResult,
     MaterialComponent, MeshComponent, MeshKind, Name, Parent, SimulationState, Transform,
@@ -634,6 +634,62 @@ struct HelloGame {
 }
 
 impl HelloGame {
+    fn spawn_map_audio(&self, ctx: &mut EngineContext, result: &MapLoadResult) {
+        let wave_path = match result.kind {
+            MapKind::Coastal => "audio/ambient/coastal_waves_cc0.flac",
+            MapKind::Island => "audio/ambient/island_waves_cc0.flac",
+        };
+        let surface_y = result
+            .water
+            .map_or(result.camera_position.y, |water| {
+                result.preset.terrain_translation.y + water.surface_level + 0.5
+            });
+        let wave_position = Vec3::new(
+            result.camera_position.x + 12.0,
+            surface_y,
+            result.camera_position.z - 8.0,
+        );
+        ctx.world.spawn((
+            Transform::from_translation(wave_position),
+            WorldTransform::identity(),
+            Name::new(match result.kind {
+                MapKind::Coastal => "Coastal Surf (CC0)",
+                _ => "Island Surf (CC0)",
+            }),
+            AudioEmitterComponent {
+                audio: somnium_asset::database::AssetId::from_relative_path(wave_path),
+                volume: 0.65,
+                min_distance: 18.0,
+                max_distance: 180.0,
+                ..Default::default()
+            },
+        ));
+
+        // A short, directional one-shot on the same beach gives the test map
+        // two overlapping authored voices before footsteps are added by the
+        // controller.
+        ctx.world.spawn((
+            Transform::from_translation(wave_position + Vec3::new(5.0, 0.0, 4.0)),
+            WorldTransform::identity(),
+            Name::new("Shore Splash Test (CC0)"),
+            AudioEmitterComponent {
+                audio: somnium_asset::database::AssetId::from_relative_path(
+                    "audio/sfx/water_splash_cc0.wav",
+                ),
+                looping: false,
+                volume: 0.8,
+                attenuation: AudioAttenuationModel::Linear,
+                min_distance: 2.0,
+                max_distance: 30.0,
+                cone_enabled: true,
+                cone_inner_degrees: 55.0,
+                cone_outer_degrees: 110.0,
+                cone_outer_gain: 0.25,
+                ..Default::default()
+            },
+        ));
+    }
+
     fn new() -> Self {
         let mut runtime_ui = somnium_core::UiCanvas::new(640.0, 360.0);
         runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
@@ -841,6 +897,7 @@ impl HelloGame {
                     water_component,
                 );
             }
+            self.spawn_map_audio(ctx, result);
         }
         info!(
             "Map {:?} preset v{} active",
@@ -2556,6 +2613,17 @@ const DEMO_SCRIPT_SOURCE: &str = include_str!("../../../assets/scripts/demo_rota
 /// lifecycle, the ordering, the command applier and the frame hooks are
 /// the engine's. Press Play to run it.
 fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
+    for clip in [
+        "audio/footsteps/footstep_01_cc0.ogg",
+        "audio/footsteps/footstep_02_cc0.ogg",
+        "audio/footsteps/footstep_03_cc0.ogg",
+        "audio/footsteps/footstep_04_cc0.ogg",
+    ] {
+        ctx.scripts.register_audio(
+            somnium_script::ids::ScriptAssetId::from_path(clip),
+            std::path::Path::new("assets").join(clip).to_string_lossy(),
+        );
+    }
     // â”€â”€ The force router â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //
     // `applyForce` names an entity; Jolt wants a body id. The mapping is

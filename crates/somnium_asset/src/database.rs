@@ -14,6 +14,9 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+/// Content-drawer filter for audio files.
+pub const ASSET_KIND_AUDIO: u64 = AssetKind::Audio.bit();
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetId(u128);
 

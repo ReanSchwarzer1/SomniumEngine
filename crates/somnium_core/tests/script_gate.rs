@@ -22,7 +22,7 @@ use somnium_script::attachment::{ScriptAttachment, ScriptSet};
 use somnium_script::backend::Budget;
 use somnium_script::ids::{InstanceUuid, ScriptAssetId};
 use somnium_script::runtime::PhaseInput;
-use somnium_script::snapshot::{InputSnapshot, TimeSnapshot};
+use somnium_script::snapshot::{InputActionSnapshot, InputSnapshot, TimeSnapshot};
 use somnium_script::value::ScriptValue;
 
 /// The gate script itself, compiled in so the test does not depend on the
@@ -193,8 +193,16 @@ fn the_gate_script_applies_a_force_only_while_the_key_is_held() {
     assert_eq!(gate.forces.load(Ordering::Relaxed), 0, "no key, no force");
 
     let held = InputSnapshot {
-        keys_down: vec![u32::from(b'W')],
-        ..InputSnapshot::default()
+        actions: [(
+            "Move".to_string(),
+            InputActionSnapshot {
+                value: [0.0, -1.0],
+                active: true,
+                pressed: false,
+            },
+        )]
+        .into_iter()
+        .collect(),
     };
     for _ in 0..5 {
         gate.frame(&held);

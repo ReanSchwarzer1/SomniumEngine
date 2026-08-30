@@ -6,7 +6,7 @@
 #![allow(missing_docs, clippy::wildcard_imports)]
 
 use crate::{
-    Children, LightComponent, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
+    AudioEmitterComponent, Children, LightComponent, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
     WorldPartitionComponent, WorldTransform,
 };
@@ -731,6 +731,7 @@ pub struct EntitySnapshot {
     pub transform: Option<Transform>,
     pub name: Option<Name>,
     pub light: Option<LightComponent>,
+    pub audio: Option<AudioEmitterComponent>,
     pub mesh: Option<MeshComponent>,
     pub mat: Option<MaterialComponent>,
     pub wt: Option<WorldTransform>,
@@ -761,6 +762,7 @@ impl EntitySnapshot {
             transform: world.get::<Transform>(entity).copied(),
             name: world.get::<Name>(entity).copied(),
             light: world.get::<LightComponent>(entity).copied(),
+            audio: world.get::<AudioEmitterComponent>(entity).cloned(),
             mesh: world.get::<MeshComponent>(entity).copied(),
             mat: world.get::<MaterialComponent>(entity).copied(),
             wt: world.get::<WorldTransform>(entity).copied(),
@@ -791,6 +793,17 @@ impl EntitySnapshot {
 
         if self.is_particle_emitter {
             return world.spawn((transform, name, wt, crate::ParticleEmitter::default()));
+        }
+
+        if let Some(audio) = self.audio {
+            return match (self.parent, self.children) {
+                (Some(parent), Some(children)) => {
+                    world.spawn((transform, name, wt, audio, parent, children))
+                }
+                (Some(parent), None) => world.spawn((transform, name, wt, audio, parent)),
+                (None, Some(children)) => world.spawn((transform, name, wt, audio, children)),
+                (None, None) => world.spawn((transform, name, wt, audio)),
+            };
         }
 
         if let Some(decal) = self.decal {
@@ -2586,6 +2599,7 @@ mod landscape_tests {
             transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
             name: Some(Name::new("Terrain")),
             light: None,
+            audio: None,
             mesh: None,
             mat: None,
             wt: Some(WorldTransform::identity()),
@@ -2622,6 +2636,7 @@ mod landscape_tests {
             ))),
             name: Some(Name::new("Water")),
             light: None,
+            audio: None,
             mesh: None,
             mat: None,
             wt: Some(WorldTransform::identity()),

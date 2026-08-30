@@ -22,8 +22,8 @@ return Script.define({
 	fields = {
 		eyeHeight = Field.number(0.72, { min = -2.0, max = 3.0,
 			description = "Metres above the capsule's centre. The player is 1.8 m tall, so this is roughly eye level." }),
-		mouseSensitivity = Field.number(0.12, { min = 0.005, max = 2.0,
-			description = "Degrees of pitch per pixel of mouse movement. Match the controller's to keep looking even." }),
+		lookSensitivity = Field.number(1.2, { min = 0.01, max = 10.0,
+			description = "Degrees of pitch per Look action unit. Match the controller's to keep looking even." }),
 		pitchLimit = Field.number(89.0, { min = 0.0, max = 89.9,
 			description = "How far up or down you may look. Stops short of 90 so the view never flips." }),
 		invertMouseY = Field.boolean(false),
@@ -39,11 +39,12 @@ return Script.define({
 	onFixedUpdate = function(self, ctx, dt)
 		local transform = ctx.self.transform
 
-		local dy = ctx.input.mouseDeltaY
+		local look = ctx.input:vector2("Look")
+		local dy = look.y
 		if self.invertMouseY then
 			dy = -dy
 		end
-		self.pitch = self.pitch - dy * self.mouseSensitivity
+		self.pitch = self.pitch - dy * self.lookSensitivity
 
 		-- Clamped, not wrapped. Looking past straight up should stop, not
 		-- roll the world over.

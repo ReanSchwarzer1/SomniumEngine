@@ -234,7 +234,19 @@ impl AudioEngine {
         settings: SoundSettings,
         emitter: &Emitter,
     ) -> Result<Option<SoundHandle>, AudioError> {
-        let spatial = evaluate(&self.listener, emitter, self.doppler_scale);
+        self.play_spatial_scaled(bus, path, settings, emitter, self.doppler_scale)
+    }
+
+    /// Play a spatial sound with an emitter-specific Doppler multiplier.
+    pub fn play_spatial_scaled(
+        &mut self,
+        bus: &str,
+        path: &str,
+        settings: SoundSettings,
+        emitter: &Emitter,
+        doppler_scale: f32,
+    ) -> Result<Option<SoundHandle>, AudioError> {
+        let spatial = evaluate(&self.listener, emitter, doppler_scale);
         let gain = self.mixer.gain(bus);
         if spatial.gain <= 1e-4 || gain <= 1e-4 {
             return Ok(None);
@@ -245,6 +257,34 @@ impl AudioEngine {
             .play(data.with_settings(spatial_settings(&settings, gain, &spatial)))
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
         Ok(Some(SoundHandle { handle }))
+    }
+
+    /// Re-evaluate and apply a live voice after listener/emitter movement or
+    /// an inspector change. A zero gain keeps a looping voice alive silently,
+    /// so walking back into range resumes without decoding or restarting it.
+    pub fn update_spatial(
+        &self,
+        handle: &mut SoundHandle,
+        bus: &str,
+        settings: &SoundSettings,
+        emitter: &Emitter,
+        doppler_scale: f32,
+    ) -> Spatial {
+        let spatial = evaluate(&self.listener, emitter, doppler_scale);
+        let gain = settings.volume.max(0.0)
+            * f64::from(self.mixer.gain(bus))
+            * f64::from(spatial.gain);
+        handle.set_spatial(
+            gain,
+            f64::from(spatial.pan * 0.5 + 0.5),
+            f64::from(spatial.doppler),
+        );
+        spatial
+    }
+
+    /// Refresh a live non-spatial voice after volume or mixer changes.
+    pub fn update_gain(&self, handle: &mut SoundHandle, bus: &str, settings: &SoundSettings) {
+        handle.set_gain(settings.volume.max(0.0) * f64::from(self.mixer.gain(bus)));
     }
 }
 

@@ -107,8 +107,8 @@ is still the right tool for a push, an explosion or thrust.
 
 **`grounded` is a vertical-speed heuristic, not a ground cast.** It reads
 true for a few frames at the apex of a jump, where vertical speed also
-passes through zero. Edge-trigger your jump on `isKeyPressed` rather than
-`isKeyDown`, and add a cooldown that outlasts the jump — see
+passes through zero. Edge-trigger your jump on `actionPressed("Jump")` rather
+than `actionDown("Jump")`, and add a cooldown that outlasts the jump — see
 `assets/scripts/first_person_controller.luau`, which does both.
 
 ## The lifecycle
@@ -192,20 +192,19 @@ happens at the safe point afterwards.
 
 ## Input
 
-`ctx.input:isKeyDown(code)`, `:isKeyPressed(code)` and `:isMouseDown(button)`.
-Letters and digits are their uppercase ASCII values, so
-`string.byte("W")` is the W key. Mouse buttons are 0 left, 1 right,
-2 middle. The named keys are:
+Scripts read named actions, never keyboard or gamepad controls:
 
-| Key | Code | Key | Code |
-|---|---|---|---|
-| Space | 32 | Down | 263 |
-| Escape | 256 | Shift | 264 |
-| Enter | 257 | Control | 265 |
-| Tab | 258 | Alt | 266 |
-| Backspace | 259 | | |
-| Left | 260 | Right | 261 |
-| Up | 262 | | |
+```luau
+local move = ctx.input:vector2("Move")
+local look = ctx.input:vector2("Look")
+if ctx.input:actionDown("Sprint") then ... end
+if ctx.input:actionPressed("Jump") then ... end
+```
+
+`axis(name)` reads a one-dimensional value. `vector2(name)` returns a vector
+whose X/Y components hold a two-dimensional value. The default gameplay map
+defines `Move`, `Look`, `Jump`, `Sprint`, `Interact`, and `Pause`; rebinding a
+keyboard key or switching to a gamepad does not change script code.
 
 ## Determinism
 

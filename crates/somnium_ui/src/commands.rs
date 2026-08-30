@@ -1156,6 +1156,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.create.audio_emitter",
+            "Create Audio Emitter",
+            "Create",
+            None,
+            "Create an authored spatial sound source.",
+            A::CreateEntity(C::AudioEmitter),
+            CREATE,
+            always
+        ),
+        command!(
             "editor.create.terrain",
             "Create Terrain",
             "Create",
