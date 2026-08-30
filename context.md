@@ -1816,9 +1816,14 @@ does not overlap. STALKER waits for both relevant outputs.
 - Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
   textures. Importing a brush alpha is the next step and needs the same asset
   field the other pickers use.
-- Docking/floating/multiple viewports, large-list virtualisation and data-table
-  editing, the GUI layout editor, and isolated play-in-editor (MORROWIND
-  Construction Set J, M, M2, and N).
+- Floating OS windows and multiple viewports. The **dock tree itself is in
+  tree** (`somnium_ui::dock`): tiles, splitters and tab sets, with the shipped
+  arrangement as its default and every workspace preset expressed through it,
+  so nothing moved. What is missing is the shell resolving tiles directly, a
+  drag-to-dock affordance, real `winit` child windows, and a renderer that
+  draws more than one view per frame (MORROWIND-J steps 2 and 3).
+- Large-list virtualisation and data-table editing, the GUI layout editor, and
+  isolated play-in-editor (MORROWIND Construction Set M, M2, and N).
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2156,6 +2161,17 @@ path had never heard of. Despawn happens only after persistence succeeds.
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
 into lower detail instead of into a missing object. ([MORROWIND-R](<dev records/phase MORROWIND/MORROWIND-R.md>))
+
+**A dock arrangement is a tree, and the five-region shell is a projection of
+it.** The tree owns the collapse rules — a tile that loses its last tab is
+removed and its sibling promoted, a closed tab never steals focus from the
+active one, a panel cannot appear twice, the last panel cannot be closed — so a
+caller says *"dock Details to the right of Viewport"* and never performs tree
+surgery. Ratios are clamped when resolved rather than when dragged, so a layout
+carried to a small monitor and back comes back unchanged. The projection to the
+old five numbers returns `Option`: once something is docked it has no honest
+answer, and saying so is what stops it outliving the thing it projects.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **Large-world positions are exact CPU integer cells plus small local f32
 offsets.** Shader soft-double was the alternative. The CPU design was chosen

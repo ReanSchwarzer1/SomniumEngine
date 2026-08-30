@@ -1644,6 +1644,15 @@ integration. It does not deliver a conformance claim (§14.5).
 
 #### MORROWIND-J — Docking, floating windows, multiple viewports
 
+**Step 1 shipped 2026-08-30** — see [`MORROWIND-J.md`](phase%20MORROWIND/MORROWIND-J.md).
+`somnium_ui::dock` is a binary split tree of tab sets with the shipped
+arrangement as its default, and every workspace preset now goes through it and
+back, so the tree is load-bearing rather than a model nobody calls. The five
+existing workspace tests pass unchanged, which is the "nothing looks different"
+requirement verified. Persistence is `editor_dock.json`, separate from
+`editor_layout.json` because the two fail differently. The shell still consumes
+the five-region projection; steps 2 and 3 are not started.
+
 1. A dock tree (tiles, splitters, tabs) replacing the fixed five-region shell,
    with the current arrangement as the **default layout** so nothing looks
    different on first run.

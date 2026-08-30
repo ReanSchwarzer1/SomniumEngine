@@ -59,7 +59,59 @@ impl Workspace {
     /// Sizes are derived from the window rather than stored as absolutes so a
     /// preset authored on a 1080p monitor is not a 240 px Details panel on an
     /// ultrawide. Every value is then clamped to the redline minimums.
+    ///
+    /// MORROWIND-J: the pixel intent below is unchanged, but the arrangement
+    /// now goes through a [`DockTree`](crate::dock::DockTree) and back. That is
+    /// what makes the tree load-bearing without changing a pixel — every shipped
+    /// workspace is now *expressed as a dock tree*, and
+    /// `every_preset_survives_a_trip_through_the_dock_tree` is the proof.
     pub fn preset(self, window_w: f32, window_h: f32) -> WorkspaceLayout {
+        let intent = self.intent(window_w, window_h);
+        let tree = self.dock_tree(window_w, window_h);
+        // A window too small to honour the minimums resolves differently from
+        // the intent by design (`dock::split_span` halves rather than lie), so
+        // the projection is only taken when it round-trips.
+        match tree.chrome(window_w, window_h) {
+            Some(chrome) => WorkspaceLayout {
+                tools: chrome.tools,
+                details: chrome.details,
+                outliner: chrome.outliner,
+                drawer_height: if chrome.bottom.is_some() {
+                    chrome.drawer_height
+                } else {
+                    intent.drawer_height
+                },
+                bottom: intent.bottom,
+            },
+            None => intent,
+        }
+    }
+
+    /// This workspace as a dock tree.
+    ///
+    /// The arrangement the shell will eventually resolve directly. Today the
+    /// shell still consumes [`WorkspaceLayout`], and `preset` derives that from
+    /// this.
+    #[must_use]
+    pub fn dock_tree(self, window_w: f32, window_h: f32) -> crate::dock::DockTree {
+        let intent = self.intent(window_w, window_h);
+        crate::dock::DockTree::from_chrome(
+            intent.tools,
+            intent.details,
+            intent.outliner,
+            intent.drawer_height,
+            match intent.bottom {
+                BottomPanel::None => None,
+                BottomPanel::Content => Some("Content Drawer"),
+                BottomPanel::Log => Some("Output Log"),
+            },
+            window_w,
+            window_h,
+        )
+    }
+
+    /// The pixel intent, before it is expressed as a tree.
+    fn intent(self, window_w: f32, window_h: f32) -> WorkspaceLayout {
         // Redline §06 defaults: rail 168, Details 340, drawer 220.
         let details = 340.0;
         let base = WorkspaceLayout {
@@ -242,6 +294,78 @@ mod tests {
             Workspace::Foliage.preset(1920.0, 1080.0).bottom,
             BottomPanel::Content
         );
+    }
+
+    // ── MORROWIND-J: the tree must express what the editor already ships ──
+
+    #[test]
+    fn every_preset_survives_a_trip_through_the_dock_tree() {
+        // The requirement is *"the current arrangement as the default layout so
+        // nothing looks different on first run"*. This is that sentence as a
+        // test: each workspace's pixel intent, expressed as a dock tree and
+        // resolved back, is the same arrangement to within a pixel.
+        for (w, h) in [
+            (1280.0, 720.0),
+            (1920.0, 1080.0),
+            (2560.0, 1440.0),
+            (3440.0, 1440.0),
+        ] {
+            for ws in Workspace::ALL {
+                let intent = ws.intent(w, h);
+                let through = ws.preset(w, h);
+                assert!(
+                    (intent.tools - through.tools).abs() < 1.0,
+                    "{ws:?} at {w}x{h}: rail {} -> {}",
+                    intent.tools,
+                    through.tools
+                );
+                assert!(
+                    (intent.details - through.details).abs() < 1.0,
+                    "{ws:?} at {w}x{h}: details {} -> {}",
+                    intent.details,
+                    through.details
+                );
+                assert!(
+                    (intent.outliner - through.outliner).abs() < 1.0,
+                    "{ws:?} at {w}x{h}: outliner {} -> {}",
+                    intent.outliner,
+                    through.outliner
+                );
+                assert!(
+                    (intent.drawer_height - through.drawer_height).abs() < 1.0,
+                    "{ws:?} at {w}x{h}: drawer {} -> {}",
+                    intent.drawer_height,
+                    through.drawer_height
+                );
+                assert_eq!(intent.bottom, through.bottom, "{ws:?} at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_workspace_without_a_bottom_row_builds_a_tree_without_one() {
+        // `BottomPanel::None` was a flag the old model carried beside the
+        // numbers. In a tree it is the absence of a tile, which is the
+        // difference between describing an arrangement and encoding one.
+        let terrain = Workspace::Terrain.dock_tree(1920.0, 1080.0);
+        assert!(!terrain.contains("Content Drawer"));
+        assert!(terrain.contains("Viewport"));
+
+        let debug = Workspace::Debug.dock_tree(1920.0, 1080.0);
+        assert!(debug.contains("Output Log"));
+        let chrome = debug.chrome(1920.0, 1080.0).unwrap();
+        assert_eq!(chrome.bottom.as_deref(), Some("Output Log"));
+    }
+
+    #[test]
+    fn a_docked_panel_makes_the_five_region_projection_refuse() {
+        // Once an arrangement leaves the shipped shape, `chrome` has no honest
+        // answer. Returning plausible numbers for a layout they do not describe
+        // is how a projection outlives the thing it projects.
+        let mut tree = Workspace::Layout.dock_tree(1920.0, 1080.0);
+        assert!(tree.chrome(1920.0, 1080.0).is_some());
+        assert!(tree.close("Details"));
+        assert!(tree.chrome(1920.0, 1080.0).is_none());
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod a11y;
 pub mod color;
 pub mod commands;
 pub mod debug;
+pub mod dock;
 pub mod drag_drop;
 pub mod draw;
 pub mod editor;
