@@ -753,6 +753,11 @@ pub struct EntitySnapshot {
     pub water: Option<WaterComponent>,
     pub parent: Option<Parent>,
     pub children: Option<Children>,
+    /// An authored path. Inserted after the spawn rather than woven into the
+    /// archetype tuples below, because every optional component that joins
+    /// that chain doubles the number of `match` arms in it and the chain is
+    /// already the least pleasant function in this file.
+    pub spline: Option<crate::SplineComponent>,
 }
 
 impl EntitySnapshot {
@@ -780,11 +785,21 @@ impl EntitySnapshot {
             water: world.get::<WaterComponent>(entity).copied(),
             parent: world.get::<Parent>(entity).copied(),
             children: world.get::<Children>(entity).copied(),
+            spline: world.get::<crate::SplineComponent>(entity).cloned(),
         }
     }
 
     /// Spawn a new entity from this snapshot. Returns the new entity handle.
     pub fn respawn(self, world: &mut World) -> Entity {
+        let spline = self.spline.clone();
+        let entity = self.respawn_core(world);
+        if let Some(spline) = spline {
+            let _ = world.insert_component(entity, spline);
+        }
+        entity
+    }
+
+    fn respawn_core(self, world: &mut World) -> Entity {
         let transform = self
             .transform
             .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
@@ -2596,6 +2611,7 @@ mod landscape_tests {
 
     fn terrain_snapshot() -> EntitySnapshot {
         EntitySnapshot {
+            spline: None,
             transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
             name: Some(Name::new("Terrain")),
             light: None,
@@ -2631,6 +2647,7 @@ mod landscape_tests {
 
     fn water_snapshot() -> EntitySnapshot {
         EntitySnapshot {
+            spline: None,
             transform: Some(Transform::from_translation(glam::Vec3::new(
                 512.0, 15.0, 512.0,
             ))),

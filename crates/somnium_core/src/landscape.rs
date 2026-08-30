@@ -177,6 +177,7 @@ fn landscape_snapshots(
     mesh: MeshComponent,
 ) -> (EntitySnapshot, EntitySnapshot) {
     let terrain = EntitySnapshot {
+        spline: None,
         transform: Some(Transform::from_translation(preset.terrain_translation)),
         name: Some(Name::new("Terrain")),
         light: None,
@@ -206,6 +207,7 @@ fn landscape_snapshots(
         children: Some(Children::empty()),
     };
     let water = EntitySnapshot {
+        spline: None,
         transform: Some(Transform::from_translation(preset.water_local_translation)),
         name: Some(Name::new("Water")),
         light: None,

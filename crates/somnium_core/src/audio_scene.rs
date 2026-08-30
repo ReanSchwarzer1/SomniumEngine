@@ -82,6 +82,20 @@ impl AudioScene {
                 } else {
                     local
                 };
+                // A spline emitter is heard at the nearest point of its path
+                // rather than at its origin, which is the whole difference
+                // between "a marker somewhere out at sea" and "the surf,
+                // wherever you are standing on the beach". Resolved here, at
+                // the one place that already knows both the listener and the
+                // emitter's world transform, so nothing downstream has to
+                // learn that a second shape exists.
+                let mut transform = transform;
+                transform.translation = crate::spline::audible_position(
+                    world,
+                    entity,
+                    transform.to_matrix(),
+                    camera_position,
+                );
                 Some((
                     entity,
                     world.get::<AudioEmitterComponent>(entity)?.clone(),

@@ -47,74 +47,126 @@ const VERTEX_SIZE: u64 = std::mem::size_of::<GizmoVertex>() as u64;
 
 // ─── Geometry generation ──────────────────────────────────────────────────────
 
-const RED: [f32; 3] = [0.90, 0.20, 0.20];
-const GREEN: [f32; 3] = [0.20, 0.90, 0.20];
-const BLUE: [f32; 3] = [0.20, 0.20, 0.90];
+// Axis colours. Not the pure primaries the first version used: `(0.2, 0.9,
+// 0.2)` is a fluorescent green that vibrates against every scene behind it, and
+// a pure blue axis is nearly invisible against a night sky. These are lifted
+// toward the light and pulled slightly off-hue, which keeps them instantly
+// readable as X/Y/Z while sitting in the same tonal family as the rest of the
+// editor chrome.
+const RED: [f32; 3] = [0.94, 0.33, 0.36];
+const GREEN: [f32; 3] = [0.47, 0.83, 0.35];
+const BLUE: [f32; 3] = [0.36, 0.60, 0.98];
+/// The uniform-drag centre, and the colour a handle would use for "all axes".
+const NEUTRAL: [f32; 3] = [0.86, 0.87, 0.90];
 
-/// Append an arrow along `dir` (shaft + 8-sided cone) to the geometry vectors.
-/// All units are in gizmo-local space where the gizmo fits inside a unit sphere.
+/// Append an arrow along `dir`: a round shaft and a capped cone head.
+///
+/// All units are in gizmo-local space, where the gizmo fits inside a unit
+/// sphere. The first version built the shaft as a four-sided prism and the
+/// head as an eight-sided open cone, which is why the gizmo read as a cluster
+/// of faceted blocks: a four-sided shaft is a visible square from every angle,
+/// and an uncapped cone shows its hollow inside whenever the camera gets
+/// behind it. Twelve sides is past the point where the facets are visible at
+/// the size this is ever drawn, and the cap costs one fan.
 fn push_arrow(verts: &mut Vec<GizmoVertex>, inds: &mut Vec<u32>, dir: glam::Vec3, color: [f32; 3]) {
-    const SHAFT_START: f32 = 0.13;
-    const SHAFT_END: f32 = 0.78;
-    const SHAFT_W: f32 = 0.04;
-    const CONE_START: f32 = 0.78;
+    const SHAFT_START: f32 = 0.14;
+    const SHAFT_END: f32 = 0.76;
+    const SHAFT_R: f32 = 0.022;
+    const CONE_START: f32 = 0.74;
     const CONE_END: f32 = 1.0;
-    const CONE_R: f32 = 0.09;
-    const SIDES: u32 = 8;
+    const CONE_R: f32 = 0.075;
+    const SIDES: u32 = 12;
 
     let rot = glam::Quat::from_rotation_arc(glam::Vec3::X, dir);
-    let base = verts.len() as u32;
-
-    // Shaft: rectangular prism (4 corners at each end = 8 verts).
-    for x in [SHAFT_START, SHAFT_END] {
-        for (sy, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            let p = rot * glam::Vec3::new(x, sy * SHAFT_W, sz * SHAFT_W);
+    let mut ring = |x: f32, r: f32| -> u32 {
+        let base = verts.len() as u32;
+        for i in 0..SIDES {
+            let a = std::f32::consts::TAU * i as f32 / SIDES as f32;
+            let p = rot * glam::Vec3::new(x, r * a.cos(), r * a.sin());
             verts.push(GizmoVertex {
                 position: p.to_array(),
                 color,
             });
         }
-    }
-    // 4 side quads (skip end caps — shaft obscures them).
-    for i in 0..4u32 {
-        let j = (i + 1) % 4;
-        let (a, b, c, d) = (base + i, base + j, base + 4 + j, base + 4 + i);
-        inds.extend_from_slice(&[a, b, c, a, c, d]);
-    }
+        base
+    };
 
-    // Cone: 8 base ring verts + 1 apex.
-    let cone_base = verts.len() as u32;
-    for i in 0..SIDES {
-        let angle = std::f32::consts::TAU * i as f32 / SIDES as f32;
-        let p = rot * glam::Vec3::new(CONE_START, CONE_R * angle.cos(), CONE_R * angle.sin());
-        verts.push(GizmoVertex {
-            position: p.to_array(),
-            color,
-        });
-    }
-    let apex_idx = verts.len() as u32;
-    let apex = rot * glam::Vec3::new(CONE_END, 0.0, 0.0);
-    verts.push(GizmoVertex {
-        position: apex.to_array(),
-        color,
-    });
-
+    // Round shaft.
+    let near = ring(SHAFT_START, SHAFT_R);
+    let far = ring(SHAFT_END, SHAFT_R);
     for i in 0..SIDES {
         let j = (i + 1) % SIDES;
-        inds.extend_from_slice(&[apex_idx, cone_base + i, cone_base + j]);
+        inds.extend_from_slice(&[
+            near + i,
+            near + j,
+            far + j,
+            near + i,
+            far + j,
+            far + i,
+        ]);
+    }
+
+    // Cone head, and the disc that closes its base.
+    let cone = ring(CONE_START, CONE_R);
+    let apex = verts.len() as u32;
+    verts.push(GizmoVertex {
+        position: (rot * glam::Vec3::new(CONE_END, 0.0, 0.0)).to_array(),
+        color,
+    });
+    let cap = verts.len() as u32;
+    verts.push(GizmoVertex {
+        position: (rot * glam::Vec3::new(CONE_START, 0.0, 0.0)).to_array(),
+        color,
+    });
+    for i in 0..SIDES {
+        let j = (i + 1) % SIDES;
+        inds.extend_from_slice(&[apex, cone + i, cone + j]);
+        inds.extend_from_slice(&[cap, cone + j, cone + i]);
     }
 }
 
-/// Append a thin torus ring (36 quads) perpendicular to `normal`.
+/// A small faceted ball at the origin, so the gizmo has a visible centre
+/// rather than three shafts converging on nothing.
+fn push_centre(verts: &mut Vec<GizmoVertex>, inds: &mut Vec<u32>, radius: f32) {
+    const RINGS: u32 = 6;
+    const SEGS: u32 = 12;
+    let base = verts.len() as u32;
+    for ring in 0..=RINGS {
+        let phi = std::f32::consts::PI * ring as f32 / RINGS as f32;
+        let (sp, cp) = phi.sin_cos();
+        for seg in 0..=SEGS {
+            let theta = std::f32::consts::TAU * seg as f32 / SEGS as f32;
+            let (st, ct) = theta.sin_cos();
+            verts.push(GizmoVertex {
+                position: [radius * sp * ct, radius * cp, radius * sp * st],
+                color: NEUTRAL,
+            });
+        }
+    }
+    let stride = SEGS + 1;
+    for ring in 0..RINGS {
+        for seg in 0..SEGS {
+            let a = base + ring * stride + seg;
+            let b = a + 1;
+            let c = a + stride;
+            let d = c + 1;
+            inds.extend_from_slice(&[a, c, d, a, d, b]);
+        }
+    }
+}
+
+/// Append a flat ribbon ring perpendicular to `normal`.
 fn push_ring(
     verts: &mut Vec<GizmoVertex>,
     inds: &mut Vec<u32>,
     normal: glam::Vec3,
     color: [f32; 3],
 ) {
-    const INNER_R: f32 = 0.80;
-    const OUTER_R: f32 = 0.88;
-    const SEGS: u32 = 36;
+    const INNER_R: f32 = 0.815;
+    const OUTER_R: f32 = 0.865;
+    // 36 segments left a visible polygon at the size a rotate ring is
+    // actually drawn; 72 is smooth and still 144 triangles.
+    const SEGS: u32 = 72;
 
     let rot = glam::Quat::from_rotation_arc(glam::Vec3::Z, normal);
     let base = verts.len() as u32;
@@ -148,10 +200,10 @@ fn push_scale_arm(
     dir: glam::Vec3,
     color: [f32; 3],
 ) {
-    const SHAFT_START: f32 = 0.13;
+    const SHAFT_START: f32 = 0.14;
     const SHAFT_END: f32 = 0.78;
-    const SHAFT_W: f32 = 0.04;
-    const CUBE_HALF: f32 = 0.065;
+    const SHAFT_W: f32 = 0.022;
+    const CUBE_HALF: f32 = 0.06;
     const CUBE_START: f32 = 0.78;
     const CUBE_END: f32 = CUBE_START + CUBE_HALF * 2.0;
 
@@ -228,6 +280,7 @@ fn build_gizmo_geometry() -> (
     push_arrow(&mut verts, &mut inds, glam::Vec3::X, RED);
     push_arrow(&mut verts, &mut inds, glam::Vec3::Y, GREEN);
     push_arrow(&mut verts, &mut inds, glam::Vec3::Z, BLUE);
+    push_centre(&mut verts, &mut inds, 0.055);
     let t_end = inds.len() as u32;
 
     // Rotate: 3 rings (normal = rotation axis).
@@ -235,6 +288,7 @@ fn build_gizmo_geometry() -> (
     push_ring(&mut verts, &mut inds, glam::Vec3::X, RED);
     push_ring(&mut verts, &mut inds, glam::Vec3::Y, GREEN);
     push_ring(&mut verts, &mut inds, glam::Vec3::Z, BLUE);
+    push_centre(&mut verts, &mut inds, 0.045);
     let r_end = inds.len() as u32;
 
     // Scale: 3 shaft + cube arms.
@@ -242,6 +296,7 @@ fn build_gizmo_geometry() -> (
     push_scale_arm(&mut verts, &mut inds, glam::Vec3::X, RED);
     push_scale_arm(&mut verts, &mut inds, glam::Vec3::Y, GREEN);
     push_scale_arm(&mut verts, &mut inds, glam::Vec3::Z, BLUE);
+    push_centre(&mut verts, &mut inds, 0.055);
     let s_end = inds.len() as u32;
 
     (verts, inds, t_start..t_end, r_start..r_end, s_start..s_end)

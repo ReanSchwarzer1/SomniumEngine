@@ -1413,6 +1413,29 @@ test run passed with zero failures. This proves decoding, reconciliation, input,
 script, scene-schema, editor, and example integration; whether a particular
 output device is audible remains an interactive acceptance check.
 
+### Splines
+
+`SplineComponent` is an authored path: a list of control points in entity-local
+space and a `closed` flag. The curve through them is uniform Catmull-Rom, which
+**interpolates** its control points — the curve passes exactly through what the
+author placed, and needs no tangent handles. Queries run against a sampled
+polyline rather than the analytic curve: it is the same polyline the viewport
+draws, so what an author sees is what the engine uses, and the error is bounded
+by a sampling rate they can read.
+
+The spline knows nothing about audio. It exists as its own component because a
+road, a river, a fence line, a patrol route and a camera rail are the same
+primitive, and each would otherwise have arrived with its own point list, its
+own serialization and its own handles.
+
+An **audio emitter on a spline** is an ordinary Audio Emitter whose entity also
+carries one. There is no second component and no second code path: the audio
+runtime asks where a sound is, and a spline answers "at your nearest point"
+while everything else answers "at my origin". That is what lets one emitter
+cover a whole shoreline — walk the beach and the surf stays beside you, walk
+inland and it fades with distance from the water rather than from a marker out
+at sea. `Create → Shoreline Audio` makes both at once.
+
 ### Localisation
 
 The localisation crate supports string tables, CLDR plural and gender rules,
@@ -1693,10 +1716,12 @@ does not overlap. STALKER waits for both relevant outputs.
   the current ledger explicit, but those historical files still need care when
   used as plans.
 - Dragging an asset out of the Content Drawer onto a Details asset field has a
-  complete and tested semantic route, but has been reported as doing nothing in
-  the running editor and the cause is not yet found. A refused drop now names
-  its reason in a toast instead of failing silently, so the next attempt says
-  which link is broken.
+  complete and tested semantic route, and has still been reported as doing
+  nothing in the running editor twice. Every failed drop now reports what the
+  pointer was over, which is the diagnostic the two earlier attempts lacked —
+  the first fix only spoke when a target had been resolved *and* refused, and
+  the failure is upstream of that. `Assign to Selection` in the drawer's
+  context menu is the route that does not depend on a drag.
 - A gizmo drag on a **child** entity is anchored correctly but still writes a
   world-space delta into a local transform, so it is only right while the
   parent is unrotated and unscaled. The anchor fix made this visible; mapping
@@ -1711,10 +1736,8 @@ does not overlap. STALKER waits for both relevant outputs.
 
 ### Missing systems
 
-- Prefab authoring/instancing, general splines, and rule-driven scattering. A
-  spline primitive is the prerequisite for the shaped ambient audio emitter a
-  shoreline wants — one that follows the water's edge instead of sitting at a
-  point — and for spline roads, rivers and fences after it.
+- Prefab authoring/instancing and rule-driven scattering. Splines are now in
+  tree (see below); roads, rivers and fences built on them are not.
 - Terrain layers and foliage kinds are fixed built-in lists rather than assets,
   so the left toolbar's tools have nothing to offer beyond a mode. The tools
   now say when they cannot run; they still do not open their own options.
@@ -1921,6 +1944,17 @@ the property surface was maintained by hand at a cost of 675 identifiers: 106
 generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
 hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
+
+**A mode that refuses a gesture says so, at the moment it refuses.** Every
+transform gizmo in the editor was inert — translate, rotate and scale alike,
+on every object — and nothing said why. The cause was `select_only`, a
+deliberate Godot-style mode that stops a click on a gizmo axis from moving the
+thing you were only trying to select. It is persisted in `editor.toml`, so once
+it is on it stays on across every session, and the press it swallowed produced
+no toast, no log line and no visible difference from a broken feature. Two
+sessions of investigation went into the ray maths and the anchor before anyone
+looked at the setting. A refusal is now announced by the code that refuses,
+which is the only place that knows the reason.
 
 **Every viewport ray reads the live surface size, never a cached one.** The
 editor kept a `viewport_size` filled from winit's `Resized`, and

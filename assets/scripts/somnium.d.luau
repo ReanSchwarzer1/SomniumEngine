@@ -287,6 +287,12 @@ export type SomniumSky = {
 	temporal_jitter: boolean,
 }
 
+--- `somnium.Spline` (schema version 1).
+export type SomniumSpline = {
+	points: { Vec3 },
+	closed: boolean,
+}
+
 --- `somnium.Terrain` (schema version 2).
 export type SomniumTerrain = {
 	terrain_id: number,
@@ -436,6 +442,7 @@ export type SelfComponents = {
 	postProcess: SomniumPostProcess?,
 	rigidBody: SomniumRigidBody?,
 	sky: SomniumSky?,
+	spline: SomniumSpline?,
 	terrain: SomniumTerrain?,
 	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,

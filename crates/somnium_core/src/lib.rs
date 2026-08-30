@@ -50,6 +50,7 @@ pub mod app;
 mod audio_scene;
 pub mod autosave;
 pub mod character;
+pub mod spline;
 pub mod clipboard;
 pub mod config;
 pub mod context;
@@ -100,6 +101,7 @@ pub mod world_partition;
 
 pub use app::{Engine, GameApp};
 pub use character::RigidBodyComponent;
+pub use spline::SplineComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{

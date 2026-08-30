@@ -2816,16 +2816,35 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 // preference: without it a click that happens to land on a
                 // gizmo axis moves the object you were only trying to select,
                 // and the damage is silent until you notice it later.
-                let drag = if self.settings.editor().select_only {
+                //
+                // The mode had the opposite failure, and a worse one. It is
+                // persisted in `editor.toml`, so once it is on it stays on
+                // across every session — and it used to swallow the press with
+                // no word of explanation. Every gizmo in the editor was inert,
+                // for translate and rotate and scale alike, and nothing
+                // anywhere said why. A mode that refuses a gesture has to
+                // admit it at the moment it refuses, or it is indistinguishable
+                // from a broken feature.
+                let started = try_start_gizmo_drag(
+                    self.renderer.as_ref(),
+                    &self.world,
+                    &self.selection.primary,
+                    self.cursor_pos,
+                    self.viewport_size(),
+                );
+                let blocked = started.is_some() && self.settings.editor().select_only;
+                if blocked {
+                    let message =
+                        "Select Only is on — click it in the toolbar to move, rotate and scale";
+                    info!("{message}");
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.push_toast(message);
+                    }
+                }
+                let drag = if blocked {
                     None
                 } else {
-                    try_start_gizmo_drag(
-                        self.renderer.as_ref(),
-                        &self.world,
-                        &self.selection.primary,
-                        self.cursor_pos,
-                        self.viewport_size(),
-                    )
+                    started
                     .map(|mut drag| {
                         drag.local_space = self.settings.editor().gizmo_local_space;
                         drag.followers = self
@@ -3850,6 +3869,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         if !self.play_session_active {
             self.submit_light_gizmos();
             self.submit_audio_gizmos();
+            self.submit_spline_gizmos();
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
@@ -4782,6 +4802,73 @@ impl<G: GameApp> Engine<G> {
         (dir != glam::Vec3::ZERO).then_some((r.camera_pos, dir))
     }
 
+    /// Put `path`'s asset into the first field of the selection that accepts
+    /// its kind.
+    ///
+    /// The menu-and-keyboard route to where a drop lands. It exists because a
+    /// drag is a gesture with a dozen ways to not quite happen — the pointer a
+    /// few pixels off the row, a threshold not crossed, a window that lost
+    /// focus mid-drag — and an author who cannot make the drag work needs a
+    /// path that is a single click and cannot miss.
+    ///
+    /// The kind comes from the extension rather than from the asset database,
+    /// so this works during the window after a file appears and before the
+    /// scan that indexes it has finished.
+    fn assign_asset_to_selection(&mut self, path: &std::path::Path) {
+        use somnium_ecs::reflect::ReflectValue;
+
+        let Some(entity) = self.selection.primary else {
+            self.toast("Select something first — an asset has to be assigned to an entity");
+            return;
+        };
+        let kind = somnium_asset::database::classify(path, false);
+        // Ids are minted from the path *relative to the content root*, which
+        // is the whole point of `AssetId`: the same file names the same asset
+        // whatever the project happens to be checked out at.
+        let relative = path
+            .strip_prefix(&self.config.content_root)
+            .unwrap_or(path);
+        let asset = somnium_asset::database::AssetId::from_relative_path(relative);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let target = asset_field_for(&self.type_registry, &self.world, entity, kind);
+
+        let Some((component, field, component_name, field_name)) = target else {
+            self.toast(&format!(
+                "Nothing on this entity takes a {} asset",
+                kind.label()
+            ));
+            return;
+        };
+
+        self.handle_editor_event(EditorEvent::SetComponentField {
+            entity,
+            component,
+            field,
+            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(
+                asset.raw(),
+            ))),
+            gesture: GestureId(u64::MAX - 2),
+            live: false,
+        });
+        self.toast(&format!("{name} → {component_name} · {field_name}"));
+    }
+
+    /// Say something in the viewport, and in the log.
+    ///
+    /// Both, always: the log is the record and the toast is the one the author
+    /// is actually looking at. Several routes had only the log, which is the
+    /// same as saying nothing while someone is working in the viewport.
+    fn toast(&mut self, message: &str) {
+        info!("{message}");
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(message);
+        }
+    }
+
     /// Put the whole brush state in front of the author, in the viewport.
     ///
     /// It used to go to `info!`, which means the Output Log, which means a
@@ -5254,6 +5341,7 @@ impl<G: GameApp> Engine<G> {
                 Name::new(&node.entity_name)
             };
             let snapshot = EntitySnapshot {
+                spline: None,
                 transform: Some(Transform {
                     translation: translation + offset,
                     rotation,
@@ -6463,6 +6551,93 @@ impl<G: GameApp> Engine<G> {
     }
 
     /// Queue attenuation and directivity shapes for authored audio emitters.
+    /// Draw every spline as a polyline, with a tick at each control point.
+    ///
+    /// The curve the author is editing has to be visible before it can be
+    /// edited, and the polyline drawn here is the *same* sampling the
+    /// nearest-point query uses — so what you see is exactly what the audio
+    /// hears, rather than a smooth curve drawn beside a coarse one that is
+    /// actually in effect.
+    fn submit_spline_gizmos(&mut self) {
+        use somnium_renderer::pass::light_gizmo::LineVertex;
+
+        // Selected splines are drawn bright; the rest are dimmed, the same
+        // rule the light gizmos already use.
+        const BRIGHT: [f32; 3] = [0.30, 0.90, 0.85];
+        const DIM: [f32; 3] = [0.13, 0.38, 0.36];
+
+        let mut lines: Vec<LineVertex> = Vec::new();
+        let entities: Vec<_> = self.world.entities().collect();
+        for entity in entities {
+            let Some(spline) = self.world.get::<crate::SplineComponent>(entity) else {
+                continue;
+            };
+            let flags = self
+                .world
+                .get::<EditorFlags>(entity)
+                .copied()
+                .unwrap_or_default();
+            if flags.hidden {
+                continue;
+            }
+            let model = self
+                .world
+                .get::<WorldTransform>(entity)
+                .map(|world| world.0)
+                .or_else(|| {
+                    self.world
+                        .get::<Transform>(entity)
+                        .map(Transform::to_matrix)
+                })
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let colour = if self.selection.contains(entity) {
+                BRIGHT
+            } else {
+                DIM
+            };
+
+            let path: Vec<glam::Vec3> = spline
+                .polyline()
+                .iter()
+                .map(|point| model.transform_point3(*point))
+                .collect();
+            for pair in path.windows(2) {
+                lines.push(LineVertex {
+                    position: pair[0].to_array(),
+                    color: colour,
+                });
+                lines.push(LineVertex {
+                    position: pair[1].to_array(),
+                    color: colour,
+                });
+            }
+
+            // A cross at each control point, sized in metres rather than in
+            // screen space: these mark authored data, and an author needs to
+            // see which bend belongs to a point they can move.
+            const TICK: f32 = 0.6;
+            for point in &spline.points {
+                let centre = model.transform_point3(*point);
+                for axis in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
+                    lines.push(LineVertex {
+                        position: (centre - axis * TICK).to_array(),
+                        color: colour,
+                    });
+                    lines.push(LineVertex {
+                        position: (centre + axis * TICK).to_array(),
+                        color: colour,
+                    });
+                }
+            }
+        }
+
+        if !lines.is_empty()
+            && let Some(renderer) = self.renderer.as_mut()
+        {
+            renderer.submit_gizmo_lines(lines);
+        }
+    }
+
     fn submit_audio_gizmos(&mut self) {
         use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
 
@@ -7143,6 +7318,7 @@ impl<G: GameApp> Engine<G> {
                 // spins its streaming driver up when it sees this component
                 // (and tears it down when the entity is deleted).
                 let snapshot = EntitySnapshot {
+                    spline: None,
                     transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
                     name: Some(Name::new("Voxel Terrain")),
                     light: None,
@@ -7250,8 +7426,28 @@ impl<G: GameApp> Engine<G> {
                     )),
                     _ => None,
                 };
-                let audio = (kind == CreateKind::AudioEmitter)
-                    .then(crate::AudioEmitterComponent::default);
+                // A shoreline emitter is an ordinary emitter that happens to
+                // carry a path. There is no second component and no second
+                // code path: the audio runtime asks where the sound is, and a
+                // spline answers "at your nearest point" while everything else
+                // answers "at my origin".
+                let audio = matches!(
+                    kind,
+                    CreateKind::AudioEmitter | CreateKind::ShorelineAudio
+                )
+                .then(|| {
+                    let mut emitter = crate::AudioEmitterComponent::default();
+                    if kind == CreateKind::ShorelineAudio {
+                        // A shoreline is heard from far further than a point
+                        // source, and it loops: surf does not stop.
+                        emitter.max_distance = 120.0;
+                        emitter.min_distance = 6.0;
+                        emitter.looping = true;
+                    }
+                    emitter
+                });
+                let spline = matches!(kind, CreateKind::Spline | CreateKind::ShorelineAudio)
+                    .then(|| crate::SplineComponent::straight(4, 12.0));
 
                 // Determine mesh_kind for procedural mesh entities.
                 let mesh_kind = match kind {
@@ -7328,6 +7524,7 @@ impl<G: GameApp> Engine<G> {
                 };
 
                 let spawn_dist = if light.is_some() || audio.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if spline.is_some() { 18.0 } else { spawn_dist };
                 let (spawn_pos, look, right) =
                     camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
                 let rotation = match kind {
@@ -7346,6 +7543,7 @@ impl<G: GameApp> Engine<G> {
                 };
                 let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
+                    spline,
                     transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
@@ -7423,6 +7621,24 @@ impl<G: GameApp> Engine<G> {
                         }
                     );
                 }
+            }
+
+            EditorEvent::OpenScenePicker => {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title("Open Scene")
+                    .add_filter("Somnium scene", &["somnium"])
+                    .set_directory(&self.config.content_root)
+                    .pick_file()
+                else {
+                    return;
+                };
+                self.handle_editor_event(EditorEvent::LoadScene(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+
+            EditorEvent::AssignAssetToSelection(path) => {
+                self.assign_asset_to_selection(std::path::Path::new(&path));
             }
 
             EditorEvent::SetComponentField {
@@ -7856,6 +8072,7 @@ impl<G: GameApp> Engine<G> {
                     let mut dup_transform = transform;
                     dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
                     let snapshot = EntitySnapshot {
+                        spline: None,
                         transform: Some(dup_transform),
                         name: Some(name),
                         light,
@@ -8783,6 +9000,35 @@ impl SnapSettings {
     }
 }
 
+/// The first field on `entity` that accepts an asset of `kind`.
+///
+/// Registration order decides, and the probe for "does this entity have that
+/// component at all" is `read_field` returning `Some` — the schema's own
+/// accessor, rather than a second list of component types that would drift
+/// away from it.
+fn asset_field_for(
+    registry: &somnium_ecs::reflect::TypeRegistry,
+    world: &somnium_ecs::World,
+    entity: somnium_ecs::Entity,
+    kind: somnium_asset::database::AssetKind,
+) -> Option<(
+    somnium_ecs::reflect::StableId,
+    somnium_ecs::reflect::FieldId,
+    &'static str,
+    &'static str,
+)> {
+    use somnium_ecs::reflect::FieldType;
+    registry.iter().find_map(|schema| {
+        let field = schema.fields.iter().find(|field| {
+            field.ty == FieldType::Asset
+                && kind.bit() & field.asset_kind_mask != 0
+                && !field.read_only
+        })?;
+        (schema.read_field)(world, entity, field.id)?;
+        Some((schema.stable_id, field.id, schema.display_name, field.name))
+    })
+}
+
 /// The gizmo axis a world-space ray hits, if any.
 ///
 /// The gizmo is drawn at a constant size on screen, so its handles live in a
@@ -9131,6 +9377,60 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+    }
+
+    // ── Assigning an asset without a drag ──────────────────────────
+
+    /// A clip lands on the Audio Emitter's clip field and nowhere else.
+    ///
+    /// This is the menu route to the thing a drag was supposed to do. It
+    /// exists because the drag has repeatedly done nothing at all in the
+    /// running editor, and an author needs one path to assigning an asset
+    /// that is a single click and cannot be missed by a few pixels.
+    #[test]
+    fn a_clip_finds_the_audio_emitters_field() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let emitter = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+
+        let found = super::asset_field_for(&registry, &world, emitter, AssetKind::Audio);
+        let (component, _, _, field_name) = found.expect("an emitter must accept a clip");
+        assert_eq!(
+            component,
+            somnium_ecs::reflect::StableId::new("somnium.AudioEmitter")
+        );
+        assert_eq!(field_name, "audio");
+    }
+
+    /// And the same entity refuses a texture rather than dropping it into
+    /// whichever asset field happens to come first in the registry.
+    #[test]
+    fn an_emitter_does_not_take_a_texture() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let emitter = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+        assert!(super::asset_field_for(&registry, &world, emitter, AssetKind::Texture).is_none());
+    }
+
+    /// An entity that has no asset field at all is not a target, however
+    /// many other components it carries.
+    #[test]
+    fn an_entity_with_no_asset_field_accepts_nothing() {
+        use somnium_asset::database::AssetKind;
+        let registry = crate::reflect_registry::component_registry();
+        let mut world = somnium_ecs::World::new();
+        let plain = world.spawn((Transform::default(), WorldTransform::identity()));
+        for kind in [AssetKind::Audio, AssetKind::Texture, AssetKind::Mesh] {
+            assert!(super::asset_field_for(&registry, &world, plain, kind).is_none());
+        }
     }
 
     // ── Gizmo picking ──────────────────────────────────────────────

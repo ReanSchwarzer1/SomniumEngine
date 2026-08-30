@@ -703,6 +703,9 @@ pub struct UiManager {
         GeneratedEdit,
     )>,
     generated_bindings: HashMap<NodeHandle, GeneratedBinding>,
+    /// What the last drop probe resolved to, in words, for the message a
+    /// failed drop shows. Diagnostic state, not authoring state.
+    drop_probe: String,
     generated_rows: HashMap<NodeHandle, GeneratedBinding>,
     generated_gestures: HashMap<NodeHandle, GestureId>,
     generated_asset_choices: HashMap<NodeHandle, Vec<Option<somnium_ecs::reflect::AssetRef>>>,
@@ -1325,6 +1328,7 @@ impl UiManager {
             generated_entity: None,
             generated_signature: Vec::new(),
             generated_bindings: HashMap::new(),
+            drop_probe: String::new(),
             generated_rows: HashMap::new(),
             generated_gestures: HashMap::new(),
             generated_asset_choices: HashMap::new(),
@@ -2256,9 +2260,24 @@ impl UiManager {
             None
         };
         let Some((target, highlight)) = resolved else {
+            // Nothing under the pointer registered as a target. This is the
+            // case that used to end in complete silence: no acceptance means
+            // no rejection reason either, so the release had nothing to
+            // report and the drag simply evaporated.
+            self.drop_probe = if hit.is_none() {
+                "the viewport".to_string()
+            } else {
+                "something that is not a drop target".to_string()
+            };
             self.native_ui.set_drop_acceptance(None);
             self.native_ui.set_drop_highlight(None);
             return;
+        };
+        self.drop_probe = match &target {
+            crate::drag_drop::DropTarget::AssetField { .. } => "an asset field".to_string(),
+            crate::drag_drop::DropTarget::Outliner(_) => "the Outliner".to_string(),
+            crate::drag_drop::DropTarget::Viewport { .. } => "the viewport".to_string(),
+            crate::drag_drop::DropTarget::DrawerFolder(_) => "the Content Drawer".to_string(),
         };
         let candidate = crate::drag_drop::acceptance_for(&self.asset_db, &payload, target.clone());
         let acceptance = match crate::drag_drop::semantic_request(
@@ -2274,14 +2293,56 @@ impl UiManager {
         self.native_ui.set_drop_acceptance(Some(acceptance));
     }
 
+    /// What "open" means for one content item.
+    ///
+    /// One function because the double-click and the context menu's `Open`
+    /// have to agree, and because "double-click does nothing for this kind"
+    /// is exactly the sort of gap that appears when two call sites each
+    /// handle their own subset.
+    fn open_content_entry(&mut self, entry: &crate::metaphor::ContentEntry) {
+        if entry.is_dir {
+            self.navigate_content(entry.path.to_string_lossy().into_owned());
+            return;
+        }
+        if entry.is_engine {
+            self.push_toast("Built-in Engine assets have nothing to open");
+            return;
+        }
+        let extension = entry
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match extension.as_str() {
+            "somnium" => self.prompt_unsaved_action(EditorEvent::LoadScene(
+                entry.path.to_string_lossy().into_owned(),
+            )),
+            // Everything else goes to whatever the OS or the preference says
+            // opens it. Silently doing nothing is not one of the options.
+            _ => self.editor_events.push_back(EditorEvent::EditContentAsset(
+                entry.path.to_string_lossy().into_owned(),
+            )),
+        }
+    }
+
     fn complete_drop(&mut self) {
         self.native_ui.set_drop_highlight(None);
-        // Read the refusal before taking the drop, because taking it clears
-        // the state that knows why.
+        // Read both before taking the drop, because taking it clears the state
+        // that knows why.
+        let was_dragging = self.native_ui.is_dragging();
         let refused = self.native_ui.drop_rejection_reason();
         let Some(drop) = self.native_ui.take_completed_drop() else {
-            if let Some(reason) = refused {
-                self.push_toast(&reason);
+            // Every failed drop says something now. A drag that ends in
+            // nothing at all is the one outcome an author cannot act on: it
+            // looks identical whether the field refused the asset, the pointer
+            // was a few pixels off the row, or the whole feature is broken.
+            if was_dragging {
+                let message = refused.unwrap_or_else(|| {
+                    format!("Released over {} — nothing was assigned", self.drop_probe)
+                });
+                tracing::warn!(probe = %self.drop_probe, "{message}");
+                self.push_toast(&message);
             }
             return;
         };
@@ -4095,6 +4156,24 @@ impl UiManager {
                 }
             }
             A::ContentRefresh => self.refresh_content_list(),
+            A::OpenScene => self.prompt_unsaved_action(EditorEvent::OpenScenePicker),
+            A::ContentOpen => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.open_content_entry(&entry);
+                }
+            }
+            A::ContentAssignToSelection => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    if entry.is_dir {
+                        self.push_toast("A folder cannot be assigned to a field");
+                    } else {
+                        self.editor_events
+                            .push_back(EditorEvent::AssignAssetToSelection(
+                                entry.path.to_string_lossy().into_owned(),
+                            ));
+                    }
+                }
+            }
         }
     }
 
@@ -5839,24 +5918,21 @@ impl UiManager {
                 continue;
             }
             if let Some(ButtonMessage::DoubleClick) = msg.data::<ButtonMessage>() {
+                // The tile's children — icon, label, badge — are separate
+                // nodes, and a double-click that lands on one of them arrives
+                // addressed to *it*, not to the tile. Matching only the tile
+                // handle meant a double-click on the icon, which is most of
+                // the tile's area, did nothing at all. `is_under` is the same
+                // ancestor walk the drag arm and the context menu already use.
                 if let Some((_, entry)) = self
                     .content_entries
                     .iter()
-                    .find(|(bh, _)| *bh == msg.destination)
+                    .find(|(bh, _)| {
+                        *bh == msg.destination || self.native_ui.is_under(msg.destination, *bh)
+                    })
                     .cloned()
                 {
-                    let is_map = !entry.is_dir
-                        && !entry.is_engine
-                        && entry
-                            .path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case("somnium"));
-                    if is_map {
-                        self.prompt_unsaved_action(EditorEvent::LoadScene(
-                            entry.path.to_string_lossy().into_owned(),
-                        ));
-                    }
+                    self.open_content_entry(&entry);
                 }
                 continue;
             }

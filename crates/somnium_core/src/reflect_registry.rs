@@ -603,6 +603,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(particle_emitter_schema());
     registry.register(post_process_schema());
     crate::character::register(&mut registry);
+    crate::spline::register(&mut registry);
     registry.register(sky_schema());
     registry.register(terrain_schema());
     registry.register(world_partition_schema());
@@ -1233,7 +1234,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 24);
+        assert_eq!(registry.len(), 25);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1254,6 +1255,7 @@ mod tests {
                 "somnium.PostProcess",
                 "somnium.RigidBody",
                 "somnium.Sky",
+                "somnium.Spline",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",

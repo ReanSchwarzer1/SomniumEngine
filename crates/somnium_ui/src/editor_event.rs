@@ -13,6 +13,11 @@ pub enum CreateKind {
     TubeLight,
     /// Authored spatial or non-spatial sound source.
     AudioEmitter,
+    /// An authored path. The primitive roads, rivers and shaped emitters read.
+    Spline,
+    /// An audio emitter whose sound is heard along a path rather than from a
+    /// point — a shoreline, a river, a road with traffic on it.
+    ShorelineAudio,
     Particle,
     Terrain,
     VoxelTerrain,
@@ -39,6 +44,8 @@ impl CreateKind {
             Self::DiscLight => "Disc Light",
             Self::TubeLight => "Tube Light",
             Self::AudioEmitter => "Audio Emitter",
+            Self::Spline => "Spline",
+            Self::ShorelineAudio => "Shoreline Audio",
             Self::Particle => "Particle Emitter",
             Self::Terrain => "Terrain",
             Self::VoxelTerrain => "Voxel Terrain",
@@ -303,6 +310,15 @@ pub enum EditorEvent {
     SaveScene,
     NewScene,
     LoadScene(String),
+    /// Ask the engine to put up a file dialog and load whatever is chosen.
+    ///
+    /// The dialog lives in the engine layer because that is where `rfd` and
+    /// the project root already are; the UI only knows that the author asked.
+    OpenScenePicker,
+    /// Put `path`'s asset into the first field of the selection that accepts
+    /// its kind. The keyboard-and-menu route to the same place a drop lands,
+    /// and the one that works when a drag does not.
+    AssignAssetToSelection(String),
     /// The one schema-driven component property write path.
     SetComponentField {
         entity: Entity,

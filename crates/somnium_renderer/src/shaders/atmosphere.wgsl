@@ -264,13 +264,20 @@ fn star_hash(p: vec3<f32>) -> f32 {
 /// read as brighter rather than merely as a whiter pixel, and both are smooth
 /// everywhere so they antialias for free as the camera turns.
 ///
-/// Density came down at the same time. The old field was dense enough to read
-/// as noise; a real sky is mostly empty with a crowded band across it, so the
-/// cells are larger and the acceptance threshold is tighter, which keeps the
-/// Milky Way concentration while thinning the rest by roughly three times.
+/// Density came down at the same time, twice. The original field was dense
+/// enough to read as noise; a real sky is mostly empty with a crowded band
+/// across it, so the cells are larger and the acceptance threshold is tighter,
+/// which keeps the Milky Way concentration while thinning the rest by roughly
+/// six times against where this started.
+///
+/// The reference engines mostly do not do this at all — Wicked, Flax and
+/// Godot all render a night sky from a star-map texture rather than from a
+/// hash. A 4K panorama is the higher-fidelity answer and stays available; the
+/// procedural field is what works with no asset in the project, and its two
+/// failures were both profile bugs rather than anything inherent.
 fn star_field(dir: vec3<f32>) -> vec3<f32> {
     // Larger cells than before: fewer stars, and each one gets more room.
-    let cell_scale = 200.0;
+    let cell_scale = 190.0;
     let base_cell = floor(dir * cell_scale);
 
     // The angular radius of one pixel. `fwidth` sums the absolute derivative
@@ -294,7 +301,7 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
         // there, which is the Milky Way without a texture for it.
         let cell_dir = normalize(cell + 0.5);
         let gal_dist = abs(dot(cell_dir, GALACTIC_POLE));
-        let threshold = mix(0.975, 0.993, gal_dist * gal_dist);
+        let threshold = mix(0.982, 0.9965, gal_dist * gal_dist);
         if h < threshold { continue; }
 
         // Star position within the cell.
@@ -310,16 +317,23 @@ fn star_field(dir: vec3<f32>) -> vec3<f32> {
 
         // Exponential magnitude distribution: many faint, few bright.
         let magnitude = star_hash(cell + 71.0);
-        let brightness = 0.0045 * exp(4.2 * magnitude);
+        let brightness = 0.0040 * exp(3.6 * magnitude);
 
         // Bright stars are drawn slightly larger, which is how a photograph
         // and an eye both encode magnitude. Sized in pixels, never in radians.
-        let core = pixel_angle * mix(0.62, 1.25, magnitude * magnitude);
+        //
+        // Sub-pixel at the faint end on purpose. The first attempt at fixing
+        // the blocky squares over-corrected into the opposite failure: a core
+        // over a pixel wide with a *ten-percent exponential* skirt beside it,
+        // which has a fat tail and stayed visible six or seven pixels out. The
+        // sky filled with soft glowing blobs. Both terms are Gaussian now, so
+        // the halo falls off as fast as the core does and a star is a point
+        // with a hint of bloom rather than a ball of light.
+        let core = pixel_angle * mix(0.45, 0.85, magnitude * magnitude);
         let d = angle / core;
-        if d > 9.0 { continue; }
+        if d > 4.5 { continue; }
 
-        // Gaussian core, plus a wide exponential skirt at a tenth the weight.
-        let profile = exp(-d * d * 1.9) + 0.10 * exp(-d * 0.8);
+        let profile = exp(-d * d * 2.6) + 0.035 * exp(-d * d * 0.20);
 
         // Spectral tint, pulled most of the way to white: real stars are far
         // less colourful than a naive warm-to-blue ramp makes them, and a sky
