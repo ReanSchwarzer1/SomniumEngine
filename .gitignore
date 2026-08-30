@@ -52,6 +52,11 @@ dev records/
 # hand-off. Keep its generator outputs/evidence manifest reviewable in-tree.
 !dev records/
 dev records/*
+# Keep the top-level phase plans and index reviewable in Git. Per-phase working
+# folders, hand-offs, audits and generated evidence remain ignored unless a
+# narrower exception below explicitly preserves them.
+!dev records/README.md
+!dev records/phase_*.md
 !dev records/phase_CONTROL.md
 !dev records/phase CONTROL/
 dev records/phase CONTROL/*

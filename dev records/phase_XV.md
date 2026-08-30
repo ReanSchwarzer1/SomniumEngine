@@ -1,0 +1,876 @@
+# Phase XV — Appalachia
+
+> *“Sixteen times the detail.”* — Todd Howard  
+> Sixteen terrain materials. It had to be Appalachia.
+
+> **Codename:** Appalachia, after the setting of Bethesda Game Studios' *Fallout 76*  
+> **Status:** XV-A through XV-J **COMPLETE** (2026-08-13). GPU evidence:
+> [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+> Shading 1.10 ms remains an explicit exception. BC7 encoder + local packs:
+> [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).  
+> **Plan date:** 2026-08-12  
+> **Research expanded:** 2026-08-13 (second pass — papers, talks, open-source terrain systems, wetness)  
+> **XV-A provenance audit:** 2026-08-13 — see [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Two role substitutions recorded.  
+> **XV-Zeta:** 2026-08-13 — 32-layer landscape identity, paint UX, distant hue, aerial shading LOD, biome v3. Canonical live numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) (Live contract).  
+> **Project:** Somnium Engine  
+> **Target:** Rust 1.85, wgpu 29, winit 0.30
+
+The codename is thematic, while publicly documented Bethesda Game Studios rendering and landscape-production principles are research references for this phase. Those ideas will be independently adapted to Somnium and attributed; no Bethesda source code, artwork, textures, or game assets will be copied.
+
+**Parity bar (2026-08-13).** Phase IV-K closed with water that reads as a photographic surface under Somnium's physical lighting. Phase XV exists so the *ground* meets that bar: distinct materials under the same sun, moon, and ReSTIR path, cliffs that carry full PBR rather than stretched albedo, and wet/dry response that survives a rainy shore next to the Great Lakes body. If a material only looks good as a flat albedo swatch, it fails XV.
+
+## 1. Executive decision
+
+Phase XV expands Somnium's terrain from eight to sixteen photogrammetry-quality PBR materials while keeping the current editable heightfield, visibility-buffer renderer, four-channel packed material format, and hex-tiling system.
+
+The implementation should use:
+
+- sixteen globally available terrain materials;
+- no more than four locally active materials per splat texel;
+- four RGBA control/splat textures, retaining direct editable weights;
+- GPU selection of the strongest four weights before expensive PBR sampling;
+- two packed texture arrays per material: albedo + height and normal XY + roughness + AO;
+- offline, semantics-aware mip generation and BC7 compression, with an uncompressed fallback;
+- physically scaled material metadata rather than a single arbitrary UV scale;
+- full-PBR biplanar projection on steep cliffs, including normals, height, roughness, and AO;
+- the existing hex randomization and macro variation, tuned so the two do not compound into visible colour drift;
+- a deterministic biome-rule preset shared by the default scene and **Create > Terrain**, with manual paint remaining authoritative.
+
+This is an extension of the proven Phase 25 terrain path, not a replacement renderer. Runtime virtual texturing, geometry clipmaps, tessellation, and unlimited material stacks remain outside the initial scope unless profiling demonstrates that the bounded design cannot meet the acceptance budgets in section 11.
+
+## 2. Goals
+
+1. Increase the terrain palette from eight to sixteen production-quality, redistributable materials.
+2. Cover visually distinct terrain classes: dry and wet sand, meadow and sparse grass, forest floor, soil and mud, gravel and talus, dry and mossy rock, vertical cliff, and snow.
+3. Preserve old scenes exactly for layers 0–7 and make the sidecar migration automatic.
+4. Improve close-range realism through physical scale, correct semantic mips, specular anti-aliasing, and consistent normal blending.
+5. Remove stretched or incomplete cliff shading by projecting the entire material, not albedo alone.
+6. Keep shader cost bounded even though the global palette doubles.
+7. Make provenance, source URLs, source hashes, processing parameters, and licenses reproducible.
+8. Give artists useful authoring and diagnostic tools without hiding the actual material budget.
+
+## 3. Non-goals
+
+- Replacing the Great Lakes heightfield or changing terrain geometry/LOD topology.
+- Building a world-scale sparse virtual-texture system in this phase.
+- Adding tessellation, mesh shaders, micropolygon displacement, or true geometry displacement.
+- Sampling POM for every blended layer; POM remains dominant-layer-only.
+- Adding foliage, rocks, decals, roads, or procedural object scatter. These are valuable later, but are separate systems.
+- Importing Quixel/Megascans assets or any asset whose redistribution rights are not unambiguous for a public engine repository.
+- Generating source materials with AI.
+- Copying source code from any reference engine. Reference implementations inform an original Rust/WGSL design and must be cited in `ATTRIBUTION.md` during implementation.
+
+## 4. Context and repository audit
+
+### 4.1 Required project context
+
+The following project records were reviewed before this plan was written:
+
+- `context.md`
+- `ATTRIBUTION.md`
+- `dev records/phase_25m2_completion_report.md`
+- `assets/LICENSE.md`
+- the Phase 25 terrain implementation and shader files
+
+The originally referenced root files `m2.md` and `m25.md` are not present in the current worktree. The available combined Phase 25M2 completion report was used instead; this absence must not be silently treated as successful discovery in later sessions.
+
+### 4.2 Current Somnium baseline
+
+Somnium already has a mature eight-layer terrain path:
+
+| Layer | Current asset | Editor label | Compatibility rule |
+|---:|---|---|---|
+| 0 | `aerial_grass_rock` | Grass | Preserve index and interpretation |
+| 1 | `forrest_ground_01` | Forest Floor | Preserve index and interpretation |
+| 2 | `aerial_rocks_04` | Rock | Preserve as the legacy cliff layer unless explicitly migrated |
+| 3 | `snow_02` | Snow | Preserve index and interpretation |
+| 4 | `leafy_grass` | Meadow | Preserve index and interpretation |
+| 5 | `brown_mud` | Mud | Preserve index and interpretation |
+| 6 | `coast_sand_rocks_02` | Sand | Preserve index and interpretation |
+| 7 | `gravel_floor` | Gravel | Preserve index and interpretation |
+
+Current material storage is two RGBA8 array textures per layer:
+
+- **Albedo/height:** RGB albedo, A height.
+- **Surface:** normal X/Y, roughness, AO.
+
+The control data is two RGBA splatmaps and `SplatTexel = [u8; 8]`. The sidecar format is version 2. Visibility shading uses sparse weight gating, explicit derivatives, height-aware blending, perceptual albedo blending, a dominant-layer POM path, derived macro colour, and practical hex tiling of **colour**. The committed source pack is 4K PNG; runtime default is 2K via `SOMNIUM_TERRAIN_RES` (4096 opt-in). Load Lanczos3-resizes the 4K pack, then `build_mip_chain` box-filters encoded bytes (XV-B replaces this with semantic mips). No BC7 path exists yet.
+
+The measured Phase 25D terrain shader cost fell from 0.973 ms to 0.883 ms in its reference view. The current landscape and eye-level material-map averages are approximately 11.44 and 12 taps respectively. Those measurements are historical comparison hints, not a frozen XV-A GPU baseline. Live adapter identity, timings, tap counts, and memory capture remain blocked on implementation authorization; do not invent new numbers.
+
+`context.md` §20 still describes the retired Phase 14 standalone 4-layer `TerrainPass`. Live terrain is inside the vis-buffer / `shading.wgsl` path (Phase 25A-2). Do not treat §20 as terrain truth, and do not rewrite all of `context.md` as if XV shipped.
+
+### 4.3 Identified gaps
+
+- GPU, auto-splat, and sidecar v2 already have eight layers; **paint/UI still clamp to layers 0–3** (`apply_paint` `.min(3)`, `,`/`.` `% 4`, inspector Tile 0–3). Layers 4–7 exist via auto-splat + sidecar only. XV-C must widen editor paint — do not assume 8-layer authoring already works.
+- A naïve increase to sixteen would double the existing worst-case material fetch count from 48 to 96.
+- The steep-slope path (`terrain_triplanar_albedo`) is albedo-only, uses implicit derivatives, mixes roughness toward 0.8, and does not project cliff normal, height, or AO. XV-F still owns full-PBR biplanar.
+- Layer normals are linearly averaged and normalized, which loses detail as dissimilar normals blend. `hex_sample_normal` exists but is **unused**; terrain hex-samples the surface pack as colour.
+- Current mip generation box-filters encoded channel bytes without respecting albedo colour space, normal length, height semantics, or normal-driven roughness variance.
+- Physical real-world material size is not a first-class manifest property.
+- Sixteen uncompressed 2K material pairs would consume about 682.7 MiB including full mip chains; 4K would be about 2.67 GiB.
+- ReSTIR GI uses `gi_terrain_albedo` (**mean albedo × splat weights only**): no height blend, hex, cliff, POM, or macro. It concatenates the terrain WGSL modules but does not call `evaluate_terrain_material`. XV-D shared helpers must keep indexing identical and must not pretend GI already evaluates packed PBR.
+- `GpuTerrainMaterial` live size is **448 bytes** (`shaders_validate.rs`). Header comments that still say 256 bytes are stale.
+- F7 auto-splat uses snow height **10 m**; `DefaultLandscapePreset` / Create → Terrain uses **~65 m** (`relief * 0.62`). Freeze XV-A cameras from the preset, not F7.
+
+### 4.4 Live-code corrections (XV-A codebase map, 2026-08-13)
+
+Full file-level briefing: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
+
+- O3DE `TerrainDetailMaterialManager.cpp` lives under `TerrainRenderer/`, not `Components/DetailMaterial/`. Official docs say “top three”; **local source stores top-two IDs** + 8-bit relative blend and gathers/deduplicates neighbours. Keep Somnium’s four **direct** splatmaps.
+- Terrain3D, PlumeSplat, and the Mikkelsen `surfgrad-bump-standalone-demo` are **not** in `C:\Users\adhir\Downloads\GE\example_repo`. Cite them as web/GitHub pattern study. CDLOD **is** in that tree (out of XV).
+- There is no `assets/terrain/materials.json`. Draft stays under `dev records/phase XV/` until implementation is authorized.
+
+## 5. Research method and conclusions
+
+Research prioritized source code in the supplied reference repositories, official engine documentation, original papers, conference material, and first-party asset/license pages. Secondary tutorials were not used as architectural authority. SIGCHI proceedings were searched, but no directly applicable real-time terrain-material technique was found; the relevant evidence came from SIGGRAPH, JCGT, Eurographics, GDC, CVPR, and engine source/documentation.
+
+### 5.1 Reference-engine findings
+
+| Reference | Source finding | Somnium decision |
+|---|---|---|
+| O3DE Terrain | The Surface Material List exposes many materials globally but blends only the strongest local materials. Official documentation states that the top three weights are normalized; **local source** (`TerrainRenderer/TerrainDetailMaterialManager.cpp`, not `Components/DetailMaterial/`) stores **top-two IDs** + 8-bit relative blend and gathers/deduplicates neighbouring IDs. | Adopt “many globally, few locally,” but retain four **direct** editable splatmaps rather than switching to indexed IDs. Evaluate strongest four initially and compare strongest three. |
+| O3DE detail/macro materials | Separates large unique macro variation from tiled detail material and uses bounded material selection. | Keep Somnium's derived macro map and tiled PBR detail; do not add another clipmap until a measured need exists. |
+| DICE/Frostbite | Procedural shader splatting combines a low-frequency unique colour source with tiled detail; terrain rules include slope and height, and dynamic flow avoids hidden-material cost. DICE also stresses that close terrain needs coherent scans and supporting surface detail. | Add deterministic biome suggestions and preserve early rejection of inactive layers. Do not pretend textures alone replace later scatter/decals. |
+| Far Cry 5 | A virtual-texture solution collapses a very large material sample into a small runtime sample budget. | Record as a scalability alternative, not the default for Somnium's bounded editable terrain. |
+| Ghost Recon Wildlands | Large-world biome diversity is supported with virtual texture and specialized authoring tools. | Borrow the clear biome/authoring separation, not the world-scale streaming architecture. |
+| Unreal Landscape/RVT | Runtime Virtual Texturing caches complex landscape shading and lets landscape/other actors share surface data. | Defer RVT. Introduce a benchmark gate so it can be reconsidered if sixteen direct layers fail cost or residency targets. |
+| Wicked Engine | Terrain uses material arrays and sparse/virtual atlas techniques for larger scopes. | Continue material arrays; avoid introducing an atlas/VT subsystem without a world-size requirement. |
+| Fyrox | Terrain layers are individually masked and authored as a stack. | Preserve intuitive layer-based authoring while keeping Somnium's packed one-pass control textures. |
+| Bevy biplanar reference | Demonstrates biplanar sampling with explicit gradients and the reduction from three projections to two, with known axis-switch discontinuities. | Use full-PBR biplanar projection as the default steep-slope path, retain triplanar as a debug/quality fallback, and test seam hysteresis. |
+| Godot 4.7.1 `BaseMaterial3D` | Its generated world/object-space triplanar path uses normalized powered-normal axis weights and exposes blend sharpness. It applies the same projected coordinates to albedo, metallic, roughness/ORM, normal, bent-normal, AO, emission, and detail inputs. Godot explicitly disables height mapping when triplanar mapping is active. | Use Godot as additional evidence that projection must cover the complete PBR channel set and expose bounded projection sharpness. Project height for material transitions, but disable parallax ray marching on the projected cliff path. Retain Somnium's explicit-gradient, orientation-correct normal implementation rather than translating Godot's generic sampling code. |
+| Godot 4.7.1 texture importer | `Image::generate_mipmap_roughness` reconstructs normal Z, builds a summed-area table, measures average-normal length over each mip footprint, estimates unresolved variance, and raises roughness accordingly before compression. The import pipeline associates a roughness texture with its source normal texture automatically. | Make normal-to-roughness association explicit in the terrain manifest and add Godot's limiter as a named validation reference for Somnium's independently implemented Toksvig-style semantic mip generator. |
+| Bethesda Game Studios / Fallout 4 | Bethesda's first-party graphics overview describes a physically based deferred renderer designed to make materials visually distinct, plus a material system that changes world surfaces when rain arrives. | Judge all sixteen materials by their light response—not albedo alone—and verify wet/dry weather states without erasing the identity of sand, soil, grass, and rock. |
+| Bethesda Game Studios / GDC 2016 | Joel Burgess and Nathan Purkeypile describe reusable modular art kits and an iterative level-design workflow as the production foundation that allowed a comparatively small content team to build Fallout 4's enormous world. | Treat the sixteen-material palette and biome preset as a reusable **landscape kit**: versioned, previewable, composable, and repeatedly reviewed across the whole terrain rather than tuned as isolated textures. |
+
+### 5.2 Research-to-design decisions
+
+| Topic | Evidence | Decision |
+|---|---|---|
+| Anti-tiling | Mikkelsen's practical hex tiling preserves derivatives and limits randomised repetitions; Somnium already hex-samples **colour**. `hex_sample_normal` exists but is unused — packed XY normals are not counter-rotated. | Keep and extend the existing colour hex path. Do not layer texture bombing on top. XV-H must not inherit “hex already handles normals.” |
+| Histogram preservation | Burley's histogram-preserving blending addresses contrast/colour loss under randomized tiling. | Add only after an A/B evaluation shows measurable contrast loss; it requires preprocessing and is not automatically justified. |
+| Normal composition | Mikkelsen surface gradients (JCGT 2020) compose layered / projected bumps linearly; RNM preserves microdetail better than linear normal averaging. | **Mandatory:** blend transition and projected cliff normals as weighted surface gradients, resolve once, then apply shared microdetail with RNM. Linear average-and-normalize of layer normals is rejected. |
+| Specular shimmer | Toksvig filtering and LEAN mapping account for unresolved normal variance. Godot 4.7.1 provides a production importer example that derives additional mip roughness from the shortened average normal vector over each footprint. | Generate per-mip roughness compensation offline using normal variance. Compare the output against an independently implemented Godot-reference limiter and reject LEAN's additional storage for this phase. |
+| Cliff mapping | Full triplanar displacement research maps colour, detail normals, and displacement consistently. Godot applies world-space triplanar coordinates across its PBR inputs, but deliberately makes height-map parallax and triplanar mutually exclusive. | Project every stored PBR channel at cliffs. Use projected height for layer-transition coherence, not projected POM; use biplanar by default for cost and keep triplanar for verification/fallback. |
+| Photogrammetry | DICE's photogrammetry workflow and MatSynth both highlight scale, material completeness, cleanup, and metadata. | Treat “photoscanned” as a quality/provenance requirement, not a marketing label. Validate seams, scale, lighting neutrality, and all PBR channels. |
+| Compression | wgpu exposes BC texture compression only when the adapter supports `TEXTURE_COMPRESSION_BC`. | Produce BC7 runtime packs and request the feature conditionally. Keep a deterministic RGBA8 fallback and never keep both resident. |
+| Virtual texturing | Unreal RVT, Far Cry 4 AVT (Chen GDC 2015), Far Cry 5 / Ghost Recon, Call of Duty “super terrain” (Hooker GDC 2021; Étienne SIGGRAPH 2023), O3DE, and Wicked demonstrate its value at large scale. | Defer until a profiler-backed gate is crossed. Somnium currently has a bounded 1 km terrain and a working direct-array path. CoD/AVT define the “world-scale done” checklist, not the XV default. |
+| Wet / porous response | BGS weather-aware surfaces; Hnat et al. 2006 porous wetting; Terrain3D painted wetness → roughness. | Manifest moisture affinity + global wetness scalar in v1; optional painted wetness channel later. Validate dry/damp/wet in the XV-A landscape-kit matrix, especially at the Great Lakes shore. |
+| Geometry LOD | Geometry clipmaps (Losasso/Hoppe), CDLOD (Strugar), Terrain3D clipmap mesh. | Out of XV. Phase 25C owns morphing; do not rewrite terrain mesh topology to “make materials look better.” |
+
+### 5.3 The Bethesda/Appalachia landscape connection
+
+The Appalachia codename now has a practical design link as well as the “sixteen times the detail” joke:
+
+- Bethesda Game Studios' Fallout 4 graphics overview says its technology choices were selected jointly by the art and engineering teams against specific artistic and performance goals. Its PBR renderer was intended to make surfaces feel tactile and materially distinct, while rain could alter world-surface response. Phase XV follows that discipline by giving every terrain category a characteristic albedo, normal scale, roughness range, height response, and wet-state response, then testing those properties within a fixed GPU budget.
+- In the GDC 2016 session **Fallout 4's Modular Level Design**, BGS presented reusable art kits and iteration as a way to create a large, varied open world efficiently. The direct analogue here is not modular architecture but a modular landscape kit: sixteen stable materials, one manifest, shared biome rules, consistent debug views, and repeated whole-world review.
+- Bethesda's official Fallout 76 overview describes Appalachia as six visually distinct regions, including the Forest, Toxic Valley, and Ash Heap. Somnium should similarly require readable biome identities from combinations of a reusable palette rather than equating variety with one unique texture per biome.
+- BGS senior environment artist Megan Sawyer describes a landscape team that reviews its work weekly and uses regionally meaningful flora—such as West Virginia's rhododendron—to ground Fallout 76. Foliage remains outside Phase XV, but the material manifest should retain biome and moisture tags so a later scatter system can extend the same environmental identity instead of inventing a disconnected one.
+
+This does **not** mean copying Creation Engine technology or Fallout's art direction. It contributes production principles: distinct physical materials, weather-aware validation, reusable landscape building blocks, strong regional identity, and regular landscape-scale review.
+
+### 5.4 Godot 4.7.1 source audit
+
+Godot does not provide a native 3D terrain/splat-material subsystem in the inspected source, so it does not supersede the O3DE, Unreal, Wicked, or Fyrox layer-management references. Its general material and import pipelines nevertheless add two concrete safeguards to Phase XV.
+
+First, Godot's `BaseMaterial3D` generator treats triplanar mapping as a material-wide coordinate policy rather than an albedo special case. Axis weights are derived from the powered absolute surface normal and normalized; world-space projection and blend sharpness are explicit options. The projected coordinates are reused for the available PBR and detail channels. This reinforces Somnium's full-channel cliff requirement, while Godot's documented cost warning supports keeping biplanar as the shipping default and triplanar as a reference/quality mode. Godot's prohibition on combining triplanar mapping with height-map parallax also clarifies Somnium's boundary: cliff height still participates in material/height blending, but projected POM ray marching is disabled.
+
+Second, Godot's importer supplies a useful specular anti-aliasing reference. For each roughness mip texel, it averages reconstructed normals across the corresponding full-resolution footprint using a summed-area table. The shortened mean-normal length estimates unresolved directional variance; that variance is combined with squared source roughness and bounded before writing the mip. Somnium should implement the principle independently in Rust, cite Godot and the original normal-filtering research, and compare generated mip chains against this reference behaviour. The terrain manifest's explicit pairing of surface/normal and roughness channels makes the association deterministic instead of relying on editor-time detection.
+
+Godot is MIT-licensed. No source should be copied into Somnium; any translated pattern must be independently expressed for Somnium's packed arrays, cited in `ATTRIBUTION.md`, and retain the applicable notice if a substantial portion were ever incorporated.
+
+### 5.5 Expanded research pass (2026-08-13)
+
+A second literature and open-source pass was run after Phase IV water closed, with the explicit goal of finding everything attributable that would make terrain feel as finished as the ocean. SIGCHI remains thin for real-time terrain materials; the useful corpus is still SIGGRAPH / Advances in Real-Time Rendering, GDC, JCGT, Eurographics, CVPR, and production open-source terrain plugins.
+
+#### 5.5.1 Papers and courses (geometry / materials / filtering)
+
+| Source | Why it matters for XV | Somnium decision |
+|---|---|---|
+| Losasso & Hoppe, **Geometry Clipmaps**, SIGGRAPH 2004; GPU Gems 2 Ch. 2 | Nested regular grids, morph heights, constant triangle budget. | Geometry LOD stays **Phase 25C / deferred clipmap work**, not XV. Cited so XV does not invent a second LOD story while packing materials. |
+| Strugar, **CDLOD**, JGT 2009 | Quadtree-adaptive clipmaps; smooth morph; no stitching meshes. | Same boundary: informs 25C morphing; XV assumes the existing chunk/LOD mesh and must not regress it. |
+| Andersson, **Frostbite Procedural Shader Splatting**, SIGGRAPH 2007 | Compute materials instead of storing unique detail; slope/height masks; destruction-friendly. | Already core to XV biome rules + sparse evaluation. Reconfirmed as the closest classical match to “many materials, few active”. |
+| Mikkelsen, **Surface Gradient–Based Bump Mapping**, JCGT 2020 | Linear compositing of bump influences (triplanar, decals, layered normals) without a shared tangent frame. | **Strengthen XV-H / XV-F:** blend layer and projected cliff normals as surface gradients, then resolve once. RNM is the microdetail step on top, not the only blend rule. |
+| Mikkelsen, **Practical Real-Time Hex-Tiling**, JCGT 2022 | Derivative-correct hex randomization; works for normals; SampleGrad required. | Already shipping; keep as the only anti-tiling path. |
+| Burley, **Histogram-Preserving Blending**, JCGT 2019 | Contrast preservation under randomized tiling. | Still optional A/B only (7.6). |
+| Toksvig, **Mipmapping Normal Maps**, JGT 2005; Godot `generate_mipmap_roughness` | Unresolved normal variance → roughness. | Already XV-B. |
+| Hill / Barré-Brisebois, **Blending in Detail** (RNM survey) | Compares PD / whiteout / UDN / RNM for detail normals. | RNM for microdetail; surface gradients for inter-layer blend. |
+| Olano & Baker, **LEAN Mapping**, I3D 2010 | Moments for specular AA. | Still rejected for storage (13.3). |
+| **Triplanar Displacement Mapping for Terrain**, EG 2020 | Full-channel projection including displacement. | Reinforces full-PBR cliffs; projected POM still off. |
+| **Mix-Max**, EG 2024 | Content-aware texture transitions. | Research reserve (13.7). |
+| Vecchio et al., **MatSynth**, CVPR 2024 | Modern PBR dataset; height-aware material blending masks. | Provenance/quality bar + height-blend validation corpus, not a runtime dependency. |
+| Hnat et al., **Real-time Wetting of Porous Media**, ICCVG / MG&V 2006 | Porous surfaces darken and gain specular response when wet. | Formalise wet-state as albedo darken + roughness drop + slight F0 lift, gated by moisture affinity tags already planned in the manifest. |
+| Bajo et al. / micro-ellipsoid wet-porous work (recent survey lineage) | Shows surface wetting models are practical but approximate; volume porosity is still research. | Keep XV wet response **artist-tunable and lightweight**; do not claim a physical porous BRDF. |
+
+#### 5.5.2 Production talks (virtual texture & “super terrain”)
+
+| Talk | Finding | Somnium decision |
+|---|---|---|
+| Ka Chen, **Adaptive Virtual Texture Rendering in Far Cry 4**, GDC 2015 | AVT grows virtual image size with camera distance; ~10 km worlds at ~10 texels/cm; terrain + decals in one VT. | Still **deferred** (13.1). Record as the scalability ceiling if the 1 km direct-array path ever fails budgets or the world grows. |
+| JT Hooker, **Boots on the Ground: The Terrain of Call of Duty**, GDC 2021 | GPU-side editing, procedural biomes, VT-backed artistic blending, 60 fps budgets. | Borrow *authoring iteration* ideals (GPU-friendly paint already exists); do not adopt CoD’s VT stack in XV. |
+| Étienne, **Large Scale Terrain Rendering in Call of Duty**, SIGGRAPH 2023 Advances | Extends virtualization beyond textures; scales mobile→PC; builds on Far Cry AVT lineage. | Same deferral. Useful checklist of what “done” looks like at AAA scale so XV knows what it is *not* claiming. |
+| Ubisoft, **Far Cry 5 Terrain** / **Ghost Recon Wildlands Terrain**, GDC 2017–2018 | Already cited; biome tools + VT. | Unchanged. |
+
+#### 5.5.3 Open-source terrain systems (pattern study only)
+
+| Project | License / notes | Useful patterns | What XV will *not* copy |
+|---|---|---|---|
+| **Terrain3D** (TokisanGames, Godot 4, MIT) | Clipmap mesh; up to 32 texture sets; height blending; painted wetness (roughness shift); colormap; autoshader + manual paint separation; rich debug views. | **Wetness as a painted scalar channel** that modulates roughness/albedo after material blend; autoshade vs paint override model mirrors XV-G’s base/override split; debug views as acceptance tools (XV-I). | Geometry clipmap mesh; indexed base/overlay control map (XV keeps four direct splats). |
+| **PlumeSplat** (DrewRidley, Bevy) | Texture-array splat, up to 256 materials, height blend, triplanar, stochastic tiling, packed ORM+H. | Confirms “array + height blend + projection” as the modern open-source default Somnium already chose. | 256-material / vertex-index path; Bevy material integration. |
+| **Hollow-TerrainSystem** (SanielX, Unity demo) | Adaptive VT prototype; cites CoD 2023, Far Cry 4, van Waveren software VT. | Bibliography cross-check for the VT deferral gate. | Any VT page-table code. |
+| **PVTUT** (ACskyline) | Procedural virtual texture + clipmap indirection tutorial. | Clarifies why indirection clipmaps exist (do not store finest LOD globally). | Implementation. |
+| **TerrainHeightBlend-Shader** (jensnt, Unity) | Height blend + distant macro map + parallax. | Distant-map blend distance as another name for Somnium’s macro/detail crossfade. | Unity terrain binding. |
+| **Mikkelsen surfgrad demo** (`mmikk/surfgrad-bump-standalone-demo`) | Reference compositing of triplanar / decals via surface gradients. **Not** in the local `example_repo` (web/GitHub only). | Validation reference for XV-F/XV-H normal composition. | Direct code lift — re-express in WGSL. |
+| **ambientCG** | CC0 materials + documented asset API (`type=material` / terrain-oriented packs). | **Fallback source** beside Poly Haven when a candidate fails audit (§6). Record API User-Agent and hashes like Poly Haven. | Silent bulk download without manifest. |
+
+Terrain3D, PlumeSplat, Hollow-TerrainSystem, PVTUT, and the surfgrad demo were **not** found under `C:\Users\adhir\Downloads\GE\example_repo` (XV-A codebase map). They remain web/GitHub citations. CDLOD **is** present in that tree and stays out of XV (Phase 25C).
+
+#### 5.5.4 Design consequences of the second pass
+
+1. **Surface-gradient blending is mandatory language for XV-H / XV-F**, not an optional upgrade over linear normal lerp. Inter-layer and biplanar contributions accumulate as gradients; RNM applies only the shared microdetail layer.
+2. **Wetness validation is first-class**, not a screenshot footnote. XV-A’s landscape-kit matrix must include dry / damp / wet for shore, mud, rock, and grass under noon and moon, using the porous-wetting darken+gloss model. Terrain3D’s “paint wetness → roughness” authoring is the UX reference for a later inspector control; XV-G stores moisture affinity so a global wetness scalar can drive it without per-texel paint in v1.
+3. **Geometry clipmaps / CDLOD / CoD AVT stay out of XV.** They are attributed and parked under Phase 25C or a future world-scale phase so XV’s acceptance cannot hide behind a mesh rewrite.
+4. **Debug views are acceptance criteria.** Weight heatmaps, dominant-layer ID, projection-axis visualisation, and wetness response views (Terrain3D / CoD practice) land with XV-I and are required before XV-J can close.
+5. **Water adjacency is a required fixture.** The Great Lakes shore (wet sand → dry sand → meadow) under the shipping water body is an XV-A capture set, because that is where terrain quality is judged against the finished ocean.
+
+## 6. Proposed sixteen-material palette
+
+All eight current indices remain unchanged. The eight new candidates are Poly Haven assets published under CC0. First-party `/info` and `/files` were accessed on **2026-08-13** (XV-A research). Two role substitutions are already recorded below; they are research substitutions, not downloaded assets. Final visual/channel acceptance remains contingent on an implementation-time audit; any further substitution must also be CC0, must preserve the intended terrain role, and must update the manifest and attribution record.
+
+| Index | Asset identifier | Editor role | Approx. physical width | Source |
+|---:|---|---|---:|---|
+| 0 | `aerial_grass_rock` | Grass | 15 m | Existing licensed asset |
+| 1 | `forrest_ground_01` | Forest Floor | 2 m | Existing licensed asset |
+| 2 | `aerial_rocks_04` | Rock / legacy cliff | 80 m | Existing licensed asset |
+| 3 | `snow_02` | Snow | 2 m | Existing licensed asset |
+| 4 | `leafy_grass` | Meadow | 2 m | Existing licensed asset |
+| 5 | `brown_mud` | Mud | 1.3 m | Existing licensed asset |
+| 6 | `coast_sand_rocks_02` | Sand / pebbled coast | 15 m | Existing licensed asset |
+| 7 | `gravel_floor` | Gravel | 2.25 m | Existing licensed asset |
+| 8 | `aerial_sand` | Dry beach sand | 15 m | <https://polyhaven.com/a/aerial_sand> |
+| 9 | `coast_sand_01` | Damp shoreline sand | 15 m | <https://polyhaven.com/a/coast_sand_01> |
+| 10 | `dry_mud_field_001` | Dry earth / topsoil | 3 m | <https://polyhaven.com/a/dry_mud_field_001> |
+| 11 | `cracked_red_ground` | Red mineral clay | 2 m | <https://polyhaven.com/a/cracked_red_ground> — **XV-A research substitution** (accessed 2026-08-13) for `terrain_red_01`, which is crushed reddish gravel overlapping layer 7 `gravel_floor` |
+| 12 | `sparse_grass` | Sparse grass and exposed soil | 2 m | <https://polyhaven.com/a/sparse_grass> |
+| 13 | `mossy_rock` | Wet/mossy mountain rock | 3 m | <https://polyhaven.com/a/mossy_rock> |
+| 14 | `rock_face_03` | Rugged vertical cliff | 2.7 m | <https://polyhaven.com/a/rock_face_03> |
+| 15 | `ganges_river_pebbles` | Talus / river stone | 2.16 m | <https://polyhaven.com/a/ganges_river_pebbles> — **XV-A research substitution** (accessed 2026-08-13) for `dry_riverbed_rock`, which is a rock face overlapping the dedicated cliff |
+
+XV-A also filled layers 0–7 provenance gaps from first-party `/info` (2026-08-13): `leafy_grass` author is **Charlotte Baglioni** (not Tuytel); `gravel_floor` is **Matterfield** photography / **Jenelle van Heerden** processing; `brown_mud` physical size is **1.3 m** (API scale string `1,3`); `aerial_rocks_04` is an **80 m** aerial scan while the engine still tiles every layer at **4 m**. Do not silently retile shipping 0–7 to 1:1 physical scale — that would change old scenes. SHA-256 of source bytes, evidence PNGs, and live GPU/tap/memory freeze remain pending implementation authorization; the draft manifest stays under `dev records/phase XV/`.
+
+Poly Haven's official license places its assets under CC0, permitting commercial use, modification, and redistribution without required attribution. Somnium should still provide voluntary credit, direct asset-page URLs, the CC0 link, an access date, and hashes for every downloaded source file. The implementation must fetch through the documented API or asset URLs with an identifying User-Agent and must not obscure provenance.
+
+Fallback sourcing, if a candidate fails the quality review, may use another Poly Haven asset or an ambientCG CC0 material. A source's general reputation is not sufficient: the exact asset page and license must be captured.
+
+## 7. Target architecture
+
+### 7.1 Reproducible material manifest
+
+Add a versioned `assets/terrain/materials.json` as the source of truth. Each entry should contain:
+
+- stable numeric layer index and stable string ID;
+- editor display name and terrain-role tags;
+- source page, author/organization, license identifier and license URL;
+- source-file URLs, expected byte sizes, and SHA-256 hashes;
+- source colour-space and normal convention (OpenGL or DirectX);
+- measured physical width/height in metres;
+- per-layer UV scale multiplier and optional rotation offset;
+- channel mapping and processing parameters;
+- height normalization range and neutral-height convention;
+- macro tint limits, microdetail response, wetness affinity, and cliff suitability;
+- generated output hashes for 2K and 4K packs.
+
+The fetch tool must fail closed on hash mismatch, missing channels, changed resolution, or an unknown license. Generated packs should be reproducible from the manifest and cached source files.
+
+### 7.2 Control representation: four direct splatmaps
+
+Use four RGBA8 control textures for sixteen weights:
+
+```text
+Splat 0: layers  0–3
+Splat 1: layers  4–7
+Splat 2: layers  8–11
+Splat 3: layers 12–15
+```
+
+This deliberately retains direct weights rather than adopting an indexed ID/weight texture. Direct splats preserve hardware bilinear filtering, current brush behaviour, undo semantics, and simple migration. An indexed representation requires neighbour gathers plus ID deduplication to filter correctly, as demonstrated by O3DE's implementation, and would make authoring more fragile.
+
+The editor invariant is **at most four non-zero stored channels per texel**. When a brush or biome rule adds a fifth channel, the smallest channels should decay deterministically, then all surviving channels should be renormalized to 255 with a stable remainder rule. Filtering can expose more than four candidates at pixel boundaries; the shader selects the strongest four and renormalizes them before material sampling.
+
+Sidecar version 3 migration:
+
+- copy version 2 layers 0–7 byte-for-byte;
+- initialize layers 8–15 to zero;
+- preserve the exact normalized rendering of old scenes;
+- store material-manifest version and hash;
+- retain a one-way v2-to-v3 migration test fixture.
+
+### 7.3 Bounded shader evaluation
+
+The fragment path should:
+
+1. sample four control textures;
+2. assemble and normalize sixteen scalar weights;
+3. select the strongest four with a deterministic compare/swap network;
+4. reject negligible weights before texture work;
+5. evaluate only the surviving material entries;
+6. height-blend and renormalize the selected set;
+7. evaluate dominant-layer POM only when its existing distance/angle gates pass;
+8. blend normals through a surface-gradient representation;
+9. apply optional shared microdetail with RNM;
+10. write the same material interpretation to the terrain visibility shading and ReSTIR GI paths through shared WGSL helpers.
+
+With two packed maps, three hex samples, and four selected layers, the base worst case is 24 material taps rather than the current 48. Full-PBR biplanar projection on a steep dominant cliff may bring the bounded worst case to 36 material taps. Control-map, macro-map, and gated POM fetches are reported separately so profiling cannot hide them.
+
+The implementation must A/B strongest-three and strongest-four selection against a full sixteen-layer offline reference. Three may ship only if its transition error and visible junction quality meet the same thresholds.
+
+### 7.4 Material arrays, compression, and mips
+
+Continue using the two packed material arrays. Build two runtime variants:
+
+- **Preferred:** BC7 for both arrays when the adapter exposes wgpu `TEXTURE_COMPRESSION_BC`.
+- **Fallback:** RGBA8 arrays using the current universal upload path.
+
+The device feature is conditional; requesting an unsupported feature is an error. Only one variant may be resident.
+
+Approximate full-mip residency for sixteen layers:
+
+| Runtime pack | 2K | 4K |
+|---|---:|---:|
+| Two RGBA8 arrays | 682.7 MiB | 2.67 GiB |
+| Two BC7 arrays | 170.7 MiB | 682.7 MiB |
+| Four RGBA8 2K control maps | 21.3 MiB | 85.3 MiB |
+
+The default remains 2K. The 4K mode remains an explicit high-quality option.
+
+Offline mips must be channel-aware:
+
+- decode albedo to linear, filter, then encode to sRGB;
+- average tangent-space normals, renormalize, and repack XY;
+- preserve linear height and AO semantics;
+- increase per-mip roughness using the lost normal-vector length/variance (Toksvig-style specular anti-aliasing);
+- compare the roughness result against the Godot 4.7.1 normal-footprint limiter and record formula/threshold differences in the pack report;
+- perform deterministic edge wrapping for tileable sources;
+- validate alpha and scalar ranges after compression.
+
+The packer should output a machine-readable report with per-layer range statistics, seam error, normal-length error, compression PSNR/SSIM for colour, and scalar-channel maximum error. BC7 height quality must be inspected explicitly because height lives in alpha and influences blending/POM.
+
+### 7.5 Full-PBR cliff projection
+
+Replace the current albedo-only cliff projection with a shared projected-material function that returns:
+
+- albedo;
+- tangent/world-space normal contribution;
+- roughness;
+- AO;
+- height.
+
+Default to biplanar projection with explicit gradients to control cost and avoid derivative errors inside divergent branches. Blend projection axes continuously and add hysteresis/smoothing around the axis switch. A triplanar mode should remain available as a debug/reference quality path. Height blending and projected normal orientation must use the same coordinates, or cliff material boundaries will swim.
+
+Projected height is used for coherent layer selection and transition blending only. POM/parallax ray marching must be disabled on the projected cliff branch, matching the practical incompatibility exposed by Godot's general material path and avoiding another divergent multi-sample loop.
+
+Slope transitions should be broad enough to avoid a visible contour around the whole landscape. Layer 14 is the preferred dedicated cliff face, while layer 2 retains legacy compatibility. Artists can override cliff assignment through painted weights.
+
+### 7.6 Multi-scale appearance
+
+Each material should contribute at three distinct scales:
+
+- **Macro:** the existing derived unique colour map and conservative biome tint; no high-frequency normals.
+- **Meso:** physically scaled photoscanned PBR material with hex randomization.
+- **Micro:** a subtle shared or per-category detail normal applied through RNM and faded by distance/roughness.
+
+Physical-size metadata determines the base tiling rate. Per-layer artistic scale is a bounded multiplier, not a replacement for metres. Random rotation/offset must preserve normal orientation. Macro colour variance should be energy-limited and evaluated alongside hex tiling so the combined system does not create synthetic blotches.
+
+Histogram-preserving hex blending is an optional quality experiment. It should be enabled only if objective image statistics and side-by-side captures show that the current randomization visibly washes out contrast.
+
+### 7.7 Biome rules and manual authoring
+
+The default terrain preset should calculate material suggestions from stable, inspectable inputs:
+
+- normalized elevation and world-space height;
+- slope and curvature;
+- distance above/below the water level;
+- a low-frequency moisture field;
+- a low-frequency temperature/exposure field;
+- deterministic seeded noise only for boundary breakup.
+
+Example intent:
+
+- wet sand close to the waterline, transitioning to dry sand above it;
+- mud and sparse grass in damp low slopes;
+- meadow/grass on moderate, well-lit slopes;
+- forest floor in sheltered/moist regions;
+- gravel, talus, and rock as slope/curvature rises;
+- rock-face projection on cliffs;
+- snow at high elevation, modulated by slope and exposure.
+
+Procedural results must be bakeable into the same four splatmaps. Manual paint is an additive/override authoring layer and must survive rule regeneration through an explicit “rebuild base / preserve overrides” operation. The default scene and **Create > Terrain** must instantiate the same versioned preset rather than duplicating constants.
+
+## 8. Implementation phases
+
+All subphases **XV-A through XV-Zeta are implemented in engine** as of 2026-08-13
+(including biome v3, landscape v4, and aerial hex/POM LOD). Canonical live
+numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md). **XV-J is
+complete** (compile gate + live GPU PNGs + wgpu adapter freeze + release
+profiler). Exception: 1.10 ms shading budget. BC7 encoder + local packs:
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
+XV-J record:
+[`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+
+### XV-A — Baseline and provenance gate
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (research + runtime data model). Provenance: [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md). Codebase map: [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md). Shipping manifest: [`assets/terrain/materials.json`](../assets/terrain/materials.json). Landscape-kit matrix: [`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md). Live GPU captures, SHA-256 of downloads, and adapter freeze still pending an engine/fetch run.
+
+**Work**
+
+- Freeze reference scenes and cameras from `DefaultLandscapePreset` (snow band ~65 m), **not** F7 (`auto_splat(..., 10.0)`). Record adapter details, shader timings, tap counts, and memory on an authorized engine run.
+- Define a landscape-kit review matrix covering each intended biome identity in dry, damp, wet, day, and night conditions, including the **Great Lakes shore under the shipping water body** (wet sand → dry sand → meadow) as the water-parity fixture.
+- Add the sixteen-entry manifest schema and fill existing-layer provenance gaps, including moisture-affinity tags for the porous-wetting response model.
+- Validate the eight proposed new asset pages, channel sets, real-world sizes, licenses, and source hashes; record ambientCG fallback candidates if any Poly Haven page fails audit.
+- Record any evidence images under `dev records/phase XV/evidence/` using `phase_XV-A_<purpose>.png` names.
+
+**Exit criteria**
+
+- Reproducible baseline report exists. **Met for the code contract** (cameras, tiling, residency, historical timings, codebase map). Live adapter/GPU/tap capture still pending an authorized engine run.
+- Every candidate has an exact first-party source/license record. **Met**, with two role substitutions (`terrain_red_01` → `cracked_red_ground`, `dry_riverbed_rock` → `ganges_river_pebbles`).
+- No new texture binary has entered the repository without its manifest entry. **Met** — 2K sources fetched 2026-08-13 into `assets/terrain/_source/` (gitignored); SHA-256 in `_source/FETCH_REPORT.json`. Packed PNGs for 8–15 written beside shipping 4K 0–7.
+- File-level codebase map recorded. **Met** — [`phase XV/XV-A_codebase_map.md`](phase%20XV/XV-A_codebase_map.md).
+
+**Not met (follow-up, not XV-J):** 1.10 ms shading. BC7 encoder + local packs: [`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md). XV-J record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md). Fetch SHA-256 is in `assets/terrain/_source/FETCH_REPORT.json`. Manifest is installed at `assets/terrain/materials.json`. Sidecar v4 and thirty-two-layer shaders are in the engine.
+
+### XV-B — Deterministic asset pipeline
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Manifest fetch (`fetch_terrain`), sixteen-layer packer, semantic mips, Godot-reference Toksvig fixture. Live 2K fetch ran 2026-08-13 (`assets/terrain/_source/FETCH_REPORT.json`). Packer skips existing `*_albedo.png`/`*_surface.png` unless `--force`, so shipping 4K layers 0–7 were left alone and layers 8–15 packed at 2K. JPEG `nor_dx` pixels with XY length > 1 are clamped onto the unit disk (logged, not fatal unless length > 1.5). BC7 encoder is `encode_terrain_bc7`; runtime detects BC and loads `assets/terrain/bc7/` when complete, else RGBA8, never both.
+
+### XV-C — Sixteen-layer data model and migration
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Sixteen-channel splat, paint 0–15 with four-nonzero, sidecar v3, v2 migration copies 0–7 and zeros 8–15. Startup and Create → Terrain bake the XV-G biome (layers 0–15). The eight-layer F7 rebuild path is removed. Inspector palette is XV-I.
+
+### XV-D — GPU layout and sparse evaluation
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** `GpuTerrainMaterial` is 880 bytes / four splatmaps / moisture+wetness (XV-H). Strongest-four before PBR. GI uses the same unpack/select helpers, then mean-albedo × weights with wetness darken. Debug: `SOMNIUM_SHADOW_DEBUG` / inspector 12, 18–23.
+
+### XV-E — Compression and specular stability
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13** (detect + RGBA8 path + encoder).
+`TEXTURE_COMPRESSION_BC` is requested only when present. Semantic mips + Toksvig
+fixture are in. Offline BC7: `cargo run --release -p somnium_renderer --example encode_terrain_bc7`
+(`intel_tex_2` alpha_basic, packs gitignored). Runtime loads `assets/terrain/bc7/`
+when complete (hero 2048 + extra 1024, ~213 MiB); `SOMNIUM_TERRAIN_FORCE_RGBA8=1`
+keeps the fallback. Visual A/B (cliff MAE 0.599 vs RGBA8):
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
+
+### XV-F — Full-PBR mountain and cliff materials
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Full-PBR biplanar (triplanar debug), surface-gradient composition, POM suppressed when `cliff_blend >= 0.05`. `cliff_layer` is 14 (`rock_face_03`); layer 2 stays legacy rock. Hex packed-surface normals are counter-rotated.
+
+**Work**
+
+- Replace the live albedo-only cliff path (`terrain_triplanar_albedo` + roughness 0.8). Implement explicit-gradient biplanar projection for all packed channels.
+- Correct projected normal orientation and blend it through surface gradients.
+- Expose a bounded projection-sharpness control and explicitly suppress POM on the projected path while retaining projected height blending.
+- Add triplanar reference/debug mode and axis-switch diagnostics.
+- Tune cliff slope masks and dedicated rock-face selection.
+
+**Exit criteria**
+
+- No albedo stretching or fixed-roughness cliff patches.
+- Normal, roughness, AO, height, and albedo remain spatially aligned.
+- Steep-path worst case is at most 36 material-map taps.
+- Axis transitions are not visible in the cliff test corpus.
+
+### XV-G — Biome preset and shared terrain creation
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Visual sign-off is XV-J.
+
+`BiomePreset::appalachia` in `terrain/biome.rs` writes all sixteen layers from elevation, slope, curvature, water datum (16.1 m), and noise. `auto_splat` delegates to it. `DefaultLandscapePreset` version is **2**. Startup and Create → Terrain are the only authors of the default splat; F7 is gone. Paint stamps still set `splat_lock` so a later explicit rebuild can preserve overrides.
+
+**Work**
+
+- Implement deterministic elevation/slope/curvature/water/moisture/exposure rules.
+- Bake results into the four direct splatmaps while respecting local sparsity.
+- Add paint overrides and an explicit rebuild policy.
+- Make the default scene and **Create > Terrain** consume one versioned preset.
+
+**Exit criteria**
+
+- Same seed, heightmap, water level, and preset produce identical splat hashes. **Met in unit tests** for `weights_at` bit-identity; full splat-hash capture is XV-J.
+- Waterline, beach, grassland, soil, mountain, cliff, talus, and snow regions read coherently. **Code path exists; GPU look is XV-J.**
+- Manual overrides survive a base-rule rebuild when requested. **Met** via `splat_lock` (no F7; rebuild is internal to the biome apply).
+
+### XV-H — Macro, meso, and micro fidelity
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Visual A/B is XV-J.
+
+Layers 0–7 stay at tiling 0.25 (4 m tile) so old scenes do not retile. Layers 8–15 use `1 / physical_width_m`. Moisture affinity is packed as `array<vec4<f32>, 4>` at GPU offset 800. Global wetness (`SOMNIUM_TERRAIN_WETNESS` / inspector Wet) darkens albedo, drops roughness, and lifts F0 after the blend, weighted by moisture. Histogram-preserving blend is **not shipped** (no evidence yet). No extra RNM microdetail map; surface-gradient composition from XV-F stands.
+
+**Work**
+
+- Apply per-material physical scale and bounded artistic multipliers.
+- Implement surface-gradient accumulation for inter-layer and projected normals; apply RNM only to shared/category microdetail with distance fade.
+- Calibrate dry / damp / wet responses (albedo darken, roughness drop, slight F0 lift) so each material remains distinct under weather-driven changes, gated by moisture affinity.
+- Retune macro variation and hex randomization as one system.
+- A/B histogram-preserving blending; ship it only if evidence justifies its preprocessing and runtime cost.
+
+**Exit criteria**
+
+- No obvious grid repetition / plausible real-world scale / wet-vs-dry identity: **shader and constants are in; captures are XV-J.**
+- Histogram-preserving blend: **deferred** unless XV-J evidence asks for it.
+
+### XV-I — Editor experience and diagnostics
+
+**Status: IMPLEMENTED IN ENGINE — 2026-08-13.** Named palette buttons (not texture thumbnails). Debug views ride the same codes as `SOMNIUM_SHADOW_DEBUG`, also settable from the inspector without an env var.
+
+Palette: sixteen abbreviated names. Paint stepper kept. Tile 0–3 replaced by tiling of the **current** paint layer, plus Wetness and Debug. Debug 12 taps, 18 discarded, 19 selected, 20 weights, 21 dominant albedo, 22 cliff blend, 23 wetness factor.
+
+**Work**
+
+- Expand the native wgpu material palette to sixteen named thumbnails.
+- Show physical scale, source/license, memory state, moisture affinity, and material role in the inspector.
+- Add solo-layer, weight heatmap, selected-four, dominant-layer ID, cliff projection axis, wetness response, mip, and residency debug views (Terrain3D / CoD-style acceptance tools).
+- Surface unsupported compression fallback and manifest mismatch clearly in the output log.
+
+**Exit criteria**
+
+- All sixteen materials are discoverable and paintable without memorizing indices. **Met** via named buttons + Paint stepper.
+- The artist can identify why a material was selected, what was discarded, and how wetness is modulating roughness/albedo. **Met for debug 18–23;** mip/residency views not added.
+- Debug UI remains native wgpu and does not introduce an opaque WebView background. **Met.**
+
+### XV-Zeta — 32-layer landscape identity (before XV-J)
+
+**Status: IN ENGINE — 2026-08-13**, including aerial LOD and biome v3. Live look signed off the same day. Canonical numbers: [`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md).
+
+Live default landscape after XV-I: close-up scans worked; from the overview
+camera the ground was one ochre; inspector palette clicks selected a layer but
+did not paint. **Those are fixed.** Remaining XV-J work is GPU evidence, not
+paint UX.
+
+**PBR channels (already used):** albedo RGB, displacement as height (blend +
+dominant POM, not tessellation), DirectX normal XY, roughness, AO. Metallic
+dropped. Distant brown is kit + biome + macro, not missing maps.
+
+**Work (A→E in engine 2026-08-13)**
+
+- **Zeta-A** — Terrain Paint Mode; palette click arms paint and disables foliage
+  paint; stroke still happens on the viewport.
+- **Zeta-B** — Splat-weighted unique colour / macro so distant pixels show which
+  material won; stop the Great Lakes satellite diffuse from owning the continent;
+  retune 0–15 biome toward green/gray inland, sand/mud at the waterline.
+- **Zeta-C** — 32 global layers, eight RGBA splatmaps, sidecar v4, strongest-four
+  unchanged, layout ~1600 bytes, `array<vec4<T>, 8>`.
+- **Zeta-D** — Audit + fetch + pack 16 new **hue-diverse** CC0 scans (not more
+  dirt). Extra bank 16–31 still loads at 1024; with BC7 packs, hero 0–15 stay
+  2048 (~213 MiB). RGBA8 32×2K ~1365 MiB fails the 700 MiB budget.
+- **Zeta-E** — 32-weight biome on Create → Terrain / startup; bump landscape
+  version. **v3 biome / landscape v4 (same day):** warped FBM (no ruler
+  isolines), overlapping forest/meadow, snow cap at `relief * 0.48` plus
+  mid-slope patches, unused layers scatter, rock height-blend widened.
+  Aerial LOD: `gpu_material_for_camera` (hex/POM off > 80 m above ground).
+  Live look signed off 2026-08-13.
+
+**Deferred (not XV-J):** further shading LOD. Per-pixel sample-count branches
+made walking *slower* (20→27 ms). Aerial hex/POM is a CPU uniform
+(`gpu_material_for_camera`, 80 m above ground). Next real cut is a second
+shading PSO (BC7 is the residency lever, not the 1.10 ms close). See
+[`phase XV/XV-Zeta_plan.md`](phase%20XV/XV-Zeta_plan.md) §11.
+
+**Exit criteria**
+
+- Clicking a palette name and dragging the ground paints that material. **Met.**
+- Overview camera reads green / gray / tan / shore / snow without zooming in.
+  **Met in live look 2026-08-13;** GPU evidence PNGs still XV-J.
+- 32 photographed (or explicitly substituted) CC0 layers; v3 scenes keep 0–15.
+  Layers 16 and 24 are the substitutions (procedural lush/wildgrass). **Met.**
+- Strongest-four tap caps unchanged. Residency logged. Water datum / Great Lakes
+  body untouched. **Met.**
+
+### XV-J — Verification, attribution, and handoff
+
+**Status: COMPLETE — 2026-08-13** (compile gate + GPU corpus). Exception: §10.1
+1.10 ms shading. BC7 follow-up the same day:
+[`phase XV/evidence/XV-BC7_visual_check.md`](phase%20XV/evidence/XV-BC7_visual_check.md).
+
+Record: [`phase XV/evidence/XV-J_compile_gate.md`](phase%20XV/evidence/XV-J_compile_gate.md).
+
+**Done**
+
+- `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, Naga `shaders_validate`, sidecar v2/v3/v4, CIEDE2000 strongest-four fixture, `pack_terrain --validate-only` (30 photographed, 0 missing).
+- Live wgpu freeze: NVIDIA GeForce RTX 5080 Laptop GPU, Vulkan, driver 610.74, BC/RT/timestamps yes.
+- Release 1280×720 profiler at frame 240: overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Frame ~10.8 ms overview.
+- Residency: projected 853 MiB @2K+1K; runtime **1024+1024 ~341 MiB** (RGBA8, packs absent at XV-J freeze).
+- Tonemapped `phase_XV-J_*.png` corpus (overview day/night, eye, shore dry/wet/night, cliff, snow ridge, forest, taps/discarded/selected).
+- Same-day BC7 follow-up: local packs, hero 2048 + extra 1024 ~213 MiB, `phase_XV-BC7_*` / `phase_XV-RGBA8_*`.
+
+**Exit criteria**
+
+- Compile/Naga/sidecar/pack: **met**.
+- Section 11: met or recorded as an approved exception (1.10 ms). BC7 packs are local artifacts, not a new subphase.
+- GPU PNG corpus: **met**. Phase XV implementation is closed; remaining follow-up is the 1.10 ms aerial PSO, not a new subphase.
+
+## 9. Expected implementation touch points
+
+This list is planning guidance, not permission to perform unrelated refactors.
+
+| Area | Expected files |
+|---|---|
+| Asset provenance | `assets/terrain/materials.json` + `assets/terrain/materials.schema.json`, `dev records/phase XV/XV-A_research.md`, `dev records/phase XV/XV-A_codebase_map.md`, `assets/LICENSE.md`, `ATTRIBUTION.md` §1.6 |
+| Fetch/pack tools | `crates/somnium_asset/examples/fetch_terrain.rs`, `pack_terrain.rs`; BC7: `somnium_renderer/examples/encode_terrain_bc7.rs` |
+| Terrain storage/upload | `textures.rs`, `terrain/mod.rs`, `terrain/biome.rs`, `terrain/brush.rs` (paint 0–31, `splat_lock`) |
+| Terrain shading | `terrain_material.wgsl` (1664-byte `TerrainMaterial` + wetness), `restir_gi.wgsl` (mean albedo × weights × wetness), `hextile.wgsl` |
+| Editor commands/UI | `app.rs` (paint 0–31), `somnium_ui` 32-name palette + Terrain Paint + Hex + Wet + Dbg |
+| Layout lock | `material/pool.rs`, `tests/shaders_validate.rs` (`GpuTerrainMaterial` == 1664) |
+| Tests/docs | renderer/asset tests, `context.md` (§20 is Phase 14 — do not treat as live terrain; do not rewrite as if XV shipped), `ATTRIBUTION.md`, `assets/LICENSE.md`, this plan |
+
+Before editing, the implementing session must re-open the current files and check for changes made after this plan date. File names and layouts are not contractual APIs.
+
+## 10. Performance and quality budgets
+
+### 10.1 Sampling and frame cost
+
+- Maximum four expensive material evaluations per pixel.
+- Base hex path: at most 24 material-map taps.
+- Steep biplanar path: at most 36 material-map taps.
+- Landscape average: at most 12 material-map taps.
+- Eye-level average: at most 18 material-map taps.
+- Median terrain shader target: at most 1.10 ms in the exact Phase 25 reference adapter, resolution, and camera corpus.
+- **XV-J measured 2026-08-13 (release, 1280×720, RTX 5080 Laptop, Vulkan):** overview shading **3.951 ms**, walk **5.532 ms**, forest close **8.036 ms**. Not 1.10 ms. Debug ~20 ms from the same day was unoptimized. Aerial hex/POM is a CPU uniform (`gpu_material_for_camera`, 80 m). Further LOD is a second aerial PSO, not a per-pixel branch. BC7 same day: overview **3.794 ms**, walk **5.250 ms**, hero 2048 + extra 1024 ~213 MiB (`XV-BC7_visual_check.md`).
+- No more than a 20–25% median regression from the captured pre-Phase-XV baseline without an approved image-quality justification.
+- Report control, macro, projected-material, and POM taps separately.
+
+### 10.2 Memory and disk
+
+- Preferred 2K BC7 material arrays: original 16-layer budget 200 MiB. Live 32-layer mixed 2048+1024 is **~213 MiB** (logged; 220 MiB ceiling so hero 2K returns).
+- RGBA8 fallback 2K material arrays: at most 700 MiB resident.
+- Never hold preferred and fallback packs simultaneously.
+- Four 2K RGBA8 control maps: approximately 21.3 MiB including mips.
+- 4K material mode stays opt-in and must log its projected residency before allocation.
+
+### 10.3 Sparse-selection accuracy
+
+Create an offline sixteen-layer reference that evaluates every non-zero layer, then compare strongest-three and strongest-four outputs over a corpus containing two-, three-, four-, and filtered five-plus-way junctions.
+
+- Albedo difference: median CIEDE2000 < 1.0, 95th percentile < 3.0.
+- Discarded normalized weight: 95th percentile < 0.05 in shipped/default splat data.
+- Normal angular difference: median < 1 degree, 95th percentile < 4 degrees.
+- Roughness absolute error: median < 0.015, 95th percentile < 0.05.
+- No temporal index popping while the camera moves across a filtered junction.
+
+### 10.4 Visual acceptance corpus
+
+Capture consistent before/after frames and short camera paths for:
+
+- default overview;
+- eye-level grass/soil transition;
+- dry-to-wet beach and waterline **with the shipping Great Lakes water body in frame** (water-parity fixture);
+- mud/sparse-grass lowland dry vs wet;
+- gravel/talus/rock mountain transition;
+- vertical cliff under glancing day light;
+- cliff at night and in wet conditions;
+- snowline;
+- long-distance minification and camera motion;
+- two-, three-, and four-material junctions;
+- migrated version 2 scene.
+
+Evidence images must not be placed in the repository root. Use `dev records/phase XV/evidence/phase_XV-<subphase>_<purpose>.png`.
+
+## 11. Phase acceptance criteria
+
+Phase XV is complete only when all of the following are true:
+
+1. Sixteen stable materials are listed, paintable, serialized, and rendered.
+2. Every shipped material has exact provenance, license, access date, source hash, and physical-size metadata.
+3. Version 2 terrain data migrates automatically and layers 0–7 preserve their appearance.
+4. The default scene and **Create > Terrain** use the same versioned sixteen-layer preset.
+5. Stored splat texels contain at most four non-zero channels and normalize deterministically.
+6. Shader material cost is bounded by strongest-four selection before PBR sampling.
+7. Full-PBR cliff projection eliminates stretched albedo and fixed roughness, with aligned normals/height/AO composed via surface gradients.
+8. Offline mips are colour-, normal-, height-, AO-, and roughness-aware.
+9. BC7 is used only when supported; the RGBA8 fallback renders equivalently within the defined compression tolerances. **Met 2026-08-13** (overview MAE 0.162, cliff MAE 0.599; `XV-BC7_visual_check.md`). Packs are local/gitignored.
+10. Default 2K residency and shader timing meet section 10 budgets. **Residency met with BC7 ~213 MiB.** §10.1 1.10 ms **not met**.
+11. No obvious grid tiling, axis seam, transition pop, mip seam, or distant specular shimmer remains in the acceptance corpus.
+12. Terrain and ReSTIR GI use the same material indexing and interpretation.
+13. Native editor UI exposes all materials and the required diagnostic modes, including wetness response.
+14. Dry/damp/wet landscape-kit captures (including Great Lakes shore with shipping water) keep material identity under moisture response.
+15. `cargo fmt --check`, relevant `cargo check`/tests, asset validation, sidecar migration tests, and WGSL/Naga validation pass.
+16. Living documentation and attribution are updated with actual results rather than planned claims.
+
+## 12. Risks and mitigations
+
+| Risk | Consequence | Mitigation |
+|---|---|---|
+| Fixed eight-layer assumptions survive in a secondary path | GI or debug views disagree with the main renderer | Centralize constants/metadata and share WGSL evaluation helpers; search all shader and CPU paths before declaring XV-D complete. |
+| WGSL storage alignment mistakes | Corrupt material metadata on some adapters | Store scalar groups in `vec4`-aligned records and add byte-layout assertions; follow wgpu 29 layout rules. |
+| Direct control-map growth | More memory and bandwidth | Four control maps add little relative to material arrays; sample once and select before PBR work. Profile them separately. |
+| Strongest-four filtering changes at bilinear boundaries | Colour/normal popping | Stable compare ordering, minimum-weight hysteresis where needed, transition corpus, moving-camera tests, and direct full-reference comparison. |
+| Four-channel authoring limit removes a desired fifth material | Lost subtle blend | Show discarded weight in editor; deterministic decay; permit artist to choose the survivors. Revisit indexed sparse control only with evidence. |
+| BC7 damages height/AO | Blend/POM changes or halos | Per-channel error reports, cliff/transition A/B tests, and per-map fallback if an encoder mode cannot meet thresholds. |
+| Normal compression/mips shimmer | Sparkling or flattened mountains | Renormalized normal mips plus normal-variance roughness compensation and glancing-motion tests. |
+| Biplanar axis transition appears | Diagonal seam on cliffs | Smooth weights/hysteresis, explicit gradients, a triplanar reference mode, and an adversarial rotated-cliff fixture. |
+| Physical scale metadata is wrong | Materials look miniature or gigantic | Cross-check first-party scale, measure repeating features, expose bounded per-layer correction, record the correction in manifest. |
+| Macro and hex variation compound | Muddy or artificial colours | Tune jointly with measured luminance/chroma limits; histogram-preserving option only after A/B evidence. |
+| Asset/API/license changes | Non-reproducible or legally unclear source | Exact URLs, hashes, cached metadata, access dates, CC0 record, and fail-closed fetch. Never silently replace an asset. |
+| Disk/VRAM doubles | Slow startup or allocation failure | BC7 preferred pack, default 2K, projected-memory log, conditional 4K, one resident variant. |
+| Biome rules overwrite manual work | Artist data loss | Separate baked base and manual override operations, explicit rebuild confirmation, undo and serialization tests. |
+| Texture realism exceeds surrounding scene fidelity | Terrain feels disconnected from vegetation/water/objects | Keep calibrated colour/scale; record scatter/decals as future work rather than hiding the mismatch with aggressive shading. |
+
+## 13. Deferred and rejected alternatives
+
+### 13.1 Runtime virtual texturing / detail clipmap
+
+**Deferred.** It is proven in Unreal RVT, Far Cry 4 Adaptive Virtual Texturing (Chen, GDC 2015), Far Cry 5 / Ghost Recon, Call of Duty “super terrain” (Hooker, GDC 2021; Étienne, SIGGRAPH 2023 Advances), O3DE, Wicked, and open prototypes such as Hollow-TerrainSystem / PVTUT, but it adds page management, cache invalidation, editor feedback, residency debugging, and more complex asset builds. Reconsider only if the direct-array implementation misses the frame or memory budgets after XV-D/XV-E, or if the engine expands beyond its bounded terrain scope. The CoD/AVT talks remain the acceptance checklist for that future phase, not an XV deliverable.
+
+### 13.2 Indexed material IDs plus compact weights
+
+**Deferred.** This can reduce control data and is used effectively by O3DE-like selection systems, but correct bilinear filtering requires neighbouring ID gathers, deduplication, and reweighting. Four direct RGBA splats are simpler, preserve authoring semantics, and are small relative to material arrays.
+
+### 13.3 LEAN mapping
+
+**Rejected for Phase XV.** It improves normal/specular filtering but requires additional moments/storage. Toksvig-style offline roughness compensation is a better first step for the existing two-map budget.
+
+### 13.4 Full multilayer POM
+
+**Rejected.** It multiplies divergent sampling cost and offers poor value at transition pixels. Keep the current dominant-layer distance/angle-gated approach.
+
+### 13.5 Tessellation or true displacement
+
+**Rejected.** It changes terrain geometry, LOD, collision, and shadow behaviour and is not needed to achieve the material goals. Height remains for blend/POM cues.
+
+### 13.6 Texture bombing on top of hex tiling
+
+**Rejected initially.** It duplicates anti-repetition work and can raise sampling and derivative complexity. Preserve the already integrated JCGT hex path.
+
+### 13.7 Content-aware Mix-Max transitions
+
+**Research reserve.** Eurographics 2024 shows promising content-aware texture transitions. It should be tested only if current height-aware blending fails on the expanded material set; it is not required up front.
+
+### 13.8 Mesh scatter, decals, and foliage
+
+**Future phase.** DICE correctly notes that terrain materials alone do not create a natural close-range environment. Stones, debris, roots, grass, and biome scatter are an important follow-up, but including them here would hide whether the sixteen-layer material system itself is correct and performant.
+
+### 13.9 Geometry clipmaps / CDLOD mesh rewrite
+
+**Out of XV (owned by Phase 25C and related LOD work).** Losasso & Hoppe geometry clipmaps, Strugar CDLOD, and Terrain3D’s clipmap mesh are attributed and useful, but XV must not rewrite terrain topology to sell material quality. Materials ship on the existing chunk/LOD path; morphing pops are a separate defect.
+
+### 13.10 Per-texel painted wetness channel (v1)
+
+**Deferred past XV-G v1.** Terrain3D’s paint-wetness → roughness path is the UX reference. XV v1 uses manifest moisture affinity plus a global wetness scalar so shore validation can proceed without a new control map. A painted wetness channel may follow once sixteen-layer paint/serialization is stable.
+
+## 14. Verification commands for the implementation session
+
+Exact package names should be confirmed against the then-current workspace. The expected verification family is:
+
+```powershell
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace
+cargo run -p somnium_asset --example pack_terrain -- --validate-only
+# (flag added 2026-08-13; checks packed PNGs, does not rewrite)
+```
+
+In addition, run the repository's WGSL/Naga validation tests, sidecar v2-to-v3 golden fixtures, deterministic pack/hash tests, sparse-selection offline comparison, adapter capability tests, and the GPU timing/tap-count capture suite. No completion claim may rely on a single screenshot.
+
+## 15. Sources and reference index
+
+Web sources for the original plan were accessed on **2026-08-12**. Sources added or re-checked in the second research pass were accessed on **2026-08-13** and are marked below.
+
+### 15.1 Asset quality, datasets, and licensing
+
+- Poly Haven, **License — CC0**: <https://polyhaven.com/license>
+- Poly Haven, **Contribute / asset standards**: <https://polyhaven.com/contribute>
+- Poly Haven, **API information**: <https://polyhaven.com/el/our-api>
+- Poly Haven, **cracked_red_ground** (XV-A substitute for `terrain_red_01`; accessed 2026-08-13): <https://polyhaven.com/a/cracked_red_ground>
+- Poly Haven, **ganges_river_pebbles** (XV-A substitute for `dry_riverbed_rock`; accessed 2026-08-13): <https://polyhaven.com/a/ganges_river_pebbles>
+- XV-A provenance audit (accessed 2026-08-13): [`phase XV/XV-A_research.md`](phase%20XV/XV-A_research.md)
+- Creative Commons, **CC0 1.0 Universal**: <https://creativecommons.org/publicdomain/zero/1.0/>
+- ambientCG, **CC0 PBR materials** (fallback source; accessed 2026-08-13): <https://ambientcg.com/>
+- ambientCG, **API documentation** (accessed 2026-08-13): <https://docs.ambientcg.com/>
+- Vecchio et al., **MatSynth: A Modern PBR Materials Dataset**, CVPR 2024: <https://openaccess.thecvf.com/content/CVPR2024/html/Vecchio_MatSynth_A_Modern_PBR_Materials_Dataset_CVPR_2024_paper.html>
+- Electronic Arts/DICE, **Photogrammetry and Star Wars Battlefront**: <https://www.ea.com/news/photogrammetry-and-star-wars-battlefront>
+- DICE, **Photogrammetry and Star Wars Battlefront**, GDC 2016 slides: <https://media.gdcvault.com/gdc2016/Presentations/Brown_Kenneth_Hamilton_Andrew_PhotogrammetryStarWars.pdf>
+
+### 15.2 Terrain rendering and authoring
+
+- Bethesda Game Studios, **The Graphics Technology of Fallout 4**: <https://bethesda.net/tr-TR/news/the-graphics-technology-of-fallout-4>
+- Burgess and Purkeypile, Bethesda Game Studios, **Fallout 4's Modular Level Design**, GDC 2016 session: <https://www.gdcvault.com/play/1022930/-Fallout-4-s-Modular>
+- Burgess and Purkeypile, Bethesda Game Studios, **Fallout 4's Modular Level Design**, GDC 2016 slides: <https://media.gdcvault.com/gdc2016/Presentations/Burgess_Joel_Modular%20Level%20Design.pdf>
+- Bethesda Game Studios, **What is Fallout 76?** (six-region Appalachia overview): <https://fallout.bethesda.net/en-EU/news/what-is-fallout-76>
+- Bethesda Game Studios, **Meet Megan Sawyer — Senior Environment Artist**: <https://bethesda.net/tr-TR/news/meet-megan-sawyer-senior-environment-artist-at-bethesda-game-studios>
+- Andersson, **Terrain Rendering in Frostbite Using Procedural Shader Splatting**, SIGGRAPH 2007: <https://advances.realtimerendering.com/s2007/Andersson-TerrainRendering%28Siggraph07%29-CourseNotes.pdf>
+- Losasso & Hoppe, **Geometry Clipmaps: Terrain Rendering Using Nested Regular Grids**, SIGGRAPH 2004 (accessed 2026-08-13): <https://hhoppe.com/geomclipmap.pdf> · project page <https://hhoppe.com/proj/geomclipmap/>
+- Asirvatham & Hoppe, **Terrain Rendering Using GPU-Based Geometry Clipmaps**, GPU Gems 2 Ch. 2: <https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry>
+- Strugar, **Continuous Distance-Dependent Level of Detail for Rendering Heightmaps (CDLOD)**, JGT 2009 / author PDF (accessed 2026-08-13): <https://aggrobird.com/files/cdlod_latest.pdf> · DOI <https://doi.org/10.1080/2151237X.2009.10129287>
+- Ka Chen (Ubisoft), **Adaptive Virtual Texture Rendering in Far Cry 4**, GDC 2015 (accessed 2026-08-13): <https://www.gdcvault.com/play/1021761/>
+- JT Hooker (Treyarch), **Boots on the Ground: The Terrain of Call of Duty**, GDC 2021 (accessed 2026-08-13): <https://www.gdcvault.com/play/1027463/Advanced-Graphics-Summit-Boots-on> · Activision Research summary <https://research.activision.com/publications/2021/09/boots-on-the-ground--the-terrain-of-call-of-duty>
+- Étienne (Activision / High Moon), **Large Scale Terrain Rendering in Call of Duty**, SIGGRAPH 2023 Advances (accessed 2026-08-13): <https://advances.realtimerendering.com/s2023/Etienne%28ATVI%29-Large%20Scale%20Terrain%20Rendering%20with%20notes%20%28Advances%202023%29.pdf>
+- Mikkelsen, **Practical Real-Time Hex-Tiling**, JCGT 2022: <https://jcgt.org/published/0011/03/05/>
+- Burley, **On Histogram-Preserving Blending for Randomized Texture Tiling**, JCGT 2019: <https://jcgt.org/published/0008/04/02/>
+- O3DE, **Terrain Surface Materials List**: <https://www.docs.o3de.org/docs/user-guide/components/reference/terrain/surface-material-list/>
+- O3DE, **Terrain Detail Material**: <https://www.docs.o3de.org/docs/user-guide/components/reference/terrain/terrain-detail-material/>
+- O3DE, **Terrain Macro Material**: <https://docs.o3de.org/docs/user-guide/components/reference/terrain/terrain-macro-material/>
+- O3DE, **Texture Terrain with Macro and Detail Materials**: <https://docs.o3de.org/docs/learning-guide/tutorials/environments/create-terrain-from-images/texture-terrain/>
+- Ubisoft, **Terrain Rendering in Far Cry 5**, GDC 2018: <https://www.gdcvault.com/play/1025261/Terrain-Rendering-in-Far-Cry>
+- Ubisoft, **Terrain Rendering in Far Cry 5**, slides: <https://media.gdcvault.com/gdc2018/presentations/TerrainRenderingFarCry5.pdf>
+- Ubisoft, **Ghost Recon Wildlands Terrain Technology and Tools**, GDC 2017: <https://www.gdcvault.com/play/1024029/-Ghost-Recon-Wildlands-Terrain>
+- Ubisoft, **Ghost Recon Wildlands Terrain Technology and Tools**, slides: <https://media.gdcvault.com/gdc2017/Presentations/WERLE_MARTINEZ_GRWterrainTechnologyTools.pdf>
+- Epic Games, **Runtime Virtual Texturing Quick Start**: <https://dev.epicgames.com/documentation/unreal-engine/runtimevirtual-texturing-quick-start-in-unreal-engine>
+- NVIDIA, **Texture Bombing**, GPU Gems: <https://developer.nvidia.com/gpugems/gpugems/part-iii-materials/chapter-20-texture-bombing>
+
+### 15.3 Material filtering, projection, and wetness
+
+- Mikkelsen, **Surface Gradient–Based Bump Mapping Framework**, JCGT 2020 (accessed 2026-08-13): <https://jcgt.org/published/0009/03/04/> · PDF <https://jcgt.org/published/0009/03/04/paper.pdf>
+- Mikkelsen, **surfgrad-bump-standalone-demo** (accessed 2026-08-13): <https://github.com/mmikk/surfgrad-bump-standalone-demo>
+- Hill, **Blending in Detail — Reoriented Normal Mapping**: <https://blog.selfshadow.com/publications/blending-in-detail/>
+- Toksvig, **Mipmapping Normal Maps**, Journal of Graphics Tools 2005: <https://www.tandfonline.com/doi/abs/10.1080/2151237X.2005.10129203>
+- Olano and Baker, **LEAN Mapping**, I3D 2010: <https://userpages.cs.umbc.edu/olano/papers/lean/>
+- **Triplanar Displacement Mapping for Terrain**, Eurographics 2020: <https://diglib.eg.org/server/api/core/bitstreams/b3af0317-e2d6-4e3a-8076-b415516eee87/content>
+- **Mix-Max: Content-Aware Real-Time Texture Transitions**, Eurographics 2024: <https://diglib.eg.org/items/50375852-f98b-4f60-ae25-4ae06ad038d1>
+- Hnat, Porquet, Mérillou, Ghazanfarpour, **Real-time Wetting of Porous Media**, ICCVG 2006 / Machine Graphics & Vision 15(3) (accessed 2026-08-13): <http://damien.porquet.free.fr/msi/iccvg06/iccvg06.pdf>
+- Related modern wet-porous survey lineage (context only; accessed 2026-08-13): <https://arxiv.org/html/2401.15628v3>
+
+### 15.4 Open-source terrain systems (pattern study; accessed 2026-08-13)
+
+- TokisanGames, **Terrain3D** (MIT): <https://github.com/TokisanGames/Terrain3D> · wetness paint docs <https://terrain3d.readthedocs.io/en/stable/docs/texture_painting.html>
+- DrewRidley, **PlumeSplat** (Bevy terrain splat): <https://github.com/drewridley/plumesplat>
+- SanielX, **Hollow-TerrainSystem** (Unity prototype; license re-check at adoption): <https://github.com/SanielX/Hollow-TerrainSystem>
+- ACskyline, **PVTUT** (procedural virtual texture tutorial): <https://github.com/ACskyline/PVTUT>
+- jensnt, **TerrainHeightBlend-Shader** (MIT; Unity height blend + distant map): <https://github.com/jensnt/TerrainHeightBlend-Shader>
+
+### 15.5 API and compression
+
+- wgpu 29, **Features**: <https://docs.rs/wgpu/29.0.0/wgpu/struct.Features.html>
+- WebGPU, **GPUFeatureName**: <https://gpuweb.github.io/types/types/GPUFeatureName.html>
+
+### 15.6 Local reference source inspected
+
+- `C:\Users\adhir\Downloads\GE\example_repo\o3de-development\o3de-development\Gems\Terrain\Assets\Shaders\Terrain\TerrainDetailHelpers.azsli`
+- `C:\Users\adhir\Downloads\GE\example_repo\o3de-development\o3de-development\Gems\Terrain\Code\Source\TerrainRenderer\TerrainDetailMaterialManager.cpp` (not under `Components/DetailMaterial/`; local source stores top-two IDs)
+- `C:\Users\adhir\Downloads\GE\example_repo\o3de-development\o3de-development\Code\Framework\AzFramework\AzFramework\SurfaceData\SurfaceData.h`
+- `C:\Users\adhir\Downloads\GE\example_repo\bevy-plugins\bevy_triplanar_splatting-main\src\shaders\biplanar.wgsl`
+- `C:\Users\adhir\Downloads\GE\example_repo\New_Engines\WickedEngine-master\WickedEngine\wiTerrain.cpp`
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\scene\resources\material.cpp` (`BaseMaterial3D` world/object triplanar generation and PBR-channel coverage)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\doc\classes\BaseMaterial3D.xml` (triplanar cost/quality constraints and height-mapping incompatibility)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\core\io\image.cpp` (`Image::generate_mipmap_roughness` normal-footprint roughness limiter)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\editor\import\resource_importer_texture.cpp` (normal/roughness import association and preprocessing order)
+- `C:\Users\adhir\Downloads\GE\example_repo\godot-4.7.1-stable\LICENSE.txt` (Godot Engine MIT license)
+- Unreal Landscape weightmap and Runtime Virtual Texture source under `C:\Users\adhir\Downloads\GE\example_repo\UnrealEngine-release\UnrealEngine-release`
+- Relevant Fyrox terrain material/mask source under `C:\Users\adhir\Downloads\GE\example_repo`
+- CDLOD tree present under `C:\Users\adhir\Downloads\GE\example_repo\CDLOD-master` (out of XV)
+- **Not** in this `example_repo` (web/GitHub pattern study only): Terrain3D, PlumeSplat, Mikkelsen `surfgrad-bump-standalone-demo`, Hollow-TerrainSystem, PVTUT
+
+## 16. Handoff rule
+
+The next **implementation** session should begin with
+[`post_IV_context_handoff.md`](post_IV_context_handoff.md), then re-read
+`context.md`, `ATTRIBUTION.md`, this plan, and
+[`phase XV/landscape_kit_matrix.md`](phase%20XV/landscape_kit_matrix.md).
+
+XV-A through XV-J are done (including biome v3 / landscape v4, aerial hex/POM
+LOD, and the GPU evidence corpus). Remaining follow-up is a
+second aerial shading PSO toward the 1.10 ms budget — not a new XV subphase.
+Do not retile shipping 0–7 to 1:1
+physical scale. Packed 8–15 are 2K; 0–7 remain 4K; 16–31 pack at 2K and load at
+1024. Layers 16 and 24 are procedural lush/wildgrass (`grass_path_*` failed the
+ochre gate). BC7 encoder ships (`encode_terrain_bc7`); packs are local/gitignored.
+`WaterComponent::great_lakes` stays
+frozen. Do **not** reintroduce a per-pixel terrain sample-count LOD (walking
+regressed 20→27 ms). Snow cap is `relief * 0.48`, not `* 0.62`.

@@ -16,40 +16,34 @@
 > building the part Bethesda bought, and has almost none of the part Bethesda
 > built. **This phase is that part.**
 >
-> **Status:** **PLAN — nothing in tree.** No sub-phase started. Written
-> 2026-08-23 against the tree at `7c0b66f` on `dev`. Every count in §4 was
-> measured on that date by the commands quoted beside it; where a figure
-> disagrees with an earlier document the difference is stated, not silently
-> corrected.
+> **Current status, 2026-08-29:** **ACTIVE, PARTIAL.** Work is in tree for seven
+> of the nine tracks. Completed records currently cover A, A2, B, C, D, E, E2,
+> E2b, F, G, H, I, K, L, Q, R, S, T, U, V, Z, AB, AC, AD, AE, AG, and AH.
+> HLAALU and SIXTH HOUSE have not started. Other tracks retain the open items
+> listed in [`../context.md`](../context.md#morrowind).
 >
-> **Position in the roadmap:** this phase supersedes `context.md` §17.6's
-> numbered list from **Phase 30 onward**, and absorbs the never-started parts of
-> the §17.6 entries for 27 (animation), 28 (asset pipeline), 31 (particles) and
-> 33 (input/localization/video). See §1.3 — **the §17.6 numbering has collided
-> with reality and this phase is where that gets resolved.**
+> **Original planning snapshot:** this plan was written on 2026-08-23 against
+> `7c0b66f` on `dev`, before any MORROWIND sub-phase started. Counts and absence
+> claims in the audit sections describe that dated tree unless a later record
+> explicitly updates them. They remain here as the argument for the phase, not
+> as a current census.
 >
-> **Predecessor:** Phase 26 (Metaphor) + 26-Zeta (Nocturne Atelier) built the
-> editor's information architecture and token layer. Phase 27 (Hades) rebuilt
-> its paint layer. **Phase CONTROL (Northlight) builds the editor's *reach* —
-> the property seam, the asset seam, drag and drop, viewport control,
-> preferences, scene lifecycle, curve and gradient editing, time of day, clouds
-> and weather.** MORROWIND is gated on CONTROL for six of its eight tracks and
-> says so in §9. **Decision, taken 2026-08-23 and recorded in both documents:
-> Phase CONTROL runs first and completes in full — Tracks 2 and 3 included —
-> and Phase MORROWIND is next.** See [`phase_CONTROL.md`](phase_CONTROL.md)
-> §9.1, which states the same decision from the other side and closes CONTROL's
-> "reasonable stopping point after J" as an exit. This is stronger than the
-> "CONTROL-B and CONTROL-C in tree" floor this plan was originally drafted
-> against, and it removes §12.8's risk entirely: CONTROL's six seams will be
-> settled code rather than a moving plan before anything here is built. It also
-> secures a dependency the weaker floor did not — **CONTROL-K's curve and
-> gradient editors**, which MORROWIND-H, MORROWIND-L and MORROWIND-AG all
-> require and which sit in CONTROL's Track 2, past the old stopping point.
-> Phase PORTAL (Source) is the engineering-health phase and is orthogonal;
-> §9.4 states how they interleave.
+> **Historical roadmap correction:** this phase replaced the old numbered plan
+> from Phase 30 onward and absorbed its unstarted animation, asset-pipeline,
+> particle, input, localisation, and video work. The obsolete numbering no
+> longer appears in `context.md`; see §1.3 for the original reconciliation and
+> [`../context.md`](../context.md#roadmap-order) for the current roadmap.
 >
-> **Record:** this file. Evidence folder `dev records/phase MORROWIND/` is
-> created by **MORROWIND-A**, not before. **Do not invent PNGs.**
+> **Predecessor:** Phase 26 and 26-Zeta built the editor's information
+> architecture and token layer. Phase 27 rebuilt much of its paint layer.
+> CONTROL then completed A through O, including the property and asset seams,
+> scene lifecycle, curve and gradient editing, time of day, clouds, weather,
+> and decals. MORROWIND began on those settled seams. The full PORTAL plan is
+> still orthogonal and unstarted; PORTAL-0 is a separate completed precursor.
+>
+> **Record:** this file. Implemented sub-phases and evidence live in
+> [`phase MORROWIND/`](phase%20MORROWIND/), which MORROWIND-A created. A missing
+> acceptance capture remains missing evidence; do not replace it with a mockup.
 >
 > **Do not copy source** from Unreal, O3DE, Flax, Wicked, Esoterica, Stride,
 > Fyrox, Bevy, Godot, Unity, Daemon, Luanti, Ren'Py, Panda3D, jMonkeyEngine,
@@ -99,14 +93,10 @@ that catches it:
 
 **And its sibling — the second-example rule:**
 
-> `examples/` contains exactly one program, `hello_engine`, at 2,646 lines, and
-> it is simultaneously the demo, the test harness, the input layer and the game.
-> **Every track in this phase adds to a second example** — a small playable
-> vertical slice, `examples/vvardenfell` — built only from public crate APIs. If
-> a track cannot be exercised from that example without reaching into engine
-> internals, the track's API is wrong. This is the only mechanism in the plan
-> that reliably catches an engine/game boundary that does not exist, and §4.7
-> shows that Somnium's boundary does not currently exist.
+> `examples/` now contains `hello_engine` and `vvardenfell`. The second example
+> is the public-API consumer this rule required. Each track should remain
+> exercisable there without reaching into engine internals. Section 4.7 keeps
+> the one-program starting state that motivated the rule.
 
 ---
 
