@@ -632,6 +632,33 @@ Important ordering rules:
 - `GameApp::on_render` prepares game draw state. `on_render_ui` records game UI
   later, while the GPU frame is open.
 
+### Background work
+
+Everything off the main thread goes through `somnium_jobs`. A job declares what
+it is worth and when it stops being worth anything, which is what lets the
+scheduler drop work instead of running it late.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued: submit with a priority and a deadline
+    Queued --> Running: highest priority, earliest deadline first
+    Queued --> Dropped: deadline passed while it waited
+    Queued --> Cancelled: caller no longer wants it
+    Running --> Complete: result ready
+    Running --> Cancelled: want-state reversed
+    Complete --> Drained: main thread drains it within budget
+    Complete --> Complete: budget spent, waits for next frame
+    Drained --> [*]
+    Dropped --> [*]
+    Cancelled --> [*]
+```
+
+A job whose deadline expired in the queue is dropped rather than run. That is
+the point of declaring one: a thumbnail nobody is looking at any more, or a cell
+the camera has already left, costs nothing to abandon. The completion drain is
+budgeted for the same reason the frame limiter exists, since a burst of finished
+work arriving at once would move the hitch rather than remove it.
+
 ## ECS, scenes, and editing
 
 The ECS groups entities by component signature and stores component columns
@@ -758,6 +785,30 @@ In tree:
 There is no authored local reflection/irradiance environment asset. STALKER
 plans that capability; describing it as current would be incorrect.
 
+Four shadow paths coexist and the selection is not a free choice at every
+level. The technique is authored per directional light; whether PCSS and the
+contact march actually run is decided per frame by whether traced visibility
+already answered the question.
+
+```mermaid
+flowchart TB
+    LIGHT["directional light"] --> TECH{"authored technique"}
+    TECH -->|"Cascaded, the default"| CSM["4 cascades<br/>fitted from the unjittered inverse"]
+    TECH -->|"Virtual"| VSM["clipmap page table<br/>persistent physical atlas"]
+    VSM -->|"page miss"| CSM
+    CSM --> FILTER{"ReSTIR DI has a<br/>result for this pixel?"}
+    VSM --> FILTER
+    FILTER -->|"yes, shading bit 4"| TRACED["use traced visibility<br/>PCSS and contact compiled out"]
+    FILTER -->|"no"| PCSS["PCSS blocker search<br/>plus contact march"]
+    TRACED --> OUT["shadow_factor"]
+    PCSS --> OUT
+    CLOUD["cloud shadow, world XZ"] --> OUT
+```
+
+Cloud shadows fold into the same `shadow_factor`, so terrain, water and meshes
+read one value rather than three sources that can disagree.
+
+
 ### Materials, terrain, and water
 
 In tree:
@@ -779,6 +830,32 @@ In tree:
 - Three-cascade inverse-FFT ocean displacement, Jacobian whitecaps, temporal
   foam, Beer transport, ray-traced reflection, refraction, and underwater
   composition.
+
+Water is four passes and a query, not one shader. The prepass writes the
+surface G-buffer the later passes read; reflection blends three sources by
+confidence; the shade pass composites; underwater runs only when the camera is
+below the surface.
+
+```mermaid
+flowchart TB
+    MASK["mask, depth, shoreline SDF<br/>baked at a known datum"] --> COV["coverage<br/>extends 1.5 m under terrain"]
+    SPEC["three-cascade inverse FFT<br/>displacement and Jacobian"] --> PRE
+    COV --> PRE["Water prepass<br/>surface, velocity, roughness"]
+    PRE --> REFL["Water reflection"]
+    SSR["screen-space trace"] --> REFL
+    RT["half-res ray query"] --> REFL
+    ENV["environment cube"] --> REFL
+    REFL --> SHADE["Water shade<br/>Beer transport, foam, refraction"]
+    SHADE --> SOFT["depth fade<br/>0.9 m against scene depth"]
+    SOFT --> HDR["HDR target"]
+    HDR --> UW{"camera below<br/>the surface?"}
+    UW -->|"yes"| UNDER["underwater composition"]
+    UW -->|"no"| DONE["done"]
+```
+
+SSR owns the near field where it is confident, the traced ray fills the rest,
+and the cube is the miss. That ordering is why turning ray tracing off degrades
+rather than breaks.
 
 Current conservative defaults matter:
 
@@ -802,6 +879,30 @@ blur, GTAO, volumetrics, shafts, decals, sharpening, and reconstruction paths.
 - SMAA T2x
 - TAA
 - FSR 3
+
+```mermaid
+flowchart LR
+    AA{"AntiAliasing"} -->|Off| NONE["no resolve"]
+    AA -->|FXAA| FX["1 LDR pass"]
+    AA -->|"SMAA 1x"| S1["3 LDR passes<br/>edges, weights, blend"]
+    AA -->|"SMAA T2x"| S2["3 LDR passes<br/>over the TAA resolve"]
+    AA -->|TAA| TA["temporal resolve"]
+    AA -->|"FSR 3"| FSR["reconstruct to the window<br/>also the upscaler"]
+
+    FSR --> CHECK{"device granted<br/>the FSR features?"}
+    CHECK -->|no| TA
+    CHECK -->|yes| OUT["swapchain"]
+    NONE --> OUT
+    FX --> OUT
+    S1 --> OUT
+    S2 --> OUT
+    TA --> OUT
+```
+
+The one piece of precedence that survives is the decline: FSR is the authored
+default, and a device without the features falls back to TAA rather than
+silently producing nothing. Everything else follows from there being a single
+value.
 
 This replaced three booleans that could display an enabled mode while no pass
 ran. SMAA S2x and 4x remain refused because the visibility buffer has no MSAA
@@ -1132,6 +1233,55 @@ budget. The workspace census reports no unreferenced third-party dependency.
 This ledger records outcomes, not every task. Use the linked phase file for the
 full plan and evidence.
 
+Phases are not a straight line. Several exist because an earlier one could not
+finish without them, and reading the graph explains more than reading the dates.
+
+```mermaid
+flowchart TB
+    subgraph Capability["Capability phases"]
+        IV["IV<br/>landscape and water"]
+        XV["XV<br/>32-layer terrain"]
+        VV["VV Halcyon<br/>traced water"]
+        P16["16<br/>scripting"]
+    end
+
+    subgraph Enabling["Phases that exist to unblock others"]
+        DOOM["DOOM<br/>the clock"]
+        CONTROL["CONTROL<br/>the editor seams"]
+        PORTAL0["PORTAL-0<br/>health and honesty"]
+    end
+
+    subgraph Reach["MORROWIND tracks"]
+        T0["BALMORA<br/>jobs, shaders"]
+        T1["VIVEC<br/>runtime UI"]
+        T4["SILT STRIDER<br/>cook, streaming"]
+        T5["DWEMER<br/>animation"]
+        T7["RED MOUNTAIN<br/>rendering gaps"]
+    end
+
+    XV --> DF["DF<br/>terrain clipmaps"]
+    IV --> VV
+    DF --> DOOM
+    VV --> DOOM
+    DOOM -->|"you cannot optimise<br/>what you cannot measure"| PORTAL0
+    DOOM --> T7
+    P26["26 / 26-Zeta / 27<br/>editor IA and paint"] --> CONTROL
+    CONTROL -->|"curves, schema,<br/>command registry"| T1
+    CONTROL --> T4
+    CONTROL --> T5
+    CONTROL --> T7
+    T0 --> T1
+    T0 --> T7
+    P16 --> T5
+    PORTAL0 --> T7
+```
+
+Two edges are worth stating outright. **DOOM had to come before any performance
+work**, because every prior attempt to tune the frame turned into a session of
+flipping switches and reading fps off the window. And **CONTROL had to come
+before most of MORROWIND**, because six of its eight tracks consume the property
+schema, the command registry or the curve editor that CONTROL shipped.
+
 ### Foundation and world phases
 
 | Phase | Outcome | Status |
@@ -1373,7 +1523,7 @@ the shoreline; the depth test owns the visible intersection. That closes sub-cel
 mismatches between the coverage mask and the terrain without letting water draw
 over dry ground. It also means the visible waterline is the terrain's silhouette,
 not the shore SDF, which is worth knowing before debugging a shoreline artefact
-by editing the SDF. (MORROWIND-AC follow-up)
+by editing the SDF. ([MORROWIND-AC follow-up](<dev records/phase MORROWIND/MORROWIND-AC.md>))
 
 ### Terrain material
 
@@ -1401,14 +1551,14 @@ per-pixel fade or a cliff test makes the whole branch varying, the compiler
 flattens the march, and the Details checkbox appears to work while the samples
 still run. The aerial cut and the toggle both zero those uniforms on the CPU
 instead. Do not reintroduce a close/far sample-path mix: warps pay the union of
-both paths, and walking measured slower. (XV-Zeta, DOOM)
+both paths, and walking measured slower. ([XV-Zeta](<dev records/phase XV/XV-Zeta_plan.md>), [DOOM](<dev records/phase_DOOM.md>))
 
 **The terrain material's 32-entry weight array is scratch memory, and shrinking
 the work around it is the win.** An earlier version ran four passes of 32
 iterations over a companion `array<bool, 32>`, copied 128 bytes by value at the
 call, and renormalised all 32 slots when only four survivors are ever read. The
 current form holds the running top four in scalars. Every terrain pixel used to
-pay scratch traffic for a selection sort of at most four winners. (XV-Zeta)
+pay scratch traffic for a selection sort of at most four winners. ([XV-Zeta](<dev records/phase XV/XV-Zeta_plan.md>))
 
 ### Shaders and WGSL
 
@@ -1417,20 +1567,20 @@ Returning `struct { index: array<u32,4>, weight: array<f32,4> }` from the
 strongest-four scan looks tidier than an out-pointer and makes `selected[s]`
 unindexable, with the error `Invalid access into expression`. Binding it to `var`
 instead of `let` does not help. This cost a full build-and-validate cycle to
-find. (MORROWIND-AC)
+find. ([MORROWIND-AC](<dev records/phase MORROWIND/MORROWIND-AC.md>))
 
 **Shader validation runs against the same naga the compiler uses.** MORROWIND-A2
 bumped wgpu to 30 and left the `naga` dev-dependency on 29, so the shader tests
 were validating with a different front end from the one that compiles them. That
 hid a real wgpu 30 incompatibility (`binding_array` now needs an explicit
 `enable`) which would have failed on the first frame. Version-skewed validation
-is worse than none, because it reports green. (MORROWIND-C)
+is worse than none, because it reports green. ([MORROWIND-C](<dev records/phase MORROWIND/MORROWIND-C.md>))
 
 **A debug branch behind a pipeline-overridable constant costs nothing; a debug
 branch behind a uniform costs everything.** The 34 shader debug codes compile out
 entirely because `enable_debug` is a specialisation constant. The same code read
-from a buffer would leave every branch resident and every register live. (DOOM,
-CONTROL-G)
+from a buffer would leave every branch resident and every register live. ([DOOM](<dev records/phase_DOOM.md>),
+[CONTROL-G](<dev records/phase CONTROL/CONTROL-G_viewport.md>))
 
 ### ECS and scenes
 
@@ -1439,7 +1589,7 @@ either block the world for the duration of the phase or invite iterator
 invalidation halfway through. `ScriptSnapshot` copies out, the script returns an
 ordered `CommandBuffer`, and the engine validates and applies it. Every new script
 operation therefore needs an explicit command, which is the cost. What it buys is
-deterministic ordering and a capability check at a single choke point. (Phase 16)
+deterministic ordering and a capability check at a single choke point. ([Phase 16](<dev records/phase_16.md>))
 
 **`applyForce` was the wrong shape for a character.** Queuing a force is right for
 a push and wrong for walking: a character sets its velocity outright, which is
@@ -1456,7 +1606,7 @@ CONTROL-J, `scene_from_json` dropped what it did not recognise with a warning, s
 opening a scene in a build that was missing a component and saving it destroyed
 that data permanently. Stride's `IUnloadable` is what exposed this. Retention is
 not a nicety; it is the difference between a version mismatch being an
-inconvenience and being data loss. (CONTROL-J)
+inconvenience and being data loss. ([CONTROL-J](<dev records/phase CONTROL/CONTROL-J_scene_lifecycle.md>))
 
 **An entity's component set is its archetype, so adding a component is a move,
 not a write.** That is the trade the storage layout makes. Queries walk dense
@@ -1471,38 +1621,38 @@ the property surface was maintained by hand at a cost of 675 identifiers: 106
 201 dispatch arms. Against that there were 12 registered schemas driving zero
 generated rows. Details, undo scope, multi-select intersection, the scene
 serializer and the script type declarations now all read the same schema. The
-hand-wiring census is 0. (CONTROL-B)
+hand-wiring census is 0. ([CONTROL-B](<dev records/phase CONTROL/CONTROL-B_property_seam.md>))
 
 **Curves are a reflected value, not a widget.** `FieldType::Curve` means a curve
 gets its Details row, its scoped undo entry, its drag coalescing and its scene
 round-trip for free, the same way a float does. Making it a bespoke editor
-instead would have meant reimplementing all four. (CONTROL-K)
+instead would have meant reimplementing all four. ([CONTROL-K](<dev records/phase CONTROL/CONTROL-K_curves.md>))
 
 **Menus, shortcuts, the palette, tooltips and the help index are projections of
 one registry.** They were four unconnected hand-written lists, and the palette
 dispatched by array index, which meant inserting an entry silently rebound
-everything after it. (CONTROL-A2)
+everything after it. ([CONTROL-A2](<dev records/phase CONTROL/CONTROL-A_reachability.md>))
 
 **`WidgetMessage` carries a modifier snapshot because without one, Ctrl-click and
 Shift-range are inexpressible.** Not hard, not awkward. Inexpressible. That single
-gap blocked three later sub-phases. (CONTROL-A1)
+gap blocked three later sub-phases. ([CONTROL-A1](<dev records/phase CONTROL/CONTROL-A_reachability.md>))
 
 **Opening the terrain folder froze the editor for over a second.** `thumbnail.rs`
 claimed a 4096² source downscaled in single-digit milliseconds and decoded two per
 frame on the UI thread. The folder is 60 PNGs and 1.17 GB, and zlib inflate alone
 on the largest measured 232 to 260 ms. The fix is a thread split, visible-tile
 prioritisation and a two-stage cache. The lesson is that the comment was written
-from an assumption and nobody measured it for months. (CONTROL-A, CONTROL-C)
+from an assumption and nobody measured it for months. ([CONTROL-A](<dev records/phase CONTROL/CONTROL-A_reachability.md>), [CONTROL-C](<dev records/phase CONTROL/CONTROL-C_asset_seam.md>))
 
 **The window is created invisible and shown once initialised**, because
 `accesskit_winit` panics on an already-shown window. It turned out to be a better
 startup regardless, and the golden capture still matching is what proved the
-change was inert. (MORROWIND-I)
+change was inert. ([MORROWIND-I](<dev records/phase MORROWIND/MORROWIND-I.md>))
 
 **High contrast walks existing colours toward the pole their background is not,
 until the ratio clears 7:1.** It does not invent a palette. Reusing the theme's
 certified pairs means the contrast mode cannot drift away from the design system
-as the design system changes. (MORROWIND-I)
+as the design system changes. ([MORROWIND-I](<dev records/phase MORROWIND/MORROWIND-I.md>))
 
 **Layout invalidation has to walk to the root, not to the parent.** For a while
 `add_node` and `remove_node` only invalidated the immediate parent, so ancestors
@@ -1521,42 +1671,42 @@ UI shader decodes before the sRGB target re-encodes. Get that wrong in either
 direction and `#1C1E26` does not arrive as `#1C1E26`, which is a hard thing to
 debug by eye because everything is only slightly off. Premultiplied alpha crept
 into one shader under a comment claiming it matched the straight-alpha pipeline,
-and MORROWIND-D's first shader validation test is what caught it. (26-Zeta,
-MORROWIND-D)
+and MORROWIND-D's first shader validation test is what caught it. ([26-Zeta](<dev records/phase_26_Zeta.md>),
+[MORROWIND-D](<dev records/phase MORROWIND/MORROWIND-D.md>))
 
 **The editor draws before the game UI in the frame, and after it in z-order.**
 Game UI runs at renderer pass 9 in its own profiler zone, then the editor shell
 composites over it. A game that draws a HUD and an editor that draws panels are
 the same widget tree and the same paint system, so the ordering is the only thing
-that distinguishes them. (MORROWIND-E2)
+that distinguishes them. ([MORROWIND-E2](<dev records/phase MORROWIND/MORROWIND-E2.md>))
 
 ### Assets and streaming
 
 **`AssetId` is derived from a normalised source path and survives everything
 else.** A renderer slot, a package offset and a residency state all change while
 the scene is open. Identity does not. That is what lets a scene stay valid while
-data streams, evicts and hot reloads underneath it. (MORROWIND-Q, R)
+data streams, evicts and hot reloads underneath it. ([MORROWIND-Q](<dev records/phase MORROWIND/MORROWIND-Q.md>), R)
 
 **Cooked artifacts exclude absolute paths and timestamps.** Two clean output roots
 produce identical bytes, which is the only way an incremental cache can be
 trusted. Changing a texture recooks its material's reverse closure and leaves an
-unrelated mesh alone, and the SHA-256 recipe key is what decides that. (MORROWIND-Q)
+unrelated mesh alone, and the SHA-256 recipe key is what decides that. ([MORROWIND-Q](<dev records/phase MORROWIND/MORROWIND-Q.md>))
 
 **An unloading cell serializes real ECS components through the schema, not a
 streaming DTO.** A second representation would have to be kept in step with the
 first forever, and the first thing to break would be a component the streaming
 path had never heard of. Despawn happens only after persistence succeeds.
-(MORROWIND-S)
+([MORROWIND-S](<dev records/phase MORROWIND/MORROWIND-S.md>))
 
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
-into lower detail instead of into a missing object. (MORROWIND-R)
+into lower detail instead of into a missing object. ([MORROWIND-R](<dev records/phase MORROWIND/MORROWIND-R.md>))
 
 **Large-world positions are exact CPU integer cells plus small local f32
 offsets.** Shader soft-double was the alternative. The CPU design was chosen
 because it is reversible, keeps the complexity outside every shader, and
 preserves centimetre differences at 10,000 km. A camera-aligned rebase changes
-only the render origin and never the authored data. (MORROWIND-T)
+only the render origin and never the authored data. ([MORROWIND-T](<dev records/phase MORROWIND/MORROWIND-T.md>))
 
 ### Measurement
 
@@ -1565,41 +1715,41 @@ to 2.018 across three runs of one identical build.** A whole session went into
 chasing that variance instead of the change. `capture.rs` exists because of it,
 and `timing.rs` is the same argument applied to time rather than to pixels. A
 number with no error bar cannot answer whether a 3% change did anything, and 3%
-is the size of most of the wins worth chasing. (DOOM-A)
+is the size of most of the wins worth chasing. ([DOOM-A](<dev records/phase_DOOM.md>))
 
 **`.somtime` measures a stationary camera, deliberately.** A stationary viewpoint
 removes terrain streaming, clipmap recentring and LOD transitions from the
 measurement. A flythrough is a different experiment, and it is the one that
 matters for hitches rather than for steady-state cost. Conflating them produces a
-mean that describes neither. (DOOM-A)
+mean that describes neither. ([DOOM-A](<dev records/phase_DOOM.md>))
 
 **A standard deviation from one run cannot judge a comparison across two.**
 Between-session drift on this hardware is larger than within-run spread: the same
 viewpoint measured 11.463 ms in one session and 11.703 to 12.239 in another on
 identical code, against a within-run sigma of 0.47. Anything under about a
-millisecond needs repetitions taken back to back. (PORTAL-0)
+millisecond needs repetitions taken back to back. ([PORTAL-0](<dev records/phase_PORTAL-0.md>))
 
 **A short warm-up lies in the other direction.** MORROWIND-AB's 20-frame runs
 reported the terrain CPU zone at 1.39 ms where 180 frames report 0.031. The
 warm-up exists to discard exactly that transient, and a finding built on a
 20-frame run was an artefact of the harness rather than a defect in the engine.
-(PORTAL-0)
+([PORTAL-0](<dev records/phase_PORTAL-0.md>))
 
 **The census is generated because a hand-typed one rotted in a day.** The phase
 plan's audit was accurate when written and 27,329 lines out of date the next
 morning, because another phase landed in between. A generated report cannot drift
-without failing its gate. (MORROWIND-A)
+without failing its gate. ([MORROWIND-A](<dev records/phase MORROWIND/MORROWIND-A.md>))
 
 **A gate that reports SKIP by default is a gate that is off.** GHOSTFENCE's golden
 image row reported SKIP whenever no candidate image existed, and no candidate had
 been generated since the reference was taken. A real regression sat behind that
-green for weeks. (PORTAL-0)
+green for weeks. ([PORTAL-0](<dev records/phase_PORTAL-0.md>))
 
 **Evidence folders get their `.gitignore` entries in the same commit as the
 phase.** `dev records/phase MORROWIND/` was ignored from its first sub-phase, so
 the census, the licence audit, every record and the phase plan itself existed on
 one disk and in no commit. The allowlist is convenient and it swallows things
-silently. (MORROWIND-E2b)
+silently. ([MORROWIND-E2b](<dev records/phase MORROWIND/MORROWIND-E2b.md>))
 
 ### Things that were tried and rejected
 
@@ -1607,27 +1757,27 @@ silently. (MORROWIND-E2b)
 correct to two pixels of 2.6 million, and slower at every tile size tested: 32.5,
 27.8, 27.0 and 26.1 ms against 24.9 for the plain fullscreen pass. The
 instanced-quad setup costs more than the binning saves, which is why the
-references that do this use compute. Kept behind `SOMNIUM_SHADE_BINS=1`. (DOOM-C)
+references that do this use compute. Kept behind `SOMNIUM_SHADE_BINS=1`. ([DOOM-C](<dev records/phase_DOOM.md>))
 
 **The aerial terrain split.** Also built, also off. Dropping hex and parallax past
 a distance is invisible at 925 pixels and costs 2.3 ms, because
-`gpu_material_for_camera` already did the same cut above 80 m. (DOOM-E)
+`gpu_material_for_camera` already did the same cut above 80 m. ([DOOM-E](<dev records/phase_DOOM.md>))
 
 **Returning the strongest-four weights instead of re-reading them.** Eight dynamic
 indexes into a 32-element scratch array per terrain pixel looked free to remove.
 Measured 4% slower across three back-to-back repetitions, with the two sets not
-overlapping. Reverted. (PORTAL-0-G)
+overlapping. Reverted. ([PORTAL-0-G](<dev records/phase_PORTAL-0.md>))
 
 **Per-pixel linked-list OIT.** The plan called it the likely answer. It needs
 fragment-writable storage, which this engine has never queried and has no fallback
 for, and a node pool sized from a guess: about 796 MB at 4K for eight layers,
 where overflow is a dropped fragment. Weighted-blended needs no feature and no
-guess. (MORROWIND-AC)
+guess. ([MORROWIND-AC](<dev records/phase MORROWIND/MORROWIND-AC.md>))
 
 **Reconstructing the shore SDF from the depth field.** Reasonable, and wrong: all
 2,995,072 dry texels in the baked depth map are exactly zero, so it is a plateau
 rather than a crossing and carries no sub-cell information on the land side. Two
-reconstructions were written and both reverted. (MORROWIND-AC follow-up)
+reconstructions were written and both reverted. ([MORROWIND-AC follow-up](<dev records/phase MORROWIND/MORROWIND-AC.md>))
 
 ## Decisions not to reopen casually
 
