@@ -1970,6 +1970,7 @@ pub(crate) fn build_editor_layout(
         status_stats,
         status_stats_button,
         vp_bar_h,
+        vp_stack: vp_stack_h,
         snap_cluster,
         snap_grid_combo,
         snap_angle_combo,

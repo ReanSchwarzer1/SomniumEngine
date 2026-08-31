@@ -312,6 +312,27 @@ impl UserInterface {
         }
     }
 
+    /// A node's measured desired size, from the last layout.
+    ///
+    /// What a widget *asked* for, as opposed to what it was given. A container
+    /// that fits its children reports the width it needs, which is how a caller
+    /// can ask "does this fit" instead of guessing at a threshold.
+    #[must_use]
+    pub fn desired_size(&self, handle: NodeHandle) -> Vec2 {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.desired_size)
+            .unwrap_or(Vec2::ZERO)
+    }
+
+    /// Whether a node is set visible. Its own flag, not its ancestors'.
+    #[must_use]
+    pub fn visibility(&self, handle: NodeHandle) -> bool {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .is_ok_and(|n| n.widget.visibility)
+    }
+
     /// The rectangle a node's drawing is clipped to, which is not its bounds:
     /// a node inside a scroll viewer is clipped by the viewer, and a node that
     /// does not clip to its own bounds inherits its parent's clip whole.

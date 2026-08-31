@@ -3471,6 +3471,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         let water_descriptors: Vec<_> = self
             .world
             .entities()
+            .filter(|entity| !crate::is_hidden(&self.world, *entity))
             .filter_map(|entity| self.world.get::<WaterComponent>(entity).copied())
             .filter(|water| water.enabled && water.water_id != u32::MAX && water.preset != 0)
             .map(WaterComponent::descriptor)
@@ -5858,6 +5859,9 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .filter_map(|entity| {
+                if crate::is_hidden(&self.world, entity) {
+                    return None;
+                }
                 let decal = self.world.get::<crate::decal::DecalComponent>(entity)?;
                 if !decal.enabled || decal.opacity <= 0.001 {
                     return None;
@@ -6464,6 +6468,9 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .filter_map(|e| {
+                if crate::is_hidden(&self.world, e) {
+                    return None;
+                }
                 let tc = self.world.get::<TerrainComponent>(e)?;
                 let fc = self.world.get::<FoliageComponent>(e)?;
                 if !fc.enabled {
@@ -6844,6 +6851,9 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .filter_map(|e| {
+                if crate::is_hidden(&self.world, e) {
+                    return None;
+                }
                 let light = self.world.get::<LightComponent>(e)?;
                 let transform = entity_world_matrix(&self.world, e)?;
                 let (_, rotation, position) = transform.to_scale_rotation_translation();
@@ -6968,6 +6978,9 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .filter_map(|entity| {
+                if crate::is_hidden(&self.world, entity) {
+                    return None;
+                }
                 let audio = self.world.get::<crate::AudioEmitterComponent>(entity)?;
                 let transform = entity_world_matrix(&self.world, entity)?;
                 let (_, rotation, position) = transform.to_scale_rotation_translation();
@@ -7000,6 +7013,11 @@ impl<G: GameApp> Engine<G> {
             .world
             .entities()
             .filter_map(|e| {
+                // The Outliner's eye means "not drawn", for a terrain exactly
+                // as for a mesh.
+                if crate::is_hidden(&self.world, e) {
+                    return None;
+                }
                 let tc = self.world.get::<TerrainComponent>(e).copied()?;
                 let model = self
                     .world
@@ -9831,6 +9849,36 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
+    /// Every submission path asks the same question about `hidden`.
+    ///
+    /// A source check rather than a render check, and deliberately so: the
+    /// failure it guards is *omission*. Hiding a mesh worked while hiding a
+    /// terrain, foliage, a decal or a water body did nothing, because the check
+    /// was copy-pasted into the paths that had it and absent from the rest. A
+    /// rule spread across six call sites holds in five, and the sixth is the
+    /// one the user finds.
+    #[test]
+    fn every_submitter_consults_the_hidden_flag() {
+        let source = include_str!("app.rs");
+        for name in [
+            "submit_terrains",
+            "submit_foliage",
+            "submit_decals",
+            "submit_light_gizmos",
+            "submit_audio_gizmos",
+        ] {
+            let start = source
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("{name} has moved or been renamed"));
+            // The filter sits near the top of each. A generous window keeps
+            // this from breaking on an unrelated edit further down.
+            let window = &source[start..(start + 1600).min(source.len())];
+            assert!(
+                window.contains("is_hidden"),
+                "{name} does not consult `is_hidden`, so the Outliner's eye does not reach what it submits"
+            );
+        }
+    }
     use super::{
         EditorFlags, SnapSettings, Transform, WorldTransform, authored_proxy_aabb,
         ray_aabb_distance, world_to_local_translation,

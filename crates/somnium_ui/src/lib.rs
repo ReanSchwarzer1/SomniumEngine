@@ -549,6 +549,9 @@ struct EditorLayout {
     /// Held for the layout regression test that pins the 68 px scene budget.
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
+    /// The context bar's horizontal stack, so the overflow rule can ask what
+    /// the bar needs instead of guessing at a width.
+    vp_stack: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -880,6 +883,7 @@ pub struct UiManager {
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
     preferences: crate::editor::preferences::PreferencesHandles,
+    vp_stack: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -1070,6 +1074,11 @@ pub struct UiManager {
     locale_grid: NodeHandle,
     locale_actions: Vec<(NodeHandle, LocaleAction)>,
     locale_open: bool,
+    /// What the viewport's context bar needs to show every control inline.
+    ///
+    /// Measured once from a layout that had them all, rather than declared as a
+    /// window width, so the rule stays right when the bar's contents change.
+    context_bar_full_width: Option<f32>,
     /// Panels currently living in their own OS window (MORROWIND-J step 2).
     ///
     /// The manager does not own those windows — the host does — but it has to
@@ -1593,6 +1602,7 @@ impl UiManager {
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
             preferences: layout.preferences,
+            vp_stack: layout.vp_stack,
             snap_cluster: layout.snap_cluster,
             snap_grid_combo: layout.snap_grid_combo,
             snap_angle_combo: layout.snap_angle_combo,
@@ -1714,6 +1724,7 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
+            context_bar_full_width: None,
             floating_panels: std::collections::BTreeSet::new(),
             viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
             locale_only_incomplete: false,
@@ -2041,6 +2052,7 @@ impl UiManager {
         // arranges whatever tiles the new window built, so a scroll costs one
         // frame's rebuild rather than a frame of empty drawer.
         self.sync_content_tiles();
+        self.measure_context_bar();
         self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
@@ -3992,11 +4004,21 @@ impl UiManager {
         local_space: bool,
         select_only: bool,
     ) {
-        let rules = CollapseRules::for_width(self.window_size.0 as f32);
-        self.native_ui
-            .set_visibility(self.snap_cluster, rules.context_bar_snap_inline);
-        self.native_ui
-            .set_visibility(self.snap_overflow, !rules.context_bar_snap_inline);
+        // Measured, not guessed. This used to read a 1600 px constant, so at
+        // 1280 the cluster collapsed into a chevron while the bar still had
+        // room for it, and the controls only appeared after a resize crossed
+        // the threshold. The bar can say what it needs; asking is both more
+        // accurate and immune to the chrome changing width later.
+        let available = self.native_ui.screen_bounds(self.viewport_handle).w;
+        let inline = match self.context_bar_full_width {
+            // Not measured yet. Stay inline so the next layout can measure it
+            // — a hidden node measures to zero, so the one way to learn the
+            // width is to have shown it once.
+            None => true,
+            Some(needed) => available >= needed,
+        };
+        self.native_ui.set_visibility(self.snap_cluster, inline);
+        self.native_ui.set_visibility(self.snap_overflow, !inline);
 
         let grid = nearest_index(&SNAP_GRID_VALUES, translate_m);
         let angle = nearest_index(&SNAP_ANGLE_VALUES, rotate_deg);
@@ -4020,6 +4042,25 @@ impl UiManager {
             self.select_only_toggle,
             select_only,
         ));
+    }
+
+    /// Learn what the context bar needs, once, from a layout that had it all.
+    ///
+    /// Called after `perform_layout`, because `desired_size` is only meaningful
+    /// once something has measured it. Recorded a single time: the cached width
+    /// is what keeps the rule from oscillating, since hiding the cluster shrinks
+    /// the stack and would otherwise immediately argue for showing it again.
+    fn measure_context_bar(&mut self) {
+        if self.context_bar_full_width.is_some() {
+            return;
+        }
+        if !self.native_ui.visibility(self.snap_cluster) {
+            return;
+        }
+        let needed = self.native_ui.desired_size(self.vp_stack).x;
+        if needed > 1.0 {
+            self.context_bar_full_width = Some(needed);
+        }
     }
 
     /// Publish the corner axis widget. `axes` are the world X/Y/Z directions
