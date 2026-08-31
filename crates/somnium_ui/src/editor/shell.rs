@@ -834,6 +834,19 @@ pub(crate) fn build_editor_layout(
     );
     ui.set_visibility(snap_overflow, false);
 
+    // Last in the bar, so it is the control furthest from the ones used while
+    // building. Detaching the viewport takes this bar with it, which is what
+    // makes the button in the floating window the way back.
+    let (viewport_float, _) = labeled_icon_button(
+        ui,
+        vp_stack_h,
+        IconId::Float,
+        "Float",
+        "Move the viewport into its own window.",
+        font_id,
+        22.0,
+    );
+
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
     // instead of stealing layout from it. Rows are built once and rewritten
@@ -1365,6 +1378,15 @@ pub(crate) fn build_editor_layout(
         IconId::Undo,
         "History",
         "The undo history. Click a row to go there.",
+        font_id,
+        18.0,
+    );
+    let (log_float, _) = labeled_icon_button(
+        ui,
+        log_tools,
+        IconId::Float,
+        "Float",
+        "Move the Output Log into its own window.",
         font_id,
         18.0,
     );
@@ -2012,8 +2034,11 @@ pub(crate) fn build_editor_layout(
         vp_bar_h,
         title_drag_area: menu_grid_h,
         outliner_grid: out_grid_h,
+        details_grid: ins_grid_h,
         outliner_float,
         details_float,
+        log_float,
+        viewport_float,
         vp_stack: vp_stack_h,
         snap_cluster,
         snap_grid_combo,

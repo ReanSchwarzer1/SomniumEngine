@@ -48,6 +48,12 @@ impl Control for Popup {
         crate::a11y::Role::Dialog
     }
 
+    // Only while open: a closed popup measures to nothing and moving it
+    // between windows every frame would be work with no picture attached.
+    fn popup_anchor(&self) -> Option<NodeHandle> {
+        self.is_open.then_some(self.anchor)
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         if !self.is_open {
             return Vec2::ZERO;

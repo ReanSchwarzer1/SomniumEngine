@@ -1003,6 +1003,26 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.window.float_details",
+            "Float: Details",
+            "Window",
+            None,
+            "Move the Details into its own operating-system window.",
+            A::FloatPanel(crate::floating::FloatingKind::Details),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.float_viewport",
+            "Float: Viewport",
+            "Window",
+            None,
+            "Move the Viewport into its own operating-system window.",
+            A::FloatPanel(crate::floating::FloatingKind::Viewport),
+            WINDOW,
+            always
+        ),
+        command!(
             "editor.window.float_log",
             "Float: Output Log",
             "Window",

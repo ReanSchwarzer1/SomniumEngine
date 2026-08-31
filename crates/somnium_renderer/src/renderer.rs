@@ -71,6 +71,12 @@ const VIEW_SLOTS: u64 = 8;
 /// The slot the editor overlays read from, after every view has been recorded.
 const OVERLAY_VIEW_SLOT: u64 = VIEW_SLOTS - 1;
 
+/// The slot a floating viewport reads from.
+///
+/// Below the overlays and above the four tiles, so a four-up editor with the
+/// viewport floated still gives every view a matrix of its own.
+const DETACHED_VIEW_SLOT: u64 = VIEW_SLOTS - 2;
+
 /// What a frame's per-view overrides are overriding.
 ///
 /// MORROWIND-J step 3. A view may turn TAA off or select a debug
@@ -3026,6 +3032,57 @@ impl SomniumRenderer {
         if let Some(primary) = views.first() {
             self.set_view(primary.view, primary.proj, primary.camera_pos);
         }
+    }
+
+    /// Record the scene once more, into a window that is not the editor's.
+    ///
+    /// MORROWIND-J step 2. A floating viewport is a second surface, and a
+    /// surface is not something the shell can hand to the widget tree: the
+    /// panel that floats is the *chrome* — the context bar, the overlays, the
+    /// gizmo — and the picture behind it has to be recorded again for this
+    /// window's shape.
+    ///
+    /// Recorded again rather than blitted from the editor's frame, because the
+    /// editor no longer has that picture: the viewport left the dock, so there
+    /// is no rectangle of the main window holding a copy to steal. The camera
+    /// is the same one, and the projection is rebuilt for this window's aspect,
+    /// which is the whole of what differs.
+    ///
+    /// Never the primary view. TAA, FSR and ReSTIR keep a history bound to one
+    /// camera and one rectangle; a second window reusing it would reproject the
+    /// editor's viewport into this one and smear. See
+    /// [`Self::apply_scene_view`].
+    pub fn render_detached_view(
+        &mut self,
+        ctx: &RenderContext,
+        target: &wgpu::TextureView,
+        size: (u32, u32),
+    ) {
+        let (width, height) = size;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let view = self
+            .primary_scene_view()
+            .in_rect((0, 0, width, height))
+            .with_aspect(width as f32 / height as f32);
+        // The overrides `apply_scene_view` is about to make are this call's,
+        // not the frame's, and the editor's next frame must not inherit them.
+        self.capture_frame_view_state();
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Detached Viewport Encoder"),
+            });
+        // A slot of its own: the tiles took 0..n and the overlays take the
+        // last, and two views sharing a slot share a matrix.
+        self.record_scene_view(ctx, &mut encoder, target, &view, false, DETACHED_VIEW_SLOT);
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        self.taa_pass.set_enabled(self.frame_view_state.taa);
+        self.fsr_pass.enabled = self.frame_view_state.fsr;
+        self.shading_debug = self.frame_view_state.shading_debug;
+        self.editor_overlays_enabled = self.frame_view_state.overlays;
+        self.set_view(view.view, self.proj_matrix, view.camera_pos);
     }
 
     /// Record one view of the scene: everything from clustered lighting to the

@@ -870,39 +870,105 @@ pub struct Engine<G: GameApp> {
     stepping_now: bool,
 }
 
+/// Where a window event belongs, once a second window exists.
+///
+/// MORROWIND-J step 2. The interesting arm is the third one. A floating
+/// Outliner is finished the moment its widgets have seen the event; a floating
+/// viewport is not, because flying the camera, dragging a gizmo and picking an
+/// entity are not widget behaviour — they are the editor's, and the editor's
+/// input path has to run for that window too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatingRoute {
+    /// Not a floating window's event.
+    Main,
+    /// A floating window's, and dealt with.
+    Handled,
+    /// The floating viewport's: the widgets have had it and declined, and the
+    /// editor's viewport tools still have to see it.
+    Viewport,
+}
+
 /// A panel in its own OS window: the parts `somnium_ui` deliberately does not
 /// own.
 ///
-/// MORROWIND-J step 2. The widget tree and its draw list live in
-/// [`somnium_ui::floating::FloatingPanel`]; everything here is the platform —
-/// a window, a surface, its configuration, and the pass that puts one on the
-/// other.
+/// MORROWIND-J step 2. The widgets are not here and are not a copy of anything
+/// — they are the panel's own nodes, detached from the dock and laid out
+/// against this window instead (see [`somnium_ui::floating`]). What this owns
+/// is the platform: a window, a surface, its configuration, and the pass that
+/// puts one on the other.
 struct FloatingWindow {
+    kind: somnium_ui::floating::FloatingKind,
     window: std::sync::Arc<Window>,
     surface: somnium_ui::wgpu::Surface<'static>,
     config: somnium_ui::wgpu::SurfaceConfiguration,
     pass: somnium_ui::pass::UiPass,
-    panel: somnium_ui::floating::FloatingPanel,
+    /// Layout units per device pixel, taken from the main window so that a
+    /// pointer position and a laid-out rectangle mean the same thing. The
+    /// widget tree has one scale and both windows share it.
+    scale: f32,
+    /// Whether this window has yet reported what it drew.
+    ///
+    /// One line, once, naming the rectangle and the instance count. A floating
+    /// window cannot be captured the way the editor's own frame can — the
+    /// capture path reads the editor's swapchain — so without this the only
+    /// evidence that a detached panel drew anything is somebody looking at it.
+    reported: bool,
 }
 
 impl FloatingWindow {
+    /// The window's size in the units the widget tree lays out in.
+    fn logical(&self) -> (f32, f32) {
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        (
+            self.config.width as f32 / scale,
+            self.config.height as f32 / scale,
+        )
+    }
+
     /// Reconfigure for a new physical size.
     ///
     /// A zero-sized surface is a validation error rather than a small one, and
     /// minimising a window is exactly how it happens.
-    fn resize(&mut self, device: &somnium_ui::wgpu::Device, width: u32, height: u32) {
+    fn resize(
+        &mut self,
+        device: &somnium_ui::wgpu::Device,
+        ui: &mut somnium_ui::UiManager,
+        width: u32,
+        height: u32,
+    ) {
         if width == 0 || height == 0 {
             return;
         }
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(device, &self.config);
-        self.panel.resize((width as f32, height as f32));
+        ui.resize_floating(self.kind, self.logical());
     }
 
-    /// Draw the panel into its own swapchain.
-    fn render(&mut self, device: &somnium_ui::wgpu::Device, queue: &somnium_ui::wgpu::Queue) {
+    /// Draw this window's panel into this window's swapchain.
+    ///
+    /// The panel is drawn from the editor's own interface, after the editor's
+    /// frame has been uploaded: one drawing context serves both windows, and
+    /// filling it a second time here would clobber a frame that had not been
+    /// read yet if the order were reversed.
+    ///
+    /// `scene` is present for exactly one panel. The viewport's chrome is a
+    /// widget tree like any other, but the picture under it is not, so the
+    /// renderer records the scene into this surface first and the UI pass
+    /// loads rather than clears — the same order the editor's own frame uses.
+    fn render(
+        &mut self,
+        ui: &mut somnium_ui::UiManager,
+        ctx: &RenderContext,
+        scene: Option<&mut SomniumRenderer>,
+    ) {
         use somnium_ui::wgpu;
+        if !ui.draw_floating(self.kind) {
+            // The panel is not detached, so there is nothing in this window to
+            // draw. Acquiring a frame to leave it blank would only make the
+            // window flicker.
+            return;
+        }
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -913,20 +979,35 @@ impl FloatingWindow {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Floating Window Encoder"),
-        });
-        self.panel.draw();
-        let size = (self.config.width, self.config.height);
+        let physical = (self.config.width, self.config.height);
+        if let Some(renderer) = scene {
+            renderer.render_detached_view(ctx, &view, physical);
+        }
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Floating Window Encoder"),
+            });
         self.pass.prepare(
-            device,
-            queue,
-            &mut self.panel.ui.draw_ctx,
-            somnium_ui::pass::UiSurface::new((size.0 as f32, size.1 as f32), size),
+            &ctx.device,
+            &ctx.queue,
+            ui.draw_ctx_mut(),
+            somnium_ui::pass::UiSurface::new(self.logical(), physical),
         );
         self.pass.render(&mut encoder, &view);
-        queue.submit(std::iter::once(encoder.finish()));
-        queue.present(output);
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        ctx.queue.present(output);
+        if !self.reported {
+            self.reported = true;
+            let bounds = ui.panel_bounds(self.kind);
+            info!(
+                kind = ?self.kind,
+                window = ?physical,
+                panel = ?(bounds.w, bounds.h),
+                instances = ui.draw_ctx_mut().instances.len(),
+                "floating window drew its panel"
+            );
+        }
     }
 }
 
@@ -2756,9 +2837,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // context, which then scissors the editor's 1920x1032 frame against a
         // 900x420 target — a validation error rather than a wrong picture, and
         // the first thing that happened when this was tried.
-        if self.floating_window_event(window_id, &event) {
+        let route = self.floating_window_event(window_id, &event);
+        if route == FloatingRoute::Handled {
             return;
         }
+        // The floating viewport's widgets have already declined this event, so
+        // feeding it to the main window's tree as well would hover and click
+        // whatever the editor happens to have at the same coordinates.
+        let from_viewport_window = route == FloatingRoute::Viewport;
 
         // Always track cursor position (needed for gizmo picking every frame).
         if let WindowEvent::CursorMoved { position, .. } = &event {
@@ -2970,14 +3056,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // window is has gone stale points at the wrong place on screen. Before
         // the early returns below for the same reason.
         if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
-            a11y.process_event(window, &event);
+            // Not another window's events: the adapter tracks *this* window's
+            // geometry, and telling it about a click that happened somewhere
+            // else moves a reader's cursor to a place nothing was clicked.
+            if !from_viewport_window {
+                a11y.process_event(window, &event);
+            }
         }
 
         // ── 3. Route to native UI; return early if consumed ──────────────────
-        let ui_consumed = if let Some(ui) = &mut self.ui_manager {
-            ui.process_os_event(&event)
-        } else {
-            false
+        let ui_consumed = match (&mut self.ui_manager, from_viewport_window) {
+            (Some(ui), false) => ui.process_os_event(&event),
+            // Already offered to the widget tree, rooted at the floating
+            // viewport, and declined there.
+            _ => false,
         };
         if ui_consumed {
             return;
@@ -4218,8 +4310,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // and a one-viewport editor should not be paying for a blit to
             // prove a feature it is not using.
             let layout = ui.viewport_layout();
+            // A floated viewport has no rectangle in this window, and
+            // `viewport_physical_rect` now reports the *other* window's. Tiling
+            // against it would put four views wherever those numbers happen to
+            // land in this swapchain, over the panels. The whole-surface view
+            // is the honest answer: the panels have already expanded over the
+            // space the viewport left, so nothing of it shows here.
+            let floated = ui.is_panel_floating(somnium_ui::floating::FloatingKind::Viewport);
             if layout == somnium_ui::viewport_layout::ViewportLayout::Single
                 || self.play_session_active
+                || floated
             {
                 r.set_scene_views(&[]);
             } else {
@@ -7098,7 +7198,7 @@ impl<G: GameApp> Engine<G> {
         event_loop: &ActiveEventLoop,
         kind: somnium_ui::floating::FloatingKind,
     ) {
-        if let Some(existing) = self.floating.iter().find(|w| w.panel.kind() == kind) {
+        if let Some(existing) = self.floating.iter().find(|w| w.kind == kind) {
             // Already open. Raising it is what a user means by asking twice.
             existing.window.focus_window();
             return;
@@ -7131,92 +7231,104 @@ impl<G: GameApp> Engine<G> {
         surface.configure(&ctx.device, &config);
 
         let pass = somnium_ui::pass::UiPass::new(&ctx.device, &ctx.queue, config.format);
-        let panel = somnium_ui::floating::FloatingPanel::new(
+        let scale = window.scale_factor() as f32;
+        let floating = FloatingWindow {
             kind,
-            (config.width as f32, config.height as f32),
-            somnium_ui::load_fonts,
-        );
-        info!(?kind, "floating window opened");
-        self.floating.push(FloatingWindow {
             window,
             surface,
             config,
             pass,
-            panel,
-        });
+            scale,
+            reported: false,
+        };
+        // The panel is told its window's size before its first layout, so the
+        // first frame is drawn for this window rather than for the default the
+        // detach used.
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.resize_floating(kind, floating.logical());
+        }
+        floating.window.request_redraw();
+        info!(?kind, "floating window opened");
+        self.floating.push(floating);
     }
 
     /// Route a window event to a floating window, if it belongs to one.
     ///
-    /// Returns whether the event was consumed, so the main window's handler
-    /// does not also act on a resize that was not its own — the bug a
-    /// single-window event loop grows the moment it gains a second window.
-    fn floating_window_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+    /// The main window's handler must not act on a resize that was not its own
+    /// — that is the bug a single-window event loop grows the moment it gains a
+    /// second window, and it presents as a scissor rectangle validated against
+    /// the wrong target. See [`FloatingRoute`] for the case that is not simply
+    /// "mine" or "not mine".
+    fn floating_window_event(&mut self, id: WindowId, event: &WindowEvent) -> FloatingRoute {
         let Some(index) = self.floating.iter().position(|w| w.window.id() == id) else {
-            return false;
+            return FloatingRoute::Main;
         };
         match event {
             WindowEvent::CloseRequested => {
                 // Closing returns the panel to the dock rather than losing it.
                 let closed = self.floating.remove(index);
-                info!(kind = ?closed.panel.kind(), "floating window closed");
+                info!(kind = ?closed.kind, "floating window closed");
                 if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.set_panel_floating(closed.panel.kind(), false);
+                    ui.set_panel_floating(closed.kind, false);
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Some(ctx) = self.render_ctx.as_ref() {
-                    self.floating[index].resize(&ctx.device, size.width, size.height);
+                if let (Some(ctx), Some(ui)) =
+                    (self.render_ctx.as_ref(), self.ui_manager.as_mut())
+                {
+                    self.floating[index].resize(&ctx.device, ui, size.width, size.height);
                 }
             }
-            // Everything else is the panel's: pointer, wheel, keys. The next
-            // frame redraws it, so nothing has to ask for a repaint here.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.floating[index].scale = *scale_factor as f32;
+            }
+            // Everything else is the panel's: pointer, wheel, keys. It reaches
+            // the editor's own interface with hit-testing rooted at this
+            // panel, so a click here runs exactly the handler a click on the
+            // docked panel would have run.
             other => {
-                self.floating[index].panel.on_event(other);
+                let kind = self.floating[index].kind;
+                let consumed = match self.ui_manager.as_mut() {
+                    Some(ui) => ui.process_floating_event(kind, other),
+                    None => false,
+                };
+                if kind.hosts_scene() && !consumed {
+                    // The pointer was over the render rather than over the
+                    // bar. A detached viewport is laid out at its window's
+                    // origin, so this window's cursor position and
+                    // `viewport_physical_rect` are already in the same space
+                    // and the editor's tools need no translation to work here.
+                    return FloatingRoute::Viewport;
+                }
             }
         }
-        true
+        FloatingRoute::Handled
     }
 
     /// Draw every floating window, after the editor's own frame.
+    ///
+    /// Nothing is synchronised here and nothing is copied. Each window renders
+    /// the panel's own nodes out of the editor's own interface, so a floating
+    /// panel cannot fall behind the docked one: there is no second copy of it
+    /// to fall behind.
     fn render_floating(&mut self) {
         let Some(ctx) = self.render_ctx.as_ref() else {
             return;
         };
-        // Each panel is handed the store it rebuilds from. The manager owns
-        // both stores, so this is a read rather than a second copy kept in
-        // step.
-        let mut selections: Vec<u32> = Vec::new();
-        for index in 0..self.floating.len() {
-            let kind = self.floating[index].panel.kind();
-            if let Some(ui) = self.ui_manager.as_ref() {
-                match kind {
-                    somnium_ui::floating::FloatingKind::OutputLog => {
-                        let log = ui.log();
-                        self.floating[index]
-                            .panel
-                            .sync(somnium_ui::floating::PanelData::Log(log));
-                    }
-                    somnium_ui::floating::FloatingKind::Outliner => {
-                        let (items, selected) = ui.outliner_items();
-                        self.floating[index]
-                            .panel
-                            .sync(somnium_ui::floating::PanelData::Outliner { items, selected });
-                    }
-                }
-            }
-            self.floating[index].render(&ctx.device, &ctx.queue);
-            for event in self.floating[index].panel.take_events() {
-                match event {
-                    somnium_ui::floating::PanelEvent::SelectEntity(id) => selections.push(id),
-                }
-            }
-        }
-        // Applied after the loop so the borrow of `self.floating` is over, and
-        // through the same event a click in the docked Outliner raises rather
-        // than a second path that could drift from it.
-        for id in selections {
-            self.handle_editor_event(EditorEvent::SelectEntity(Some(id)));
+        let Some(ui) = self.ui_manager.as_mut() else {
+            return;
+        };
+        let mut renderer = self.renderer.as_mut();
+        for window in &mut self.floating {
+            // `as_deref_mut` so the loop can hand the renderer to one window
+            // and still have it for the next: only the viewport asks, but the
+            // borrow has to survive the ones that do not.
+            let scene = if window.kind.hosts_scene() {
+                renderer.as_deref_mut()
+            } else {
+                None
+            };
+            window.render(ui, ctx, scene);
         }
     }
 
@@ -8965,7 +9077,7 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::FloatPanel(kind) => self.pending_float.push(kind),
 
             EditorEvent::ClosePanelWindow(kind) => {
-                self.floating.retain(|w| w.panel.kind() != kind);
+                self.floating.retain(|w| w.kind != kind);
             }
 
             EditorEvent::SaveLocalisation => self.save_localisation(),
