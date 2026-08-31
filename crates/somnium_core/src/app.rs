@@ -7210,10 +7210,15 @@ impl<G: GameApp> Engine<G> {
         let attrs = WindowAttributes::default()
             .with_title(kind.title())
             .with_inner_size(LogicalSize::new(w, h));
+        // The panel is already detached by the time this runs — the manager
+        // does that when the command fires. So every failure below has to put
+        // it back, or it is in no window at all and there is no control left
+        // anywhere to bring it home.
         let window = match event_loop.create_window(attrs) {
             Ok(window) => std::sync::Arc::new(window),
             Err(error) => {
                 error!(?error, "could not open a floating window");
+                self.dock_panel(kind);
                 return;
             }
         };
@@ -7221,6 +7226,7 @@ impl<G: GameApp> Engine<G> {
             Ok(surface) => surface,
             Err(error) => {
                 error!(?error, "floating window has no drawable surface");
+                self.dock_panel(kind);
                 return;
             }
         };
@@ -7252,6 +7258,13 @@ impl<G: GameApp> Engine<G> {
         self.floating.push(floating);
     }
 
+    /// Return a panel to the dock, wherever the decision was made.
+    fn dock_panel(&mut self, kind: somnium_ui::floating::FloatingKind) {
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.set_panel_floating(kind, false);
+        }
+    }
+
     /// Route a window event to a floating window, if it belongs to one.
     ///
     /// The main window's handler must not act on a resize that was not its own
@@ -7268,9 +7281,7 @@ impl<G: GameApp> Engine<G> {
                 // Closing returns the panel to the dock rather than losing it.
                 let closed = self.floating.remove(index);
                 info!(kind = ?closed.kind, "floating window closed");
-                if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.set_panel_floating(closed.kind, false);
-                }
+                self.dock_panel(closed.kind);
             }
             WindowEvent::Resized(size) => {
                 if let (Some(ctx), Some(ui)) =

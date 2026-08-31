@@ -1099,6 +1099,13 @@ pub struct UiManager {
     /// Measured once from a layout that had them all, rather than declared as a
     /// window width, so the rule stays right when the bar's contents change.
     context_bar_full_width: Option<f32>,
+    /// Whether the pointer was last seen in the editor's own window.
+    ///
+    /// One cursor position serves every window, because one interface does.
+    /// While the pointer is in a floating panel that position means nothing in
+    /// this window, and a tooltip resolved against it names whatever the editor
+    /// happens to have at those coordinates.
+    pointer_in_main: bool,
     /// Panels currently living in their own OS window (MORROWIND-J step 2).
     ///
     /// The manager does not own those windows — the host does — but it has to
@@ -1752,6 +1759,7 @@ impl UiManager {
             locale_actions: layout.locale_actions,
             locale_open: false,
             context_bar_full_width: None,
+            pointer_in_main: true,
             floating_panels: std::collections::BTreeSet::new(),
             viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
             locale_only_incomplete: false,
@@ -2099,6 +2107,7 @@ impl UiManager {
 
     /// Route a winit event into the widget tree.  Returns true if consumed.
     pub fn process_os_event(&mut self, event: &WindowEvent) -> bool {
+        self.pointer_in_main = true;
         if self.immersive {
             if let WindowEvent::KeyboardInput { event: key_ev, .. } = event {
                 let pressed = key_ev.state == ElementState::Pressed;
@@ -4746,6 +4755,11 @@ impl UiManager {
     }
 
     fn update_tooltip(&mut self) {
+        if !self.pointer_in_main {
+            self.tooltip_since = None;
+            self.native_ui.set_visibility(self.tooltip, false);
+            return;
+        }
         let pos = self.native_ui.cursor_pos;
         let text = self.native_ui.tooltip_at(pos);
         if text.is_empty() {
@@ -5053,6 +5067,9 @@ impl UiManager {
         self.native_ui.set_input_root(root);
         let consumed = self.native_ui.process_os_event(event);
         self.native_ui.set_input_root(NodeHandle::NONE);
+        // `process_os_event` claims the pointer for the main window, so this
+        // has to come after it rather than before.
+        self.pointer_in_main = false;
         consumed
     }
 

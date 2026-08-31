@@ -3390,6 +3390,25 @@ mod detach_tests {
     }
 
     #[test]
+    fn the_dock_gets_its_arrangement_back_when_the_panel_returns() {
+        // A panel fills its own window, so detaching drops whatever height the
+        // dock had pinned on it. Dropping it permanently would leave a panel
+        // that came home stretched over its neighbour.
+        let (mut ui, _column, top, _bottom) = dock();
+        ui.perform_layout();
+        let docked = ui.screen_bounds(top).h;
+        assert_eq!(docked, 200.0);
+
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(top).h, 720.0, "filled its window");
+
+        ui.reattach(top);
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(top).h, docked, "and gave the height back");
+    }
+
+    #[test]
     fn a_node_cannot_be_reparented_into_its_own_subtree() {
         let (mut ui, column, top, _bottom) = dock();
         assert!(
