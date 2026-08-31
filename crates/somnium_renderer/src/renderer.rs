@@ -68,14 +68,31 @@ const VIEW_SLOT_BYTES: u64 = 256;
 /// matrix) where a silent reallocation mid-frame is not.
 const VIEW_SLOTS: u64 = 8;
 
+/// Another window's surface, when the scene is not going into the editor's.
+///
+/// MORROWIND-J step 2. A floated viewport does not get its own recording of the
+/// scene: it gets *the* recording. Everything from the visibility pass to the
+/// selection outline lands here instead, and only the editor's chrome still
+/// goes to the window this call was made for.
+///
+/// The alternative was recording the scene a second time for the second window,
+/// which works and costs a whole extra frame of scene work — and puts the
+/// floating viewport on the secondary-view path, without TAA, without FSR and
+/// without ReSTIR's history, because those are bound to one camera and one
+/// rectangle. Redirecting keeps the floating viewport on the *primary* path,
+/// which is the one the editor has always used, and leaves the editor's own
+/// window with no scene to draw at all.
+#[derive(Clone, Copy)]
+pub struct SceneTarget<'a> {
+    /// Where the scene, the gizmos, the outline and the particles land.
+    pub view: &'a wgpu::TextureView,
+    /// That surface's size in physical pixels, which is what the upscale
+    /// target has to match.
+    pub size: (u32, u32),
+}
+
 /// The slot the editor overlays read from, after every view has been recorded.
 const OVERLAY_VIEW_SLOT: u64 = VIEW_SLOTS - 1;
-
-/// The slot a floating viewport reads from.
-///
-/// Below the overlays and above the four tiles, so a four-up editor with the
-/// viewport floated still gives every view a matrix of its own.
-const DETACHED_VIEW_SLOT: u64 = VIEW_SLOTS - 2;
 
 /// What a frame's per-view overrides are overriding.
 ///
@@ -2478,7 +2495,7 @@ impl SomniumRenderer {
     }
 
     pub fn render(&mut self, ctx: &RenderContext, ui: &mut UiManager, window: &Window) {
-        self.render_with_game_ui(ctx, ui, window, None);
+        self.render_with_game_ui(ctx, ui, window, None, None);
     }
 
     /// The frame, with a game's UI in it.
@@ -2497,6 +2514,7 @@ impl SomniumRenderer {
         ui: &mut UiManager,
         window: &Window,
         game_ui: Option<&mut dyn somnium_ui::GameUi>,
+        scene_target: Option<SceneTarget<'_>>,
     ) {
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters
@@ -2549,8 +2567,11 @@ impl SomniumRenderer {
             }
         }
 
+        // Whichever surface the scene is going to, not necessarily this
+        // window's: FSR upscales to the size of the thing it lands on.
+        let present_size = scene_target.map_or((ctx.config.width, ctx.config.height), |t| t.size);
         let (ldr_w, ldr_h) = if self.fsr_pass.enabled {
-            (ctx.config.width, ctx.config.height)
+            present_size
         } else {
             (self.render_width, self.render_height)
         };
@@ -2584,11 +2605,42 @@ impl SomniumRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The picture and the chrome can be in different windows. Everything
+        // below writes to one of these two, and which one is not a detail: the
+        // scene, the gizmos, the outline and the particles belong to the
+        // viewport, and the menus, panels and status bar belong to the editor.
+        let scene_view = scene_target.map_or(&surface_view, |target| target.view);
+
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Main Render Encoder"),
             });
+
+        // Nothing is going to draw the scene into this window, and the UI pass
+        // loads rather than clears. Without this the editor's own swapchain
+        // keeps whatever was in that buffer two frames ago, which with a
+        // triple-buffered surface reads as a flicker behind the panels.
+        if scene_target.is_some() {
+            encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Clear Editor Swapchain"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+        }
 
         // Phase 29: the profiler brackets each pass from outside, so no pass
         // has to know it is being timed. Scopes nest — `end` closes the
@@ -2644,7 +2696,7 @@ impl SomniumRenderer {
             capture_now |= self.record_scene_view(
                 ctx,
                 &mut encoder,
-                &surface_view,
+                scene_view,
                 view,
                 index == 0,
                 index as u64,
@@ -2655,7 +2707,12 @@ impl SomniumRenderer {
         // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
         // gizmos/UI so an A/B measures the scene rather than editor chrome.
         if capture_now && self.capture.wants_display() {
-            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            if scene_target.is_some() {
+                // The capture copies out of *this* window's texture, and the
+                // scene is not in it. Saying so beats writing a PNG of the
+                // editor's panels under the name of a scene A/B.
+                tracing::warn!("display capture skipped: the viewport is in its own window");
+            } else if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
                 self.capture.record_display(
                     &ctx.device,
                     &mut encoder,
@@ -2698,7 +2755,7 @@ impl SomniumRenderer {
                 * glam::Mat4::from_scale(glam::Vec3::splat(scale));
             self.gizmo_pass.update_transform(&ctx.queue, model);
             self.gizmo_pass
-                .record(&mut encoder, &surface_view, self.gizmo_mode);
+                .record(&mut encoder, scene_view, self.gizmo_mode);
         }
 
         // ── 8.7 Selection outline → swapchain (Phase 11.5I) ─────────────────
@@ -2708,7 +2765,7 @@ impl SomniumRenderer {
             self.outline_pass.record(
                 &ctx.queue,
                 &mut encoder,
-                &surface_view,
+                scene_view,
                 self.view_proj_unjittered,
                 model,
                 v_off,
@@ -2731,7 +2788,7 @@ impl SomniumRenderer {
                 &ctx.device,
                 &ctx.queue,
                 &mut encoder,
-                &surface_view,
+                scene_view,
                 &lines,
             );
         }
@@ -2741,7 +2798,7 @@ impl SomniumRenderer {
             self.particle_pass.record(
                 &ctx.queue,
                 &mut encoder,
-                &surface_view,
+                scene_view,
                 self.view_proj_unjittered,
                 self.view_matrix,
                 &self.pending_particles,
@@ -3032,57 +3089,6 @@ impl SomniumRenderer {
         if let Some(primary) = views.first() {
             self.set_view(primary.view, primary.proj, primary.camera_pos);
         }
-    }
-
-    /// Record the scene once more, into a window that is not the editor's.
-    ///
-    /// MORROWIND-J step 2. A floating viewport is a second surface, and a
-    /// surface is not something the shell can hand to the widget tree: the
-    /// panel that floats is the *chrome* — the context bar, the overlays, the
-    /// gizmo — and the picture behind it has to be recorded again for this
-    /// window's shape.
-    ///
-    /// Recorded again rather than blitted from the editor's frame, because the
-    /// editor no longer has that picture: the viewport left the dock, so there
-    /// is no rectangle of the main window holding a copy to steal. The camera
-    /// is the same one, and the projection is rebuilt for this window's aspect,
-    /// which is the whole of what differs.
-    ///
-    /// Never the primary view. TAA, FSR and ReSTIR keep a history bound to one
-    /// camera and one rectangle; a second window reusing it would reproject the
-    /// editor's viewport into this one and smear. See
-    /// [`Self::apply_scene_view`].
-    pub fn render_detached_view(
-        &mut self,
-        ctx: &RenderContext,
-        target: &wgpu::TextureView,
-        size: (u32, u32),
-    ) {
-        let (width, height) = size;
-        if width == 0 || height == 0 {
-            return;
-        }
-        let view = self
-            .primary_scene_view()
-            .in_rect((0, 0, width, height))
-            .with_aspect(width as f32 / height as f32);
-        // The overrides `apply_scene_view` is about to make are this call's,
-        // not the frame's, and the editor's next frame must not inherit them.
-        self.capture_frame_view_state();
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Detached Viewport Encoder"),
-            });
-        // A slot of its own: the tiles took 0..n and the overlays take the
-        // last, and two views sharing a slot share a matrix.
-        self.record_scene_view(ctx, &mut encoder, target, &view, false, DETACHED_VIEW_SLOT);
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-        self.taa_pass.set_enabled(self.frame_view_state.taa);
-        self.fsr_pass.enabled = self.frame_view_state.fsr;
-        self.shading_debug = self.frame_view_state.shading_debug;
-        self.editor_overlays_enabled = self.frame_view_state.overlays;
-        self.set_view(view.view, self.proj_matrix, view.camera_pos);
     }
 
     /// Record one view of the scene: everything from clustered lighting to the

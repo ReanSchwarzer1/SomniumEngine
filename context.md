@@ -1840,10 +1840,10 @@ does not overlap. STALKER waits for both relevant outputs.
   M2 item 5). MORROWIND-J is otherwise closed: the dock tree, real `winit` child
   windows and several views per frame all landed on 2026-08-31, and on the same
   day every major panel learned to float — Outliner, Details, viewport and
-  Output Log, each from a button on its own header. What J still lacks is a
-  drag-to-dock affordance and a shell that resolves tiles directly. A floated
-  viewport records the scene a second time rather than redirecting the primary
-  view's target, so it costs a second scene pass while it is out.
+  Output Log, each from a button on its own header. A floated viewport is the
+  primary view redirected into that window, not a second recording, so it costs
+  no extra scene work and keeps TAA, FSR and ReSTIR. What J still lacks is a
+  drag-to-dock affordance and a shell that resolves tiles directly.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2248,6 +2248,47 @@ The handles never change, so every binding, message route and open gesture
 survives the move. Two consequences: a floating panel is not a lesser copy of
 the docked one, it *is* the docked one; and the dock closes the gap by itself,
 because a splitter left with one child stretches it.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A second window must not get a second `UiPass`.** Each pass owns the GPU copy
+of the font atlas, the icon atlas, the thumbnail atlas and every registered
+texture, and each upload is guarded by a dirty flag that the *first* pass to
+prepare clears. The second pass then draws against blank atlases. It looks
+exactly like a font that failed to load: panels, sliders and check boxes appear,
+and not one glyph or icon does. One pass serves every window, drawn after the
+editor's frame has been submitted.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A hidden widget kept every pixel it used to occupy.** The measure cache is
+read before the visibility check, and the hidden branch returned zero without
+writing it into the record a container arranges from:
+
+```text
+  measure(node):
+    if cached and same constraint  -> return stored desired_size   ← stale
+    if not visible                 -> return ZERO                  ← not stored
+```
+
+So the viewport's context bar had a 478 px hole where the snapping cluster had
+been, and the two controls after it were laid out past the bar's edge, where
+they clipped to nothing. The bar read as having lost them. Zero is written
+through now.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A horizontal bar that runs out of room drops its newest control.** A stack
+does not shrink; it places the overflow past the edge. The control added most
+recently is the one that goes, and in a bar of viewport options the newest one
+was the button that puts the viewport back in the window. The actions get a
+reserved `auto` column and the content column truncates instead.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**The overlays painted over a window are not widgets, so they do not travel.**
+The axis gizmo, the statistics panel and the rubber band are drawn after the
+tree from stored rectangles; the drag ghost is drawn after everything. With the
+viewport in a second window they kept being painted into the first one, at
+coordinates that meant something in the other. They are aimed now: the viewport's
+three at whichever window the viewport is in, the ghost and the tooltip at
+whichever window the pointer is in, which is not always the same one.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **A popup is placed by being a child of a root, so a second root means popups

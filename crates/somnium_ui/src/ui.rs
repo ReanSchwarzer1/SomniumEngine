@@ -149,6 +149,12 @@ pub struct UserInterface {
     /// Where hit-testing starts. The window's root, or a detached subtree while
     /// its own window's events are being fed in.
     input_root_ih: IH,
+    /// The root the pointer was last seen under.
+    ///
+    /// Unlike `input_root_ih` this outlives the event: the drag ghost and the
+    /// tooltip belong to the window the pointer is in, and both are drawn on a
+    /// frame rather than on an event.
+    pointer_root_ih: IH,
 }
 
 impl UserInterface {
@@ -190,6 +196,7 @@ impl UserInterface {
             viewport_handle: NodeHandle::NONE,
             detached: Vec::new(),
             input_root_ih: root_ih,
+            pointer_root_ih: root_ih,
         }
     }
 
@@ -604,6 +611,20 @@ impl UserInterface {
             return snap.desired_size;
         }
         if !snap.visibility {
+            // Written through, not merely returned. A container arranges from
+            // the stored `desired_size`, and returning zero while leaving the
+            // last visible measure in the record means a hidden child keeps
+            // every pixel it used to occupy.
+            //
+            // That is what put a 478 px hole in the viewport's context bar
+            // where the snapping cluster had been, and pushed the two controls
+            // after it — the overflow chevron and the float button — past the
+            // bar's right edge, where they clipped to nothing. The bar looked
+            // like it had lost them.
+            let node = self.nodes.borrow_mut(handle);
+            node.widget.prev_measure = available;
+            node.widget.desired_size = Vec2::ZERO;
+            node.widget.measure_valid = true;
             return Vec2::ZERO;
         }
 
@@ -1110,7 +1131,7 @@ impl UserInterface {
 
     /// Tooltip string on the widget under `pos`, walking parents if empty.
     pub fn tooltip_at(&self, pos: Vec2) -> String {
-        let mut h = self.hit_test(pos);
+        let mut h = to_nh(self.pick_node(self.pointer_root_ih, pos));
         while h.is_some() {
             if let Ok(n) = self.nodes.try_borrow(to_ih(h)) {
                 if !n.widget.tooltip.is_empty() {
@@ -1219,10 +1240,25 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
-        self.draw_axis_widget();
-        self.draw_statistics();
-        self.draw_marquee();
-        self.draw_drag_overlay();
+        self.draw_overlays(self.root_ih);
+    }
+
+    /// Everything painted over a window's tree rather than in it.
+    ///
+    /// MORROWIND-J step 2. These are not widgets, so they do not travel with a
+    /// detached subtree the way the context bar does — they have to be aimed.
+    /// The axis gizmo, the statistics panel and the rubber band belong to
+    /// whichever window the viewport is in; the drag ghost belongs to whichever
+    /// window the pointer is in, which is not always the same one.
+    fn draw_overlays(&mut self, root: IH) {
+        if to_ih(self.host_for(self.viewport_handle)) == root {
+            self.draw_axis_widget();
+            self.draw_statistics();
+            self.draw_marquee();
+        }
+        if self.pointer_root_ih == root {
+            self.draw_drag_overlay();
+        }
     }
 
     /// The corner axis widget. Three labelled ends, each a click target.
@@ -1852,6 +1888,7 @@ impl UserInterface {
         self.draw_ctx.clear(size.x, size.y);
         self.update_global_visibility(to_ih(host), true);
         self.draw_node(to_ih(host));
+        self.draw_overlays(to_ih(host));
         true
     }
 
@@ -1869,6 +1906,13 @@ impl UserInterface {
             // asking for the window that panel is in.
             None => self.root_ih,
         };
+    }
+
+    /// The root the pointer was last seen under, for a caller placing
+    /// something that follows it.
+    #[must_use]
+    pub fn pointer_root(&self) -> NodeHandle {
+        to_nh(self.pointer_root_ih)
     }
 
     /// Which surface's root a node belongs to.
@@ -1985,6 +2029,10 @@ impl UserInterface {
                 false
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // The pointer is in whichever window fed this event, and the
+                // drag ghost and the tooltip are drawn there rather than where
+                // the same coordinates happen to land in the editor.
+                self.pointer_root_ih = self.input_root_ih;
                 self.cursor_pos = self.to_logical(position.x, position.y);
                 let crossed = self.drag_drop.pointer_moved(self.cursor_pos);
                 if crossed {
@@ -3406,6 +3454,49 @@ mod detach_tests {
         ui.reattach(top);
         ui.perform_layout();
         assert_eq!(ui.screen_bounds(top).h, docked, "and gave the height back");
+    }
+
+    #[test]
+    fn a_hidden_child_stops_taking_up_room() {
+        // The measure cache is read before the visibility check, and the hidden
+        // branch used to return zero without writing it into the record a
+        // container arranges from. So a hidden child kept every pixel it had
+        // when it was last visible.
+        //
+        // In the viewport bar that was a 478 px hole where the snapping cluster
+        // had been, with the two controls after it — the overflow chevron and
+        // the float button — pushed past the bar's edge and clipped to
+        // nothing. The bar read as having lost them.
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let bar = ui.add_node(
+            StackPanelBuilder::new(WidgetBuilder::new())
+                .with_orientation(crate::widgets::stack_panel::Orientation::Horizontal)
+                .build(),
+            root,
+        );
+        let first = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(24.0)).build(),
+            bar,
+        );
+        let after = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(60.0).with_height(24.0)).build(),
+            bar,
+        );
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(after).x, 200.0);
+
+        ui.set_visibility(first, false);
+        ui.perform_layout();
+        assert_eq!(
+            ui.screen_bounds(after).x,
+            0.0,
+            "the hidden control still reserved its width"
+        );
+
+        ui.set_visibility(first, true);
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(after).x, 200.0, "and gave it back");
     }
 
     #[test]

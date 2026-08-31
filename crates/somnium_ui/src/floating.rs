@@ -6,22 +6,26 @@
 //!
 //! # What a floating panel actually needs
 //!
-//! Not a widget. A second OS window is a second **surface**, and a surface is
-//! the thing a [`crate::pass::UiPass`] renders into, so the host owns a second
-//! window, a second surface and a second pass. What it does *not* own is a
-//! second widget tree:
+//! Not a widget. A second OS window is a second **surface**, so the host owns a
+//! second window and a second surface. It owns nothing else:
 //!
 //! ```text
 //!   main window          floating window
 //!   ───────────          ───────────────
 //!   winit::Window        winit::Window        ┐ the host's (somnium_core)
-//!   wgpu::Surface        wgpu::Surface        │
-//!   UiPass               UiPass               ┘
+//!   wgpu::Surface        wgpu::Surface        ┘
 //!         ╲                    ╱
 //!          ╲                  ╱
-//!        one UserInterface, one pool of handles
+//!     one UserInterface, one DrawingContext, one UiPass
 //!          root ── … ── dock          detached ── DETAILS
 //! ```
+//!
+//! One [`crate::pass::UiPass`], and that is not thrift. A pass owns the GPU
+//! copy of the font atlas, the icon atlas, the thumbnail atlas and every
+//! registered texture, and each upload is guarded by a dirty flag that the
+//! first pass to prepare clears. A second pass therefore draws against blank
+//! atlases: panels, sliders and check boxes appear, and not one glyph or icon
+//! does. It looked exactly like a font that had failed to load.
 //!
 //! # Why the panel is moved rather than rebuilt
 //!
@@ -74,21 +78,43 @@ impl FloatingKind {
         Self::OutputLog,
     ];
 
-    /// The panel `SOMNIUM_FLOAT` asks to open at startup, if it asks for one.
+    /// The panels `SOMNIUM_FLOAT` asks to open at startup.
     ///
     /// A window only a menu can open is a window no automated run can look at,
-    /// and this one has a GPU surface of its own.
+    /// and these have GPU surfaces of their own. Comma-separated, because the
+    /// interesting case is more than one: every window draws through the same
+    /// pass, and one window can only ever prove that it does not conflict with
+    /// the editor.
     #[must_use]
-    pub fn from_env() -> Option<Self> {
-        match std::env::var("SOMNIUM_FLOAT").ok()?.trim() {
-            "log" => Some(Self::OutputLog),
-            "outliner" => Some(Self::Outliner),
-            "details" => Some(Self::Details),
-            "viewport" => Some(Self::Viewport),
-            other => {
-                tracing::warn!("SOMNIUM_FLOAT={other} is not a panel name; ignoring");
-                None
-            }
+    pub fn from_env() -> Vec<Self> {
+        let Ok(raw) = std::env::var("SOMNIUM_FLOAT") else {
+            return Vec::new();
+        };
+        raw.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .filter_map(|name| {
+                let found = Self::ALL.into_iter().find(|kind| kind.slug() == name);
+                if found.is_none() {
+                    tracing::warn!("SOMNIUM_FLOAT={name} is not a panel name; ignoring");
+                }
+                found
+            })
+            .collect()
+    }
+
+    /// The panel's name in an environment variable and in a file name.
+    ///
+    /// One table rather than two: the name `SOMNIUM_FLOAT` accepts is the name
+    /// `SOMNIUM_FLOAT_PNG` writes, so a run that asked for four windows comes
+    /// back with four files that say which is which.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::OutputLog => "log",
+            Self::Outliner => "outliner",
+            Self::Details => "details",
+            Self::Viewport => "viewport",
         }
     }
 
@@ -118,11 +144,12 @@ impl FloatingKind {
     #[must_use]
     pub const fn default_size(self) -> (u32, u32) {
         match self {
-            // Wide and short: a log is read a line at a time and the lines are
-            // long. Tall and narrow: an outliner is a list of short names, and
-            // Details is a column of rows. The viewport is the one that wants
-            // area, because it is the thing being looked at.
-            Self::OutputLog => (900, 420),
+            // Wide and short: a log is read a line at a time, the lines are
+            // long, and its toolbar is nine controls that a narrower window
+            // would truncate. Tall and narrow: an outliner is a list of short
+            // names, and Details is a column of rows. The viewport is the one
+            // that wants area, because it is the thing being looked at.
+            Self::OutputLog => (1120, 460),
             Self::Outliner => (360, 720),
             Self::Details => (400, 800),
             Self::Viewport => (1280, 760),
@@ -155,6 +182,20 @@ mod tests {
             assert!(kind.title().contains(kind.label()));
             let (w, h) = kind.default_size();
             assert!(w > 100 && h > 100, "{kind:?} opens at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn every_panel_answers_to_its_own_slug() {
+        // `from_env` is written against `slug`, so a variant whose slug
+        // collided with another would silently open the wrong window.
+        for kind in FloatingKind::ALL {
+            assert!(!kind.slug().is_empty());
+            let same: Vec<_> = FloatingKind::ALL
+                .into_iter()
+                .filter(|other| other.slug() == kind.slug())
+                .collect();
+            assert_eq!(same, vec![kind], "{:?} shares a slug", kind);
         }
     }
 

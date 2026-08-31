@@ -20,15 +20,28 @@
 //! The second run logs the mean absolute luminance difference over terrain
 //! pixels and over everything else, separately.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Set after a capture has been written. `SOMNIUM_CAPTURE_QUIT=1` polls this
 /// so a headless evidence run can exit instead of sitting on a window.
 static CAPTURE_FINISHED: AtomicBool = AtomicBool::new(false);
 
-/// True once [`FrameCapture::resolve`] has written or compared a frame.
+/// Surface captures asked for and not yet written.
+///
+/// A floating window opens after the editor and therefore reaches any given
+/// frame number after it, so an evidence run that quit the moment the editor's
+/// capture landed would exit with the second window's PNG still unwritten. It
+/// did, every time.
+static SURFACE_PENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// Say that one more surface is going to be written before the run may end.
+pub fn expect_surface_capture() {
+    SURFACE_PENDING.fetch_add(1, Ordering::Relaxed);
+}
+
+/// True once every capture this run asked for has been written or compared.
 pub fn finished() -> bool {
-    CAPTURE_FINISHED.load(Ordering::Relaxed)
+    CAPTURE_FINISHED.load(Ordering::Relaxed) && SURFACE_PENDING.load(Ordering::Relaxed) == 0
 }
 
 /// Frame the capture fires on unless `SOMNIUM_CAPTURE_FRAME` says otherwise.
@@ -52,6 +65,47 @@ pub struct CapturedFrame {
     /// any lighting question — averaging it in buries whatever the A/B was
     /// actually about under a constant.
     pub terrain: Vec<u8>,
+}
+
+/// Read one surface image back and write it as a PNG, now.
+///
+/// MORROWIND-J step 2. [`FrameCapture`] reads the *editor's* swapchain, which
+/// left a floating window as the one part of the editor nobody could look at
+/// without pointing a camera at the screen — and grabbing the desktop is what
+/// the note at the top of this file exists to stop people doing.
+///
+/// Blocking, and meant for evidence rather than for a frame budget: it submits
+/// its own copy, waits for the device, and maps. `texture` must have been
+/// created with `COPY_SRC`.
+pub fn write_surface_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    path: &str,
+) {
+    let (width, height) = (texture.width(), texture.height());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surface PNG Capture"),
+    });
+    let Some((staging, pending)) = FrameCapture::copy_swapchain(
+        device, &mut encoder, texture, width, height, format, "surface",
+    ) else {
+        return;
+    };
+    queue.submit(std::iter::once(encoder.finish()));
+    FrameCapture::write_swapchain_png(
+        device,
+        Some(&path.to_owned()),
+        Some(&staging),
+        Some(pending),
+        "surface",
+    );
+    // Whether or not the write succeeded: a run that cannot produce this file
+    // should end and say so, not hang waiting for a file it will never get.
+    let _ = SURFACE_PENDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(1))
+    });
 }
 
 /// Visibility-buffer geometry that is not terrain.

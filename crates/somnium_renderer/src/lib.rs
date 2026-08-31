@@ -44,5 +44,5 @@ pub use bindless::{GlobalResourcePool, MAX_BINDLESS_TEXTURES};
 pub use command::{DrawCommand, SortKey};
 pub use context::RenderContext;
 pub use pass::gizmo::{GizmoAxis, GizmoMode, gizmo_hit_test};
-pub use renderer::{SomniumRenderer, UploadedNode};
+pub use renderer::{SceneTarget, SomniumRenderer, UploadedNode};
 pub use viewport_resolution::{VIEWPORT_RESOLUTION_LABELS, scene_size_for_preset};
