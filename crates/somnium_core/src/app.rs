@@ -646,6 +646,18 @@ pub struct Engine<G: GameApp> {
     /// this is the catalogue it was projected from, kept because a save needs
     /// the display names and font lists a table cannot carry.
     locale_catalog: Option<somnium_i18n::Catalog>,
+    /// Float requests waiting for an `ActiveEventLoop`.
+    ///
+    /// `handle_editor_event` has no event loop and a window cannot be created
+    /// without one, so the request is parked here and serviced a few lines
+    /// later in `about_to_wait` — the nearest point that has both.
+    pending_float: Vec<somnium_ui::floating::FloatingKind>,
+    /// Panels the user has pulled out into their own OS windows.
+    ///
+    /// A `Vec` rather than a map keyed by `WindowId`: there are at most a
+    /// handful, they are iterated far more often than they are looked up, and a
+    /// linear scan of four is not the thing to optimise.
+    floating: Vec<FloatingWindow>,
     next_asset_scan: std::time::Instant,
     /// When shader files were last polled for hot reload (MORROWIND-C).
     last_shader_poll: std::time::Instant,
@@ -858,6 +870,66 @@ pub struct Engine<G: GameApp> {
     stepping_now: bool,
 }
 
+/// A panel in its own OS window: the parts `somnium_ui` deliberately does not
+/// own.
+///
+/// MORROWIND-J step 2. The widget tree and its draw list live in
+/// [`somnium_ui::floating::FloatingPanel`]; everything here is the platform —
+/// a window, a surface, its configuration, and the pass that puts one on the
+/// other.
+struct FloatingWindow {
+    window: std::sync::Arc<Window>,
+    surface: somnium_ui::wgpu::Surface<'static>,
+    config: somnium_ui::wgpu::SurfaceConfiguration,
+    pass: somnium_ui::pass::UiPass,
+    panel: somnium_ui::floating::FloatingPanel,
+}
+
+impl FloatingWindow {
+    /// Reconfigure for a new physical size.
+    ///
+    /// A zero-sized surface is a validation error rather than a small one, and
+    /// minimising a window is exactly how it happens.
+    fn resize(&mut self, device: &somnium_ui::wgpu::Device, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(device, &self.config);
+        self.panel.resize((width as f32, height as f32));
+    }
+
+    /// Draw the panel into its own swapchain.
+    fn render(&mut self, device: &somnium_ui::wgpu::Device, queue: &somnium_ui::wgpu::Queue) {
+        use somnium_ui::wgpu;
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(tex)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            // A window being resized or occluded fails to acquire, and skipping
+            // the frame is the whole of the correct response.
+            _ => return,
+        };
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Floating Window Encoder"),
+        });
+        self.panel.draw();
+        let size = (self.config.width, self.config.height);
+        self.pass.prepare(
+            device,
+            queue,
+            &mut self.panel.ui.draw_ctx,
+            somnium_ui::pass::UiSurface::new((size.0 as f32, size.1 as f32), size),
+        );
+        self.pass.render(&mut encoder, &view);
+        queue.submit(std::iter::once(encoder.finish()));
+        queue.present(output);
+    }
+}
+
 impl<G: GameApp + 'static> Engine<G> {
     /// Start the engine loop. This will take control of the current thread.
     pub fn run(mut config: EngineConfig, game: G) -> Result<(), EngineError> {
@@ -928,6 +1000,8 @@ impl<G: GameApp + 'static> Engine<G> {
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             locale_catalog: None,
+            pending_float: Vec::new(),
+            floating: Vec::new(),
             next_asset_scan: std::time::Instant::now(),
             last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
@@ -2596,6 +2670,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 // position and their in-flight edit.
                 self.load_localisation();
 
+                // MORROWIND-J step 2, opened from the environment so a
+                // headless run can exercise the second surface.
+                if let Some(kind) = somnium_ui::floating::FloatingKind::from_env() {
+                    self.pending_float.push(kind);
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.set_panel_floating(kind, true);
+                    }
+                }
+
                 // MORROWIND-I. Everything is initialised; show the window.
                 window.set_visible(true);
 
@@ -2660,10 +2743,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         if self.state != LifecycleState::Running {
+            return;
+        }
+
+        // MORROWIND-J step 2. The id was ignored while there was one window,
+        // and that is precisely the assumption a second window breaks. Without
+        // this line the floating log's `Resized` reaches the main render
+        // context, which then scissors the editor's 1920x1032 frame against a
+        // 900x420 target — a validation error rather than a wrong picture, and
+        // the first thing that happened when this was tried.
+        if self.floating_window_event(window_id, &event) {
             return;
         }
 
@@ -4127,6 +4220,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             r.render_with_game_ui(c, ui, window, Some(&mut adapter));
         }
 
+        // MORROWIND-J step 2. After the editor's own frame, and on the same
+        // device: each floating window has its own surface and submits its own
+        // encoder, so a slow one costs its own frame rather than the editor's.
+        self.render_floating();
+
         // ── Accessibility preferences (MORROWIND-I) ──────────────────────────
         //
         // The platform first, the preference over it. Applied every frame
@@ -4173,6 +4271,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
             for ev in events {
                 self.handle_editor_event(ev);
+            }
+            // Serviced here rather than in the handler: a window needs the
+            // event loop, and this is the first point after the drain that has
+            // one.
+            for kind in std::mem::take(&mut self.pending_float) {
+                self.float_panel(event_loop, kind);
             }
             if let Some(result) = self.pending_map_load.take() {
                 let mut ctx = EngineContext::new(
@@ -6950,6 +7054,106 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Open a panel in its own OS window, or focus the one already showing it.
+    ///
+    /// MORROWIND-J step 2. Created here rather than anywhere else because
+    /// `create_window` needs an `ActiveEventLoop`, and this is the point in the
+    /// frame that has one *and* has just drained the editor's events.
+    fn float_panel(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        kind: somnium_ui::floating::FloatingKind,
+    ) {
+        if let Some(existing) = self.floating.iter().find(|w| w.panel.kind() == kind) {
+            // Already open. Raising it is what a user means by asking twice.
+            existing.window.focus_window();
+            return;
+        }
+        let Some(ctx) = self.render_ctx.as_ref() else {
+            return;
+        };
+        let (w, h) = kind.default_size();
+        let attrs = WindowAttributes::default()
+            .with_title(kind.title())
+            .with_inner_size(LogicalSize::new(w, h));
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => std::sync::Arc::new(window),
+            Err(error) => {
+                error!(?error, "could not open a floating window");
+                return;
+            }
+        };
+        let surface = match ctx.instance.create_surface(std::sync::Arc::clone(&window)) {
+            Ok(surface) => surface,
+            Err(error) => {
+                error!(?error, "floating window has no drawable surface");
+                return;
+            }
+        };
+        let size = window.inner_size();
+        let mut config = ctx.config.clone();
+        config.width = size.width.max(1);
+        config.height = size.height.max(1);
+        surface.configure(&ctx.device, &config);
+
+        let pass = somnium_ui::pass::UiPass::new(&ctx.device, &ctx.queue, config.format);
+        let panel = somnium_ui::floating::FloatingPanel::new(
+            kind,
+            (config.width as f32, config.height as f32),
+            somnium_ui::load_fonts,
+        );
+        info!(?kind, "floating window opened");
+        self.floating.push(FloatingWindow {
+            window,
+            surface,
+            config,
+            pass,
+            panel,
+        });
+    }
+
+    /// Route a window event to a floating window, if it belongs to one.
+    ///
+    /// Returns whether the event was consumed, so the main window's handler
+    /// does not also act on a resize that was not its own — the bug a
+    /// single-window event loop grows the moment it gains a second window.
+    fn floating_window_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+        let Some(index) = self.floating.iter().position(|w| w.window.id() == id) else {
+            return false;
+        };
+        match event {
+            WindowEvent::CloseRequested => {
+                // Closing returns the panel to the dock rather than losing it.
+                let closed = self.floating.remove(index);
+                info!(kind = ?closed.panel.kind(), "floating window closed");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_panel_floating(closed.panel.kind(), false);
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(ctx) = self.render_ctx.as_ref() {
+                    self.floating[index].resize(&ctx.device, size.width, size.height);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Draw every floating window, after the editor's own frame.
+    fn render_floating(&mut self) {
+        let Some(ctx) = self.render_ctx.as_ref() else {
+            return;
+        };
+        for index in 0..self.floating.len() {
+            if let Some(ui) = self.ui_manager.as_ref() {
+                let log = ui.log();
+                self.floating[index].panel.sync(log);
+            }
+            self.floating[index].render(&ctx.device, &ctx.queue);
+        }
+    }
+
     fn handle_editor_event(&mut self, ev: EditorEvent) {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
@@ -8691,6 +8895,8 @@ impl<G: GameApp> Engine<G> {
                     self.report_content_error(&path, &error);
                 }
             }
+
+            EditorEvent::FloatPanel(kind) => self.pending_float.push(kind),
 
             EditorEvent::SaveLocalisation => self.save_localisation(),
 

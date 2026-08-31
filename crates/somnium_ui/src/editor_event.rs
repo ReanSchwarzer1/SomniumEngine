@@ -528,6 +528,12 @@ pub enum EditorEvent {
     ShowContentItemInFolder(String),
     /// Open an asset in its configured OS editor.
     EditContentAsset(String),
+    /// Pull a panel out into its own OS window, or raise the one already
+    /// showing it (MORROWIND-J step 2).
+    ///
+    /// The host acts on this because only the host has an `ActiveEventLoop`,
+    /// which is the one thing a window cannot be created without.
+    FloatPanel(crate::floating::FloatingKind),
     /// Write the localisation table back to the project, one file per locale.
     ///
     /// Carries nothing: the host asks [`crate::UiManager::localisation_table`]

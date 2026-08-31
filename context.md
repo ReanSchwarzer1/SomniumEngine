@@ -2228,6 +2228,22 @@ would crop the empty state of an empty folder out of existence, and an inline
 rename is a text box parented to a tile, so a rename holds the window still
 until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**A panel cannot be moved between widget trees, only rebuilt in one.** Handles
+are indices into a `UserInterface`'s pool, so a floating window is a *second
+tree*, not a re-parenting — and rebuilding a panel elsewhere is only possible
+when its content is a **store** rather than a pile of widgets. `OutputLog` is
+one, which is why it is the panel that floats first; the Content Drawer and
+Details would each need to be given one before they could follow.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A window id ignored is an assumption about there being one window.**
+`window_event` took `_window_id` and was correct for years. The first floating
+window turned that into the editor's swapchain being resized to the log window's
+size — caught as a wgpu validation error, which was the lucky outcome: the same
+mis-route could as easily have been a `CloseRequested` quitting the editor
+because somebody shut a panel.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
 **A shaper and a rasteriser must share a glyph index space, and two libraries
 do not.** `rustybuzz` and `fontdue` disagree about `Inter-Regular.ttf`: `C` is
 18 to both, `(` is 331 to one and 324 to the other, and the divergence is not a

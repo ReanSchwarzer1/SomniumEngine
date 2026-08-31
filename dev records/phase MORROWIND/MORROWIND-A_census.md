@@ -18,14 +18,14 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 65,795 | +38,265 | 32.3% | 717 | +502 | 107 | 2 |
-| `somnium_renderer` | 64,014 | +13,808 | 31.4% | 444 | +116 | 92 | 55 |
-| `somnium_core` | 35,326 | +16,106 | 17.3% | 403 | +186 | 46 | 0 |
+| `somnium_ui` | 66,188 | +38,658 | 32.4% | 722 | +507 | 108 | 2 |
+| `somnium_renderer` | 64,014 | +13,808 | 31.3% | 444 | +116 | 92 | 55 |
+| `somnium_core` | 35,532 | +16,312 | 17.4% | 403 | +186 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.3% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.4% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
-| `somnium_anim` | 4,380 | +4,380 | 2.2% | 46 | +46 | 4 | 0 |
+| `somnium_anim` | 4,380 | +4,380 | 2.1% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.6% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 1,968 | +1,968 | 1.0% | 35 | +35 | 5 | 0 |
 | `somnium_i18n` | 1,964 | +1,964 | 1.0% | 57 | +57 | 5 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **203,648** | +89,756 | | **2079** | +1,134 | | |
+| **Total** | **204,247** | +90,355 | | **2084** | +1,139 | | |
 
 The top three crates are **81.1%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -49,7 +49,7 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1253 | 261 | 118 | 8 | 14 | 189 | 105 | **1949** |
+| `somnium_ui` | 1266 | 262 | 119 | 8 | 14 | 189 | 106 | **1965** |
 | `somnium_renderer` | 663 | 157 | 9 | 1 | 3 | 126 | 89 | **1048** |
 | `somnium_core` | 334 | 110 | 23 | 4 | 3 | 47 | 41 | **562** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
@@ -95,7 +95,7 @@ is a system this phase still owes.
 |---|---:|---:|---:|---|
 | `bone` | 6 | 0 | +6 | No skeletal animation of any kind (Track 5). |
 | `armature` | 1 | 0 | +1 | As above. |
-| `skin` | 33 | 8 | +25 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
+| `skin` | 34 | 8 | +26 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |
 | `pathfind` | 0 | 0 | — | As above. |
 | `gamepad` | 8 | 0 | +8 | No input abstraction (Track 8, Seam 5). |
@@ -103,14 +103,14 @@ is a system this phase still owes.
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
 | `prefab` | 9 | 2 | +7 | Both are comments in the scripting crate. No prefab system (Track 3). |
-| `dock` | 11 | 5 | +6 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
+| `dock` | 13 | 5 | +8 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 12 | 1 | +11 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |
 
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 124 (+28 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 125 (+29 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 

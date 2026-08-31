@@ -278,6 +278,8 @@ pub enum CommandAction {
     OpenReferences,
     /// Open or close the Localisation table.
     OpenLocalisation,
+    /// Pull a panel out into its own OS window (MORROWIND-J step 2).
+    FloatPanel(crate::floating::FloatingKind),
     /// Choose how the viewport region is divided (MORROWIND-J step 3).
     ///
     /// One action per named layout rather than a cycle, matching
@@ -985,6 +987,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Open or close the Output Log.",
             A::OpenOutputLog,
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.float_log",
+            "Output Log in a Window",
+            "Window",
+            None,
+            "Open the Output Log as a separate operating-system window.",
+            A::FloatPanel(crate::floating::FloatingKind::OutputLog),
             WINDOW,
             always
         ),

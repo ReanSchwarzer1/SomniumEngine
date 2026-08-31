@@ -35,6 +35,15 @@ pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
+/// MORROWIND-J step 2: a panel living in its own OS window.
+/// `wgpu`, as this crate sees it.
+///
+/// Re-exported so a host can build a surface for a [`floating`] window without
+/// taking its own direct dependency and risking a second, incompatible `wgpu`
+/// in the graph — the classic way two crates end up unable to hand each other
+/// a device.
+pub use wgpu;
+pub mod floating;
 pub mod viewport_layout;
 pub mod virtual_list;
 pub mod widget;
@@ -1061,6 +1070,11 @@ pub struct UiManager {
     locale_grid: NodeHandle,
     locale_actions: Vec<(NodeHandle, LocaleAction)>,
     locale_open: bool,
+    /// Panels currently living in their own OS window (MORROWIND-J step 2).
+    ///
+    /// The manager does not own those windows — the host does — but it has to
+    /// know, so the docked copy of a floated panel stops claiming space.
+    floating_panels: std::collections::BTreeSet<crate::floating::FloatingKind>,
     /// MORROWIND-J step 3. How the viewport region is divided.
     viewport_layout: crate::viewport_layout::ViewportLayout,
     /// Whether the panel is filtered to rows with an untranslated cell.
@@ -1092,7 +1106,12 @@ pub struct UiManager {
 /// did rather than left pointing at an unloaded id — a missing SemiBold should
 /// cost the header its weight, not its glyphs. Returns the UI Regular id, which
 /// is what the existing `font_id` parameter threaded through `build_*` means.
-fn load_fonts(ui: &mut UserInterface) -> u8 {
+/// Load the bundled editor faces into a tree, returning the base font id.
+///
+/// Public since MORROWIND-J step 2: a floating window builds its own
+/// [`ui::UserInterface`], and text in it that fell back to a system face would
+/// be visibly not the editor's.
+pub fn load_fonts(ui: &mut UserInterface) -> u8 {
     use typography::{FontRegistry, FontRole};
 
     const FACES: [(FontRole, &[u8], &str); 5] = [
@@ -1695,6 +1714,7 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
+            floating_panels: std::collections::BTreeSet::new(),
             viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
             locale_only_incomplete: false,
             locale_table: None,
@@ -3222,6 +3242,14 @@ impl UiManager {
     }
 
     fn toggle_log_panel(&mut self) {
+        // Floated: the panel is not in this window, so opening the dock slot
+        // for it would show an empty one beside a full window.
+        if self.is_panel_floating(crate::floating::FloatingKind::OutputLog) {
+            self.editor_events.push_back(EditorEvent::FloatPanel(
+                crate::floating::FloatingKind::OutputLog,
+            ));
+            return;
+        }
         if self.log_open {
             self.log_open = false;
         } else {
@@ -4390,6 +4418,10 @@ impl UiManager {
             A::OpenOutputLog => self.toggle_log_panel(),
             A::OpenReferences => self.toggle_references_panel(),
             A::OpenLocalisation => self.toggle_locale_panel(),
+            A::FloatPanel(kind) => {
+                self.set_panel_floating(kind, true);
+                self.editor_events.push_back(EditorEvent::FloatPanel(kind));
+            }
             A::SetViewportLayout(layout) => self.set_viewport_layout(layout),
             A::ContentShowReferences => {
                 // Only an asset has references. A folder is a place, and the
@@ -4805,6 +4837,38 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+    }
+
+    /// Whether a panel is currently living in its own OS window.
+    #[must_use]
+    pub fn is_panel_floating(&self, kind: crate::floating::FloatingKind) -> bool {
+        self.floating_panels.contains(&kind)
+    }
+
+    /// Record that a panel has been floated or returned to the dock.
+    ///
+    /// The docked copy is hidden while the panel is out, because two live
+    /// copies of the Output Log is not a feature — and because the bottom row
+    /// showing an empty log beside a floating window full of lines is the kind
+    /// of wrong that makes people distrust both.
+    pub fn set_panel_floating(&mut self, kind: crate::floating::FloatingKind, floating: bool) {
+        let changed = if floating {
+            self.floating_panels.insert(kind)
+        } else {
+            self.floating_panels.remove(&kind)
+        };
+        if !changed {
+            return;
+        }
+        match kind {
+            crate::floating::FloatingKind::OutputLog => {
+                if floating && self.log_open {
+                    // It has left the dock; the dock should not keep its space.
+                    self.log_open = false;
+                    self.apply_bottom_panel();
+                }
+            }
+        }
     }
 
     /// How the viewport region is divided this frame (MORROWIND-J step 3).
@@ -6144,6 +6208,9 @@ impl UiManager {
     }
 
     /// The Output Log's state.
+    ///
+    /// The store, not the widgets — which is what lets a floating window build
+    /// its own tree from the same lines (MORROWIND-J step 2).
     #[must_use]
     pub fn log(&self) -> &crate::log::OutputLog {
         &self.log

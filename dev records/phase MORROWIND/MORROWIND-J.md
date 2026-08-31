@@ -1,21 +1,22 @@
 # MORROWIND-J — docking, floating windows, multiple viewports
 
-**Status:** steps 1 and 3 of 4 complete, 2026-08-31. The dock tree exists and
-is load-bearing; the renderer draws several views per frame, each with its own
-camera, and the default is still one full-size viewport.
+**Status:** steps 1, 2 and 3 of 4 complete, 2026-08-31. The dock tree exists
+and is load-bearing; the Output Log can be pulled out into a real OS window; the
+renderer draws several views per frame, each with its own camera, and the
+default is still one full-size viewport.
 
 ## The four steps, and where this one stops
 
 | Step | State |
 |---|---|
 | 1. A dock tree (tiles, splitters, tabs) with the current arrangement as the default | **Done** — this record |
-| 2. Floating windows as real OS windows via winit | Not started |
+| 2. Floating windows as real OS windows via winit | **Done** for the Output Log — see below |
 | 3. Multiple viewports, each with its own camera, view mode and overlays | **Done** — see below |
 | 4. Layout persistence, named workspaces, reset | Persistence **done**; workspaces and reset already shipped in Phase 26-Zeta-F |
 
-Step 2 is the remaining expensive half. Step 3 — *"the renderer learns to render
-more than one view per frame"* — is done and measured, and nothing in step 2 is
-blocked by it.
+Both expensive halves are done. Step 3 — *"the renderer learns to render more
+than one view per frame"* — is measured; step 2 is real OS windows, for one panel
+so far and by a mechanism that generalises.
 
 ## The constraint that shaped step 1
 
@@ -120,6 +121,104 @@ the shell did not change at all — it still asks for four numbers and a
 bottom-panel choice, and those are now *derived from a tree* rather than being
 the only representation there is. Step 2 replaces that projection with the
 resolved rectangles; nothing in it needs the projection to have been wrong.
+
+## Step 2 — a panel in its own OS window
+
+**Done for the Output Log, 2026-08-31.** A real `winit` child window with its
+own `wgpu` surface, its own widget tree and its own pass, opened from the Window
+menu and returned to the dock when it is closed.
+
+### A floating panel is not a widget
+
+That is the whole shape of the problem. A second OS window is a second
+**surface**, and a surface is what a `UiPass` renders into — so a floating panel
+owns a parallel stack, and the interesting question is where to cut it:
+
+```text
+   main window            floating window
+   ───────────            ───────────────
+   winit::Window          winit::Window        ┐ somnium_core: the platform
+   wgpu::Surface          wgpu::Surface        │ — windows, surfaces, configs
+   wgpu::SurfaceConfig    wgpu::SurfaceConfig  ┘
+   ─────────────────────────────────────────────
+   UserInterface          UserInterface        ┐ somnium_ui: a widget tree
+   UiPass                 UiPass               ┘ — and how to paint one
+```
+
+`somnium_ui::floating::FloatingPanel` is everything below the line and nothing
+above it, which is what lets the rebuild logic — the part with the bugs — be
+tested with no GPU and no event loop at all. `somnium_core` holds the window and
+the surface, because it always has.
+
+### Why the panel is rebuilt rather than moved
+
+A widget tree belongs to one `UserInterface`: handles are indices into its pool,
+and a node cannot be re-parented across two of them. So detaching a panel means
+**building it again** in the new tree from the same data — and that is only
+possible when the panel's content is a *store* rather than a pile of widgets.
+
+`log::OutputLog` is exactly that, and it is why the Output Log is the panel that
+floats first. A panel whose state lives in its widgets could not be detached
+without first being given somewhere else to keep it.
+
+### Three decisions the tests hold down
+
+- **The cache key is the newest entry's id, not the row count.** A log at
+  capacity loses a line for every line it gains, so a length-keyed cache would
+  freeze the window the moment the buffer first filled. A busy editor logs every
+  frame, and a second window that rebuilt a thousand rows to add one would cost
+  more than the editor beside it.
+- **Closing returns the panel to the dock.** A floated panel hides its docked
+  copy — two live Output Logs is not a feature, and the bottom row showing an
+  empty one beside a full window is the kind of wrong that makes people distrust
+  both. Closing the window puts it back.
+- **A zero-sized surface is a validation error, not a small one**, and
+  minimising a window is how it happens.
+
+### The bug a second window was always going to find
+
+`window_event` took its `WindowId` as `_window_id` and ignored it — correct for
+one window, and precisely the assumption a second one breaks. The first run
+crashed:
+
+```
+In a CommandEncoder, label = 'Main Render Encoder'
+  In a set_scissor_rect command
+    Scissor Rect { x: 0, y: 0, w: 1920, h: 1032 } is not contained
+    in the render target (900, 420, 1)
+```
+
+The floating window's `Resized` had reached the main render context, which
+resized the editor's swapchain to the log window's size. Not a wrong picture — a
+validation failure, which is the good outcome: the same event reaching the wrong
+handler could as easily have been a `CloseRequested` quitting the editor because
+somebody shut the log.
+
+Events are routed by id first now, and the handler says so.
+
+### Verification
+
+`SOMNIUM_FLOAT=log` opens the window at startup, so an automated run exercises
+the second surface rather than leaving it to a menu nobody clicks in a headless
+test. A screenshot of the running editor shows the second window titled
+*Output Log — Somnium*, with the OS's own chrome, live log lines in the editor's
+own faces, and the main window still at 59 fps.
+
+Five tests cover the detached panel with no GPU: it builds without a window,
+rows follow the log, an unchanged log does not rebuild, a log that drops from
+the front still does, and a resize is a layout rather than a rebuild.
+
+### What step 2 does not claim
+
+- **Only the Output Log floats.** The mechanism is general and the enum has one
+  variant; the next panel is the work of teaching it to rebuild itself from a
+  store, which for the Content Drawer and Details means giving them one.
+- **The floating window is read-only.** It has no input routing — clicks and
+  keys do not reach its tree yet — so the log's filter chips and search live in
+  the docked copy.
+- **A panel cannot be dragged out**, only opened from the menu. The drag is a
+  shell gesture; this is the window underneath it.
+- Layout persistence does not remember an open floating window across a restart.
 
 ## Step 3 — several views in one frame
 
