@@ -1838,9 +1838,12 @@ does not overlap. STALKER waits for both relevant outputs.
   pickers above.
 - Prefabs, and the GUI layout editor's item 5 that waits on them (MORROWIND-O,
   M2 item 5). MORROWIND-J is otherwise closed: the dock tree, real `winit` child
-  windows and several views per frame all landed on 2026-08-31. What J still
-  lacks is a drag-to-dock affordance and a shell that resolves tiles directly,
-  and only the Output Log knows how to float.
+  windows and several views per frame all landed on 2026-08-31, and on the same
+  day every major panel learned to float — Outliner, Details, viewport and
+  Output Log, each from a button on its own header. What J still lacks is a
+  drag-to-dock affordance and a shell that resolves tiles directly. A floated
+  viewport records the scene a second time rather than redirecting the primary
+  view's target, so it costs a second scene pass while it is out.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2223,17 +2226,43 @@ empty state of an empty folder out of existence, and an inline rename is a text
 box parented to a tile, so a rename holds the window still until it lands.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
-**A widget tree owns its handles, so a floating panel is rebuilt, not moved.**
-Handles index one `UserInterface`'s pool, and a second OS window is a second
-tree. A panel can only be built there if its content lives in a store:
+**A second window does not need a second widget tree.** The first cut of
+floating windows built the panel again, in a second `UserInterface`, from the
+same data. That only works for a panel whose content is a store, and Details is
+not one: its rows come from reflected schemas and each is wired to an editing
+path through a map keyed on the row's own handle. Rebuilding it elsewhere means
+rebuilding that wiring, then keeping two copies of it honest.
+
+Detaching moves the panel instead. It leaves its parent's child list, gets a
+root of its own, and is laid out against the floating window's size:
 
 ```text
-  OutputLog (store) ──┬──> docked tree    ──> rows
-                      └──> floating tree  ──> rows
+                    one UserInterface, one pool of handles
+   window root ── outer grid ── … ── OUTLINER          ← main surface
+   detached root ─────────────────── DETAILS           ← second surface
+                                     ↑
+                        same handles, so the same bindings
 ```
 
-`OutputLog` already was one, which is why the log floats first. The Content
-Drawer and Details need one before they can follow.
+The handles never change, so every binding, message route and open gesture
+survives the move. Two consequences: a floating panel is not a lesser copy of
+the docked one, it *is* the docked one; and the dock closes the gap by itself,
+because a splitter left with one child stretches it.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A popup is placed by being a child of a root, so a second root means popups
+can hang off the wrong one.** A combo box in a floating Details would drop its
+list into the main window, at coordinates that meant something in the other one.
+`Control::popup_anchor` is how the interface finds them: the popup already knows
+its anchor, and a registry beside it would be a second place for the answer to
+be wrong.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A detached panel is laid out at its window's origin, and that is the whole
+trick.** The surface's coordinates and the widget's coordinates become the same
+numbers, so neither drawing nor hit-testing translates anything, and the
+editor's viewport tools work in a window the editor does not own: this window's
+cursor position and `viewport_physical_rect` are already in one space.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **`process_os_event` queues; `update` delivers.** A tree that lays out and
