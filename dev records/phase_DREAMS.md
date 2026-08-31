@@ -449,16 +449,21 @@ hit, and whether Slang or WESL raises it.
 | Composition cost | 2.87 ms for `shading.wgsl` cold, 0.8 µs cached, 8.03 ms for all 55 roots at startup. Not a problem |
 | Diagnostics | An error on line 48 of `brdf.wgsl` was reported as `wgsl:195` and labelled `shading.wgsl`, a file it is not in. **The one real cost** |
 | WESL 0.4.4 | Real source maps, generics, wildcard imports, MIT OR Apache-2.0, and `rust-version = 1.97.1` against a tree frozen at rustc 1.88. Not adoptable without a toolchain bump |
-| Slang | **Not measured.** Needs a `slangc` binary that is not on this machine. Its strongest argument survives: `PASSTHROUGH_SHADERS` is already requested in tree for FSR's SPIR-V |
+| Slang | **Measured in [DREAMS-A2](<phase DREAMS/DREAMS-A2.md>).** Its WGSL target refuses `NonUniformResourceIndex` and so cannot compile this engine's bindless shaders; its SPIR-V target runs end to end through `PASSTHROUGH_SHADERS`, verified by dispatch. Adopted for **new** shaders only |
 | Generics | Wanted by exactly one of B through E (PUPPET's layered BSDF). One of four is not a migration |
 
 **What landed instead:** a line-origin map built during the composition that was
 already happening. 10 spans for 4,801 composed lines, 0.5% of a startup-only
 path, and the diagnostic now reads `brdf.wgsl:48:37`.
 
-**Re-opened when, not if:** if PUPPET needs generics, this comes back with a
-concrete case rather than a guess. §3 of the record says what measuring Slang
-would take.
+**Re-opened, and answered:** [DREAMS-A2](<phase DREAMS/DREAMS-A2.md>) measured
+Slang rather than leaving it filed. Its WGSL target cannot compile this engine's
+bindless shaders, its SPIR-V target runs end to end with a verified dispatch,
+and its generics monomorphise to nothing. **Slang is adopted for new shaders on
+the SPIR-V path, alongside the 55 WGSL modules, which are not migrated.** Four
+questions are open for DREAMS-B in §8 of that record, and the honest expectation
+is that B, C and D stay in WGSL and the first real Slang case is PUPPET's
+layered BSDF.
 
 ### DREAMS-B · GRAIN — sampling and filtering
 

@@ -2550,7 +2550,32 @@ adopted**:
 | Considered | Licence | Outcome |
 |---|---|---|
 | [WESL](https://wesl-lang.dev/) / `wesl` crate | MIT OR Apache-2.0 | **Not adopted.** 0.4.4 declares `rust-version = 1.97.1`; the tree is frozen at rustc 1.88, so only 0.4.0 is installable and every upgrade would be a frozen-toolchain change. Nothing from it was read into the tree. |
-| [Slang](https://shader-slang.org/) | Apache-2.0 with LLVM exception | **Not adopted and not measured.** Evaluating it needs a `slangc` binary that is not installed on the development machine; the option is left open in the DREAMS-A record with the reason. |
+| [Slang](https://shader-slang.org/) | Apache-2.0 with LLVM exception | **Measured in DREAMS-A2 and adopted for new shaders only.** See §13K.2. |
 
 The `//!include` / `//!if` directive language the map serves is MORROWIND-C's,
 recorded at §13H.5 and §13H.7. DREAMS-A did not change it.
+
+### 13K.2 DREAMS-A2 — Slang, measured
+
+**Slang** (`shader-slang/slang`), **Apache-2.0 WITH LLVM-exception**, release
+`v2026.16.1` published 2026-08-28. The Windows x86_64 package
+(`slang-2026.16.1-windows-x86_64.zip`, 56.7 MB, SHA-256
+`0fd3e6a9a5d05ed4cdd000d467f1ffb5d9701b827e83bfb428902a45c37ef8a5`) was
+downloaded to a scratchpad and used as a **compiler**. It ships its own
+`LICENSES/` bundle covering vendored components (Apache-2.0, BSL-1.0, CC-BY-4.0,
+LLVM-exception, LicenseRef-UOI-NCSA, MIT, Unlicense).
+
+**Nothing from Slang was vendored into this repository.** No source, no header,
+no binary, no identifier and no generated file. `DREAMS-A2_brdf.slang` is this
+project's own `brdf.wgsl` rewritten by hand in Slang's syntax;
+`DREAMS-A2_brdf_slang_output.wgsl` is compiler output from that input, kept as
+evidence of what the tool produced and not linked into the engine.
+
+The decision recorded in `DREAMS-A2.md` is that Slang may be used for **new**
+shaders on the SPIR-V path. If and when a Slang shader ships, the question of
+how `slangc` reaches a build machine is answered in that sub-phase's record and
+this section is extended with whatever that answer vendors, if anything.
+
+Slang's WGSL target was measured and found unable to express this engine's
+bindless global pool (`NonUniformResourceIndex` is refused for the WGSL target),
+which is why the WGSL half of `somnium_shader` is unaffected by this decision.

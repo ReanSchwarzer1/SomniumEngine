@@ -68,7 +68,7 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **55 WGSL files, 14,333 lines** (+7 files, +2,254 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **57 files, 14,802 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,333 lines** (+7 files, +2,254 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,892 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
