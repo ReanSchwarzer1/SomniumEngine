@@ -38,11 +38,20 @@ use std::sync::{Arc, Mutex};
 
 /// Scopes a frame may open. Two timestamps each.
 ///
-/// The frame currently opens about 25; the headroom is for the passes that do
-/// not exist yet, and overflow degrades to "this scope is not timed" rather
-/// than to a panic — a profiler that crashes the thing it is measuring is
-/// worse than one that misses a row.
-pub const MAX_SCOPES: usize = 64;
+/// One view opens about 25; the headroom is for the passes that do not exist
+/// yet, and overflow degrades to "this scope is not timed" rather than to a
+/// panic — a profiler that crashes the thing it is measuring is worse than one
+/// that misses a row.
+///
+/// MORROWIND-J step 3 raised this from 64. A frame now records the scene once
+/// *per view*, so a four-up editor opens four times the scopes and 64 silently
+/// dropped half of them — which does not read as "the profiler ran out". It
+/// reads as a frame with 50% unattributed time, which is indistinguishable from
+/// an engine with an unbracketed pass, and it is the more alarming of the two.
+///
+/// Must stay a multiple of 16: the resolve buffer is `MAX_SCOPES * 2 * 8` bytes
+/// and has to be a multiple of `QUERY_RESOLVE_BUFFER_ALIGNMENT` (256).
+pub const MAX_SCOPES: usize = 192;
 
 /// Frames of readback in flight. Three is one more than the deepest pipelining
 /// wgpu will do, so a buffer is never mapped while the GPU still owns it.

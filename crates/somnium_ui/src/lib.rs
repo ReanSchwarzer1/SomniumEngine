@@ -35,6 +35,7 @@ pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
+pub mod viewport_layout;
 pub mod virtual_list;
 pub mod widget;
 pub mod widgets;
@@ -1060,6 +1061,8 @@ pub struct UiManager {
     locale_grid: NodeHandle,
     locale_actions: Vec<(NodeHandle, LocaleAction)>,
     locale_open: bool,
+    /// MORROWIND-J step 3. How the viewport region is divided.
+    viewport_layout: crate::viewport_layout::ViewportLayout,
     /// Whether the panel is filtered to rows with an untranslated cell.
     locale_only_incomplete: bool,
     /// The last committed state of the localisation table.
@@ -1692,6 +1695,7 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
+            viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
             locale_only_incomplete: false,
             locale_table: None,
             title_last_click: None,
@@ -4386,6 +4390,7 @@ impl UiManager {
             A::OpenOutputLog => self.toggle_log_panel(),
             A::OpenReferences => self.toggle_references_panel(),
             A::OpenLocalisation => self.toggle_locale_panel(),
+            A::SetViewportLayout(layout) => self.set_viewport_layout(layout),
             A::ContentShowReferences => {
                 // Only an asset has references. A folder is a place, and the
                 // command is disabled for one because `content_target` gates
@@ -4800,6 +4805,39 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+    }
+
+    /// How the viewport region is divided this frame (MORROWIND-J step 3).
+    #[must_use]
+    pub fn viewport_layout(&self) -> crate::viewport_layout::ViewportLayout {
+        self.viewport_layout
+    }
+
+    /// Choose how the viewport region is divided.
+    pub fn set_viewport_layout(&mut self, layout: crate::viewport_layout::ViewportLayout) {
+        if self.viewport_layout == layout {
+            return;
+        }
+        self.viewport_layout = layout;
+        self.push_toast(layout.label());
+    }
+
+    /// The viewport's rectangle in **physical** pixels.
+    ///
+    /// Physical, because it is handed to the renderer, and the renderer draws
+    /// into a swapchain measured in physical pixels. Handing it logical ones on
+    /// a 150% display puts three quarters of the scene in the top-left corner —
+    /// the classic DPI bug, and one that looks like a layout error.
+    #[must_use]
+    pub fn viewport_physical_rect(&self, scale: f32) -> (u32, u32, u32, u32) {
+        let b = self.native_ui.screen_bounds(self.viewport_handle);
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        (
+            (b.x * scale).max(0.0) as u32,
+            (b.y * scale).max(0.0) as u32,
+            (b.w * scale).max(0.0) as u32,
+            (b.h * scale).max(0.0) as u32,
+        )
     }
 
     /// Hand the editor a localisation catalogue, already projected as a table.

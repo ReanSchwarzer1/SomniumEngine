@@ -2228,6 +2228,34 @@ would crop the empty state of an empty folder out of existence, and an inline
 rename is a text box parented to a tile, so a rename holds the window still
 until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**`Queue::write_buffer` does not write where you call it.** It stages, and the
+staged writes are applied at the *start of the submit* — and this renderer
+submits once per frame. Anything uploaded that way more than once in a frame
+therefore has exactly one winner: the last call. It went unnoticed while a frame
+had one view, and MORROWIND-J step 3 made it visible in the loudest way
+available, four viewports all showing the same picture. It also means the scene
+had been rendering with the *unjittered* matrix all along, because the editor
+overlays upload theirs after the scene. Per-frame-varying uniform data has to go
+**into the command stream** — a staging slot per view and a
+`copy_buffer_to_buffer` — or through dynamic offsets, and nothing else is
+ordered against the passes that read it.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A second view is only useful if it is aimed at what you are looking at.** The
+orthographic elevations orbit where the primary camera's ray meets the ground,
+not a fixed distance ahead of it: with an editor camera a hundred and fifty
+metres up, "ten metres ahead" is empty air, and the top view rendered black with
+perfectly correct arithmetic. Their extent is recovered from the primary's own
+projection, so they frame exactly what it frames.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Temporal history belongs to one camera.** TAA, FSR and ReSTIR all carry a
+history keyed to the view that built it, so a secondary viewport reusing it does
+not merely look wrong — it reprojects the other viewport into this one. The
+secondary views run history-free, which is also most of why four views cost
+1.3× one rather than 4×.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
 **A projection you can only read is a report, not an editor.**
 `catalog_to_table` had been half a feature since MORROWIND-AH. The other half is
 the inverse, and two of its rules are the difference between an editor and a

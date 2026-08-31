@@ -1,7 +1,8 @@
 # MORROWIND-J — docking, floating windows, multiple viewports
 
-**Status:** step 1 of 4 complete, 2026-08-30. The dock tree exists, is
-load-bearing, and expresses every arrangement the editor ships.
+**Status:** steps 1 and 3 of 4 complete, 2026-08-31. The dock tree exists and
+is load-bearing; the renderer draws several views per frame, each with its own
+camera, and the default is still one full-size viewport.
 
 ## The four steps, and where this one stops
 
@@ -9,13 +10,12 @@ load-bearing, and expresses every arrangement the editor ships.
 |---|---|
 | 1. A dock tree (tiles, splitters, tabs) with the current arrangement as the default | **Done** — this record |
 | 2. Floating windows as real OS windows via winit | Not started |
-| 3. Multiple viewports, each with its own camera, view mode and overlays | Not started |
+| 3. Multiple viewports, each with its own camera, view mode and overlays | **Done** — see below |
 | 4. Layout persistence, named workspaces, reset | Persistence **done**; workspaces and reset already shipped in Phase 26-Zeta-F |
 
-Steps 2 and 3 are the expensive halves — step 3 in particular is where *"the
-renderer learns to render more than one view per frame"*, and the plan already
-attaches a `.somtime` row for the four-viewport case to it. Neither is started,
-and neither is blocked by anything here.
+Step 2 is the remaining expensive half. Step 3 — *"the renderer learns to render
+more than one view per frame"* — is done and measured, and nothing in step 2 is
+blocked by it.
 
 ## The constraint that shaped step 1
 
@@ -120,6 +120,137 @@ the shell did not change at all — it still asks for four numbers and a
 bottom-panel choice, and those are now *derived from a tree* rather than being
 the only representation there is. Step 2 replaces that projection with the
 resolved rectangles; nothing in it needs the projection to have been wrong.
+
+## Step 3 — several views in one frame
+
+**Done, 2026-08-31.** The default is unchanged: one full-size viewport, and the
+first-run editor is pixel-for-pixel what it was.
+
+### What "render more than one view per frame" turned out to mean
+
+The frame was one long pipeline over renderer *state* — a view matrix, a
+projection and a camera position that whatever ran last had set — writing
+full-window into the swapchain. Four views need those to be **arguments**,
+because state read off `self` inside a loop is read from the previous iteration.
+
+The middle two thirds of `render_with_game_ui` became `record_scene_view`, a
+sibling method rather than a loop body in place. That is a deliberate choice
+about *diff shape*: a method body sits at the same indentation as the code it
+came from, so eighteen hundred lines moved without a single one being reindented,
+and the change is reviewable as a move plus a header.
+
+```
+  acquire swapchain, open the Frame scope        once
+  ┌─ for each view ──────────────────────────────────────┐
+  │  apply camera, mode, overlays                        │
+  │  cluster assign, cascades, cull, sort, instances     │
+  │  shadows, visibility, GTAO, shading, water, post     │
+  │  blit into this view's rectangle                     │
+  └──────────────────────────────────────────────────────┘
+  gizmos, outlines, editor chrome, game UI       once, primary camera
+```
+
+`SceneView::rect` is `Option`, and that is not tidiness: `None` means the whole
+surface and keeps a one-viewport frame on the path it was always on — a clear
+and a direct write, with no blit to pay for a feature it is not using.
+
+### The bug that made all four tiles identical
+
+`Queue::write_buffer` does not write where you call it. It stages, and the
+staged writes are applied **at the start of the submit** — and this renderer
+submits once per frame. So four per-view uploads to one buffer all landed before
+any pass, and the last write won for the whole frame.
+
+Worse, the last write of the frame is not even a view's: the editor overlays
+upload the *unjittered* matrix after the scene, so every view rendered with the
+primary camera and the four tiles came out identical. (The same mechanism means
+the scene had been rendering unjittered all along — a pre-existing bug this
+uncovered, now fixed by the same change.)
+
+The fix is to put the update **into the command stream**: one staging slot per
+view, `queue.write_buffer` into the slot, `encoder.copy_buffer_to_buffer` into
+the view buffer at the point the passes read it. The alternative — dynamic
+offsets on the global bind group — is the textbook answer and would have touched
+every pass that binds group 0.
+
+### The second bug: elevations pointed at nothing
+
+The orthographic views orbit "what the primary camera is looking at", and the
+first version said that was ten metres ahead of the eye. With the editor camera
+a hundred and fifty metres above a coastline, ten metres ahead is empty air: the
+top view framed a twenty-metre cube of sky and rendered black. Correct
+arithmetic, useless answer, and invisible in a unit test that only checks the
+three axes are orthogonal.
+
+The focus is now **where the camera's ray meets the ground plane**, and the
+extent is recovered from the primary's own projection — `perspective_rh` puts
+`1 / tan(fov_y / 2)` in `y_axis.y` — so the elevations frame exactly what the
+perspective view frames. A camera pointed at the sky, where the ray never lands,
+falls back rather than diverging to a focus point kilometres away.
+
+### What each view gets, and what it shares
+
+- **Its own camera, projection, rectangle and debug visualisation.** Two
+  viewports showing the same picture is not a feature; the interesting
+  arrangement is the lit image beside the overdraw.
+- **The primary keeps the temporal passes; the secondaries do not.** TAA, FSR
+  and ReSTIR carry a history keyed to one camera. A second view reusing it does
+  not merely look wrong — it reprojects the other viewport into this one and
+  smears. Giving every view its own history is four times the memory for three
+  views nobody is looking at closely.
+- **Overlays are drawn once, from the primary camera.** A gizmo claimed by the
+  top view would appear in the top view's tile at the perspective view's
+  position.
+- **Everything a secondary borrows is put back.** Without that, a frame that
+  once drew four viewports leaves TAA off for every frame after it — the shape
+  of a bug that only appears after you have used a feature and stopped.
+
+### The measurement
+
+`.somtime`, on an RTX 5080 Laptop at 1920×1032, back to back:
+
+| | GPU frame | unattributed |
+|---|---|---|
+| 1 viewport (default) | **21.64 ms** | 0.7% |
+| 4 viewports | **28.06 ms** | 1.7% |
+
+**Four views cost 1.30× one view, not 4×.** The expensive perspective view is
+paid once and the three elevations are orthographic, history-free and cheap. Per
+scope the rows read *faster* in the four-up run, which is not a saving: a scope's
+mean is per **occurrence**, and three of the four occurrences are the cheap ones.
+
+Two things in the harness had to be fixed to get an honest number at all, and
+both were measuring the harness rather than the engine:
+
+- **`MAX_SCOPES` was 64** and one view opens about 25. A four-up frame silently
+  dropped half its queries, which does not report as "the profiler ran out" — it
+  reports as 50% unattributed frame time, indistinguishable from an engine full
+  of unbracketed passes and the more alarming of the two readings. Now 192.
+- **`unattributed_pct` summed means.** A pass occurring four times a frame was
+  counted once, reporting 75% unattributed. The occurrence count was already in
+  the file — a row's samples over the frame's — so the weighting is a division,
+  not new data.
+
+### In the editor
+
+Window menu, beside the workspace presets, because that is where a user looks
+for *how is the editor arranged*: **Viewports: 1** (the default), **2 Side by
+Side**, **2 Stacked**, **4**. Four named entries rather than one cycling button:
+a cycle is the right control for a mode with two states and the wrong one for
+four arrangements you pick between, where it hides three behind pressing the
+fourth again. `SOMNIUM_VIEWPORTS=1|2|2h|4` selects one for a `.somtime` run,
+which is non-interactive.
+
+### What step 3 does not claim
+
+- **Every view renders at the full internal resolution** and is scaled into its
+  tile. Correct, and four times the pixels a quarter-tile needs; per-view render
+  targets are the fix and they are also four times the memory.
+- **Only the primary view can be flown.** The elevations follow it. Clicking
+  into a tile to give it the camera is a shell change, not a renderer one.
+- **Gizmos, the selection outline and picking are the primary view's.** A click
+  in a secondary tile picks through the primary camera.
+- Step 2, floating OS windows, is still not started.
 
 ## What step 1 does not claim
 

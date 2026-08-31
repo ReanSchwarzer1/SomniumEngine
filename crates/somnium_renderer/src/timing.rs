@@ -947,15 +947,23 @@ impl TimingRun {
 /// the same number a reviewer can recompute from the file.
 #[must_use]
 pub fn unattributed_pct(run: &Run) -> Option<f32> {
-    let frame = run.find("gpu", "Frame", 0)?.mean;
+    let frame_row = run.find("gpu", "Frame", 0)?;
+    let frame = frame_row.mean;
     if frame <= 0.0 {
         return None;
     }
+    // MORROWIND-J step 3. A scope's mean is per *occurrence*, and since a frame
+    // records the scene once per view a pass can occur four times in one frame.
+    // Summing the means would then account for a quarter of the work and report
+    // 75% unattributed — indistinguishable from an engine full of unbracketed
+    // passes, and the more alarming reading of the two. The occurrence count is
+    // already in the file: a row's samples over the frame's.
+    let frames = frame_row.samples.max(1) as f32;
     let children: f32 = run
         .rows
         .iter()
         .filter(|r| r.kind == "gpu" && r.depth == 1)
-        .map(|r| r.mean)
+        .map(|r| r.mean * (r.samples as f32 / frames))
         .sum();
     Some(((frame - children).max(0.0) / frame) * 100.0)
 }
@@ -1130,6 +1138,23 @@ mod tests {
              gpu\tShading\t1\t40.0000\t0\t0\t0\t10\n\
              gpu\tShadows\t1\t7.5000\t0\t0\t0\t10\n",
         );
+        let pct = unattributed_pct(&run).expect("frame row present");
+        assert!((pct - 5.0).abs() < 1e-3, "{pct}");
+    }
+
+    #[test]
+    fn a_pass_recorded_once_per_view_is_counted_once_per_view() {
+        // Four viewports record `Shading` four times a frame, so its samples
+        // are four times the frame's. Counting its mean once would report three
+        // quarters of the frame as unattributed and fail a gate that is
+        // measuring the harness rather than the engine.
+        let text = [
+            ["gpu", "Frame", "0", "40.0000", "0", "0", "0", "10"].join("\t"),
+            ["gpu", "Shading", "1", "9.5000", "0", "0", "0", "40"].join("\t"),
+        ]
+        .join("\n");
+        let run = parse(&text);
+        assert_eq!(run.rows.len(), 2, "fixture did not parse: {:?}", run.rows);
         let pct = unattributed_pct(&run).expect("frame row present");
         assert!((pct - 5.0).abs() < 1e-3, "{pct}");
     }

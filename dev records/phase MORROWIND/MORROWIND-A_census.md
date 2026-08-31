@@ -18,9 +18,9 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 64,449 | +36,919 | 32.0% | 694 | +479 | 104 | 2 |
-| `somnium_renderer` | 63,247 | +13,041 | 31.4% | 436 | +108 | 91 | 55 |
-| `somnium_core` | 35,306 | +16,086 | 17.5% | 403 | +186 | 46 | 0 |
+| `somnium_ui` | 64,726 | +37,196 | 32.0% | 698 | +483 | 105 | 2 |
+| `somnium_renderer` | 63,967 | +13,761 | 31.6% | 444 | +116 | 92 | 55 |
+| `somnium_core` | 35,326 | +16,106 | 17.4% | 403 | +186 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.3% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **201,515** | +87,623 | | **2048** | +1,103 | | |
+| **Total** | **202,532** | +88,640 | | **2060** | +1,115 | | |
 
-The top three crates are **80.9%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **81.0%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **3,130 lines** (+484 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,8 +49,8 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1236 | 258 | 117 | 8 | 13 | 187 | 102 | **1922** |
-| `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
+| `somnium_ui` | 1243 | 258 | 118 | 8 | 14 | 188 | 103 | **1933** |
+| `somnium_renderer` | 663 | 157 | 9 | 1 | 3 | 126 | 89 | **1048** |
 | `somnium_core` | 334 | 110 | 23 | 4 | 3 | 47 | 41 | **562** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
@@ -95,7 +95,7 @@ is a system this phase still owes.
 |---|---:|---:|---:|---|
 | `bone` | 6 | 0 | +6 | No skeletal animation of any kind (Track 5). |
 | `armature` | 1 | 0 | +1 | As above. |
-| `skin` | 30 | 8 | +22 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
+| `skin` | 31 | 8 | +23 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |
 | `pathfind` | 0 | 0 | — | As above. |
 | `gamepad` | 8 | 0 | +8 | No input abstraction (Track 8, Seam 5). |
@@ -103,14 +103,14 @@ is a system this phase still owes.
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
 | `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
 | `prefab` | 9 | 2 | +7 | Both are comments in the scripting crate. No prefab system (Track 3). |
-| `dock` | 10 | 5 | +5 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
+| `dock` | 11 | 5 | +6 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 12 | 1 | +11 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |
 
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 121 (+25 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 123 (+27 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 

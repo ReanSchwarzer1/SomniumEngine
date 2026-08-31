@@ -4098,6 +4098,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         ) {
             r.set_editor_overlays_enabled(!self.play_session_active);
             r.time = self.simulation_clock.elapsed_seconds;
+
+            // MORROWIND-J step 3. After the game has set its camera and before
+            // the frame is recorded, because the tiles are the editor's and the
+            // camera is the game's, and this is the one place that holds both.
+            //
+            // Single stays *empty* rather than becoming a one-element list: an
+            // empty list is the path the renderer took before views existed,
+            // and a one-viewport editor should not be paying for a blit to
+            // prove a feature it is not using.
+            let layout = ui.viewport_layout();
+            if layout == somnium_ui::viewport_layout::ViewportLayout::Single
+                || self.play_session_active
+            {
+                r.set_scene_views(&[]);
+            } else {
+                let scale = window.scale_factor() as f32;
+                let tiles = layout.tiles(ui.viewport_physical_rect(scale));
+                let views = somnium_renderer::view::standard_views(&tiles, r.primary_scene_view());
+                r.set_scene_views(&views);
+            }
             // MORROWIND-E2. `self.game` is a disjoint field from the four
             // borrowed above, so the game can be handed to the renderer as a
             // callback without any of this becoming a `RefCell`.
