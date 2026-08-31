@@ -175,6 +175,30 @@ without first being given somewhere else to keep it.
 - **A zero-sized surface is a validation error, not a small one**, and
   minimising a window is how it happens.
 
+### Two bugs, and the second one was invisible
+
+**A queued message nobody pumps is a message thrown away.**
+`UserInterface::process_os_event` does not dispatch: it *queues* a `UiMessage`,
+and `update` is what delivers it. The panel's `draw` laid out and painted
+without pumping, so every wheel event was accepted, queued, and dropped on the
+next frame. The window looked entirely correct and would not scroll.
+
+Worse, it defeated the obvious check. A screenshot before and after scrolling
+shows different text either way, because the log keeps growing underneath, so
+"the content moved" proves nothing. What settles it is a test that fails without
+the fix:
+
+```rust
+panel.draw();
+let top = panel.rows_origin();
+panel.ui.send(/* MouseWheel, delta -600 */);
+panel.draw();
+assert!(panel.rows_origin() < top);
+```
+
+Removing the two `update` calls turns that into `the rows did not move: 0 then
+0`, which is the only evidence worth having.
+
 ### The bug a second window was always going to find
 
 `window_event` took its `WindowId` as `_window_id` and ignored it — correct for
@@ -213,9 +237,8 @@ the front still does, and a resize is a layout rather than a rebuild.
 - **Only the Output Log floats.** The mechanism is general and the enum has one
   variant; the next panel is the work of teaching it to rebuild itself from a
   store, which for the Content Drawer and Details means giving them one.
-- **The floating window is read-only.** It has no input routing — clicks and
-  keys do not reach its tree yet — so the log's filter chips and search live in
-  the docked copy.
+- **The floating window's own controls are not built.** It scrolls, but the
+  log's filter chips, search and clear button live in the docked copy.
 - **A panel cannot be dragged out**, only opened from the menu. The drag is a
   shell gesture; this is the window underneath it.
 - Layout persistence does not remember an open floating window across a restart.

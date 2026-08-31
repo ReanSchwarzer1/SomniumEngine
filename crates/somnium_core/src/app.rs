@@ -7135,7 +7135,11 @@ impl<G: GameApp> Engine<G> {
                     self.floating[index].resize(&ctx.device, size.width, size.height);
                 }
             }
-            _ => {}
+            // Everything else is the panel's: pointer, wheel, keys. The next
+            // frame redraws it, so nothing has to ask for a repaint here.
+            other => {
+                self.floating[index].panel.on_event(other);
+            }
         }
         true
     }

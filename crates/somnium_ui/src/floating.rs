@@ -106,6 +106,8 @@ pub struct FloatingPanel {
     /// The panel's own widget tree.
     pub ui: UserInterface,
     font_id: u8,
+    /// The viewport the rows scroll inside.
+    scroll: NodeHandle,
     /// Where rows are appended.
     stack: NodeHandle,
     /// Rows currently built, so a refresh replaces rather than appends.
@@ -154,6 +156,7 @@ impl FloatingPanel {
             kind,
             ui,
             font_id,
+            scroll,
             stack,
             rows: Vec::new(),
             built_for: None,
@@ -163,6 +166,20 @@ impl FloatingPanel {
     #[must_use]
     pub fn kind(&self) -> FloatingKind {
         self.kind
+    }
+
+    /// Feed the window's input to the panel's tree.
+    ///
+    /// Returns whether the tree consumed it. Without this the panel is a
+    /// picture: the scroll viewer never sees a wheel event, so a log longer
+    /// than the window is a log you can only read the top of.
+    ///
+    /// Everything is forwarded, including the pointer motion. A wheel event
+    /// carries a position, and the tree routes it to whatever is under that
+    /// position, so a window that forwarded only wheels would scroll whichever
+    /// widget the pointer was last over in some other window.
+    pub fn on_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        self.ui.process_os_event(event)
     }
 
     /// Lay the tree out for a new window size, in logical pixels.
@@ -209,10 +226,35 @@ impl FloatingPanel {
         self.rows.len()
     }
 
-    /// Lay out and draw, leaving the primitives in the tree's draw context.
+    /// Pump, lay out and draw.
+    ///
+    /// The pump is not optional and its absence is not visible.
+    /// [`crate::ui::UserInterface::process_os_event`] **queues** a `UiMessage`;
+    /// nothing dispatches it until `update` runs. A panel that laid out and
+    /// painted without pumping took every wheel event, put it on the queue, and
+    /// threw it away next frame, so the window looked right and would not
+    /// scroll.
+    ///
+    /// Twice, for the reason the shell does it twice: a handler can send
+    /// further messages, and a scroll that only invalidated layout on the
+    /// following frame lags the pointer by one.
     pub fn draw(&mut self) {
+        let _ = self.ui.update();
+        let _ = self.ui.update();
         self.ui.perform_layout();
         self.ui.draw();
+    }
+
+    /// Where the rows sit, for a test that needs to see them move.
+    #[must_use]
+    pub fn rows_origin(&self) -> f32 {
+        self.ui.screen_bounds(self.stack).y
+    }
+
+    /// The scroll viewport's handle, so a caller can address it directly.
+    #[must_use]
+    pub fn scroll_handle(&self) -> NodeHandle {
+        self.scroll
     }
 
     /// The rectangle the tree was laid out for.
@@ -241,6 +283,69 @@ mod tests {
         panel.draw();
         assert_eq!(panel.kind(), FloatingKind::OutputLog);
         assert_eq!(panel.row_count(), 0, "an empty log has no rows");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_rows() {
+        // The bug this pins: `process_os_event` *queues* a `UiMessage`, and
+        // nothing dispatches it until `update` runs. A panel that laid out and
+        // painted without pumping accepted every wheel event, put it on the
+        // queue, and dropped it on the next frame. The window looked correct
+        // and would not scroll, and a screenshot could not tell the difference
+        // because the log kept growing under it.
+        let mut log = OutputLog::default();
+        for i in 0..200 {
+            log.append(i as f64, &format!("line {i}"));
+        }
+        let mut panel = panel();
+        panel.sync(&log);
+        panel.draw();
+        let top = panel.rows_origin();
+
+        panel.ui.send(crate::message::UiMessage::new(
+            panel.scroll_handle(),
+            crate::message::MessageDirection::ToWidget,
+            crate::message::WidgetMessage::MouseWheel {
+                pos: glam::Vec2::new(400.0, 200.0),
+                // Negative is downward: the viewer subtracts the delta.
+                delta: -600.0,
+                mods: crate::message::Modifiers::default(),
+            },
+        ));
+        panel.draw();
+
+        assert!(
+            panel.rows_origin() < top,
+            "the rows did not move: {} then {}",
+            top,
+            panel.rows_origin()
+        );
+    }
+
+    #[test]
+    fn a_log_shorter_than_the_window_does_not_scroll() {
+        // The other half. A scroll viewer clamps to its content, so two lines
+        // in a 420 px window stay put however hard the wheel is turned.
+        let mut log = OutputLog::default();
+        log.append(0.0, "one");
+        log.append(1.0, "two");
+        let mut panel = panel();
+        panel.sync(&log);
+        panel.draw();
+        let top = panel.rows_origin();
+
+        panel.ui.send(crate::message::UiMessage::new(
+            panel.scroll_handle(),
+            crate::message::MessageDirection::ToWidget,
+            crate::message::WidgetMessage::MouseWheel {
+                pos: glam::Vec2::new(400.0, 200.0),
+                delta: -600.0,
+                mods: crate::message::Modifiers::default(),
+            },
+        ));
+        panel.draw();
+
+        assert_eq!(panel.rows_origin(), top);
     }
 
     #[test]

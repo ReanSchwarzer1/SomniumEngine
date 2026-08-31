@@ -2214,124 +2214,135 @@ cannot disagree with the scroll viewer about it. A hundred rows and a hundred
 thousand rows now emit the identical number of primitives.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
-**Windowing a draw and windowing a widget tree are different problems.** The
-outliner's `TreeView` is one widget that paints rows, so virtualising it is a
-matter of which rows the draw loop touches. The content drawer's tile is a real
-button with a real icon and label, and it is a drop target, a drag source and a
-double-click target *by being one* — so the window has to decide which widgets
-**exist**. The drawer's container is therefore a `Canvas` with an explicit
-height covering every row in the folder, and each of the ~40 built tiles is
-placed at the rectangle its index *in the whole folder* earns. A flow layout
-cannot do this: it works out where the fourth tile goes by having been given the
-first three. Two traps came with it — a canvas that clipped to its own bounds
-would crop the empty state of an empty folder out of existence, and an inline
-rename is a text box parented to a tile, so a rename holds the window still
-until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+**Windowing a draw and windowing a widget tree are different problems.** A
+`TreeView` is one widget that paints rows, so the outliner only has to window
+its draw loop. A drawer tile is a real button, and it is a drop target, a drag
+source and a double-click target by being one, so the window has to decide which
+widgets *exist*:
 
-**A panel cannot be moved between widget trees, only rebuilt in one.** Handles
-are indices into a `UserInterface`'s pool, so a floating window is a *second
-tree*, not a re-parenting — and rebuilding a panel elsewhere is only possible
-when its content is a **store** rather than a pile of widgets. `OutputLog` is
-one, which is why it is the panel that floats first; the Content Drawer and
-Details would each need to be given one before they could follow.
+```text
+  outliner   1 widget  ──> draw loop paints rows 40..70 of 100,000
+  drawer     N widgets ──> build tiles 40..70; the other 99,970 do not exist
+```
+
+The container is a `Canvas` as tall as every row in the folder, and each of the
+~40 built tiles sits at the rectangle its index in the whole folder earns. A
+flow layout cannot do that, since it works out where the fourth tile goes from
+having been given the first three.
+
+Two traps came with it. A canvas that clipped to its own bounds cropped the
+empty state of an empty folder out of existence, and an inline rename is a text
+box parented to a tile, so a rename holds the window still until it lands.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A widget tree owns its handles, so a floating panel is rebuilt, not moved.**
+Handles index one `UserInterface`'s pool, and a second OS window is a second
+tree. A panel can only be built there if its content lives in a store:
+
+```text
+  OutputLog (store) ──┬──> docked tree    ──> rows
+                      └──> floating tree  ──> rows
+```
+
+`OutputLog` already was one, which is why the log floats first. The Content
+Drawer and Details need one before they can follow.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
-**A window id ignored is an assumption about there being one window.**
-`window_event` took `_window_id` and was correct for years. The first floating
-window turned that into the editor's swapchain being resized to the log window's
-size — caught as a wgpu validation error, which was the lucky outcome: the same
-mis-route could as easily have been a `CloseRequested` quitting the editor
-because somebody shut a panel.
+**`process_os_event` queues; `update` delivers.** A tree that lays out and
+paints without pumping accepts every event, queues it, and drops it next frame.
+The floating log looked right and would not scroll. The check that settles it is
+a test, not a screenshot: the log grows underneath, so "the content moved" is
+true whether or not the wheel did anything.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
-**A shaper and a rasteriser must share a glyph index space, and two libraries
-do not.** `rustybuzz` and `fontdue` disagree about `Inter-Regular.ttf`: `C` is
-18 to both, `(` is 331 to one and 324 to the other, and the divergence is not a
-constant offset. Handing one library's id to the other drew a glyph with no
-outline, which read as missing punctuation — *"Coastal Surf  CC0"*, *"14 00"*.
-The dangerous half is the case that did not happen yet: a mismatched id landing
-on a glyph that *does* have an outline draws plausible, wrong text, and a
-ligature is exactly that. So the shaped path rasterises from the same face the
-shaper read (`ttf-parser` outlines, which `rustybuzz` re-exports, filled by
-`tiny-skia`), and `fontdue` keeps the per-character path untouched.
+**Ignoring a `WindowId` is an assumption there is one window.** `window_event`
+took `_window_id` for years. The first floating window routed its `Resized` into
+the main render context, resizing the editor's swapchain to the log window's
+900x420. wgpu caught it. A `CloseRequested` down the same path would have quit
+the editor because somebody shut a panel.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A shaper and a rasteriser have to agree on glyph ids.** `rustybuzz` and
+`fontdue` do not, on the editor's own `Inter-Regular.ttf`:
+
+| character | `rustybuzz` | `fontdue` |
+|---|---|---|
+| `C` | 18 | 18 |
+| `(` | 331 | 324 |
+| `:` | 366 | 365 |
+
+Letters coincide, punctuation does not, and the gap is not a constant offset.
+The symptom was missing punctuation ("Coastal Surf  CC0"). The danger is the
+case that had not happened yet: an id landing on a glyph that *does* have an
+outline draws wrong text that reads as fine, and every ligature is that case.
+The shaped path rasterises from the face the shaper read, `ttf-parser` outlines
+filled by `tiny-skia`.
 ([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
 
-**A fallback chain is not a router.** Asking "which face covers this character"
-gives the *first* face that does, and the regular cut covers Latin — so every
-label meant for the medium or semibold cut came out in regular. The caller's
-face gets first refusal, and only what it lacks reaches the chain.
+**Ask a fallback chain which face covers a character and you get the first one
+that does.** Regular covers Latin, so every label meant for the medium or
+semibold cut came out in regular. The caller's face gets first refusal; the
+chain sees only what it lacks.
 ([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
 
-**`Queue::write_buffer` does not write where you call it.** It stages, and the
-staged writes are applied at the *start of the submit* — and this renderer
-submits once per frame. Anything uploaded that way more than once in a frame
-therefore has exactly one winner: the last call. **Correcting that ordering is
-itself a rendering change**, and it shipped as one: with the jitter reaching the
-shaders for the first time, 1.3% of viewport pixels moved between consecutive
-frames on a still camera against 0.6% before, which from a high camera reads as
-the whole viewport shaking. A one-view frame therefore keeps the plain write it
-always had, and the staged copy is confined to the case that cannot work without
-it. It went unnoticed while a frame
-had one view, and MORROWIND-J step 3 made it visible in the loudest way
-available, four viewports all showing the same picture. It also means the scene
-had been rendering with the *unjittered* matrix all along, because the editor
-overlays upload theirs after the scene. Per-frame-varying uniform data has to go
-**into the command stream** — a staging slot per view and a
-`copy_buffer_to_buffer` — or through dynamic offsets, and nothing else is
-ordered against the passes that read it.
+**`Queue::write_buffer` does not write where you call it.** Staged writes apply
+at the start of the submit, and this renderer submits once per frame:
+
+```text
+  issued:   write A · write B · [encode pass 1] · [encode pass 2] · submit
+  executed: A · B ······························> both passes read B
+```
+
+So the frame's last write wins for every pass in it. Invisible with one view;
+with four it drew the same picture four times. It also means the scene had
+always rendered unjittered, since the overlays upload after it. Uniform data
+that varies within a frame belongs in the command stream, as a staging slot plus
+`copy_buffer_to_buffer`.
+
+Fixing the ordering is itself a rendering change. Jitter reaching the shaders
+for the first time moved 1.3% of viewport pixels between consecutive frames on a
+still camera, against 0.6% before, which from a high camera looks like shaking.
+One view keeps the plain write; only multi-view takes the staged copy.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
-**A second view is only useful if it is aimed at what you are looking at.** The
-orthographic elevations orbit where the primary camera's ray meets the ground,
-not a fixed distance ahead of it: with an editor camera a hundred and fifty
-metres up, "ten metres ahead" is empty air, and the top view rendered black with
-perfectly correct arithmetic. Their extent is recovered from the primary's own
-projection, so they frame exactly what it frames.
+**Secondary views orbit where the primary camera's ray meets the ground.** A
+fixed distance ahead does not survive a camera 150 m up, where ten metres ahead
+is empty air and the top view renders black on correct arithmetic. Their extent
+comes from the primary's projection, so they frame what it frames.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
-**Temporal history belongs to one camera.** TAA, FSR and ReSTIR all carry a
-history keyed to the view that built it, so a secondary viewport reusing it does
-not merely look wrong — it reprojects the other viewport into this one. The
-secondary views run history-free, which is also most of why four views cost
-1.3× one rather than 4×.
+**Temporal history is keyed to one camera.** TAA, FSR and ReSTIR reproject the
+last frame through the view that built it, so a second viewport reusing that
+history pulls the first viewport's pixels into itself. Secondary views run
+history-free, which is most of why four views cost 1.3x one instead of 4x.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
-**A projection you can only read is a report, not an editor.**
-`catalog_to_table` had been half a feature since MORROWIND-AH. The other half is
-the inverse, and two of its rules are the difference between an editor and a
-data-loss bug: an untranslated cell comes back as an **absent key** rather than
-as `""` — writing the empty string would make every untranslated key look
-translated to `only_incomplete`, the filter a translator opens the table to use
-— and the loaded catalogue is the **template** a save is written against, so the
-display name and font list a grid of strings cannot hold survive an edit. The
-crate boundary holds throughout: `somnium_ui` is handed a `DataTable` and never
-learns what a catalogue is, and `EditorEvent::SaveLocalisation` carries nothing,
-because the shape a catalogue is saved in is a `somnium_i18n` question.
+**Reading a catalogue as a table is half an editor.** Writing it back is the
+other half, and two rules carry it. An untranslated cell returns as an absent
+key, never `""`, or every untranslated string looks translated to the
+`only_incomplete` filter a translator opened the table for. And the loaded
+catalogue is the template a save writes against, so display names and font lists
+survive an edit. Throughout, `somnium_ui` is handed a `DataTable` and never
+learns what a catalogue is.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
 **A focused widget that claims text input swallows every key before the game
-sees it.** Both directions of getting that wrong ship as a mystery: always
-claiming it means a grid nobody clicked into eats the fly-cam's WASD and the
-camera "just stops responding"; never claiming it means typing `w` into a cell
-also switches the gizmo to Translate and `Delete` removes the selected *entity*.
-The rule the curve editor already followed is the right one — the keyboard
-belongs to the widget only while it has a selection — plus one the data grid
-adds: closing the panel over a focused widget releases the keyboard, because a
-widget nobody can see must not be holding it.
+sees it.** Claim it always and a grid nobody clicked into eats the fly-cam's
+WASD, which presents as the camera not responding. Claim it never and typing `w`
+into a cell switches the gizmo to Translate while `Delete` removes the selected
+entity. The curve editor already had the rule: the keyboard belongs to a widget
+only while it has a selection. Closing a panel over a focused widget releases
+it.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
-**The cook plan's dependency graph cannot answer the editor's question.**
-MORROWIND-Q's graph is built from declared edges, because a cook plan has them.
-Nobody declares that a scene uses a mesh — they drop the mesh onto an entity and
-the edge exists because a field now holds an id. `somnium_asset::depend` reads
-the project instead, and does it **structurally**: an asset id reaches a file as
-either a tagged `{"$asset": …}` or a bare 32-hex string, so one scanner covers
-scenes, prefabs, materials and `.somui` documents, and a new asset field cannot
-go missing from the view by nobody remembering to teach it twice. What it cannot
-read it *counts* rather than reports as empty — a dependency view that says a
-`.glb` references nothing is worse than none, because it is believed. The index
-is built on the asset inventory's own job, so the graph and the drawer always
-describe the same disk.
+**Cook-plan edges are declared; editor edges are not.** Nobody declares that a
+scene uses a mesh. They drop the mesh on an entity and a field holds an id. So
+`somnium_asset::depend` reads the project structurally: an id appears either as
+`{"$asset": ...}` or as a bare 32-hex string, and one scanner covers scenes,
+prefabs, materials and `.somui`. A new asset field cannot go missing because
+nobody taught it twice. What the scanner cannot read it counts, because a view
+claiming a `.glb` references nothing gets believed. It builds on the asset
+inventory's own job, so graph and drawer describe the same disk.
 ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
 **A selection is held by key, never by index.** Filtering, sorting, expanding a
