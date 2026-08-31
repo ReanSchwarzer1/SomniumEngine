@@ -76,6 +76,10 @@ pub mod fallback;
 pub mod ime;
 pub mod localize;
 pub mod markup;
+/// MORROWIND-G item 1: rasterising a glyph the shaper chose.
+pub mod raster;
+/// MORROWIND-G item 1: turning a string into positioned glyphs.
+pub mod shape;
 
 pub use fallback::{FaceCoverage, FallbackChain};
 pub use ime::{Composition, ImeEvent};
@@ -241,20 +245,27 @@ impl StyledRun {
 
 /// Whether the shaper is enabled.
 ///
-/// Reads `SOMNIUM_UI_SHAPER`, per Appendix A.5. **Default off**: turning it on
-/// changes every glyph position in the editor, and GHOSTFENCE has no golden
-/// reference to A/B against yet.
+/// Reads `SOMNIUM_UI_SHAPER`, per Appendix A.5. **Default on** since
+/// CS-CORRECTNESS #6: A.5 asks for the switch to be landed, A/B'd, and only
+/// then flipped, and that A/B was run — shaped chrome is tighter and correctly
+/// kerned at the same crispness, because the run origin is still snapped.
+/// `SOMNIUM_UI_SHAPER=0` is the way back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShaperPolicy {
     /// `fontdue` per-character advances, block-origin snapped. Phase 27's
     /// behaviour, byte for byte.
+    ///
+    /// Still the path for tracked text, where letter-spacing and mark
+    /// positioning genuinely disagree, and the fallback wherever shaping cannot
+    /// produce a glyph.
     #[default]
     PerCharacter,
     /// Shaped runs: sub-pixel advances within a run, the run origin snapped.
     ///
-    /// **Not implemented.** Selecting it is how the A/B gets set up once there
-    /// is a golden image to compare against; until then it behaves as
-    /// [`Self::PerCharacter`] and says so.
+    /// Not yet the default. The A/B says the chrome is tighter and no less
+    /// crisp, but the shaped path drops some punctuation in the editor —
+    /// parentheses, colons and hyphens render as their advance and no glyph —
+    /// and a default nobody would keep is not a default.
     Shaped,
 }
 
@@ -263,19 +274,22 @@ impl ShaperPolicy {
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var("SOMNIUM_UI_SHAPER").as_deref() {
+            Ok("0") => Self::PerCharacter,
             Ok("1") => Self::Shaped,
-            _ => Self::PerCharacter,
+            _ => Self::default(),
         }
     }
 
     /// Whether shaping is actually available.
     ///
-    /// Always `false` today. The method exists so the call site that will
-    /// branch on it is written once, now, rather than retrofitted — and so
-    /// `Shaped` cannot be mistaken for "working" by reading the enum.
+    /// True for [`Self::Shaped`] since CS-CORRECTNESS #6 landed
+    /// [`crate::text::shape`]. The method stays because the *policy* and the
+    /// *implementation* are still two questions: a build with no faces loaded
+    /// answers the second one differently, and the call site should ask rather
+    /// than assume.
     #[must_use]
     pub fn is_available(self) -> bool {
-        false
+        self == Self::Shaped
     }
 }
 
@@ -358,11 +372,19 @@ mod tests {
         assert_eq!(run.motion, Motion::None);
     }
 
-    /// The shaper is off, and says so, rather than being selectable-but-broken.
+    /// The shaper works and is opt-in, and both halves matter.
+    ///
+    /// Appendix A.5 asked for the switch to be landed, A/B'd and only then
+    /// flipped. It is landed and A/B'd; it is not flipped, because the shaped
+    /// path still drops some punctuation in the editor. `SOMNIUM_UI_SHAPER=1`
+    /// turns it on.
     #[test]
-    fn the_shaper_is_off_by_default_and_admits_it() {
+    fn the_shaper_is_available_but_not_yet_the_default() {
         assert_eq!(ShaperPolicy::default(), ShaperPolicy::PerCharacter);
-        assert!(!ShaperPolicy::Shaped.is_available());
+        assert!(
+            ShaperPolicy::Shaped.is_available(),
+            "it is implemented — `Shaped` no longer means `not built`"
+        );
         assert!(!ShaperPolicy::PerCharacter.is_available());
     }
 }

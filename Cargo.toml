@@ -117,6 +117,14 @@ exr = "1.74"
 # -- Font rasterization (Phase 12A-4) ----------------------------------------
 fontdue = "0.7"
 
+# -- Text shaping and bidi (MORROWIND-G item 1, adopted in CS-CORRECTNESS #6) -
+# Shaping only. `rustybuzz` is a HarfBuzz port that takes a face and a string
+# and returns positioned glyph ids; it owns no font database, no atlas and no
+# editing model, which is what lets it slot in behind the run model MORROWIND-G
+# built rather than arriving as a second text stack beside `fontdue`.
+rustybuzz    = "0.20"
+unicode-bidi = "0.3"
+
 # -- SVG rasterization (Phase 26-Zeta-E) --------------------------------------
 # Builds the editor icon atlas from vendored Tabler + Somnium SVG sources at
 # startup. Text, system fonts and raster-image support are off: every source is

@@ -2228,10 +2228,34 @@ would crop the empty state of an empty folder out of existence, and an inline
 rename is a text box parented to a tile, so a rename holds the window still
 until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**A shaper and a rasteriser must share a glyph index space, and two libraries
+do not.** `rustybuzz` and `fontdue` disagree about `Inter-Regular.ttf`: `C` is
+18 to both, `(` is 331 to one and 324 to the other, and the divergence is not a
+constant offset. Handing one library's id to the other drew a glyph with no
+outline, which read as missing punctuation — *"Coastal Surf  CC0"*, *"14 00"*.
+The dangerous half is the case that did not happen yet: a mismatched id landing
+on a glyph that *does* have an outline draws plausible, wrong text, and a
+ligature is exactly that. So the shaped path rasterises from the same face the
+shaper read (`ttf-parser` outlines, which `rustybuzz` re-exports, filled by
+`tiny-skia`), and `fontdue` keeps the per-character path untouched.
+([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
+
+**A fallback chain is not a router.** Asking "which face covers this character"
+gives the *first* face that does, and the regular cut covers Latin — so every
+label meant for the medium or semibold cut came out in regular. The caller's
+face gets first refusal, and only what it lacks reaches the chain.
+([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
+
 **`Queue::write_buffer` does not write where you call it.** It stages, and the
 staged writes are applied at the *start of the submit* — and this renderer
 submits once per frame. Anything uploaded that way more than once in a frame
-therefore has exactly one winner: the last call. It went unnoticed while a frame
+therefore has exactly one winner: the last call. **Correcting that ordering is
+itself a rendering change**, and it shipped as one: with the jitter reaching the
+shaders for the first time, 1.3% of viewport pixels moved between consecutive
+frames on a still camera against 0.6% before, which from a high camera reads as
+the whole viewport shaking. A one-view frame therefore keeps the plain write it
+always had, and the staged copy is confined to the case that cannot work without
+it. It went unnoticed while a frame
 had one view, and MORROWIND-J step 3 made it visible in the loudest way
 available, four viewports all showing the same picture. It also means the scene
 had been rendering with the *unjittered* matrix all along, because the editor

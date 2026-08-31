@@ -2666,12 +2666,18 @@ impl SomniumRenderer {
         // Overlays draw onto the reconstructed image. The scene used a jittered
         // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
         // here makes gizmos and outlines swim by a pixel every frame.
-        self.stage_view_buffer(
-            &ctx.queue,
-            &mut encoder,
-            OVERLAY_VIEW_SLOT,
-            self.view_proj_unjittered,
-        );
+        // The same rule as the scene's upload above: one view keeps the plain
+        // write it has always used.
+        if self.views.len() > 1 {
+            self.stage_view_buffer(
+                &ctx.queue,
+                &mut encoder,
+                OVERLAY_VIEW_SLOT,
+                self.view_proj_unjittered,
+            );
+        } else {
+            self.write_view_buffer(&ctx.queue, self.view_proj_unjittered);
+        }
 
         self.profiler.begin(&mut encoder, "Editor overlays");
 
@@ -3093,7 +3099,48 @@ impl SomniumRenderer {
         // ── 0. Upload view buffer ────────────────────────────────────────────
         //
         // Through the encoder, not `write_buffer`: see `stage_view_buffer`.
-        self.stage_view_buffer(&ctx.queue, encoder, self.view_slot, self.view_proj);
+        //
+        // **Unjittered, and deliberately.** `self.view_proj` carries the TAA /
+        // FSR sub-pixel offset, and before the staging fix below it never
+        // reached a shader: the editor overlays upload the unjittered matrix
+        // after the scene, and a `write_buffer` staged later in the frame wins
+        // for the whole frame. So the scene has always drawn unjittered, and
+        // ordering the uploads correctly turned that on for the first time —
+        // which shows up as the whole viewport shaking, hardest from a high
+        // camera where a pixel of terrain covers metres of ground.
+        //
+        // Turning jitter on is a rendering change with its own A/B to run and
+        // its own record to write. MORROWIND-J step 3 is about drawing several
+        // views, and it promised a one-viewport frame identical to the one
+        // before it. This keeps that promise; see MORROWIND-J for the finding.
+        // **One view takes the path it always took.**
+        //
+        // MORROWIND-J step 3 promised that a one-viewport frame is the frame
+        // that came before it, and the staged-copy mechanism below is only
+        // needed when several views share a command buffer. Using it
+        // unconditionally is how this change reached the editor as a viewport
+        // that shook — the copy lands *inside* the encoder where the plain
+        // write landed at the top of the submit, and every pass that reads the
+        // view buffer sees a different matrix as a result.
+        //
+        // So the default path is byte-for-byte the old one, and the new
+        // mechanism is confined to the case that cannot work without it.
+        //
+        // The multi-view branch uploads the **unjittered** matrix, because that
+        // is what a one-view frame effectively renders with: its jittered write
+        // is overwritten by the overlays' unjittered one before any pass runs.
+        // Matching it is what keeps a tile the same picture as the whole
+        // viewport, rather than the same picture plus a shake.
+        if self.views.len() > 1 {
+            self.stage_view_buffer(
+                &ctx.queue,
+                encoder,
+                self.view_slot,
+                self.view_proj_unjittered,
+            );
+        } else {
+            self.write_view_buffer(&ctx.queue, self.view_proj);
+        }
 
         // ── 0.5 Phase 19: refresh the environment cubemap ────────────────────
         // No-ops unless the sun actually moved, so this is free in the common
