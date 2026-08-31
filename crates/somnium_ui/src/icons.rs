@@ -79,6 +79,8 @@ pub enum IconId {
     Link,
     /// A globe: the Localisation table, MORROWIND-M item 2.
     Language,
+    /// A panel leaving its dock: the float button on a panel header.
+    Float,
     Cube,
     Sphere,
     Plane,
@@ -172,6 +174,7 @@ impl IconId {
         Self::ContentDrawer,
         Self::Link,
         Self::Language,
+        Self::Float,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -748,6 +751,13 @@ impl IconAtlas {
                 self.circle(s(12.0), t(12.0), 8.0, w, false);
                 self.line(s(4.0), t(12.0), s(20.0), t(12.0), w);
                 self.circle(s(12.0), t(12.0), 4.0, w, false);
+            }
+            IconId::Float => {
+                // A pane, and a second one lifting off its top-right corner.
+                // Two overlapping rectangles read as "detach" at 12 px where an
+                // arrow reads as "export".
+                self.rect_stroke(s(4.0), t(9.0), 11.0, 11.0, w);
+                self.rect_stroke(s(10.0), t(4.0), 10.0, 10.0, w);
             }
             IconId::Cube => self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w),
             IconId::Sphere => self.circle(s(12.0), t(12.0), 8.0, w, false),

@@ -280,6 +280,8 @@ pub enum CommandAction {
     OpenLocalisation,
     /// Pull a panel out into its own OS window (MORROWIND-J step 2).
     FloatPanel(crate::floating::FloatingKind),
+    /// Put every floating panel back in the main window.
+    DockAllPanels,
     /// Choose how the viewport region is divided (MORROWIND-J step 3).
     ///
     /// One action per named layout rather than a cycle, matching
@@ -991,12 +993,32 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
-            "editor.window.float_log",
-            "Output Log in a Window",
+            "editor.window.float_outliner",
+            "Float: Outliner",
             "Window",
             None,
-            "Open the Output Log as a separate operating-system window.",
+            "Move the Outliner into its own operating-system window.",
+            A::FloatPanel(crate::floating::FloatingKind::Outliner),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.float_log",
+            "Float: Output Log",
+            "Window",
+            None,
+            "Move the Output Log into its own operating-system window.",
             A::FloatPanel(crate::floating::FloatingKind::OutputLog),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.default_layout",
+            "Default Layout",
+            "Window",
+            None,
+            "Return every floating panel to the main window.",
+            A::DockAllPanels,
             WINDOW,
             always
         ),

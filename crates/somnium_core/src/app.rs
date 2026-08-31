@@ -7167,12 +7167,40 @@ impl<G: GameApp> Engine<G> {
         let Some(ctx) = self.render_ctx.as_ref() else {
             return;
         };
+        // Each panel is handed the store it rebuilds from. The manager owns
+        // both stores, so this is a read rather than a second copy kept in
+        // step.
+        let mut selections: Vec<u32> = Vec::new();
         for index in 0..self.floating.len() {
+            let kind = self.floating[index].panel.kind();
             if let Some(ui) = self.ui_manager.as_ref() {
-                let log = ui.log();
-                self.floating[index].panel.sync(log);
+                match kind {
+                    somnium_ui::floating::FloatingKind::OutputLog => {
+                        let log = ui.log();
+                        self.floating[index]
+                            .panel
+                            .sync(somnium_ui::floating::PanelData::Log(log));
+                    }
+                    somnium_ui::floating::FloatingKind::Outliner => {
+                        let (items, selected) = ui.outliner_items();
+                        self.floating[index]
+                            .panel
+                            .sync(somnium_ui::floating::PanelData::Outliner { items, selected });
+                    }
+                }
             }
             self.floating[index].render(&ctx.device, &ctx.queue);
+            for event in self.floating[index].panel.take_events() {
+                match event {
+                    somnium_ui::floating::PanelEvent::SelectEntity(id) => selections.push(id),
+                }
+            }
+        }
+        // Applied after the loop so the borrow of `self.floating` is over, and
+        // through the same event a click in the docked Outliner raises rather
+        // than a second path that could drift from it.
+        for id in selections {
+            self.handle_editor_event(EditorEvent::SelectEntity(Some(id)));
         }
     }
 
@@ -8919,6 +8947,10 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::FloatPanel(kind) => self.pending_float.push(kind),
+
+            EditorEvent::ClosePanelWindow(kind) => {
+                self.floating.retain(|w| w.panel.kind() != kind);
+            }
 
             EditorEvent::SaveLocalisation => self.save_localisation(),
 

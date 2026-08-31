@@ -547,6 +547,11 @@ struct EditorLayout {
     status_stats_button: NodeHandle,
     /// Floating viewport-context scope; a child of the viewport, not a grid row.
     /// Held for the layout regression test that pins the 68 px scene budget.
+    /// The Outliner's whole container, so floating it can take its space away.
+    outliner_grid: NodeHandle,
+    /// The float buttons on the Outliner and Details headers.
+    outliner_float: NodeHandle,
+    details_float: NodeHandle,
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
     /// The context bar's horizontal stack, so the overflow rule can ask what
@@ -883,6 +888,9 @@ pub struct UiManager {
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
     preferences: crate::editor::preferences::PreferencesHandles,
+    outliner_grid: NodeHandle,
+    outliner_float: NodeHandle,
+    details_float: NodeHandle,
     vp_stack: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
@@ -1074,6 +1082,12 @@ pub struct UiManager {
     locale_grid: NodeHandle,
     locale_actions: Vec<(NodeHandle, LocaleAction)>,
     locale_open: bool,
+    /// The Outliner's rows as last projected, for a floating copy.
+    outliner_items: Vec<crate::widgets::tree_view::TreeItem>,
+    outliner_selected: Option<u32>,
+    /// The Outliner's height in the right column before it floated, so
+    /// returning it does not snap the column to a preset.
+    docked_outliner_size: Option<f32>,
     /// What the viewport's context bar needs to show every control inline.
     ///
     /// Measured once from a layout that had them all, rather than declared as a
@@ -1602,6 +1616,9 @@ impl UiManager {
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
             preferences: layout.preferences,
+            outliner_grid: layout.outliner_grid,
+            outliner_float: layout.outliner_float,
+            details_float: layout.details_float,
             vp_stack: layout.vp_stack,
             snap_cluster: layout.snap_cluster,
             snap_grid_combo: layout.snap_grid_combo,
@@ -1724,6 +1741,9 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
+            outliner_items: Vec::new(),
+            outliner_selected: None,
+            docked_outliner_size: None,
             context_bar_full_width: None,
             floating_panels: std::collections::BTreeSet::new(),
             viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
@@ -1764,6 +1784,11 @@ impl UiManager {
         // The Outliner is repopulated on the first frame and flips itself; the
         // log has nothing until something logs.
         this.native_ui.set_visibility(this.log_stack, false);
+        // Details generates its rows from reflected schemas against the live
+        // selection, so it has no store a second tree could rebuild from. The
+        // button is built with the others and hidden until it does, rather than
+        // shipping a control that quietly does nothing.
+        this.native_ui.set_visibility(this.details_float, false);
         this.native_ui.set_visibility(this.log_empty, true);
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
@@ -4459,9 +4484,12 @@ impl UiManager {
             A::OpenOutputLog => self.toggle_log_panel(),
             A::OpenReferences => self.toggle_references_panel(),
             A::OpenLocalisation => self.toggle_locale_panel(),
-            A::FloatPanel(kind) => {
-                self.set_panel_floating(kind, true);
-                self.editor_events.push_back(EditorEvent::FloatPanel(kind));
+            A::FloatPanel(kind) => self.float_panel(kind),
+            A::DockAllPanels => {
+                for kind in self.dock_all_panels() {
+                    self.editor_events
+                        .push_back(EditorEvent::ClosePanelWindow(kind));
+                }
             }
             A::SetViewportLayout(layout) => self.set_viewport_layout(layout),
             A::ContentShowReferences => {
@@ -4880,6 +4908,16 @@ impl UiManager {
         self.refresh_content_list();
     }
 
+    /// The Outliner's rows as last projected, and what is selected.
+    ///
+    /// The projection, not the source: filtering and expansion are already
+    /// applied, so a floating Outliner cannot disagree with the docked one
+    /// about what the scene contains.
+    #[must_use]
+    pub fn outliner_items(&self) -> (&[crate::widgets::tree_view::TreeItem], Option<u32>) {
+        (&self.outliner_items, self.outliner_selected)
+    }
+
     /// Whether a panel is currently living in its own OS window.
     #[must_use]
     pub fn is_panel_floating(&self, kind: crate::floating::FloatingKind) -> bool {
@@ -4893,6 +4931,8 @@ impl UiManager {
     /// showing an empty log beside a floating window full of lines is the kind
     /// of wrong that makes people distrust both.
     pub fn set_panel_floating(&mut self, kind: crate::floating::FloatingKind, floating: bool) {
+        use crate::floating::FloatingKind;
+
         let changed = if floating {
             self.floating_panels.insert(kind)
         } else {
@@ -4902,14 +4942,57 @@ impl UiManager {
             return;
         }
         match kind {
-            crate::floating::FloatingKind::OutputLog => {
+            FloatingKind::OutputLog => {
                 if floating && self.log_open {
                     // It has left the dock; the dock should not keep its space.
                     self.log_open = false;
                     self.apply_bottom_panel();
                 }
             }
+            FloatingKind::Outliner => {
+                // Collapse its share of the right column rather than hiding the
+                // node: the splitter already knows how to give the space to
+                // Details, and a hidden node in a splitter leaves a gap the
+                // size of the divider.
+                let size = if floating {
+                    // Remembered so returning it puts the column back where the
+                    // user had dragged it, not where a preset says it goes.
+                    self.docked_outliner_size =
+                        Some(self.native_ui.screen_bounds(self.outliner_scroll).h);
+                    0.0
+                } else {
+                    self.docked_outliner_size.take().unwrap_or(240.0)
+                };
+                // Both halves: the splitter stops reserving the space, and the
+                // container stops drawing. A zero split alone still leaves the
+                // header and its first row visible, because a splitter clamps
+                // to what its child says it needs.
+                self.native_ui.set_visibility(self.outliner_grid, !floating);
+                self.native_ui.send(UiMessage::new(
+                    self.right_split_h,
+                    MessageDirection::ToWidget,
+                    SplitterMessage::SetFirstSize(size),
+                ));
+            }
         }
+    }
+
+    /// Send a panel out into its own window, and tell the host to open one.
+    pub fn float_panel(&mut self, kind: crate::floating::FloatingKind) {
+        self.set_panel_floating(kind, true);
+        self.editor_events.push_back(EditorEvent::FloatPanel(kind));
+    }
+
+    /// Put every floating panel back in the dock.
+    ///
+    /// The Window menu's *Default Layout*. Returns the panels the host has to
+    /// close windows for, because this crate does not own them.
+    pub fn dock_all_panels(&mut self) -> Vec<crate::floating::FloatingKind> {
+        let floating: Vec<_> = self.floating_panels.iter().copied().collect();
+        for kind in &floating {
+            self.set_panel_floating(*kind, false);
+        }
+        floating
     }
 
     /// How the viewport region is divided this frame (MORROWIND-J step 3).
@@ -5691,6 +5774,11 @@ impl UiManager {
             .set_visibility(self.outliner_empty, !has_entities);
 
         self.outliner_rows = items.iter().map(|i| (self.outliner_tree, i.id)).collect();
+        // Kept so a floating Outliner shows the same rows the docked one does.
+        // The projection runs once, here: two trees building their own items
+        // from the same rows would eventually disagree about a filter.
+        self.outliner_items = items.clone();
+        self.outliner_selected = selected;
         // Mirror the rows so the palette can offer them without reaching into
         // the widget tree.
         self.palette_entities = entities
@@ -7143,6 +7231,10 @@ impl UiManager {
                 }
                 if msg.destination == self.references_button {
                     self.toggle_references_panel();
+                    continue;
+                }
+                if msg.destination == self.outliner_float {
+                    self.float_panel(crate::floating::FloatingKind::Outliner);
                     continue;
                 }
                 if msg.destination == self.locale_button {

@@ -63,6 +63,64 @@ fn command_tooltip(id: &str) -> String {
 
 // ── Editor layout builder ─────────────────────────────────────────────────────
 
+/// A panel header: its caption, and the button that sends it to its own window.
+///
+/// MORROWIND-J step 2. One helper rather than the same grid written per panel,
+/// so every header puts the button in the same place at the same size. The
+/// caption stretches and the button is `auto`, which is what keeps the glyph
+/// pinned to the right edge whatever the panel is called.
+fn panel_header(
+    ui: &mut UserInterface,
+    header: NodeHandle,
+    caption: &str,
+    font_id: u8,
+) -> NodeHandle {
+    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let grid = ui.add_node(grid, header);
+
+    let text = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
+        Thickness {
+            left: 8.0,
+            top: 5.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
+    ))
+    .with_role(TextRole::SectionCaps)
+    .with_text(caption)
+    .with_font_id(font_id)
+    .build();
+    ui.add_node(text, grid);
+
+    let button = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
+            .with_width(20.0)
+            .with_height(18.0)
+            .with_margin(Thickness::axes(4.0, 2.0))
+            .with_background(theme::TRANSPARENT),
+    )
+    .build();
+    let button = ui.add_node(button, grid);
+    let glyph = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_width(12.0)
+            .with_height(12.0)
+            .with_margin(Thickness::uniform(3.0)),
+    )
+    .with_icon(IconId::Float)
+    .with_size(12.0)
+    .with_tint(theme::active().semantic.text.secondary.bytes())
+    .build();
+    ui.add_node(glyph, button);
+    button
+}
+
 pub(crate) fn build_editor_layout(
     ui: &mut UserInterface,
     font_id: u8,
@@ -1056,16 +1114,7 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let out_hdr_h = ui.add_node(out_hdr, out_grid_h);
-    let out_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 5.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_role(TextRole::SectionCaps)
-    .with_text("OUTLINER")
-    .build();
-    ui.add_node(out_hdr_txt, out_hdr_h);
+    let outliner_float = panel_header(ui, out_hdr_h, "OUTLINER", font_id);
 
     let outliner_search = {
         let n = SearchBoxBuilder::new(
@@ -1121,16 +1170,7 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let ins_hdr_h = ui.add_node(ins_hdr, ins_grid_h);
-    let ins_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 5.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_role(TextRole::SectionCaps)
-    .with_text("DETAILS")
-    .build();
-    ui.add_node(ins_hdr_txt, ins_hdr_h);
+    let details_float = panel_header(ui, ins_hdr_h, "DETAILS", font_id);
 
     let inspector_search = {
         let n = SearchBoxBuilder::new(
@@ -1970,6 +2010,9 @@ pub(crate) fn build_editor_layout(
         status_stats,
         status_stats_button,
         vp_bar_h,
+        outliner_grid: out_grid_h,
+        outliner_float,
+        details_float,
         vp_stack: vp_stack_h,
         snap_cluster,
         snap_grid_combo,
