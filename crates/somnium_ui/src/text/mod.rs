@@ -249,7 +249,11 @@ impl StyledRun {
 /// CS-CORRECTNESS #6: A.5 asks for the switch to be landed, A/B'd, and only
 /// then flipped, and that A/B was run — shaped chrome is tighter and correctly
 /// kerned at the same crispness, because the run origin is still snapped.
-/// `SOMNIUM_UI_SHAPER=0` is the way back.
+///
+/// `SOMNIUM_UI_SHAPER=0` is the way back, and it is a real one: the
+/// per-character path is not a stub kept for the tests, it is what tracked text
+/// still uses and what every glyph falls back to when shaping cannot produce
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShaperPolicy {
     /// `fontdue` per-character advances, block-origin snapped. Phase 27's
@@ -258,14 +262,9 @@ pub enum ShaperPolicy {
     /// Still the path for tracked text, where letter-spacing and mark
     /// positioning genuinely disagree, and the fallback wherever shaping cannot
     /// produce a glyph.
-    #[default]
     PerCharacter,
     /// Shaped runs: sub-pixel advances within a run, the run origin snapped.
-    ///
-    /// Not yet the default. The A/B says the chrome is tighter and no less
-    /// crisp, but the shaped path drops some punctuation in the editor —
-    /// parentheses, colons and hyphens render as their advance and no glyph —
-    /// and a default nobody would keep is not a default.
+    #[default]
     Shaped,
 }
 
@@ -372,19 +371,18 @@ mod tests {
         assert_eq!(run.motion, Motion::None);
     }
 
-    /// The shaper works and is opt-in, and both halves matter.
+    /// The shaper is on, and there is a real way back.
     ///
     /// Appendix A.5 asked for the switch to be landed, A/B'd and only then
-    /// flipped. It is landed and A/B'd; it is not flipped, because the shaped
-    /// path still drops some punctuation in the editor. `SOMNIUM_UI_SHAPER=1`
-    /// turns it on.
+    /// flipped. All three happened. The way back has to keep working — a
+    /// default nobody can undo is not a default, it is a rewrite.
     #[test]
-    fn the_shaper_is_available_but_not_yet_the_default() {
-        assert_eq!(ShaperPolicy::default(), ShaperPolicy::PerCharacter);
+    fn the_shaper_is_on_by_default_and_can_be_turned_off() {
+        assert_eq!(ShaperPolicy::default(), ShaperPolicy::Shaped);
+        assert!(ShaperPolicy::Shaped.is_available());
         assert!(
-            ShaperPolicy::Shaped.is_available(),
-            "it is implemented — `Shaped` no longer means `not built`"
+            !ShaperPolicy::PerCharacter.is_available(),
+            "the per-character path is the fallback, not a second shaper"
         );
-        assert!(!ShaperPolicy::PerCharacter.is_available());
     }
 }
