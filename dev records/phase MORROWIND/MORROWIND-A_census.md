@@ -18,7 +18,7 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 67,326 | +39,796 | 32.7% | 730 | +515 | 108 | 2 |
+| `somnium_ui` | 67,415 | +39,885 | 32.7% | 731 | +516 | 108 | 2 |
 | `somnium_renderer` | 64,131 | +13,925 | 31.1% | 444 | +116 | 92 | 55 |
 | `somnium_core` | 35,927 | +16,707 | 17.4% | 404 | +187 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.3% | 56 | +50 | 13 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **205,897** | +92,005 | | **2093** | +1,148 | | |
+| **Total** | **205,986** | +92,094 | | **2094** | +1,149 | | |
 
 The top three crates are **81.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 

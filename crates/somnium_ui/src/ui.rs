@@ -73,8 +73,14 @@ struct Detached {
     /// rather than into a cell. Without a root of its own, a combo box in a
     /// floating Details has nowhere to drop its list except the main window.
     host: NodeHandle,
-    /// Where the panel came from, so returning it puts it back in the slot it
-    /// left rather than at the end of its parent's children.
+    /// Where the panel came from, and where in it.
+    ///
+    /// The index is the panel's place in the parent's children *as they were
+    /// before anything left* — not its place in the list it was actually
+    /// removed from. Those differ as soon as two siblings are out at once, and
+    /// the difference is not academic: float the Outliner and then Details, and
+    /// both record index 0, so docking them again puts Details above the
+    /// Outliner.
     parent: NodeHandle,
     index: usize,
     /// The hosting surface's size, in layout units.
@@ -1736,6 +1742,7 @@ impl UserInterface {
         let Some((parent, index)) = self.unlink(handle) else {
             return false;
         };
+        let index = self.original_index(parent, index);
         let host = self.spawn_host(size);
         self.link_at(handle, host, usize::MAX);
         let docked = self.fill_window(handle);
@@ -1767,7 +1774,16 @@ impl UserInterface {
         }
         self.unlink(handle);
         self.restore_fit(handle, record.docked);
-        let linked = self.link_at(handle, record.parent, record.index);
+        // Its old place, minus the siblings that are still out. Those will
+        // insert themselves ahead of it when they come back, whichever order
+        // they come back in.
+        let missing = self
+            .detached
+            .iter()
+            .filter(|d| d.parent == record.parent && d.index < record.index)
+            .count();
+        let at = record.index.saturating_sub(missing);
+        let linked = self.link_at(handle, record.parent, at);
         let strays = self
             .nodes
             .try_borrow(to_ih(record.host))
@@ -1817,6 +1833,29 @@ impl UserInterface {
             node.widget.horizontal_alignment = fit.horizontal;
             node.widget.vertical_alignment = fit.vertical;
         }
+    }
+
+    /// Where a node sat before any of its siblings left.
+    ///
+    /// `removed_at` is its place in the list it was just taken out of, which is
+    /// short by one for every sibling already gone from in front of it. Walking
+    /// the earlier records in order restores the count, because each one that
+    /// sat at or before the running position pushes it along by one.
+    fn original_index(&self, parent: NodeHandle, removed_at: usize) -> usize {
+        let mut earlier: Vec<usize> = self
+            .detached
+            .iter()
+            .filter(|d| d.parent == parent)
+            .map(|d| d.index)
+            .collect();
+        earlier.sort_unstable();
+        let mut index = removed_at;
+        for gone in earlier {
+            if gone <= index {
+                index += 1;
+            }
+        }
+        index
     }
 
     /// A second root, for one window, sized to it.
@@ -3454,6 +3493,56 @@ mod detach_tests {
         ui.reattach(top);
         ui.perform_layout();
         assert_eq!(ui.screen_bounds(top).h, docked, "and gave the height back");
+    }
+
+    #[test]
+    fn siblings_come_back_in_order_however_they_left() {
+        // Two panels out of one splitter is not a corner case: it is the
+        // Outliner and Details, and the Window menu's *Default Layout* returns
+        // them together. Recording the index each was removed *from* puts
+        // Details above the Outliner, because by the time Details leaves the
+        // Outliner has already gone and both record 0.
+        //
+        // Every order, both ways, because the bug is order-dependent and one
+        // ordering passing proves nothing about the others.
+        let orders: [([usize; 3], [usize; 3]); 4] = [
+            ([0, 1, 2], [0, 1, 2]),
+            ([2, 1, 0], [0, 1, 2]),
+            ([1, 2, 0], [2, 0, 1]),
+            ([0, 2, 1], [1, 0, 2]),
+        ];
+        for (out, back) in orders {
+            let mut ui = UserInterface::new(800.0, 600.0);
+            let root = ui.root();
+            let column = ui.add_node(StackPanelBuilder::new(WidgetBuilder::new()).build(), root);
+            let panels: Vec<_> = (0..3)
+                .map(|_| {
+                    ui.add_node(
+                        BorderBuilder::new(WidgetBuilder::new().with_height(100.0))
+                            .with_stroke_thickness(Thickness::ZERO)
+                            .build(),
+                        column,
+                    )
+                })
+                .collect();
+
+            for i in out {
+                assert!(ui.detach(panels[i], Vec2::new(300.0, 400.0)));
+            }
+            for i in back {
+                assert!(ui.reattach(panels[i]));
+            }
+
+            let children = ui
+                .nodes
+                .try_borrow(to_ih(column))
+                .map(|n| n.widget.children.clone())
+                .unwrap();
+            assert_eq!(
+                children, panels,
+                "detached {out:?} then docked {back:?}"
+            );
+        }
     }
 
     #[test]

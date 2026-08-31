@@ -2275,6 +2275,13 @@ they clipped to nothing. The bar read as having lost them. Zero is written
 through now.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
+**An index recorded on the way out is stale by the time a sibling follows.**
+Float the Outliner and then Details and both record slot 0, because Details was
+removed from a list the Outliner had already left. Docking them again put
+Details above the Outliner. What survives is the place a panel held before
+*anything* left, restored minus the siblings still out.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
 **A horizontal bar that runs out of room drops its newest control.** A stack
 does not shrink; it places the overflow past the edge. The control added most
 recently is the one that goes, and in a bar of viewport options the newest one

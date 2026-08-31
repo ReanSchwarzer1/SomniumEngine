@@ -346,6 +346,14 @@ to nothing. The bar read as having lost them. This was the other half of the
 "some options in the viewport bar are not visible" report; the first half was a
 collapse rule reading the window's width instead of the bar's.
 
+**Two panels out of one splitter came back in the wrong order.** The index a
+detach records is the panel's place in the list it was removed *from*, and by
+the time Details leaves the Outliner has already gone, so both record 0 and
+docking them puts Details on top. What has to be recorded is the place the panel
+held before *anything* left, and what has to be restored is that place minus the
+siblings still out. Both directions, in any order, because *Default Layout*
+returns them together and nothing says which goes first.
+
 **A horizontal bar that runs out of room drops its newest control.** A stack
 does not shrink, it places the overflow past the edge, and the control added
 most recently is the one that goes. In a bar of viewport options the newest one
@@ -414,8 +422,9 @@ floating window drew its panel kind=Viewport  window=(1280, 760)  panel=(1280.0,
 floating window drew its panel kind=OutputLog window=(1120, 460)  panel=(1120.0, 460.0) instances=2534
 ```
 
-Ten tests cover the mechanism with no GPU and no event loop: a panel leaves the
-dock and comes back to the same slot, it is laid out at its window's origin, it
+Eleven tests cover the mechanism with no GPU and no event loop: a panel leaves
+the dock and comes back to the same slot, three siblings come back in order
+however they left and however they return, it is laid out at its window's origin, it
 gives the dock's pinned height back when it returns, the main window stops
 drawing it while the floating one starts, a click in the floating window reaches
 the widget that is *there* rather than the one at the same coordinates in the
