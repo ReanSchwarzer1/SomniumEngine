@@ -18,10 +18,10 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_renderer` | 63,247 | +13,041 | 31.6% | 436 | +108 | 91 | 55 |
-| `somnium_ui` | 63,207 | +35,677 | 31.6% | 682 | +467 | 103 | 2 |
-| `somnium_core` | 34,973 | +15,753 | 17.5% | 398 | +181 | 46 | 0 |
-| `somnium_asset` | 6,711 | +5,072 | 3.4% | 56 | +50 | 13 | 0 |
+| `somnium_ui` | 64,449 | +36,919 | 32.0% | 694 | +479 | 104 | 2 |
+| `somnium_renderer` | 63,247 | +13,041 | 31.4% | 436 | +108 | 91 | 55 |
+| `somnium_core` | 35,306 | +16,086 | 17.5% | 403 | +186 | 46 | 0 |
+| `somnium_asset` | 6,711 | +5,072 | 3.3% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.6% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.5% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.4% | 59 | +1 | 9 | 0 |
@@ -34,9 +34,9 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **199,940** | +86,048 | | **2031** | +1,086 | | |
+| **Total** | **201,515** | +87,623 | | **2048** | +1,103 | | |
 
-The top three crates are **80.7%** of the tree (`somnium_renderer`, `somnium_ui`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **80.9%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **3,130 lines** (+484 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,9 +49,9 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1223 | 256 | 115 | 8 | 13 | 185 | 101 | **1902** |
+| `somnium_ui` | 1236 | 258 | 117 | 8 | 13 | 187 | 102 | **1922** |
 | `somnium_renderer` | 649 | 156 | 9 | 1 | 2 | 125 | 88 | **1030** |
-| `somnium_core` | 331 | 110 | 23 | 4 | 3 | 47 | 41 | **559** |
+| `somnium_core` | 334 | 110 | 23 | 4 | 3 | 47 | 41 | **562** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 93 | 49 | 10 | 0 | 0 | 13 | 9 | **174** |

@@ -2228,6 +2228,30 @@ would crop the empty state of an empty folder out of existence, and an inline
 rename is a text box parented to a tile, so a rename holds the window still
 until it lands. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
 
+**A projection you can only read is a report, not an editor.**
+`catalog_to_table` had been half a feature since MORROWIND-AH. The other half is
+the inverse, and two of its rules are the difference between an editor and a
+data-loss bug: an untranslated cell comes back as an **absent key** rather than
+as `""` — writing the empty string would make every untranslated key look
+translated to `only_incomplete`, the filter a translator opens the table to use
+— and the loaded catalogue is the **template** a save is written against, so the
+display name and font list a grid of strings cannot hold survive an edit. The
+crate boundary holds throughout: `somnium_ui` is handed a `DataTable` and never
+learns what a catalogue is, and `EditorEvent::SaveLocalisation` carries nothing,
+because the shape a catalogue is saved in is a `somnium_i18n` question.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A focused widget that claims text input swallows every key before the game
+sees it.** Both directions of getting that wrong ship as a mystery: always
+claiming it means a grid nobody clicked into eats the fly-cam's WASD and the
+camera "just stops responding"; never claiming it means typing `w` into a cell
+also switches the gizmo to Translate and `Delete` removes the selected *entity*.
+The rule the curve editor already followed is the right one — the keyboard
+belongs to the widget only while it has a selection — plus one the data grid
+adds: closing the panel over a focused widget releases the keyboard, because a
+widget nobody can see must not be holding it.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
 **The cook plan's dependency graph cannot answer the editor's question.**
 MORROWIND-Q's graph is built from declared edges, because a cook plan has them.
 Nobody declares that a scene uses a mesh — they drop the mesh onto an entity and

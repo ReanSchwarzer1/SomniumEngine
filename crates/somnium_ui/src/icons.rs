@@ -77,6 +77,8 @@ pub enum IconId {
     ContentDrawer,
     /// Two chain links: the References panel, MORROWIND-M item 3.
     Link,
+    /// A globe: the Localisation table, MORROWIND-M item 2.
+    Language,
     Cube,
     Sphere,
     Plane,
@@ -169,6 +171,7 @@ impl IconId {
         Self::OutputLog,
         Self::ContentDrawer,
         Self::Link,
+        Self::Language,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -738,6 +741,13 @@ impl IconAtlas {
                 // as "connected to" at 16 px, where a chain of four does not.
                 self.circle(s(9.0), t(12.0), 4.5, w, false);
                 self.circle(s(15.0), t(12.0), 4.5, w, false);
+            }
+            IconId::Language => {
+                // A globe: an outline, an equator and one meridian. Three
+                // strokes is the most that stays legible at 16 px.
+                self.circle(s(12.0), t(12.0), 8.0, w, false);
+                self.line(s(4.0), t(12.0), s(20.0), t(12.0), w);
+                self.circle(s(12.0), t(12.0), 4.0, w, false);
             }
             IconId::Cube => self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w),
             IconId::Sphere => self.circle(s(12.0), t(12.0), 8.0, w, false),

@@ -528,6 +528,14 @@ pub enum EditorEvent {
     ShowContentItemInFolder(String),
     /// Open an asset in its configured OS editor.
     EditContentAsset(String),
+    /// Write the localisation table back to the project, one file per locale.
+    ///
+    /// Carries nothing: the host asks [`crate::UiManager::localisation_table`]
+    /// for the committed table, because the shape a catalogue is saved in is a
+    /// `somnium_i18n` question and this crate does not know that vocabulary.
+    SaveLocalisation,
+    /// Write the localisation table out as a CSV for a translator.
+    ExportLocalisationCsv,
     /// Copy an asset beside itself and commit the new reference through the
     /// same reflected undo path.
     MakeAssetUnique {

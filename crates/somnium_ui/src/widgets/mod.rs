@@ -14,6 +14,8 @@ pub mod combo_box;
 pub mod command_palette;
 pub mod context_menu;
 pub mod curve_editor;
+/// MORROWIND-M item 2: the grid that draws a [`crate::data_table::DataTable`].
+pub mod data_grid;
 pub mod gradient_editor;
 pub mod grid;
 pub mod image;

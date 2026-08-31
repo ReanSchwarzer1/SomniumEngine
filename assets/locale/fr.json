@@ -1,0 +1,12 @@
+{
+  "locale": "fr",
+  "display_name": "Français",
+  "fonts": [],
+  "strings": {
+    "hud.title": "Somnium",
+    "menu.open": "Ouvrir",
+    "menu.play": "Jouer",
+    "menu.quit": "Quitter",
+    "status.ready": "Prêt"
+  }
+}

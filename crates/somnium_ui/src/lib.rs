@@ -627,6 +627,21 @@ struct EditorLayout {
     references_button: NodeHandle,
     references_title: NodeHandle,
     references_list: NodeHandle,
+    locale_panel: NodeHandle,
+    locale_button: NodeHandle,
+    locale_search: NodeHandle,
+    locale_incomplete: NodeHandle,
+    locale_grid: NodeHandle,
+    locale_actions: Vec<(NodeHandle, LocaleAction)>,
+}
+
+/// A verb in the Localisation panel's header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocaleAction {
+    /// Write the catalogue back to disk, one file per locale.
+    Save,
+    /// Hand the table to a translator as a CSV.
+    ExportCsv,
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
@@ -1038,6 +1053,21 @@ pub struct UiManager {
     references_button: NodeHandle,
     references_title: NodeHandle,
     references_list: NodeHandle,
+    locale_panel: NodeHandle,
+    locale_button: NodeHandle,
+    locale_search: NodeHandle,
+    locale_incomplete: NodeHandle,
+    locale_grid: NodeHandle,
+    locale_actions: Vec<(NodeHandle, LocaleAction)>,
+    locale_open: bool,
+    /// Whether the panel is filtered to rows with an untranslated cell.
+    locale_only_incomplete: bool,
+    /// The last committed state of the localisation table.
+    ///
+    /// The grid owns the live one — it is mid-edit most of the time it is
+    /// looked at — and publishes a copy on every commit. This is what a save
+    /// writes, so a save can never catch a half-typed cell.
+    locale_table: Option<crate::data_table::DataTable>,
     title_drag: NodeHandle,
     title_label: NodeHandle,
     win_min: NodeHandle,
@@ -1655,6 +1685,15 @@ impl UiManager {
             references_button: layout.references_button,
             references_title: layout.references_title,
             references_list: layout.references_list,
+            locale_panel: layout.locale_panel,
+            locale_button: layout.locale_button,
+            locale_search: layout.locale_search,
+            locale_incomplete: layout.locale_incomplete,
+            locale_grid: layout.locale_grid,
+            locale_actions: layout.locale_actions,
+            locale_open: false,
+            locale_only_incomplete: false,
+            locale_table: None,
             title_last_click: None,
             immersive: false,
             immersive_restore_fullscreen: None,
@@ -1856,9 +1895,11 @@ impl UiManager {
                 self.log_open = true;
             }
         }
-        // A workspace preset never asks for References: it is scoped to an
-        // asset, and a preset does not know which one.
+        // Neither References nor Localisation is ever a preset's answer: one
+        // is scoped to an asset a preset does not know, and the other is a
+        // document you open on purpose.
         self.references_open = false;
+        self.locale_open = false;
         self.apply_bottom_panel();
 
         self.chrome_layout = crate::layout_persist::ChromeLayout {
@@ -3112,10 +3153,11 @@ impl UiManager {
 
     pub fn set_play_overlays_hidden(&mut self, hidden: bool) {
         if hidden {
-            if self.drawer_open || self.log_open || self.references_open {
+            if self.drawer_open || self.log_open || self.references_open || self.locale_open {
                 self.drawer_open = false;
                 self.log_open = false;
                 self.references_open = false;
+                self.locale_open = false;
                 self.apply_bottom_panel();
             }
             if self.help_open {
@@ -3170,6 +3212,7 @@ impl UiManager {
             self.drawer_open = true;
             self.log_open = false;
             self.references_open = false;
+            self.locale_open = false;
         }
         self.apply_bottom_panel();
     }
@@ -3181,6 +3224,7 @@ impl UiManager {
             self.log_open = true;
             self.drawer_open = false;
             self.references_open = false;
+            self.locale_open = false;
         }
         self.apply_bottom_panel();
     }
@@ -3194,18 +3238,41 @@ impl UiManager {
             self.references_open = true;
             self.drawer_open = false;
             self.log_open = false;
+            self.locale_open = false;
             self.refresh_references_panel();
         }
         self.apply_bottom_panel();
     }
 
+    /// MORROWIND-M item 2. The localisation table, which is empty until a
+    /// project with a `locale/` directory has been loaded.
+    fn toggle_locale_panel(&mut self) {
+        if self.locale_open {
+            self.locale_open = false;
+        } else {
+            self.locale_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+            self.references_open = false;
+        }
+        self.apply_bottom_panel();
+    }
+
     fn apply_bottom_panel(&mut self) {
-        let show = self.drawer_open || self.log_open || self.references_open;
+        let show = self.drawer_open || self.log_open || self.references_open || self.locale_open;
         self.native_ui
             .set_visibility(self.content_drawer, self.drawer_open);
         self.native_ui.set_visibility(self.log_panel, self.log_open);
         self.native_ui
             .set_visibility(self.references_panel, self.references_open);
+        self.native_ui
+            .set_visibility(self.locale_panel, self.locale_open);
+        // A hidden widget must not keep the keyboard. The grid holds it while a
+        // cell is chosen, which is right while you can see the cell and is the
+        // fly-cam silently not responding once the panel is closed over it.
+        if !self.locale_open && self.native_ui.focused() == self.locale_grid {
+            self.native_ui.release_keyboard();
+        }
         self.native_ui.send(UiMessage::new(
             self.outer_grid,
             MessageDirection::ToWidget,
@@ -4318,6 +4385,7 @@ impl UiManager {
                 .push_back(EditorEvent::ToggleImmersiveViewport),
             A::OpenOutputLog => self.toggle_log_panel(),
             A::OpenReferences => self.toggle_references_panel(),
+            A::OpenLocalisation => self.toggle_locale_panel(),
             A::ContentShowReferences => {
                 // Only an asset has references. A folder is a place, and the
                 // command is disabled for one because `content_target` gates
@@ -4732,6 +4800,34 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+    }
+
+    /// Hand the editor a localisation catalogue, already projected as a table.
+    ///
+    /// A `DataTable` and not a `Catalog`: `somnium_ui` does not know what a
+    /// catalogue is and must not learn — the projection lives in
+    /// `somnium_core::i18n`, which is the one place that knows both
+    /// vocabularies. See [`Self::localisation_table`] for the way back.
+    pub fn set_localisation_table(&mut self, table: crate::data_table::DataTable) {
+        self.locale_table = Some(table.clone());
+        self.native_ui.send(UiMessage::new(
+            self.locale_grid,
+            MessageDirection::ToWidget,
+            crate::widgets::data_grid::DataGridMessage::SetTable(Box::new(table)),
+        ));
+    }
+
+    /// The last committed state of the table, for a host about to save it.
+    #[must_use]
+    pub fn localisation_table(&self) -> Option<&crate::data_table::DataTable> {
+        self.locale_table.as_ref()
+    }
+
+    /// Open the Localisation panel on the table already loaded.
+    pub fn show_localisation(&mut self) {
+        if !self.locale_open {
+            self.toggle_locale_panel();
+        }
     }
 
     /// The project's reference graph, rebuilt with the asset inventory.
@@ -6723,6 +6819,17 @@ impl UiManager {
                 }
             }
 
+            // A committed cell edit in the Localisation grid. Outside the
+            // button block on purpose: a `DataGridMessage` is not a
+            // `ButtonMessage`, and a handler nested in there would never run.
+            if let Some(crate::widgets::data_grid::DataGridMessage::Edited { table, .. }) =
+                msg.data::<crate::widgets::data_grid::DataGridMessage>()
+            {
+                // A commit, not a keystroke: this is the state a save writes.
+                self.locale_table = Some((**table).clone());
+                continue;
+            }
+
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if let Some((_, id)) = self
                     .menu_command_items
@@ -6890,6 +6997,27 @@ impl UiManager {
                 }
                 if msg.destination == self.references_button {
                     self.toggle_references_panel();
+                    continue;
+                }
+                if msg.destination == self.locale_button {
+                    self.toggle_locale_panel();
+                    continue;
+                }
+                if let Some(action) = self
+                    .locale_actions
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .map(|(_, action)| *action)
+                {
+                    match action {
+                        LocaleAction::Save => {
+                            self.editor_events.push_back(EditorEvent::SaveLocalisation);
+                        }
+                        LocaleAction::ExportCsv => {
+                            self.editor_events
+                                .push_back(EditorEvent::ExportLocalisationCsv);
+                        }
+                    }
                     continue;
                 }
                 // Walking the graph is the point of the panel: a row is a
@@ -7115,6 +7243,17 @@ impl UiManager {
                     self.refresh_content_list();
                     continue;
                 }
+                if msg.destination == self.locale_incomplete {
+                    self.locale_only_incomplete = !self.locale_only_incomplete;
+                    self.native_ui.send(UiMessage::new(
+                        self.locale_grid,
+                        MessageDirection::ToWidget,
+                        crate::widgets::data_grid::DataGridMessage::SetOnlyIncomplete(
+                            self.locale_only_incomplete,
+                        ),
+                    ));
+                    continue;
+                }
                 // Phase 16-D: an attachment's enable box, or one of its
                 // declared boolean properties.
                 if let Some((_, action)) = self
@@ -7327,6 +7466,15 @@ impl UiManager {
                 if msg.destination == self.content_search {
                     self.content_filter = q.clone();
                     self.refresh_content_list();
+                }
+                if msg.destination == self.locale_search {
+                    // Straight through to the grid: the filter is the view's,
+                    // and the view belongs to the widget that draws it.
+                    self.native_ui.send(UiMessage::new(
+                        self.locale_grid,
+                        MessageDirection::ToWidget,
+                        crate::widgets::data_grid::DataGridMessage::SetFilter(q.clone()),
+                    ));
                 }
                 if msg.destination == self.outliner_search {
                     self.outliner_filter = q.clone();
@@ -8573,6 +8721,7 @@ mod must_not_break {
             ("content drawer", l.drawer_button),
             ("output log", l.log_button),
             ("references", l.references_button),
+            ("localisation", l.locale_button),
             ("help", l.help_button),
         ] {
             assert!(!handle.is_none(), "{name} is missing from the shell");

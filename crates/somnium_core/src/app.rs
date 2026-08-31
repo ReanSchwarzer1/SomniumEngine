@@ -642,6 +642,10 @@ pub struct Engine<G: GameApp> {
         )>,
     >,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
+    /// The project's string tables, as loaded. The editor holds the *table*;
+    /// this is the catalogue it was projected from, kept because a save needs
+    /// the display names and font lists a table cannot carry.
+    locale_catalog: Option<somnium_i18n::Catalog>,
     next_asset_scan: std::time::Instant,
     /// When shader files were last polled for hot reload (MORROWIND-C).
     last_shader_poll: std::time::Instant,
@@ -923,6 +927,7 @@ impl<G: GameApp + 'static> Engine<G> {
             world_partition_pin: None,
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
+            locale_catalog: None,
             next_asset_scan: std::time::Instant::now(),
             last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
@@ -2071,6 +2076,106 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Where the project keeps its string tables.
+    ///
+    /// A directory rather than a file, one table per locale, because that is
+    /// what a translator is handed and what a git diff is readable in.
+    fn locale_dir(&self) -> std::path::PathBuf {
+        self.config.content_root.join("locale")
+    }
+
+    /// Load the project's catalogue and hand the editor the table for it.
+    ///
+    /// MORROWIND-M item 2. The projection happens here, in the one crate that
+    /// knows both `somnium_i18n` and `somnium_ui` — the editor is given a
+    /// `DataTable` and never learns what a catalogue is.
+    fn load_localisation(&mut self) {
+        let dir = self.locale_dir();
+        if !dir.is_dir() {
+            // A project with no translations is the ordinary case, not an
+            // error. The panel opens empty and says nothing alarming.
+            return;
+        }
+        match crate::i18n::load_catalog(&dir, "en") {
+            Ok(catalog) => {
+                let table = crate::i18n::catalog_to_table(&catalog);
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_localisation_table(table);
+                }
+                self.locale_catalog = Some(catalog);
+            }
+            Err(error) => {
+                error!("{error}");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!("[locale] {error}"));
+                }
+            }
+        }
+    }
+
+    /// Write the edited table back, one file per locale.
+    fn save_localisation(&mut self) {
+        let dir = self.locale_dir();
+        let Some(table) = self
+            .ui_manager
+            .as_ref()
+            .and_then(UiManager::localisation_table)
+            .cloned()
+        else {
+            return;
+        };
+        // The loaded catalogue is the template: it carries the display name and
+        // the font list, which a grid of strings cannot hold and which a save
+        // that dropped them would cost a language its typeface.
+        let template = self
+            .locale_catalog
+            .clone()
+            .unwrap_or_else(|| somnium_i18n::Catalog::new("en"));
+        let catalog = crate::i18n::table_to_catalog(&table, &template);
+        match crate::i18n::save_catalog(&dir, &catalog) {
+            Ok(()) => {
+                let locales = catalog.locales().len();
+                self.locale_catalog = Some(catalog);
+                // Rescan: the files just changed on disk, and the drawer is
+                // showing them.
+                self.next_asset_scan = std::time::Instant::now();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!(
+                        "[locale] saved {locales} locale(s) to {}",
+                        dir.display()
+                    ));
+                    ui.push_toast("Localisation saved");
+                }
+            }
+            Err(error) => self.report_content_error(&dir, &error),
+        }
+    }
+
+    /// Hand the table to a translator as one CSV.
+    fn export_localisation_csv(&mut self) {
+        let Some(table) = self
+            .ui_manager
+            .as_ref()
+            .and_then(UiManager::localisation_table)
+            .cloned()
+        else {
+            return;
+        };
+        let path = self.locale_dir().join("localisation.csv");
+        match std::fs::create_dir_all(self.locale_dir())
+            .and_then(|()| std::fs::write(&path, table.to_csv()))
+        {
+            Ok(()) => {
+                self.next_asset_scan = std::time::Instant::now();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!("[locale] exported {}", path.display()));
+                    ui.push_toast("Exported localisation.csv");
+                }
+            }
+            Err(error) => self.report_content_error(&path, &format!("{error}")),
+        }
+    }
+
     /// Write a new `.luau` file from the template and attach it.
     ///
     /// Never overwrites: a name that exists gets a numeric suffix. Losing
@@ -2483,6 +2588,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
+
+                // MORROWIND-M item 2. Read once at startup rather than on the
+                // asset inventory's job: a catalogue is a handful of files, and
+                // rebuilding the table under a translator every time anything
+                // in the project changed would throw away their scroll
+                // position and their in-flight edit.
+                self.load_localisation();
 
                 // MORROWIND-I. Everything is initialised; show the window.
                 window.set_visible(true);
@@ -8559,6 +8671,10 @@ impl<G: GameApp> Engine<G> {
                     self.report_content_error(&path, &error);
                 }
             }
+
+            EditorEvent::SaveLocalisation => self.save_localisation(),
+
+            EditorEvent::ExportLocalisationCsv => self.export_localisation_csv(),
 
             EditorEvent::EditContentAsset(path) => {
                 let path = std::path::PathBuf::from(path);

@@ -1,6 +1,6 @@
 # MORROWIND-M — virtualisation, data tables, the localisation editor
 
-**Status:** items 1 and 3 complete, 2026-08-31. The virtualising container exists; the
+**Status:** complete, 2026-08-31. All three items. The virtualising container exists; the
 outliner virtualises its draw and the content drawer virtualises its *widgets*,
 both with the acceptance property measured rather than asserted.
 
@@ -9,7 +9,7 @@ both with the acceptance property measured rather than asserted.
 | Item | State |
 |---|---|
 | 1. A virtualising container, retro-fitted to the outliner, content drawer and asset browser | Container **done**; **outliner done**; **content drawer done** — a different shape, see below. The asset browser is the drawer under another name and inherits it |
-| 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | **Model done**, with the localisation table as its first customer; the grid widget is not built |
+| 2. A data table editor — typed columns, sorting, filtering, multi-cell edit, CSV | **Done** — model, grid widget, and the localisation table editable in the editor |
 | 3. Asset dependency view, built on MORROWIND-Q's dependency graph | **Done** — a project-wide reference graph and a References panel |
 
 ## The ceiling nobody had measured
@@ -291,6 +291,89 @@ binary header followed by its document, so the file is not JSON even though its
 body is, and the summary counts prove which files were opened and which were
 skipped.
 
+### The grid, and what it owns that the model does not
+
+`somnium_ui::widgets::data_grid` is the projection. **One widget, not one per
+cell** — a ten-thousand-row catalogue is ten thousand rows of *data*, and the
+draw is windowed against the clip with the same `RowWindow` the outliner uses.
+A screenful of a ten-thousand-row table costs what a screenful of a twenty-row
+one costs, and that is a test rather than a claim.
+
+Three things live here because they cannot live in the model:
+
+- **The frozen header.** A grid inside a scroll viewer is as tall as its
+  content, so the widget's own top scrolls away and takes the column titles with
+  it. The header is drawn at the top of the *clip* instead, and the header's
+  click target reads the clip too — the two agreeing is what makes sorting work
+  when the table is scrolled.
+- **The edit buffer.** The cell is the model's and the buffer is the widget's,
+  so nothing is written until Enter. That is what lets a bad value be refused
+  rather than half-written, and Escape put things back.
+- **A rectangular selection held by key at both corners.** Positions are the
+  obvious thing to store and the wrong one: a sort between the anchor click and
+  the shift-click renumbers every row, and a range that meant rows 4–9 would
+  come to mean six different rows.
+
+Four behaviours worth naming, each of which had an easier wrong answer:
+
+- **A refused edit keeps what was typed.** Throwing away the text because it did
+  not parse is how a grid loses work; the buffer stays, and the reason is
+  readable against the cell.
+- **A range edit is still all or nothing** — the model's promise, reached
+  through the widget. Type `heavy` across a text column and a number column and
+  *neither* is written.
+- **Delete empties a cell rather than writing a blank.** `Cell::Empty` and
+  `Cell::Text("")` are different, and the difference is what "show me what is
+  missing" runs on.
+- **The keyboard belongs to the grid only once a cell is chosen.** A focused
+  widget that claims text input swallows every key before the game sees it.
+  Always claiming it means a grid nobody clicked into eats the fly-cam's WASD;
+  never claiming it means typing `w` into a cell also switches the gizmo to
+  Translate and `Delete` removes the selected *entity*. And closing the panel
+  releases the keyboard, because a widget you cannot see must not be holding it.
+
+### The round trip, which is what makes it an editor
+
+`catalog_to_table` was already there and is only half a feature: a projection
+you can only read is a report. `somnium_core::i18n` gained the other half —
+`load_catalog`, `save_catalog` and `table_to_catalog` — and two of its
+decisions are the whole difference between an editor and a data-loss bug:
+
+- **An untranslated cell comes back as an absent key, not as `""`.** Writing the
+  empty string would make every untranslated key look translated to every later
+  pass, `only_incomplete` included — the filter a translator opens the table to
+  use.
+- **The display name and the font list survive an edit.** A grid of strings
+  cannot hold them, so the loaded catalogue is the template a save is written
+  against. Losing the font list is how a language ships as a screen of tofu
+  boxes with the translation itself perfectly correct.
+
+A file whose name and whose `locale` field disagree is refused rather than
+guessed at, because either half could be the typo and picking one silently ships
+a language's strings under another's name.
+
+### In the editor
+
+A fourth tenant of the bottom row, beside the Content Drawer, the Output Log and
+References: **Localisation**, with a filter box, an *Only untranslated* toggle,
+Save and Export CSV.
+
+`assets/locale/` ships with three locales — English complete, French partial,
+Japanese barely started and carrying a font requirement — so the panel has
+something to say on first launch and the *Only untranslated* toggle has
+something to find. An editor feature you have to build a fixture for in order to
+see is one nobody sees.
+
+The crate boundary the whole i18n design rests on is preserved: `somnium_ui`
+is handed a `DataTable` and never learns what a catalogue is, and
+`EditorEvent::SaveLocalisation` carries **nothing** — the host asks for the
+committed table and does the conversion, because the shape a catalogue is saved
+in is a `somnium_i18n` question.
+
+**A save writes the last committed table, never the live one.** The grid
+publishes a copy on each commit and the host holds that; a host that read the
+widget whenever it liked would eventually read one mid-keystroke.
+
 ## What this step does not claim
 
 - No frame time was measured. The property was, in both panels.
@@ -304,9 +387,13 @@ skipped.
   a row scrolled into view are requested one frame later. The thumbnail pump is
   already asynchronous and bounded per frame, so this is a frame of icon rather
   than a frame of nothing.
-- Item 2's grid widget is not built. The model is done and the localisation
-  table, which the plan names as its first customer, is still edited outside the
-  editor.
+- The grid has no horizontal scroll. Columns share the panel's width down to a
+  90 px floor, below which they overflow and are clipped — fine for a catalogue
+  of three or four locales and not for twenty.
+- The catalogue is read once at startup. Rebuilding the table under a translator
+  every time anything in the project changed would throw away their scroll
+  position and their in-flight edit, so an external change to a locale file
+  needs the editor restarted.
 - The reference graph reads scenes, prefabs, materials, `.somui` documents and
   plain JSON. Meshes, scripts and shaders keep their references in formats it
   does not parse, and it says so rather than reporting them as unused.

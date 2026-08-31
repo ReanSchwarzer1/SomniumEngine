@@ -276,6 +276,8 @@ pub enum CommandAction {
     OpenOutputLog,
     /// Open or close the References panel on whatever it last had.
     OpenReferences,
+    /// Open or close the Localisation table.
+    OpenLocalisation,
     /// Point the References panel at the chosen content item.
     ContentShowReferences,
     CreateEntity(CreateKind),
@@ -976,6 +978,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Open or close the Output Log.",
             A::OpenOutputLog,
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.localisation",
+            "Localisation",
+            "Window",
+            None,
+            "Open or close the localisation table.",
+            A::OpenLocalisation,
             WINDOW,
             always
         ),

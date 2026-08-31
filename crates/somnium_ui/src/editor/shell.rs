@@ -21,10 +21,12 @@ use crate::{
     widgets::{
         border::BorderBuilder,
         button::ButtonBuilder,
+        check_box::CheckBoxBuilder,
         color_picker::ColorPickerBuilder,
         combo_box::ComboBoxBuilder,
         command_palette::CommandPaletteBuilder,
         context_menu::ContextMenuBuilder,
+        data_grid::DataGridBuilder,
         grid::{Column, GridBuilder, Row},
         image::ImageBuilder,
         menu::MenuBuilder,
@@ -1411,6 +1413,115 @@ pub(crate) fn build_editor_layout(
             .build();
     let references_list = ui.add_node(references_stack, references_scroll);
 
+    // ── The Localisation table (MORROWIND-M item 2) ─────────────────────────
+    //
+    // A fourth tenant of the bottom row. The grid is one widget over the whole
+    // catalogue, so this is a scroll viewer and a header of verbs, not a
+    // container of rows.
+    let locale_panel = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::TRANSPARENT)
+            .with_visibility(false),
+    )
+    .add_row(Row::strict(24.0))
+    .add_row(Row::stretch())
+    .add_column(Column::stretch())
+    .build();
+    let locale_panel = ui.add_node(locale_panel, bottom_swap_h);
+
+    let locale_hdr = BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_background(theme::BG_HEADER)
+            .with_foreground(theme::BORDER_DARK),
+    )
+    .with_stroke_thickness(Thickness {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 1.0,
+    })
+    .build();
+    let locale_hdr = ui.add_node(locale_hdr, locale_panel);
+    let locale_bar =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let locale_bar = ui.add_node(locale_bar, locale_hdr);
+
+    let locale_title = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
+    .with_role(TextRole::SectionCaps)
+    .with_text("Localisation")
+    .with_font_id(font_id)
+    .build();
+    ui.add_node(locale_title, locale_bar);
+
+    let locale_search = SearchBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_width(180.0)
+            .with_height(20.0)
+            .with_margin(Thickness::axes(4.0, 2.0))
+            .with_background(theme::BG_INPUT),
+    )
+    .with_font_id(font_id)
+    .build();
+    let locale_search = ui.add_node(locale_search, locale_bar);
+
+    // The question a translator opens the table to ask, as a control rather
+    // than as something to scroll for.
+    let locale_incomplete =
+        CheckBoxBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 2.0)))
+            .with_label("Only untranslated")
+            .with_font_id(font_id)
+            .with_font_size(11.0)
+            .build();
+    let locale_incomplete = ui.add_node(locale_incomplete, locale_bar);
+
+    let mut locale_actions = Vec::new();
+    for (label, action) in [
+        ("Save", LocaleAction::Save),
+        ("Export CSV", LocaleAction::ExportCsv),
+    ] {
+        let button = ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_height(20.0)
+                .with_margin(Thickness::axes(2.0, 2.0)),
+        )
+        .build();
+        let button = ui.add_node(button, locale_bar);
+        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 3.0)))
+            .with_text(label)
+            .with_font_id(font_id)
+            .with_font_size(10.0)
+            .build();
+        ui.add_node(text, button);
+        locale_actions.push((button, action));
+    }
+
+    let locale_scroll = ScrollViewerBuilder::new(
+        WidgetBuilder::new()
+            .with_row(1)
+            .with_column(0)
+            .with_background(theme::BG_CONTENT),
+    )
+    .build();
+    let locale_scroll = ui.add_node(locale_scroll, locale_panel);
+    let locale_grid = DataGridBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Top)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_font_id(font_id)
+    .build();
+    let locale_grid = ui.add_node(locale_grid, locale_scroll);
+
     // ── Row 6: status bar ────────────────────────────────────────────────────
     let status_bar = BorderBuilder::new(
         WidgetBuilder::new()
@@ -1461,6 +1572,15 @@ pub(crate) fn build_editor_layout(
         IconId::OutputLog,
         "Output Log",
         &command_tooltip("editor.window.output_log"),
+        font_id,
+        theme::STATUS_HEIGHT,
+    );
+    let (locale_button, _) = labeled_icon_button(
+        ui,
+        status_stack_h,
+        IconId::Language,
+        "Localisation",
+        &command_tooltip("editor.window.localisation"),
         font_id,
         theme::STATUS_HEIGHT,
     );
@@ -1932,5 +2052,11 @@ pub(crate) fn build_editor_layout(
         references_button,
         references_title,
         references_list,
+        locale_panel,
+        locale_button,
+        locale_search,
+        locale_incomplete,
+        locale_grid,
+        locale_actions,
     }
 }

@@ -1,0 +1,16 @@
+{
+  "locale": "en",
+  "display_name": "English",
+  "fonts": [],
+  "strings": {
+    "hud.score": "Score",
+    "hud.title": "Somnium",
+    "menu.new_scene": "New Scene",
+    "menu.open": "Open",
+    "menu.play": "Play",
+    "menu.quit": "Quit",
+    "menu.save": "Save",
+    "prompt.unsaved": "You have unsaved changes.",
+    "status.ready": "Ready"
+  }
+}
