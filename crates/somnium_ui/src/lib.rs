@@ -547,6 +547,9 @@ struct EditorLayout {
     status_stats_button: NodeHandle,
     /// Floating viewport-context scope; a child of the viewport, not a grid row.
     /// Held for the layout regression test that pins the 68 px scene budget.
+    /// The empty middle of the title bar, which drags the window like the
+    /// left cluster does.
+    title_drag_area: NodeHandle,
     /// The Outliner's whole container, so floating it can take its space away.
     outliner_grid: NodeHandle,
     /// The float buttons on the Outliner and Details headers.
@@ -888,6 +891,7 @@ pub struct UiManager {
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
     preferences: crate::editor::preferences::PreferencesHandles,
+    title_drag_area: NodeHandle,
     outliner_grid: NodeHandle,
     outliner_float: NodeHandle,
     details_float: NodeHandle,
@@ -1616,6 +1620,7 @@ impl UiManager {
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
             preferences: layout.preferences,
+            title_drag_area: layout.title_drag_area,
             outliner_grid: layout.outliner_grid,
             outliner_float: layout.outliner_float,
             details_float: layout.details_float,
@@ -3586,7 +3591,18 @@ impl UiManager {
     }
 
     fn is_title_chrome_hit(&self, hit: NodeHandle) -> bool {
-        hit == self.title_drag || self.native_ui.is_under(hit, self.title_drag)
+        // The left cluster and everything in it, plus the empty middle of the
+        // bar. The middle is an **exact** hit rather than `is_under`: the menu
+        // buttons and the command palette live inside the same container, and
+        // dragging the window instead of opening the File menu would be a
+        // worse bug than the one this fixes.
+        //
+        // Before this, only the auto-sized left column dragged, so the obvious
+        // place to grab a window — the wide empty strip in the middle — did
+        // nothing.
+        hit == self.title_drag
+            || self.native_ui.is_under(hit, self.title_drag)
+            || hit == self.title_drag_area
     }
 
     fn transient_overlay_open(&self) -> bool {

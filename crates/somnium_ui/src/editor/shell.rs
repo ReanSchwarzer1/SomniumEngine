@@ -2010,6 +2010,7 @@ pub(crate) fn build_editor_layout(
         status_stats,
         status_stats_button,
         vp_bar_h,
+        title_drag_area: menu_grid_h,
         outliner_grid: out_grid_h,
         outliner_float,
         details_float,

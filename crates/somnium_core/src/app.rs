@@ -2780,6 +2780,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             };
         }
 
+        // Moved to a display with a different DPI.
+        //
+        // Windows follows this with a `Resized` carrying the new physical size,
+        // and the shell lays out in physical pixels, so the layout does follow
+        // the window across monitors. What it does *not* do is change apparent
+        // size: 13 px of text is 13 device pixels on both displays, so the
+        // editor reads smaller on the denser one. Fixing that means moving
+        // layout to logical units, which `FontAtlas::render_scale` names as its
+        // own piece of work rather than a constant to flip here.
+        if let WindowEvent::ScaleFactorChanged { scale_factor, .. } = &event {
+            info!(scale_factor, "display scale changed");
+            if let (Some(ui), Some(window)) = (&mut self.ui_manager, &self.window) {
+                ui.reposition_panels(window);
+            }
+        }
+
         // Handle Resizing
         if let WindowEvent::Resized(size) = &event {
             self.viewport_size_hint = (size.width as f32, size.height as f32);
