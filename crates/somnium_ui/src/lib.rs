@@ -5068,6 +5068,17 @@ impl UiManager {
         Some(self.native_ui.draw_ctx.instances.len())
     }
 
+    /// Layout units per device pixel, for a host sizing a second window.
+    ///
+    /// One number for every window, because there is one widget tree. A
+    /// floating window that laid itself out at its *own* monitor's scale and
+    /// then had its clicks converted at this one's would put every control a
+    /// little away from where it responds.
+    #[must_use]
+    pub fn ui_scale(&self) -> f32 {
+        self.native_ui.ui_scale()
+    }
+
     /// Where a panel was laid out, for a host reporting what its window drew.
     #[must_use]
     pub fn panel_bounds(&self, kind: crate::floating::FloatingKind) -> crate::types::Rect {

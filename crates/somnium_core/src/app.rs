@@ -906,20 +906,16 @@ enum FloatingRoute {
 /// A panel in its own OS window: the parts `somnium_ui` deliberately does not
 /// own.
 ///
-/// MORROWIND-J step 2. The widgets are not here and are not a copy of anything
-/// — they are the panel's own nodes, detached from the dock and laid out
-/// against this window instead (see [`somnium_ui::floating`]). What this owns
-/// is the platform: a window, a surface, its configuration, and the pass that
-/// puts one on the other.
+/// MORROWIND-J step 2. The widgets are not here and are not a copy of anything:
+/// they are the panel's own nodes, detached from the dock and laid out against
+/// this window instead (see [`somnium_ui::floating`]). Neither is the pass,
+/// which the editor owns and every window shares. What this owns is the
+/// platform: a window, a surface, and its configuration.
 struct FloatingWindow {
     kind: somnium_ui::floating::FloatingKind,
     window: std::sync::Arc<Window>,
     surface: somnium_ui::wgpu::Surface<'static>,
     config: somnium_ui::wgpu::SurfaceConfiguration,
-    /// Layout units per device pixel, taken from the main window so that a
-    /// pointer position and a laid-out rectangle mean the same thing. The
-    /// widget tree has one scale and both windows share it.
-    scale: f32,
     /// How many frames this window has drawn, for `SOMNIUM_FLOAT_PNG`.
     frames: u64,
     captured: bool,
@@ -934,8 +930,20 @@ struct FloatingWindow {
 
 impl FloatingWindow {
     /// The window's size in the units the widget tree lays out in.
-    fn logical(&self) -> (f32, f32) {
-        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+    ///
+    /// The *interface's* scale, not this window's, and read live rather than
+    /// remembered. The tree lays out in one scale and converts pointer
+    /// positions with the same one, so a window sized by its own monitor while
+    /// its clicks were converted by the editor's would put every control a
+    /// little away from where it responds. On a second monitor this window is
+    /// therefore the wrong apparent size, which is the deferral
+    /// `FontAtlas::render_scale` already names, and not the wrong *shape*.
+    fn logical(&self, ui: &somnium_ui::UiManager) -> (f32, f32) {
+        let scale = if ui.ui_scale() > 0.0 {
+            ui.ui_scale()
+        } else {
+            1.0
+        };
         (
             self.config.width as f32 / scale,
             self.config.height as f32 / scale,
@@ -959,7 +967,8 @@ impl FloatingWindow {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(device, &self.config);
-        ui.resize_floating(self.kind, self.logical());
+        let logical = self.logical(ui);
+        ui.resize_floating(self.kind, logical);
     }
 
     /// Draw this window's panel into this window's swapchain.
@@ -1008,13 +1017,14 @@ impl FloatingWindow {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Floating Window Encoder"),
             });
+        let surface = somnium_ui::pass::UiSurface::new(self.logical(ui), physical);
         let instances = ui.render_floating(
             self.kind,
             &ctx.device,
             &ctx.queue,
             &mut encoder,
             &view,
-            somnium_ui::pass::UiSurface::new(self.logical(), physical),
+            surface,
         );
         ctx.queue.submit(std::iter::once(encoder.finish()));
         self.frames += 1;
@@ -7297,13 +7307,11 @@ impl<G: GameApp> Engine<G> {
         config.usage |= somnium_ui::wgpu::TextureUsages::COPY_SRC;
         surface.configure(&ctx.device, &config);
 
-        let scale = window.scale_factor() as f32;
         let floating = FloatingWindow {
             kind,
             window,
             surface,
             config,
-            scale,
             frames: 0,
             captured: false,
             reported: false,
@@ -7312,7 +7320,8 @@ impl<G: GameApp> Engine<G> {
         // first frame is drawn for this window rather than for the default the
         // detach used.
         if let Some(ui) = self.ui_manager.as_mut() {
-            ui.resize_floating(kind, floating.logical());
+            let logical = floating.logical(ui);
+            ui.resize_floating(kind, logical);
         }
         floating.window.request_redraw();
         info!(?kind, "floating window opened");
@@ -7367,8 +7376,11 @@ impl<G: GameApp> Engine<G> {
                     self.resize_scene_targets();
                 }
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.floating[index].scale = *scale_factor as f32;
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // Deliberately nothing. See `FloatingWindow::scale`: the tree
+                // has one scale, and taking this window's would split layout
+                // from input. Windows follows this with a `Resized`, which is
+                // handled above.
             }
             // Everything else is the panel's: pointer, wheel, keys. It reaches
             // the editor's own interface with hit-testing rooted at this
