@@ -178,7 +178,10 @@ mod tests {
             .take(16 * 16)
             .find(|px| px[3] > 0)
             .expect("the mark covers some of the smallest cell");
-        assert_eq!([opaque[0], opaque[1], opaque[2]], [tint[2], tint[1], tint[0]]);
+        assert_eq!(
+            [opaque[0], opaque[1], opaque[2]],
+            [tint[2], tint[1], tint[0]]
+        );
 
         // The mark is drawn in the middle of the cell, so the first row read
         // bottom-up and the first row read top-down are both empty; what

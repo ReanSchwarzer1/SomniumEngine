@@ -2590,6 +2590,7 @@ impl UiManager {
             }
         }
         let consumed = self.native_ui.process_os_event(event);
+        self.cancel_panel_drag_on_blur(event);
         if matches!(event, WindowEvent::CursorMoved { .. }) {
             self.update_panel_drag();
         }
@@ -5155,6 +5156,17 @@ impl UiManager {
         .map(|(_, kind)| kind)
     }
 
+    /// Abandon a header drag whose release is never coming.
+    ///
+    /// A window that loses focus mid-gesture — alt-tab, a system dialog — may
+    /// never deliver the button going up, and an armed drag left behind would
+    /// carry the panel off on the *next* release, somewhere nobody dragged it.
+    fn cancel_panel_drag_on_blur(&mut self, event: &WindowEvent) {
+        if matches!(event, WindowEvent::Focused(false)) {
+            self.panel_drag = None;
+        }
+    }
+
     /// Note a press that might become a header drag.
     fn begin_panel_drag(&mut self, hit: NodeHandle) {
         // Any press ends whatever was in flight. A drag whose release was
@@ -5449,6 +5461,7 @@ impl UiManager {
             self.begin_panel_drag(hit);
         }
         let consumed = self.native_ui.process_os_event(event);
+        self.cancel_panel_drag_on_blur(event);
         if matches!(event, WindowEvent::CursorMoved { .. }) {
             self.update_panel_drag();
         }
