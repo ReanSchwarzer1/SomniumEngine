@@ -19,6 +19,7 @@
 
 use somnium_audio::engine::AudioEngine;
 use somnium_ecs::World;
+use somnium_jobs::JobSystem;
 use somnium_physics::world::PhysicsWorld;
 use somnium_renderer::{RenderContext, SomniumRenderer};
 use somnium_ui::UiManager;
@@ -93,6 +94,10 @@ pub struct EngineContext<'a> {
 
     /// Reference to the audio engine.
     pub audio: &'a mut AudioEngine,
+
+    /// The engine's one background scheduler. Game-side streaming systems use
+    /// this instead of creating a private pool or detached Rayon task.
+    pub jobs: &'a mut JobSystem,
 
     /// The renderer context containing wgpu state. Optional if headless.
     pub render_ctx: Option<&'a RenderContext>,
@@ -189,6 +194,7 @@ impl<'a> EngineContext<'a> {
         world: &'a mut World,
         physics: &'a mut PhysicsWorld,
         audio: &'a mut AudioEngine,
+        jobs: &'a mut JobSystem,
         render_ctx: Option<&'a RenderContext>,
         renderer: Option<&'a mut SomniumRenderer>,
         selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
@@ -203,6 +209,7 @@ impl<'a> EngineContext<'a> {
             world,
             physics,
             audio,
+            jobs,
             render_ctx,
             renderer,
             selected_entity,

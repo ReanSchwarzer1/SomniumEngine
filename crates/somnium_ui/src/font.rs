@@ -19,6 +19,12 @@ pub const ATLAS_HEIGHT: u32 = 1024;
 /// Hash key for a cached glyph entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
+    /// A character, or a glyph index with [`Self::GLYPH_INDEX`] set.
+    ///
+    /// One cache, not two. A shaped run names glyphs by index and an unshaped
+    /// one names them by character, and the same glyph reached both ways is the
+    /// same bitmap — but the *keys* must not collide, or `'A'` (U+0041) would
+    /// serve glyph 65 of whatever face asked next.
     pub codepoint: u32,
     /// f32 font size as raw bits — exact equality on constants, no NaN risk.
     pub px_bits: u32,
@@ -26,9 +32,25 @@ pub struct GlyphKey {
 }
 
 impl GlyphKey {
+    /// Set on a key that names a glyph index rather than a character.
+    ///
+    /// Above the Unicode maximum (U+10FFFF), so it cannot collide with a real
+    /// codepoint however the two paths are mixed.
+    pub const GLYPH_INDEX: u32 = 1 << 24;
+
     pub fn new(ch: char, px: f32, font_id: u8) -> Self {
         Self {
             codepoint: ch as u32,
+            px_bits: px.to_bits(),
+            font_id,
+        }
+    }
+
+    /// A key for a shaped glyph, named by its index in the face.
+    #[must_use]
+    pub fn indexed(glyph_id: u16, px: f32, font_id: u8) -> Self {
+        Self {
+            codepoint: u32::from(glyph_id) | Self::GLYPH_INDEX,
             px_bits: px.to_bits(),
             font_id,
         }
@@ -60,6 +82,23 @@ pub struct FontAtlas {
     pub dirty: bool,
 
     fonts: Vec<fontdue::Font>,
+    /// The bytes each face was loaded from.
+    ///
+    /// `fontdue::Font` is a rasteriser and does not lend out the tables a
+    /// shaper needs — GSUB, GPOS, the script and language systems. Holding the
+    /// source is what lets `rustybuzz` build a `Face` over the *same* face the
+    /// atlas rasterises from, which is the only way the advances it returns
+    /// describe the glyphs that get drawn.
+    font_bytes: Vec<std::sync::Arc<[u8]>>,
+    /// Which face serves which codepoint, in load order.
+    ///
+    /// Built from what each face actually contains rather than from the Unicode
+    /// block a character sits in — MORROWIND-G item 3's rule, and the reason a
+    /// CJK face is allowed to serve the Latin it was designed to sit with.
+    chain: crate::text::fallback::FallbackChain<crate::text::fallback::CoverageSet>,
+    /// Whether measurement goes through the shaper. Must match the draw path's
+    /// answer for the same string, or layout and painting disagree.
+    shaper: crate::text::ShaperPolicy,
     glyphs: HashMap<GlyphKey, GlyphInfo>,
     /// Device pixels per unit of UI **layout** space. Glyphs rasterize at
     /// `px * render_scale * SUPER_SAMPLE` and draw at `px`.
@@ -111,6 +150,9 @@ impl FontAtlas {
             height: ATLAS_HEIGHT,
             dirty: false,
             fonts: Vec::new(),
+            font_bytes: Vec::new(),
+            chain: crate::text::fallback::FallbackChain::new(),
+            shaper: crate::text::ShaperPolicy::from_env(),
             glyphs: HashMap::new(),
             render_scale: 1.0,
             cursor_x: 1, // 1px border to avoid UV bleeding
@@ -131,8 +173,55 @@ impl FontAtlas {
             },
         )?;
         let id = self.fonts.len() as u8;
+        // Ask the face what it covers. `fontdue` exposes its character map, so
+        // this is the face's own answer and not a guess from the file name.
+        let mut codepoints: Vec<u32> = font.chars().keys().map(|c| *c as u32).collect();
+        codepoints.sort_unstable();
+        self.chain.push(
+            id,
+            crate::text::fallback::CoverageSet::new(runs_of(&codepoints)),
+        );
         self.fonts.push(font);
+        self.font_bytes.push(std::sync::Arc::from(bytes));
         Ok(id)
+    }
+
+    /// The shaped width of one line, when shaping is on and can do it.
+    fn shaped_width(&self, line: &str, px: f32, font_id: u8, tracking: f32) -> Option<f32> {
+        // Tracking declines shaping in the draw path, so it declines here too:
+        // the two must agree about which path a given string takes.
+        if !self.shaper.is_available() || tracking != 0.0 || line.is_empty() {
+            return None;
+        }
+        crate::text::shape::shape_line(
+            line,
+            px,
+            self,
+            self.chain(),
+            crate::text::Direction::of_paragraph(line),
+            font_id,
+        )
+        .map(|shaped| shaped.width)
+    }
+
+    /// Which face serves which codepoint.
+    #[must_use]
+    pub fn chain(
+        &self,
+    ) -> &crate::text::fallback::FallbackChain<crate::text::fallback::CoverageSet> {
+        &self.chain
+    }
+
+    /// The bytes a face was loaded from, for a shaper.
+    #[must_use]
+    pub fn font_bytes(&self, font_id: u8) -> Option<&std::sync::Arc<[u8]>> {
+        self.font_bytes.get(font_id as usize)
+    }
+
+    /// How many faces are loaded.
+    #[must_use]
+    pub fn font_count(&self) -> usize {
+        self.fonts.len()
     }
 
     pub fn has_fonts(&self) -> bool {
@@ -163,10 +252,17 @@ impl FontAtlas {
         let mut max_w = 0.0f32;
         let mut lines = 0u32;
         for line in text.split('\n') {
-            let w: f32 = line
-                .chars()
-                .map(|ch| font.metrics(ch, px).advance_width + tracking)
-                .sum();
+            // Measured the same way it will be drawn. A layout that measures
+            // per-character while the draw shapes is off by the kerning on
+            // every string — text centred a pixel left, a button an em too
+            // narrow, an ellipsis on a label that would have fitted.
+            let w = self
+                .shaped_width(line, px, font_id, tracking)
+                .unwrap_or_else(|| {
+                    line.chars()
+                        .map(|ch| font.metrics(ch, px).advance_width + tracking)
+                        .sum()
+                });
             max_w = max_w.max(w);
             lines += 1;
         }
@@ -231,8 +327,74 @@ impl FontAtlas {
         }
         let font = self.fonts.get(font_id as usize)?;
         let (metrics, bitmap) = font.rasterize(ch, raster_px);
-        let inv = px / raster_px;
+        self.pack(key, px / raster_px, &metrics, &bitmap)
+    }
 
+    /// The same, for a glyph a shaper chose by index.
+    ///
+    /// MORROWIND-G item 1. A shaped cluster does not have a character to ask
+    /// for: a ligature is one glyph from two codepoints, and an Arabic letter
+    /// is a different glyph in each of its four joining forms. Only the index
+    /// identifies what to draw.
+    ///
+    /// **Rasterised from the outline, not by `fontdue`.** The two libraries do
+    /// not share an index space — see [`crate::text::raster`] for the measured
+    /// divergence — so handing `fontdue` a shaped id draws a different glyph.
+    /// That surfaced as missing punctuation and would have surfaced as wrong
+    /// ligatures, which is the same bug wearing a disguise nobody would catch.
+    pub fn get_or_rasterize_indexed(
+        &mut self,
+        glyph_id: u16,
+        px: f32,
+        font_id: u8,
+    ) -> Option<GlyphInfo> {
+        let raster_px = (px * self.render_scale * SUPER_SAMPLE).max(1.0);
+        let key = GlyphKey::indexed(glyph_id, raster_px, font_id);
+        if let Some(&info) = self.glyphs.get(&key) {
+            return Some(info);
+        }
+        let bytes = self.font_bytes.get(font_id as usize)?.clone();
+        let Some(glyph) = crate::text::raster::rasterize(&bytes, glyph_id, raster_px) else {
+            // No outline: a space. Cache the nothing so the miss is paid once,
+            // with the advance the shaper already supplied.
+            let info = GlyphInfo {
+                uv_min: [0.0; 2],
+                uv_max: [0.0; 2],
+                xmin: 0.0,
+                ymin: 0.0,
+                px_w: 0.0,
+                px_h: 0.0,
+                advance: 0.0,
+            };
+            self.glyphs.insert(key, info);
+            return Some(info);
+        };
+        let inv = px / raster_px;
+        let metrics = fontdue::Metrics {
+            xmin: glyph.xmin as i32,
+            ymin: glyph.ymin as i32,
+            width: glyph.width as usize,
+            height: glyph.height as usize,
+            // The shaper owns advances; nothing reads this one.
+            advance_width: 0.0,
+            advance_height: 0.0,
+            bounds: fontdue::OutlineBounds::default(),
+        };
+        self.pack(key, inv, &metrics, &glyph.coverage)
+    }
+
+    /// Put a rasterised bitmap in the atlas and cache where it landed.
+    ///
+    /// One packer for both entry points: the shelf allocator, the atlas-full
+    /// path and the UV arithmetic are where the bugs live, and none of them
+    /// cares how the glyph was named.
+    fn pack(
+        &mut self,
+        key: GlyphKey,
+        inv: f32,
+        metrics: &fontdue::Metrics,
+        bitmap: &[u8],
+    ) -> Option<GlyphInfo> {
         // Whitespace / zero-size glyph — cache advance only
         if metrics.width == 0 || metrics.height == 0 {
             let info = GlyphInfo {
@@ -303,6 +465,26 @@ impl FontAtlas {
         self.glyphs.insert(key, info);
         Some(info)
     }
+}
+
+/// Collapse a sorted list of codepoints into half-open ranges.
+///
+/// A face's character map is tens of thousands of entries and mostly
+/// contiguous; storing it as ranges is what makes coverage a binary search
+/// rather than a hash lookup per character per frame.
+fn runs_of(sorted: &[u32]) -> Vec<std::ops::Range<u32>> {
+    let mut ranges: Vec<std::ops::Range<u32>> = Vec::new();
+    for &code in sorted {
+        match ranges.last_mut() {
+            Some(last) if last.end == code => last.end = code + 1,
+            // Duplicates are possible — two characters can map to one glyph —
+            // and extending by zero would produce an empty range that covers
+            // nothing.
+            Some(last) if last.end > code => {}
+            _ => ranges.push(code..code + 1),
+        }
+    }
+    ranges
 }
 
 impl Default for FontAtlas {
@@ -463,14 +645,196 @@ mod tests {
     }
 
     #[test]
-    fn measure_agrees_with_the_advance_the_draw_path_uses() {
-        // `push_text_tracked` snaps the glyph quad but never the cursor, so
-        // measured width must stay exactly advance + tracking per glyph.
+    fn tracking_adds_exactly_itself_to_the_measured_width() {
+        // `push_text_tracked` snaps the glyph quad but never the cursor, so on
+        // the per-character path measured width stays exactly advance +
+        // tracking per glyph.
+        //
+        // Both measurements are tracked on purpose. Untracked text now goes
+        // through the shaper (CS-CORRECTNESS #6) and tracked text does not —
+        // that is the *designed* difference, letter-spacing and mark
+        // positioning being incompatible — so comparing across the two would be
+        // measuring the shaper, not the tracking.
         let a = loaded();
         let text = "Absorption mag.";
-        let plain = a.measure_text(text, 13.0, 0).x;
-        let tracked = a.measure_text_tracked(text, 13.0, 0, 0.5).x;
-        let expected = plain + 0.5 * text.chars().count() as f32;
-        assert!((tracked - expected).abs() < 0.001);
+        let quarter = a.measure_text_tracked(text, 13.0, 0, 0.25).x;
+        let half = a.measure_text_tracked(text, 13.0, 0, 0.5).x;
+        let expected = 0.25 * text.chars().count() as f32;
+        assert!(
+            (half - quarter - expected).abs() < 0.001,
+            "{half} - {quarter} should be {expected}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shaper_tests {
+
+    #[test]
+    fn the_shaped_path_draws_the_punctuation_the_editor_shows() {
+        // The bug that kept the shaper off the default: `(`, `)`, `:` and `-`
+        // shape to glyph ids `fontdue` does not share, so they rasterised empty
+        // and the editor showed "Coastal Surf  CC0" and "14 00". Every glyph a
+        // shaped line produces must reach the atlas with pixels in it.
+        let bytes = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+        let mut atlas = FontAtlas::new();
+        atlas.shaper = ShaperPolicy::Shaped;
+        atlas.add_font(bytes).unwrap();
+
+        for sample in ["Coastal Surf (CC0)", "14:00", "node_damagedHelmet_-6514"] {
+            let line = crate::text::shape::shape_line(
+                sample,
+                13.0,
+                &atlas,
+                atlas.chain(),
+                crate::text::Direction::Ltr,
+                0,
+            )
+            .expect("shapes");
+            for glyph in &line.glyphs {
+                let ch = sample[glyph.cluster..].chars().next().unwrap_or(' ');
+                let info = atlas
+                    .get_or_rasterize_indexed(glyph.glyph_id, 13.0, 0)
+                    .unwrap_or_else(|| panic!("{sample:?}: {ch:?} would not rasterise"));
+                if ch != ' ' {
+                    assert!(
+                        info.px_w > 0.0,
+                        "{sample:?}: {ch:?} (glyph {}) rasterised empty",
+                        glyph.glyph_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_measured_width_is_the_width_the_glyphs_are_laid_out_across() {
+        // The property the old per-character test stated, restated for the path
+        // text actually takes. If these disagree the editor centres text a
+        // pixel off, clips a label that fits, and ellipsises one that does not
+        // need it — all of which look like layout bugs and none of which are.
+        let Some(atlas) = atlas_with(ShaperPolicy::Shaped) else {
+            return;
+        };
+        for sample in ["Content Drawer", "AVATAR", "Save"] {
+            let measured = atlas.measure_text(sample, 13.0, 0).x;
+            let shaped = crate::text::shape::shape_line(
+                sample,
+                13.0,
+                &atlas,
+                atlas.chain(),
+                crate::text::Direction::Ltr,
+                0,
+            )
+            .expect("shapes");
+            assert!(
+                (measured - shaped.width).abs() < 0.001,
+                "{sample}: measured {measured}, laid out {}",
+                shaped.width
+            );
+        }
+    }
+    use super::*;
+    use crate::text::ShaperPolicy;
+
+    fn face_bytes() -> Option<Vec<u8>> {
+        std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf")
+            .or_else(|_| std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"))
+            .ok()
+    }
+
+    fn atlas_with(policy: ShaperPolicy) -> Option<FontAtlas> {
+        let bytes = face_bytes()?;
+        let mut atlas = FontAtlas::new();
+        atlas.shaper = policy;
+        atlas.add_font(&bytes).ok()?;
+        Some(atlas)
+    }
+
+    #[test]
+    fn coverage_comes_from_the_face_and_reaches_beyond_latin() {
+        // MORROWIND-G item 3's rule, now that the chain is built at load time
+        // from the character map rather than assumed. Segoe UI covers Greek and
+        // Cyrillic; a hand-written "Latin-1" range would have said otherwise.
+        let Some(atlas) = atlas_with(ShaperPolicy::PerCharacter) else {
+            return;
+        };
+        assert_eq!(atlas.chain().face_for('A'), Some(0));
+        for ch in ['\u{03B1}', '\u{0416}'] {
+            assert_eq!(atlas.chain().face_for(ch), Some(0), "{ch:?}");
+        }
+        // And a codepoint no bundled Latin face has is honestly unserved.
+        assert_eq!(atlas.chain().face_for('\u{6F22}'), None);
+    }
+
+    #[test]
+    fn a_glyph_index_key_cannot_collide_with_a_character_key() {
+        // `'A'` is U+0041 and glyph 65 is a different thing. One cache serves
+        // both paths, so the keys have to be distinguishable.
+        let by_char = GlyphKey::new('A', 13.0, 0);
+        let by_index = GlyphKey::indexed(65, 13.0, 0);
+        assert_ne!(by_char, by_index);
+        assert_eq!(by_char.codepoint, 65);
+        assert_eq!(by_index.codepoint, 65 | GlyphKey::GLYPH_INDEX);
+    }
+
+    #[test]
+    fn shaping_changes_the_measured_width_and_not_by_much() {
+        // The A/B Appendix A.5 asks for, as a test rather than as an opinion.
+        // Shaped text must differ — kerning is the point — and must not differ
+        // wildly, because a large change means the advances are being scaled
+        // wrong rather than kerned.
+        let (Some(plain), Some(shaped)) = (
+            atlas_with(ShaperPolicy::PerCharacter),
+            atlas_with(ShaperPolicy::Shaped),
+        ) else {
+            return;
+        };
+        for sample in ["Content Drawer", "AVATAR", "Waving Yellow Tavern"] {
+            let a = plain.measure_text(sample, 13.0, 0).x;
+            let b = shaped.measure_text(sample, 13.0, 0).x;
+            assert!(a > 0.0 && b > 0.0, "{sample}: {a} vs {b}");
+            let ratio = b / a;
+            assert!(
+                (0.9..=1.1).contains(&ratio),
+                "{sample}: shaped {b} against unshaped {a} is a {ratio}x change, \
+                 which is a scaling bug rather than kerning"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shaped_glyph_rasterises_by_index() {
+        let Some(mut atlas) = atlas_with(ShaperPolicy::Shaped) else {
+            return;
+        };
+        let line = crate::text::shape::shape_line(
+            "Ag",
+            16.0,
+            &atlas,
+            atlas.chain(),
+            crate::text::Direction::Ltr,
+            0,
+        )
+        .expect("shapes");
+        for glyph in &line.glyphs {
+            let info = atlas
+                .get_or_rasterize_indexed(glyph.glyph_id, 16.0, glyph.font_id)
+                .expect("a shaped glyph must rasterise");
+            assert!(info.px_w > 0.0, "{glyph:?} rasterised empty");
+        }
+    }
+
+    #[test]
+    fn tracking_declines_shaping_on_both_paths() {
+        // Letter-spacing and mark positioning disagree: inserting space after
+        // every glyph pushes a diacritic off its letter. The draw path declines
+        // tracked text and the measure path has to decline it identically, or
+        // the two disagree about the width of the same string.
+        let Some(atlas) = atlas_with(ShaperPolicy::Shaped) else {
+            return;
+        };
+        assert!(atlas.shaped_width("CAPS", 11.0, 0, 0.6).is_none());
+        assert!(atlas.shaped_width("CAPS", 11.0, 0, 0.0).is_some());
     }
 }

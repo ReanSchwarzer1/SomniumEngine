@@ -1,7 +1,8 @@
 # MORROWIND-G — text, properly
 
-**Items 2, 3, 5 and 6 complete, 2026-08-24. Item 1 is decided and deliberately
-not adopted. Item 4 is half in, half deferred by the plan.** Track 1 (VIVEC).
+**Items 2, 3, 5 and 6 complete, 2026-08-24. Item 1 adopted and item 4 completed
+2026-08-31 (CS-CORRECTNESS #6) — with a different library than this record
+chose, for a reason stated below.** Track 1 (VIVEC).
 
 §8 opens this sub-phase by calling it *"the largest single sub-phase in Track 1,
 and the one most likely to be under-estimated"*. This record does not claim it
@@ -53,6 +54,103 @@ the most visually sensitive switch in the editor with no way to tell whether the
 chrome got worse. `ShaperPolicy` reads `SOMNIUM_UI_SHAPER` as A.5 specifies, and
 `is_available()` returns `false` — so `Shaped` cannot be mistaken for "working"
 by reading the enum.
+
+## Item 1, revisited and adopted — CS-CORRECTNESS #6
+
+**Landed, A/B'd, available behind `SOMNIUM_UI_SHAPER=1`. 2026-08-31.**
+
+### The decision was re-taken, and here is why
+
+This record chose `cosmic-text` over `parley`, and said the deciding row was
+editing: *"Item 5 of this sub-phase is IME, and IME is editing"*. Item 5 then
+shipped in `text/ime.rs` **without** a shaper. That removes the whole basis of
+the comparison — what is left to want is shaping, and the parts around it are
+already built here: `StyledRun` is the run model, `FallbackChain` resolves
+coverage, `FontAtlas` rasterises and packs.
+
+A library that also owns a font database, an atlas and a layout engine would
+have arrived as a *second* text stack beside those. GHOSTFENCE has a row for
+exactly that. So:
+
+| | |
+|---|---|
+| `rustybuzz` | shaping — a HarfBuzz port that takes a face and a string and returns positioned glyph ids, and owns nothing else |
+| `unicode-bidi` | the UAX #9 resolution item 4 deferred *"to whatever could reorder glyphs"* |
+| already here | `FallbackChain` (item 3), `StyledRun` (the run model), `FontAtlas` (packing) |
+
+### The two bugs, both of which rendered something plausible
+
+**A chain is a fallback chain, not a router.** The first version asked the chain
+which face covers each character and got face 0 for everything, because the
+regular cut covers Latin too — so every label drawn in the medium and semibold
+cuts came out in regular. `split_preferring` gives the caller's face first
+refusal, and only what that face lacks reaches anything else.
+
+**`rustybuzz` and `fontdue` do not share a glyph index space.** Measured on the
+editor's own `Inter-Regular.ttf`:
+
+| character | `rustybuzz` | `fontdue` |
+|---|---|---|
+| `C` | 18 | 18 |
+| `(` | 331 | 324 |
+| `:` | 366 | 365 |
+| `-` | 348 | 344 |
+
+Letters coincide and punctuation does not, and the divergence is not a constant
+offset. In the editor this read as "Coastal Surf  CC0" and "14 00" — the
+advance kept, the glyph gone — because the mismatched id happened to land on a
+glyph with no outline. **The important half is what it would have done next:** a
+mismatch that lands on a glyph *with* an outline draws plausible, wrong text
+that nobody would think to check, and a ligature is exactly that case.
+
+So the shaped path rasterises from the same face the shaper read — outlines from
+`ttf-parser`, which `rustybuzz` re-exports, filled by `tiny-skia`. Both were
+already in the tree for the icon atlas, so this is a new use of the dependency
+graph rather than a new dependency in it. `fontdue` keeps the per-character
+path, unchanged and untouched.
+
+### The A/B Appendix A.5 asked for
+
+A.5's instruction was to land the shaper behind the flag, A/B it, and only then
+flip the default — with GHOSTFENCE's golden image as the arbiter. **That row was
+already failing before this work**, so it could not arbitrate; the A/B was run
+from fresh captures of the same frame instead, and from a test that pins the
+measured width ratio between the two paths to within 10%.
+
+The result: shaped chrome is **tighter and correctly kerned, at the same
+crispness** — the run origin is still snapped and only the advances within a run
+are sub-pixel, which is precisely A.5's stated resolution.
+
+**The default is still `PerCharacter`,** and that is a deliberate hand-off
+rather than a hedge: turning it on changes every glyph position in the editor,
+and the person who should look at that before it becomes the default is the one
+who uses the editor. `SOMNIUM_UI_SHAPER=1` turns it on; flipping the default is
+a one-line change to `ShaperPolicy`.
+
+### What it does now
+
+- **Shaping**: kerning, ligatures, mark positioning, Arabic joining, Indic
+  reordering — whatever the face's `GSUB`/`GPOS` describe, because the script
+  and language are guessed from the text rather than hard-coded.
+- **Bidi**: UAX #9 resolution and visual reordering, so the first character of
+  an Arabic line lands on the right and Latin inside it still reads left to
+  right.
+- **Fallback**: unchanged from item 3, now with the caller's face preferred, and
+  a span no face covers still produces no glyphs rather than a substitute.
+- **Measurement follows drawing.** `measure_text` shapes when the draw path
+  would shape and does not when it would not, because a layout that measures one
+  way and paints the other is off by the kerning on every string.
+
+### What it does not claim
+
+- **Tracked text is not shaped.** Letter-spacing and mark positioning disagree:
+  inserting space after every glyph pushes a diacritic off its letter. The
+  uppercase header role is Latin caps, where the per-character path is correct,
+  and both paths agree about which strings they take.
+- **One line at a time.** The paragraph model — newlines, wrapping — is still
+  the caller's, and multi-line shaped text is a wrapper around this rather than
+  a change to it.
+- The golden-image row still fails for an unrelated, pre-existing reason.
 
 ## Item 2 — rich text
 
@@ -117,6 +215,9 @@ are here, because a run must carry a level for a shaper to use, and because
 **The UAX #9 resolution algorithm is not**, and the reason is the same as the
 shaper's: reordering belongs with the thing that can reorder glyphs. Writing it
 against a pipeline that cannot would produce levels nothing reads.
+
+**Completed 2026-08-31**, with the shaper: `text/shape.rs` resolves levels
+through `unicode-bidi` and lays the visual runs out in order. See item 1 above.
 
 **Vertical writing modes are explicitly deferred by §8 item 4 itself** ("bidi is
 in; vertical writing modes are explicitly deferred, §14.5"). Not attempted.

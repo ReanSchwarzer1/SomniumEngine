@@ -65,7 +65,12 @@ somnium_voxel    = { path = "crates/somnium_voxel" }
 winit = "0.30"
 
 # -- Graphics (Phase 2) -----------------------------------------------------
-wgpu = "30.0"
+# `counters` is on in every build, not behind a feature. DOOM-J needs to be able
+# to assert that a steady-state frame creates no buffers, textures or bind
+# groups, and this repository's own lesson is that a gate you have to opt into
+# is a gate that is off. The cost is one relaxed atomic per resource create and
+# destroy, which in steady state is the number this exists to prove is zero.
+wgpu = { version = "30.0", features = ["counters"] }
 
 # -- Math --------------------------------------------------------------------
 glam = "0.29"
@@ -111,6 +116,14 @@ exr = "1.74"
 
 # -- Font rasterization (Phase 12A-4) ----------------------------------------
 fontdue = "0.7"
+
+# -- Text shaping and bidi (MORROWIND-G item 1, adopted in CS-CORRECTNESS #6) -
+# Shaping only. `rustybuzz` is a HarfBuzz port that takes a face and a string
+# and returns positioned glyph ids; it owns no font database, no atlas and no
+# editing model, which is what lets it slot in behind the run model MORROWIND-G
+# built rather than arriving as a second text stack beside `fontdue`.
+rustybuzz    = "0.20"
+unicode-bidi = "0.3"
 
 # -- SVG rasterization (Phase 26-Zeta-E) --------------------------------------
 # Builds the editor icon atlas from vendored Tabler + Somnium SVG sources at

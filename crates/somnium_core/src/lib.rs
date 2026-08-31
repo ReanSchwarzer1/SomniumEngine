@@ -50,13 +50,13 @@ pub mod app;
 mod audio_scene;
 pub mod autosave;
 pub mod character;
-pub mod spline;
 pub mod clipboard;
 pub mod config;
 pub mod context;
 /// Phase CONTROL-O: deferred decals.
 pub mod decal;
 pub mod editor_commands;
+mod editor_gizmo;
 pub mod error;
 pub mod event;
 pub mod i18n;
@@ -67,6 +67,7 @@ pub mod light_units;
 pub mod log_capture;
 pub mod map;
 pub mod reflect_registry;
+pub mod spline;
 /// The `.somnium` container: a framed header the Content Drawer can read
 /// without parsing the scene, and the three-format routing that goes with it.
 ///
@@ -88,6 +89,7 @@ pub mod selection;
 pub mod settings;
 /// Phase CONTROL-M: the sky and its cloud layer.
 pub mod sky;
+pub mod somui_host;
 pub mod sun;
 pub mod time;
 /// Phase CONTROL-L: the day cycle.
@@ -101,7 +103,6 @@ pub mod world_partition;
 
 pub use app::{Engine, GameApp};
 pub use character::RigidBodyComponent;
-pub use spline::SplineComponent;
 pub use config::EngineConfig;
 pub use context::{EngineContext, SimulationClock, SimulationState};
 pub use editor_commands::{
@@ -124,6 +125,7 @@ pub use script_host::{
     apply_animation_parameter,
 };
 pub use script_input::{ScriptInputTracker, WorldCheckpoint};
+pub use spline::SplineComponent;
 pub use time::TimeState;
 
 // Re-export input types so game code does not need a direct `winit` dependency.
@@ -723,6 +725,14 @@ pub enum UiCanvasSpace {
 pub struct UiCanvasComponent {
     /// Whether the game should draw this canvas.
     pub enabled: bool,
+    /// The `.somui` document instantiated into this canvas (MORROWIND-M2).
+    ///
+    /// An `AssetId` rather than a path so it survives a file being moved, and
+    /// so the Details row is an asset picker *and* a Content Drawer drop target
+    /// — the same field shape every other asset reference in the engine uses.
+    /// Unset means a canvas whose contents the game builds in code, which is
+    /// what every canvas was before this field existed.
+    pub document: somnium_asset::database::AssetId,
     /// Placement mode used by the game-owned widget tree.
     pub space: UiCanvasSpace,
     /// Logical reference width for screen canvases, or world width in metres.
@@ -741,6 +751,7 @@ impl Default for UiCanvasComponent {
     fn default() -> Self {
         Self {
             enabled: true,
+            document: somnium_asset::database::AssetId::default(),
             space: UiCanvasSpace::Screen,
             width: 1920.0,
             height: 1080.0,
@@ -1737,7 +1748,10 @@ mod post_process_tests {
         pp.set_cas_enabled(true);
         assert!(pp.cas_enabled);
         assert!(!pp.fsr_enabled(), "FSR RCAS and CAS must not both run");
-        assert!(pp.taa_enabled(), "the step-down must keep a temporal resolve");
+        assert!(
+            pp.taa_enabled(),
+            "the step-down must keep a temporal resolve"
+        );
     }
 
     #[test]

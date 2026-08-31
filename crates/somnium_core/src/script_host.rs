@@ -154,6 +154,33 @@ pub struct HostServices<'a> {
     pub physics: Option<&'a mut PhysicsWorld>,
     /// Audio, for `playAudio`.
     pub audio: Option<&'a mut AudioEngine>,
+    /// Authored `.somui` documents, for `setUiProperty` (MORROWIND-M2).
+    ///
+    /// A trait object rather than a concrete registry because the documents
+    /// belong to the game: a HUD is part of the game, and an engine that owned
+    /// it would have to decide how many there are and what they are called.
+    /// The game answers `GameApp::ui_documents`; a game with no authored UI
+    /// answers `None` and the write is rejected rather than silently dropped.
+    pub ui: Option<&'a mut dyn UiDocumentSink>,
+}
+
+/// Where a script's authored-UI writes land.
+///
+/// Implemented by whatever holds the game's instantiated documents.
+/// [`crate::somui_host::UiDocuments`] is the one the engine ships; a game with
+/// its own arrangement can implement this instead.
+pub trait UiDocumentSink {
+    /// Apply one write, or say why it could not be applied.
+    ///
+    /// The message goes to the Output Log attributed to the emitting script, so
+    /// it has to read as something a script author can act on.
+    fn set_property(
+        &mut self,
+        document: &str,
+        element: &str,
+        property: &str,
+        value: &somnium_script::command::UiValue,
+    ) -> Result<(), String>;
 }
 
 /// What one `sync` did, for the caller's log and the editor's status area.
@@ -1013,6 +1040,29 @@ impl ScriptHost {
             self.rejections.push(
                 "setAnimationParameter: no animation parameter router is installed (see \
                  ScriptHost::set_animation_parameter_router)"
+                    .to_string(),
+            );
+        }
+
+        // MORROWIND-M2. Same shape as `audio` below: the bridge collected the
+        // writes, and here is where they meet the thing that owns the widgets.
+        if let Some(ui) = services.ui.as_deref_mut() {
+            for (_order, write) in outcome.ui {
+                if let Err(error) = ui.set_property(
+                    &write.document,
+                    &write.element,
+                    &write.property,
+                    &write.value,
+                ) {
+                    self.rejections.push(format!("setUiProperty: {error}"));
+                }
+            }
+        } else if !outcome.ui.is_empty() {
+            // Not silence. A game that forgot to answer `ui_documents` gets one
+            // line saying exactly that, rather than a HUD that never updates
+            // and no clue why.
+            self.rejections.push(
+                "setUiProperty: this game exposes no authored UI documents (see                  GameApp::ui_documents)"
                     .to_string(),
             );
         }

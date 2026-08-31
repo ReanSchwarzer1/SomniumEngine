@@ -237,6 +237,21 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
             ));
         }
     }
+    // Hitches before the counters, and without a noise band. A band is a claim
+    // about a mean; these are order statistics and a count, and the movement
+    // worth seeing in them is in the tail, which a band would hide.
+    for a in after.rows.iter().filter(|r| r.kind == "hitch") {
+        let Some(b) = before.find("hitch", &a.name, 0) else {
+            continue;
+        };
+        out.push(format!(
+            "{:<28} {:>9.3} {:>9.3} {:>+9.3}          hitch",
+            a.name,
+            b.mean,
+            a.mean,
+            a.mean - b.mean
+        ));
+    }
     // Counters last, and never given a noise band: they are exact integers, so
     // "different" and "different by more than the noise" are the same question.
     for a in after
@@ -257,6 +272,146 @@ pub fn compare(before: &Run, after: &Run) -> Vec<String> {
         }
     }
     out
+}
+
+/// Live GPU object counts and memory, sampled once per frame (DOOM-J).
+///
+/// Read from `wgpu`'s own internal counters rather than from wrappers around
+/// two hundred and sixty-five `create_*` call sites. These are **gauges** — one
+/// increment per creation, one decrement per destruction — so what they answer
+/// is *"does a steady-state frame change the set of live GPU objects"*, which
+/// is DOOM-J's exit criterion. They cannot see a resource created and destroyed
+/// inside one frame; a per-frame delta can, which is why the delta and not the
+/// endpoint difference is what gets reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AllocationSnapshot {
+    /// Live buffers.
+    pub buffers: i64,
+    /// Live textures.
+    pub textures: i64,
+    /// Live texture views.
+    pub texture_views: i64,
+    /// Live bind groups.
+    pub bind_groups: i64,
+    /// Live samplers.
+    pub samplers: i64,
+    /// Distinct GPU memory allocations held by the allocator.
+    pub memory_allocations: i64,
+    /// Bytes attributed to buffers.
+    pub buffer_bytes: i64,
+    /// Bytes attributed to textures.
+    pub texture_bytes: i64,
+}
+
+impl AllocationSnapshot {
+    /// Sample the device's counters.
+    #[must_use]
+    pub fn read(device: &wgpu::Device) -> Self {
+        let hal = device.get_internal_counters().hal;
+        Self {
+            buffers: hal.buffers.read() as i64,
+            textures: hal.textures.read() as i64,
+            texture_views: hal.texture_views.read() as i64,
+            bind_groups: hal.bind_groups.read() as i64,
+            samplers: hal.samplers.read() as i64,
+            memory_allocations: hal.memory_allocations.read() as i64,
+            buffer_bytes: hal.buffer_memory.read() as i64,
+            texture_bytes: hal.texture_memory.read() as i64,
+        }
+    }
+
+    /// The object counts, named, in a fixed order.
+    ///
+    /// Bytes are excluded on purpose: a buffer that is written but not
+    /// reallocated does not move them, and one that grows in place is still one
+    /// object. The question is object churn.
+    #[must_use]
+    pub fn objects(&self) -> [(&'static str, i64); 6] {
+        [
+            ("buffers", self.buffers),
+            ("textures", self.textures),
+            ("texture_views", self.texture_views),
+            ("bind_groups", self.bind_groups),
+            ("samplers", self.samplers),
+            ("memory_allocations", self.memory_allocations),
+        ]
+    }
+}
+
+/// A run's hitch profile: the typical frame, the tail, and what exceeded it.
+///
+/// A *hitch* is defined here as a presented-frame interval above **twice the
+/// run's own median**, deliberately a relative threshold. An absolute one would
+/// call every frame of a 30 fps scene a hitch and none of a 240 fps one, and
+/// the thing being measured is *"the frame rate visibly broke step"*, not *"the
+/// frame took longer than a number picked in advance"*.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hitches {
+    /// Median presented-frame interval, in milliseconds.
+    pub median_ms: f32,
+    /// 99th percentile interval, in milliseconds.
+    pub p99_ms: f32,
+    /// Longest interval in the run.
+    pub worst_ms: f32,
+    /// Frames whose interval exceeded `2 x median_ms`.
+    pub over_2x: u64,
+    /// Measured-frame index of the longest interval.
+    pub worst_frame: u64,
+    /// Measured-frame index of the *last* hitch, or zero if there were none.
+    ///
+    /// With `worst_frame`, this is what separates the two diagnoses that matter
+    /// and that a count alone cannot tell apart: hitches clustered at the front
+    /// of a run are one-off startup cost — pipeline compilation, the first
+    /// streaming burst — while hitches that keep arriving are a steady-state
+    /// fault. Naming which one a run has is DOOM-I's whole job.
+    pub last_over_2x_frame: u64,
+    /// Intervals considered.
+    pub samples: u64,
+}
+
+/// Summarise wall intervals into a [`Hitches`].
+///
+/// Returns `None` below eight samples, where a median is a coin toss and a
+/// "0 hitches" row would be a claim the run cannot support.
+#[must_use]
+pub fn hitches(intervals: &[f32]) -> Option<Hitches> {
+    if intervals.len() < 8 {
+        return None;
+    }
+    let mut sorted = intervals.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let median = percentile(&sorted, 0.50);
+    let threshold = median * 2.0;
+    let mut over_2x = 0;
+    let mut worst_frame = 0;
+    let mut last_over_2x_frame = 0;
+    for (index, &value) in intervals.iter().enumerate() {
+        if value > threshold {
+            over_2x += 1;
+            last_over_2x_frame = index as u64;
+        }
+        if value > intervals[worst_frame] {
+            worst_frame = index;
+        }
+    }
+    Some(Hitches {
+        median_ms: median,
+        p99_ms: percentile(&sorted, 0.99),
+        worst_ms: *sorted.last().unwrap_or(&0.0),
+        over_2x,
+        worst_frame: worst_frame as u64,
+        last_over_2x_frame,
+        samples: intervals.len() as u64,
+    })
+}
+
+/// Nearest-rank percentile over an ascending slice.
+fn percentile(sorted: &[f32], q: f64) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (q * sorted.len() as f64).ceil() as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 /// Accumulates a run and writes it out.
@@ -285,6 +440,43 @@ pub struct TimingRun {
     /// number for a hitch baseline — CONTROL-A/C use it for the synchronous
     /// thumbnail decoder — because a hitch is an interval, whatever caused it.
     wall_frame: Accum,
+    /// Renderer construction to the first presented frame, in milliseconds.
+    ///
+    /// The largest stall in any session, and until DOOM-I it was reported by
+    /// nothing: the first tick had no previous tick, so its interval was
+    /// dropped. That produced runs whose `Frame CPU` maximum was 120 ms beside
+    /// a `Frame wall` maximum of 31.9 ms — impossible of one frame, and true
+    /// only because the frame in question had no interval at all.
+    ///
+    /// Kept out of `wall_frame` and `wall_samples` deliberately. Folding an
+    /// eight-second outlier into a mean and a standard deviation destroys both
+    /// — it took `Frame wall` from 20.0 ± 2.1 ms to 33.7 ± 336.5 ms — and every
+    /// comparison against an earlier run would have been reading a different
+    /// statistic. Startup is a different question from the frame rate, so it
+    /// gets its own row.
+    startup_ms: Option<f32>,
+    /// Allocation gauges as of the previous frame, for the per-frame delta.
+    previous_alloc: Option<AllocationSnapshot>,
+    /// Allocation gauges at the first measured frame and the most recent one.
+    first_alloc: Option<AllocationSnapshot>,
+    last_alloc: Option<AllocationSnapshot>,
+    /// Measured frames in which any live object count moved at all.
+    alloc_churn_frames: u64,
+    /// Largest single-frame movement in any object count.
+    alloc_worst_frame_delta: i64,
+    /// Measured frames in which each object count moved, in `objects()` order.
+    alloc_churn_by_object: [u64; 6],
+    /// `SOMNIUM_ALLOC_TRACE=1`: name what churns, not only how often.
+    alloc_trace: bool,
+    previous_alloc_names: Option<BTreeMap<String, i64>>,
+    /// Every wall interval *after* the first, kept rather than summarised.
+    ///
+    /// DOOM-I's exit criterion is a *hitch* metric — "no frame above 2x the
+    /// median" — and neither half of that is recoverable from `wall_frame`'s
+    /// mean and standard deviation. A median needs the samples, and a count of
+    /// frames over a threshold needs the threshold, which is not known until
+    /// the run ends. Six hundred `f32`s is 2.4 KB.
+    wall_samples: Vec<f32>,
     /// Engine frame body on the CPU, excluding the frame limiter (PORTAL-0-B).
     frame_cpu: Accum,
     /// Of which, blocked acquiring the swap-chain texture (PORTAL-0-B).
@@ -320,9 +512,31 @@ impl TimingRun {
             gpu: BTreeMap::new(),
             cpu: BTreeMap::new(),
             wall_frame: Accum::default(),
+            wall_samples: Vec::new(),
+            startup_ms: None,
+            previous_alloc: None,
+            first_alloc: None,
+            last_alloc: None,
+            alloc_churn_frames: 0,
+            alloc_worst_frame_delta: 0,
+            alloc_churn_by_object: [0; 6],
+            alloc_trace: std::env::var("SOMNIUM_ALLOC_TRACE").as_deref() == Ok("1"),
+            previous_alloc_names: None,
             frame_cpu: Accum::default(),
             surface_acquire: Accum::default(),
-            last_tick_at: None,
+            // Seeded, not `None`. `from_env` runs while the renderer is being
+            // built, so this makes the *first* recorded interval cover device
+            // and pipeline creation, map load and the first present — the
+            // largest stall in any session, and the one a `None` first tick
+            // silently discarded. DOOM-I found it that way: a run reported a
+            // 120 ms `Frame CPU` maximum next to a 31.9 ms `Frame wall`
+            // maximum, which cannot both be true of the same frame, and the
+            // reason was that the frame in question had no interval at all.
+            //
+            // It is reported as `hitch startup_ms` and kept out of the frame
+            // statistics; see `TimingRun::startup_ms` for why folding it in
+            // was tried and reverted.
+            last_tick_at: Some(Instant::now()),
             counters: FrameCounters::default(),
             stats: Vec::new(),
             census: CensusResult::default(),
@@ -344,6 +558,7 @@ impl TimingRun {
         profiler: &GpuProfiler,
         census: CensusResult,
         adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
         size: (u32, u32),
     ) {
         if self.written {
@@ -359,7 +574,12 @@ impl TimingRun {
             return;
         }
         if let Some(ms) = wall_ms {
-            self.wall_frame.push(ms);
+            if self.rendered == 1 {
+                self.startup_ms = Some(ms);
+            } else {
+                self.wall_frame.push(ms);
+                self.wall_samples.push(ms);
+            }
         }
         // PORTAL-0-B: pushed beside the wall interval rather than with the GPU
         // zones, because both are produced once per rendered frame and neither
@@ -370,6 +590,93 @@ impl TimingRun {
             self.frame_cpu.push(profiler.frame_cpu_ms);
         }
         self.surface_acquire.push(profiler.surface_acquire_ms);
+
+        // DOOM-J. Sampled every measured frame rather than only at the ends,
+        // because a resource created on one frame and released on the next
+        // nets to nothing over a window and is still churn.
+        let alloc = AllocationSnapshot::read(device);
+        if let Some(previous) = self.previous_alloc {
+            let mut moved = 0;
+            // Per counter, not only in aggregate. "68 of 300 frames churned"
+            // is not something anybody can act on; "68 of them moved
+            // `textures`" names the subsystem.
+            for (index, ((_, now), (_, before))) in alloc
+                .objects()
+                .iter()
+                .zip(previous.objects().iter())
+                .enumerate()
+            {
+                let delta = (now - before).abs();
+                if delta > 0 {
+                    self.alloc_churn_by_object[index] += 1;
+                    moved = moved.max(delta);
+                }
+            }
+            if moved > 0 {
+                self.alloc_churn_frames += 1;
+                self.alloc_worst_frame_delta = self.alloc_worst_frame_delta.max(moved);
+            }
+        }
+        // `SOMNIUM_ALLOC_TRACE=1` names the churn. The counters say *that* one
+        // buffer appeared and one went away; only the allocator report says
+        // *which*, because it carries the label each resource was created with.
+        // Opt-in because it rebuilds a multiset of every live allocation's name
+        // once a frame, which is far too much work to leave on.
+        if self.alloc_trace
+            && let Some(report) = device.generate_allocator_report()
+        {
+            let mut names: BTreeMap<String, i64> = BTreeMap::new();
+            for allocation in &report.allocations {
+                *names.entry(allocation.name.clone()).or_default() += 1;
+            }
+            if let Some(previous) = &self.previous_alloc_names {
+                for (name, count) in &names {
+                    let before = previous.get(name).copied().unwrap_or(0);
+                    if *count != before {
+                        tracing::info!(frame = self.rendered, %name, before, now = count, "alloc churn");
+                    }
+                }
+                for (name, before) in previous {
+                    if !names.contains_key(name) {
+                        tracing::info!(frame = self.rendered, %name, before, now = 0, "alloc churn");
+                    }
+                }
+            }
+            self.previous_alloc_names = Some(names);
+
+            // The other half of DOOM-J's gate is an *inventory*, not only a
+            // churn count. Logged once, on the last measured frame, because
+            // what it answers — where the gigabyte went — does not change
+            // frame to frame.
+            if self.rendered == self.warmup + self.frames {
+                let mut bytes: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+                for allocation in &report.allocations {
+                    let entry = bytes.entry(allocation.name.as_str()).or_default();
+                    entry.0 += allocation.size;
+                    entry.1 += 1;
+                }
+                let mut rows: Vec<_> = bytes.into_iter().collect();
+                rows.sort_by_key(|(_, (size, _))| std::cmp::Reverse(*size));
+                tracing::info!(
+                    total_mib = report.total_allocated_bytes as f64 / (1024.0 * 1024.0),
+                    reserved_mib = report.total_reserved_bytes as f64 / (1024.0 * 1024.0),
+                    allocations = report.allocations.len(),
+                    blocks = report.blocks.len(),
+                    "alloc inventory"
+                );
+                for (name, (size, count)) in rows.into_iter().take(20) {
+                    tracing::info!(
+                        mib = size as f64 / (1024.0 * 1024.0),
+                        count,
+                        %name,
+                        "alloc inventory row"
+                    );
+                }
+            }
+        }
+        self.previous_alloc = Some(alloc);
+        self.first_alloc.get_or_insert(alloc);
+        self.last_alloc = Some(alloc);
 
         let (serial, raw) = profiler.raw_sample();
         // Same serial means the readback ring has not produced a new frame yet.
@@ -527,6 +834,68 @@ impl TimingRun {
             );
         }
 
+        // DOOM-I. A separate kind rather than more `count` rows, for the same
+        // reason DOOM-B's census got its own: a comparison should show the
+        // frame rate breaking step separately from the scene changing size,
+        // because those are different questions with different fixes.
+        if let Some(ms) = self.startup_ms {
+            let _ = writeln!(s, "hitch	startup_ms	0	{ms:.4}	0.0000	{ms:.4}	{ms:.4}	1");
+        }
+        if let Some(h) = hitches(&self.wall_samples) {
+            for (name, v) in [
+                ("median_ms", h.median_ms),
+                ("p99_ms", h.p99_ms),
+                ("worst_ms", h.worst_ms),
+                ("over_2x_median", h.over_2x as f32),
+                ("worst_frame", h.worst_frame as f32),
+                ("last_over_2x_frame", h.last_over_2x_frame as f32),
+            ] {
+                let _ = writeln!(
+                    s,
+                    "hitch	{name}	0	{v:.4}	0.0000	{v:.4}	{v:.4}	{}",
+                    h.samples
+                );
+            }
+        }
+
+        // DOOM-J's inventory. `alloc_churn_frames` and `alloc_worst_frame_delta`
+        // are the gate; the `live_*` rows are the inventory it is a gate over,
+        // and a comparison shows both moving together when something changes.
+        if let (Some(first), Some(last)) = (self.first_alloc, self.last_alloc) {
+            const MIB: f32 = 1024.0 * 1024.0;
+            for (name, v) in [
+                ("alloc_churn_frames", self.alloc_churn_frames as i64),
+                ("alloc_worst_frame_delta", self.alloc_worst_frame_delta),
+                ("alloc_net_buffers", last.buffers - first.buffers),
+                ("alloc_net_textures", last.textures - first.textures),
+                (
+                    "alloc_net_bind_groups",
+                    last.bind_groups - first.bind_groups,
+                ),
+                ("live_buffers", last.buffers),
+                ("live_textures", last.textures),
+                ("live_texture_views", last.texture_views),
+                ("live_bind_groups", last.bind_groups),
+                ("live_samplers", last.samplers),
+                ("live_memory_allocations", last.memory_allocations),
+            ] {
+                let _ = writeln!(s, "count	{name}	0	{v}	0	{v}	{v}	1");
+            }
+            for (index, (name, _)) in last.objects().iter().enumerate() {
+                let v = self.alloc_churn_by_object[index];
+                if v > 0 {
+                    let _ = writeln!(s, "count	churn_{name}	0	{v}	0	{v}	{v}	1");
+                }
+            }
+            for (name, bytes) in [
+                ("live_buffer_mib", last.buffer_bytes),
+                ("live_texture_mib", last.texture_bytes),
+            ] {
+                let v = bytes as f32 / MIB;
+                let _ = writeln!(s, "count	{name}	0	{v:.1}	0	{v:.1}	{v:.1}	1");
+            }
+        }
+
         let c = self.counters;
         for (name, v) in [
             ("draw_calls", c.draw_calls),
@@ -536,6 +905,7 @@ impl TimingRun {
             ("terrain_cpu_culled", c.terrain_cpu_culled),
             ("tlas_instances", c.tlas_instances),
             ("shadow_casters", c.shadow_casters),
+            ("shadow_cascades_rendered", c.shadow_cascades_rendered),
             ("virtual_shadow_pages", c.virtual_shadow_pages),
             ("virtual_shadow_resident", c.virtual_shadow_resident),
         ] {
@@ -577,15 +947,23 @@ impl TimingRun {
 /// the same number a reviewer can recompute from the file.
 #[must_use]
 pub fn unattributed_pct(run: &Run) -> Option<f32> {
-    let frame = run.find("gpu", "Frame", 0)?.mean;
+    let frame_row = run.find("gpu", "Frame", 0)?;
+    let frame = frame_row.mean;
     if frame <= 0.0 {
         return None;
     }
+    // MORROWIND-J step 3. A scope's mean is per *occurrence*, and since a frame
+    // records the scene once per view a pass can occur four times in one frame.
+    // Summing the means would then account for a quarter of the work and report
+    // 75% unattributed — indistinguishable from an engine full of unbracketed
+    // passes, and the more alarming reading of the two. The occurrence count is
+    // already in the file: a row's samples over the frame's.
+    let frames = frame_row.samples.max(1) as f32;
     let children: f32 = run
         .rows
         .iter()
         .filter(|r| r.kind == "gpu" && r.depth == 1)
-        .map(|r| r.mean)
+        .map(|r| r.mean * (r.samples as f32 / frames))
         .sum();
     Some(((frame - children).max(0.0) / frame) * 100.0)
 }
@@ -622,6 +1000,69 @@ pub fn rows_from_scopes(kind: &str, scopes: &[ScopeResult]) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── DOOM-I: the hitch metric ───────────────────────────────────────────
+
+    #[test]
+    fn a_steady_run_reports_no_hitches() {
+        let steady: Vec<f32> = (0..600).map(|i| 16.6 + (i % 3) as f32 * 0.1).collect();
+        let h = hitches(&steady).expect("enough samples");
+        assert_eq!(h.over_2x, 0);
+        assert!((h.median_ms - 16.7).abs() < 0.2, "median {}", h.median_ms);
+        assert!(h.worst_ms < 17.0);
+    }
+
+    #[test]
+    fn a_spike_is_counted_and_does_not_move_the_median() {
+        // One 120 ms frame in 600. A mean would absorb it; the whole point of
+        // the metric is that it does not.
+        let mut run: Vec<f32> = vec![16.6; 600];
+        run[300] = 120.0;
+        let h = hitches(&run).expect("enough samples");
+        assert_eq!(h.over_2x, 1);
+        assert!((h.median_ms - 16.6).abs() < 0.001);
+        assert!((h.worst_ms - 120.0).abs() < 0.001);
+        assert_eq!(h.worst_frame, 300);
+        assert_eq!(h.last_over_2x_frame, 300);
+    }
+
+    #[test]
+    fn where_the_hitches_are_separates_startup_from_steady_state() {
+        // Startup: everything over the threshold is in the first few frames.
+        let mut startup: Vec<f32> = vec![16.6; 300];
+        for frame in [1usize, 4, 9] {
+            startup[frame] = 90.0;
+        }
+        let h = hitches(&startup).unwrap();
+        assert_eq!(h.over_2x, 3);
+        assert_eq!(h.last_over_2x_frame, 9);
+
+        // Steady-state fault: the last one arrives near the end of the run.
+        let mut ongoing: Vec<f32> = vec![16.6; 300];
+        for frame in [1usize, 150, 280] {
+            ongoing[frame] = 90.0;
+        }
+        assert_eq!(hitches(&ongoing).unwrap().last_over_2x_frame, 280);
+    }
+
+    #[test]
+    fn the_threshold_is_relative_to_the_run() {
+        // The same absolute 40 ms frame is a hitch at 120 fps and ordinary at
+        // 30 fps. An absolute threshold could not say both.
+        let mut fast: Vec<f32> = vec![8.3; 100];
+        fast[10] = 40.0;
+        assert_eq!(hitches(&fast).unwrap().over_2x, 1);
+
+        let mut slow: Vec<f32> = vec![33.3; 100];
+        slow[10] = 40.0;
+        assert_eq!(hitches(&slow).unwrap().over_2x, 0);
+    }
+
+    #[test]
+    fn too_few_samples_report_nothing_rather_than_zero() {
+        assert!(hitches(&[16.6; 7]).is_none());
+        assert!(hitches(&[16.6; 8]).is_some());
+    }
 
     fn run_of(rows: &[(&str, u8, f32, f32)]) -> Run {
         Run {
@@ -697,6 +1138,23 @@ mod tests {
              gpu\tShading\t1\t40.0000\t0\t0\t0\t10\n\
              gpu\tShadows\t1\t7.5000\t0\t0\t0\t10\n",
         );
+        let pct = unattributed_pct(&run).expect("frame row present");
+        assert!((pct - 5.0).abs() < 1e-3, "{pct}");
+    }
+
+    #[test]
+    fn a_pass_recorded_once_per_view_is_counted_once_per_view() {
+        // Four viewports record `Shading` four times a frame, so its samples
+        // are four times the frame's. Counting its mean once would report three
+        // quarters of the frame as unattributed and fail a gate that is
+        // measuring the harness rather than the engine.
+        let text = [
+            ["gpu", "Frame", "0", "40.0000", "0", "0", "0", "10"].join("\t"),
+            ["gpu", "Shading", "1", "9.5000", "0", "0", "0", "40"].join("\t"),
+        ]
+        .join("\n");
+        let run = parse(&text);
+        assert_eq!(run.rows.len(), 2, "fixture did not parse: {:?}", run.rows);
         let pct = unattributed_pct(&run).expect("frame row present");
         assert!((pct - 5.0).abs() < 1e-3, "{pct}");
     }

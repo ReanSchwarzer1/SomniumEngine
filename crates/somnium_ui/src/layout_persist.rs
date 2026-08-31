@@ -1,5 +1,7 @@
-//! Persist splitter widths across editor sessions (Phase 26-I).
+//! Persist splitter widths across editor sessions (Phase 26-I), and the dock
+//! arrangement (MORROWIND-J).
 
+use crate::dock::DockTree;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -75,6 +77,50 @@ impl ChromeLayout {
     }
 }
 
+/// Where the dock arrangement lives.
+///
+/// A **second file**, beside `editor_layout.json` rather than inside it. The
+/// two answer different questions and fail differently: a corrupt splitter
+/// width costs a column, and a corrupt dock tree costs the whole shell. Keeping
+/// them apart means a tree that will not load falls back to the shipped
+/// arrangement without also discarding a splitter drag, and a build that
+/// predates docking still reads its own file untouched.
+fn dock_path() -> PathBuf {
+    let mut path = layout_path();
+    path.set_file_name("editor_dock.json");
+    path
+}
+
+/// Load the stored dock arrangement, repaired.
+///
+/// Never fails. A missing, unparsable or nonsensical file becomes
+/// [`DockTree::default_layout`], because an editor that will not open because
+/// its layout file is bad is worse than an editor that opens with the layout it
+/// shipped with. [`DockTree::repair`] is the whole reason this can promise
+/// that: a file that parses but describes an impossible tree — an empty tile, a
+/// panel in two places, a ratio of 40 — is repaired rather than trusted or
+/// rejected.
+#[must_use]
+pub fn load_dock() -> DockTree {
+    let mut tree: DockTree = std::fs::read_to_string(dock_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    tree.repair();
+    tree
+}
+
+/// Store the dock arrangement.
+pub fn save_dock(tree: &DockTree) {
+    let path = dock_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(tree) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 fn layout_path() -> PathBuf {
     let mut dir = std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -106,6 +152,33 @@ pub fn save(layout: ChromeLayout) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── MORROWIND-J: the dock arrangement ─────────────────────────────────
+
+    #[test]
+    fn a_dock_file_that_will_not_parse_opens_the_shipped_layout() {
+        // The failure this exists for: a truncated write, a hand edit, or a
+        // file from a build that spelled the tree differently. None of them may
+        // stop the editor opening.
+        for text in ["", "{", "null", r#"{"root":{"Tabs":{"panels":[]}}}"#] {
+            let parsed: Option<DockTree> = serde_json::from_str(text).ok();
+            let mut tree = parsed.unwrap_or_default();
+            tree.repair();
+            assert!(
+                tree.contains("Viewport"),
+                "{text:?} left no viewport to draw into"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_layout_files_are_separate_on_purpose() {
+        // Stated as a test because the temptation to merge them is obvious and
+        // the reason not to is not: they fail differently, and a bad tree must
+        // not cost a good splitter drag.
+        assert_ne!(layout_path(), dock_path());
+        assert_eq!(layout_path().parent(), dock_path().parent());
+    }
 
     #[test]
     fn the_details_column_lands_in_the_redline_range_at_every_size() {

@@ -878,19 +878,23 @@ fn mean_linear_albedo(texels: &[u8]) -> [f32; 4] {
     if texels.is_empty() {
         return [0.5, 0.5, 0.5, 1.0];
     }
-    let srgb_to_linear = |c: u8| {
-        let s = f32::from(c) / 255.0;
-        if s <= 0.04045 {
+    // A `u8` has 256 possible values, so the transfer function is a table, not
+    // a `powf` per channel per texel. Bit-identical to evaluating it inline,
+    // and it is what lets the mean be taken over a full-resolution image
+    // instead of a Lanczos-resized thumbnail of one (DOOM-I).
+    let srgb_to_linear: [f64; 256] = std::array::from_fn(|i| {
+        let s = i as f32 / 255.0;
+        f64::from(if s <= 0.04045 {
             s / 12.92
         } else {
             ((s + 0.055) / 1.055).powf(2.4)
-        }
-    };
+        })
+    });
     let mut sum = [0.0f64; 3];
     let n = texels.len() / 4;
     for t in texels.chunks_exact(4) {
         for c in 0..3 {
-            sum[c] += f64::from(srgb_to_linear(t[c]));
+            sum[c] += srgb_to_linear[t[c] as usize];
         }
     }
     let inv = 1.0 / n as f64;
@@ -1252,11 +1256,45 @@ pub fn layer_packed_rgba(index: usize, size: u32) -> (Vec<u8>, Vec<u8>, bool) {
     }
 }
 
+/// One layer's average linear albedo, straight from its source.
+///
+/// Deliberately *not* `layer_packed_rgba`. That helper exists to produce texel
+/// data for upload, and using it for an average did three things a average does
+/// not need: it decoded the surface map as well as the albedo, it Lanczos3
+/// resized a 2048² image down to 256² first, and it did both for every one of
+/// the thirty-two layers. DOOM-I measured that at **6.94 s** — 95% of terrain
+/// creation and about 85% of the whole startup — to produce thirty-two colours.
+///
+/// The pairing rule is preserved: a layer counts as photographed only when both
+/// its maps are readable, so a half-present pack still averages the procedural
+/// recipe and the shading fallback does not change. The surface map is checked
+/// by *header*, which reads a few dozen bytes rather than megabytes.
+fn mean_albedo_source(index: usize) -> [f32; 4] {
+    let material = LAYER_MATERIALS[index];
+    let albedo = format!("{TERRAIN_ASSET_DIR}/{material}_albedo.png");
+    let surface = format!("{TERRAIN_ASSET_DIR}/{material}_surface.png");
+    if image::image_dimensions(&surface).is_ok()
+        && let Ok(image) = image::open(&albedo)
+    {
+        return mean_linear_albedo(&image.to_rgba8().into_raw());
+    }
+    let (procedural, _, _) = generate_layer(&RECIPES[index]);
+    mean_linear_albedo(&procedural)
+}
+
 fn mean_albedo_from_sources() -> [[f32; 4]; TERRAIN_LAYER_COUNT as usize] {
-    std::array::from_fn(|i| {
-        let (a, _, _) = layer_packed_rgba(i, 256);
-        mean_linear_albedo(&a)
-    })
+    let started = std::time::Instant::now();
+    // Thirty-two independent decodes, so they run at once. See
+    // `crate::jobs::map_expensive` for why the count-based threshold in
+    // `for_each_mut` is the wrong test for work this size.
+    let indices: Vec<usize> = (0..TERRAIN_LAYER_COUNT as usize).collect();
+    let means = crate::jobs::map_expensive(&indices, |&i| mean_albedo_source(i));
+    let out = std::array::from_fn(|i| means[i]);
+    tracing::info!(
+        ms = started.elapsed().as_secs_f32() * 1000.0,
+        "terrain: mean albedo from sources"
+    );
+    out
 }
 
 fn load_rgba_bank(range: std::ops::Range<usize>, size: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize) {
@@ -1757,6 +1795,63 @@ impl Splatmap {
                     depth_or_array_layers: 1,
                 },
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod doom_i_tests {
+    use super::*;
+
+    /// The table and the inline transfer function must agree exactly.
+    #[test]
+    fn the_srgb_table_is_the_transfer_function() {
+        for value in 0u16..=255 {
+            let c = value as u8;
+            let s = f32::from(c) / 255.0;
+            let inline = if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            };
+            // A one-texel image whose three colour channels are all `c`.
+            let mean = mean_linear_albedo(&[c, c, c, 255]);
+            assert_eq!(mean[0], inline, "channel value {c}");
+        }
+    }
+
+    /// Averaging the full image must agree with averaging a resized one.
+    ///
+    /// DOOM-I stopped Lanczos3-resizing every source to 256 before taking its
+    /// mean. This is the property that made that safe, checked against the real
+    /// assets when they are present and skipped when they are not — the repo
+    /// ships without `assets/terrain`, and a test that fails on a fresh clone
+    /// is a test people delete.
+    #[test]
+    fn the_full_image_mean_matches_the_resized_one() {
+        // Both helpers resolve `assets/terrain` relative to the process, so
+        // this exercises the shipped packs from the workspace root and the
+        // procedural recipes from the crate directory. Either is a real test of
+        // the property; deliberately not gated on the assets being present,
+        // because the first version of this test *was*, and silently passed by
+        // doing nothing.
+        //
+        // The tolerance is the measured worst case over all thirty-two shipped
+        // layers: 0.0184 in linear albedo, on layer 29. Lanczos3 has negative
+        // lobes, so a resized image's average is not quite the original's; the
+        // full-resolution figure is the more correct of the two.
+        for index in [0usize, 16] {
+            let (resized, _, _) = layer_packed_rgba(index, 256);
+            let old = mean_linear_albedo(&resized);
+            let new = mean_albedo_source(index);
+            for c in 0..3 {
+                assert!(
+                    (old[c] - new[c]).abs() < 0.03,
+                    "layer {index} channel {c}: resized {} vs full {}",
+                    old[c],
+                    new[c]
+                );
+            }
         }
     }
 }

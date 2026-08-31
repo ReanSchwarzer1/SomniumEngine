@@ -145,9 +145,25 @@ impl<F: FaceCoverage> FallbackChain<F> {
     /// caller can render it distinctly or log it.
     #[must_use]
     pub fn split(&self, text: &str) -> Vec<(Range<usize>, Option<u8>)> {
+        self.split_preferring(text, None)
+    }
+
+    /// [`Self::split`], but a named face gets first refusal.
+    ///
+    /// This is what makes the chain a *fallback* chain rather than a router. A
+    /// caller asking for bold is not asking "which face covers this" — it is
+    /// asking for bold, and only the characters bold does not have should reach
+    /// anything else. Without the preference, a shell with regular loaded first
+    /// draws every bold label in regular, because regular covers Latin too.
+    #[must_use]
+    pub fn split_preferring(
+        &self,
+        text: &str,
+        primary: Option<u8>,
+    ) -> Vec<(Range<usize>, Option<u8>)> {
         let mut spans: Vec<(Range<usize>, Option<u8>)> = Vec::new();
         for (offset, ch) in text.char_indices() {
-            let face = self.face_for(ch);
+            let face = self.face_for_preferring(ch, primary);
             let end = offset + ch.len_utf8();
             match spans.last_mut() {
                 Some((range, current)) if *current == face => range.end = end,
@@ -155,6 +171,20 @@ impl<F: FaceCoverage> FallbackChain<F> {
             }
         }
         spans
+    }
+
+    /// The face for `ch`, giving `primary` first refusal.
+    #[must_use]
+    pub fn face_for_preferring(&self, ch: char, primary: Option<u8>) -> Option<u8> {
+        if let Some(primary) = primary
+            && self
+                .faces
+                .iter()
+                .any(|(id, coverage)| *id == primary && coverage.covers(ch))
+        {
+            return Some(primary);
+        }
+        self.face_for(ch)
     }
 }
 
@@ -182,6 +212,45 @@ pub const SCRIPT_PRIORITY: &[(&str, Range<u32>)] = &[
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_named_face_gets_first_refusal() {
+        // A chain is a fallback chain, not a router. Both faces here cover
+        // Latin; a caller asking for face 1 is asking for face 1, and picking
+        // face 0 because it also covers Latin is how every bold label in a
+        // shell renders in regular.
+        let mut chain = FallbackChain::new();
+        chain.push(0, CoverageSet::latin());
+        chain.push(1, CoverageSet::latin());
+
+        assert_eq!(
+            chain.face_for('A'),
+            Some(0),
+            "unprefixed order is unchanged"
+        );
+        assert_eq!(chain.face_for_preferring('A', Some(1)), Some(1));
+        assert_eq!(
+            chain.split_preferring("Hi", Some(1)),
+            vec![(0..2, Some(1))],
+            "and the whole span goes to it"
+        );
+    }
+
+    #[test]
+    fn a_preferred_face_that_does_not_cover_still_falls_back() {
+        // The other half: preferring a face must not mean forcing it. A Latin
+        // face asked to draw Han has to yield, or the preference reintroduces
+        // exactly the tofu the chain exists to remove.
+        let mut chain = FallbackChain::new();
+        chain.push(0, CoverageSet::new(vec![0x4E00..0x9FFF]));
+        chain.push(1, CoverageSet::latin());
+
+        assert_eq!(chain.face_for_preferring('\u{6F22}', Some(1)), Some(0));
+        assert_eq!(
+            chain.split_preferring("A\u{6F22}", Some(1)),
+            vec![(0..1, Some(1)), (1..4, Some(0))]
+        );
+    }
     use super::*;
 
     fn latin() -> CoverageSet {

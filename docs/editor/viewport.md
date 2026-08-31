@@ -21,6 +21,33 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 
 Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings, a pass-order **Graph**, and CPU zones over the scene (including Water prepass / reflection / shade). Camera speed is the slider next to the m/s readout. **Resolution** caps the 3D target (Native, 2560×1440, 1920×1080, 1600×900, 1280×720) while the window and UI stay at display pixels — pick **1920×1080** for fullscreen on a 2K panel. **FSR** (Post Processing, default on) temporally reconstructs that internal target to the window; it replaces TAA and the bilinear blit while enabled. Frame generation is not in the engine. `SOMNIUM_FSR=0` kills it at startup. Water and other transparents have no reactive mask yet, so they can ghost under camera motion.
 
+## Dynamic resolution
+
+Off by default, and deliberately. It is the only control in the engine that
+trades image quality for frame rate, so it is something you switch on with the
+quality floor in front of you rather than something the engine starts doing
+when a frame gets expensive.
+
+Select the **Camera** entity in the Outliner and find the **Dynamic Resolution**
+group in Details:
+
+- **Dynamic Resolution** — on/off.
+- **Dynamic Target Ms** — the frame time it aims at. 16.67 is 60 Hz.
+- **Dynamic Floor** — the lowest scale it may choose, as a fraction of the
+  **Resolution** preset above. 0.67 renders about 45% of the pixels; it will
+  never go below this, so a busy view drops frames rather than going soft.
+
+It only ever scales the internal 3D target. The window, the UI, gizmos and text
+stay at display pixels. The controller has a ±10% dead band around the target
+(a frame's own standard deviation is a few percent, and without a dead band a
+controller chases its own noise), waits longer to raise the scale than to lower
+it, and settles — once it has found a scale it stops changing anything.
+
+The step grid is sixteenths, which is coarse on purpose: a change reallocates
+every scene-sized render target. The alternative — rendering into a sub-rect of
+a fixed target — needs every pass to become viewport-aware and is not in the
+engine.
+
 Lighting extras (world cache, scene specular, path tracer): see Help → **Lighting**. World cache is off by default; it adds bounce light, not frame-rate.
 
 Water reflections: see Help → **Water**. Short version — Details on a water body has **SSR**, **RT Reflect**, and **Reflect Debug**; the Post Processing entity has **RT Reflections** and **RT Refraction** (off by default). `SOMNIUM_RT_REFLECT=0` restores SSR + sky cube.

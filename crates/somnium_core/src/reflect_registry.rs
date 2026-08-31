@@ -20,12 +20,10 @@ use somnium_ecs::{Entity, World};
 
 use crate::{
     AntiAliasing, AudioAttenuationModel, AudioBus, AudioEmitterComponent, BuoyantVessel,
-    CameraSettingsComponent, EditorFlags, FoliageComponent,
-    LightComponent,
-    LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
-    ParticleEmitter, PostProcessComponent, TerrainComponent, Tonemapper, Transform,
-    SmaaPreset, UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
-    WorldPartitionComponent,
+    CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightShadowTechnique,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
+    PostProcessComponent, SmaaPreset, TerrainComponent, Tonemapper, Transform, UiCanvasComponent,
+    UiCanvasSpace, VoxelTerrainComponent, WaterComponent, WorldPartitionComponent,
 };
 
 // `MeshComponent` and `MaterialComponent` derive `Default` at their
@@ -194,9 +192,16 @@ impl ReflectField for LightShadowTechnique {
 const AUDIO_BUS_NAMES: &[&str] = &["SFX", "Music", "Dialogue", "UI"];
 
 impl ReflectField for AudioBus {
-    fn field_type() -> FieldType { FieldType::Enum(AUDIO_BUS_NAMES) }
+    fn field_type() -> FieldType {
+        FieldType::Enum(AUDIO_BUS_NAMES)
+    }
     fn to_reflect(&self) -> ReflectValue {
-        ReflectValue::I64(match self { Self::Sfx => 0, Self::Music => 1, Self::Dialogue => 2, Self::Ui => 3 })
+        ReflectValue::I64(match self {
+            Self::Sfx => 0,
+            Self::Music => 1,
+            Self::Dialogue => 2,
+            Self::Ui => 3,
+        })
     }
     fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
         match value {
@@ -204,8 +209,16 @@ impl ReflectField for AudioBus {
             ReflectValue::I64(1) => Ok(Self::Music),
             ReflectValue::I64(2) => Ok(Self::Dialogue),
             ReflectValue::I64(3) => Ok(Self::Ui),
-            ReflectValue::I64(_) => Err(ReflectError::OutOfRange { field, min: Some(0.0), max: Some(3.0) }),
-            other => Err(ReflectError::TypeMismatch { field, expected: "AudioBus".into(), found: other.kind() }),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(3.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "AudioBus".into(),
+                found: other.kind(),
+            }),
         }
     }
 }
@@ -213,9 +226,16 @@ impl ReflectField for AudioBus {
 const AUDIO_ATTENUATION_NAMES: &[&str] = &["Linear", "Inverse Square", "Authored", "None"];
 
 impl ReflectField for AudioAttenuationModel {
-    fn field_type() -> FieldType { FieldType::Enum(AUDIO_ATTENUATION_NAMES) }
+    fn field_type() -> FieldType {
+        FieldType::Enum(AUDIO_ATTENUATION_NAMES)
+    }
     fn to_reflect(&self) -> ReflectValue {
-        ReflectValue::I64(match self { Self::Linear => 0, Self::InverseSquare => 1, Self::Authored => 2, Self::None => 3 })
+        ReflectValue::I64(match self {
+            Self::Linear => 0,
+            Self::InverseSquare => 1,
+            Self::Authored => 2,
+            Self::None => 3,
+        })
     }
     fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
         match value {
@@ -223,8 +243,16 @@ impl ReflectField for AudioAttenuationModel {
             ReflectValue::I64(1) => Ok(Self::InverseSquare),
             ReflectValue::I64(2) => Ok(Self::Authored),
             ReflectValue::I64(3) => Ok(Self::None),
-            ReflectValue::I64(_) => Err(ReflectError::OutOfRange { field, min: Some(0.0), max: Some(3.0) }),
-            other => Err(ReflectError::TypeMismatch { field, expected: "AudioAttenuationModel".into(), found: other.kind() }),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(3.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "AudioAttenuationModel".into(),
+                found: other.kind(),
+            }),
         }
     }
 }
@@ -305,8 +333,7 @@ const TONEMAPPER_NAMES: &[&str] = &["AgX", "ACES", "Reinhard"];
 /// SMAA variants this pipeline can actually run. S2x and 4x are absent because
 /// they need MSAA subsample coverage a visibility buffer does not have; see
 /// [`SmaaPreset`].
-const ANTI_ALIASING_NAMES: &[&str] =
-    &["Off", "FXAA", "SMAA 1x", "SMAA T2x", "TAA", "FSR 3"];
+const ANTI_ALIASING_NAMES: &[&str] = &["Off", "FXAA", "SMAA 1x", "SMAA T2x", "TAA", "FSR 3"];
 
 /// MORROWIND-AC. Order is [`SmaaPreset::as_index`].
 const SMAA_PRESET_NAMES: &[&str] = &["Low", "Medium", "High", "Ultra"];
@@ -1217,6 +1244,7 @@ fn ui_canvas_schema() -> ComponentSchema {
         UiCanvasComponent as "somnium.UiCanvas", display "UI Canvas", version 1,
         fields {
             enabled { group: "Canvas" },
+            document { group: "Canvas", asset_kind_mask: somnium_asset::database::ASSET_KIND_UI_DOCUMENT },
             space { group: "Canvas" },
             width { min: 0.01, soft_max: 3840.0, group: "Resolution" },
             height { min: 0.01, soft_max: 2160.0, group: "Resolution" },

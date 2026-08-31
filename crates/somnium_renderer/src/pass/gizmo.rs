@@ -96,14 +96,7 @@ fn push_arrow(verts: &mut Vec<GizmoVertex>, inds: &mut Vec<u32>, dir: glam::Vec3
     let far = ring(SHAFT_END, SHAFT_R);
     for i in 0..SIDES {
         let j = (i + 1) % SIDES;
-        inds.extend_from_slice(&[
-            near + i,
-            near + j,
-            far + j,
-            near + i,
-            far + j,
-            far + i,
-        ]);
+        inds.extend_from_slice(&[near + i, near + j, far + j, near + i, far + j, far + i]);
     }
 
     // Cone head, and the disc that closes its base.

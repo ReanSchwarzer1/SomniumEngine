@@ -1,0 +1,90 @@
+# somtime v1
+# label	DOOM-M close-out, island-ground, all defaults
+# frames	300 measured after 180 warmup, 287 profiler samples
+# adapter	NVIDIA GeForce RTX 5080 Laptop GPU / Vulkan
+# driver	NVIDIA 610.74
+# render	1920x1032
+# columns	kind	name	depth	mean_ms	stddev_ms	min_ms	max_ms	samples
+gpu	Auto exposure	1	0.0376	0.0012	0.0344	0.0424	287
+gpu	Bloom	1	0.0756	0.0024	0.0687	0.0821	287
+gpu	Census	1	0.0021	0.0001	0.0020	0.0026	287
+gpu	Cloud composite	1	0.0023	0.0001	0.0020	0.0027	287
+gpu	Clouds	1	0.0021	0.0001	0.0020	0.0026	287
+gpu	Cull (phase 1)	1	0.0140	0.0209	0.0109	0.2595	287
+gpu	Cull (phase 2)	1	0.0096	0.0004	0.0088	0.0106	287
+gpu	DDGI	1	0.0025	0.0026	0.0020	0.0262	287
+gpu	DoF	1	0.0023	0.0001	0.0020	0.0034	287
+gpu	Editor overlays	1	0.0063	0.0002	0.0060	0.0072	287
+gpu	FSR	1	0.7243	0.0131	0.6906	0.7722	287
+gpu	Frame	0	13.1794	0.8356	10.9523	14.6284	287
+gpu	GTAO	1	0.5003	0.0274	0.4655	0.7786	287
+gpu	Game UI	2	0.0092	0.0002	0.0088	0.0099	287
+gpu	Hi-Z	1	0.0516	0.0147	0.0473	0.2978	287
+gpu	Hi-Z (phase 2)	1	0.0462	0.0018	0.0425	0.0522	287
+gpu	Lighting extra	1	0.0025	0.0025	0.0020	0.0241	287
+gpu	Motion Blur	1	0.0023	0.0002	0.0020	0.0043	287
+gpu	Post + present	1	0.0488	0.0012	0.0463	0.0531	287
+gpu	ReSTIR DI	1	0.2502	0.0068	0.2328	0.2728	287
+gpu	ReSTIR GI	1	1.3807	0.0597	1.2884	1.7784	287
+gpu	ReSTIR clear	1	0.0024	0.0025	0.0020	0.0241	287
+gpu	Shading	1	6.2000	0.2470	5.6675	6.9699	287
+gpu	Shadows	1	0.0023	0.0021	0.0020	0.0235	287
+gpu	TAA	1	0.0023	0.0001	0.0020	0.0029	287
+gpu	TLAS build	1	0.0668	0.0023	0.0616	0.0745	287
+gpu	Terrain clipmap	1	0.0021	0.0001	0.0020	0.0025	287
+gpu	Transparent	1	0.0022	0.0001	0.0020	0.0026	287
+gpu	UI	1	0.1126	0.0047	0.1017	0.1274	287
+gpu	Underwater	1	0.0518	0.0015	0.0478	0.0557	287
+gpu	Velocity	1	0.0203	0.0028	0.0182	0.0441	287
+gpu	Visibility (phase 1)	1	0.0640	0.0270	0.0558	0.3362	287
+gpu	Visibility (phase 2)	1	0.0200	0.0012	0.0183	0.0236	287
+gpu	Volumetrics	1	0.1264	0.0036	0.1187	0.1388	287
+gpu	Water prepass	1	2.2390	0.8046	0.3128	2.6879	287
+gpu	Water reflection	1	0.1489	0.0061	0.1302	0.1668	287
+gpu	Water shade	1	0.8072	0.0230	0.7586	0.8798	287
+cpu	Cluster cull	0	0.0139	0.0112	0.0090	0.1408	287
+cpu	Editor panels	0	0.3092	0.0967	0.1909	0.7011	287
+cpu	Environment	0	0.0462	0.0217	0.0236	0.2528	287
+cpu	Foliage	1	0.0002	0.0001	0.0001	0.0004	287
+cpu	Instances	0	0.0037	0.0007	0.0026	0.0086	287
+cpu	Jobs & assets	0	0.0546	0.2282	0.0035	1.4631	287
+cpu	Lighting extra	0	0.0063	0.0026	0.0043	0.0475	287
+cpu	Scene submit	0	0.0065	0.0015	0.0044	0.0195	287
+cpu	Terrain	0	0.0168	0.0044	0.0118	0.0597	287
+cpu	Frame wall	0	16.8832	0.6468	14.9383	18.7051	300
+cpu	Frame CPU	0	3.4727	0.5052	2.4771	6.9858	300
+cpu	Surface acquire	0	0.0351	0.0106	0.0209	0.1052	300
+hitch	median_ms	0	16.8328	0.0000	16.8328	16.8328	300
+hitch	p99_ms	0	18.3420	0.0000	18.3420	18.3420	300
+hitch	worst_ms	0	18.7051	0.0000	18.7051	18.7051	300
+hitch	over_2x_median	0	0.0000	0.0000	0.0000	0.0000	300
+hitch	worst_frame	0	21.0000	0.0000	21.0000	21.0000	300
+hitch	last_over_2x_frame	0	0.0000	0.0000	0.0000	0.0000	300
+count	alloc_churn_frames	0	103	0	103	103	1
+count	alloc_worst_frame_delta	0	75	0	75	75	1
+count	alloc_net_buffers	0	0	0	0	0	1
+count	alloc_net_textures	0	0	0	0	0	1
+count	alloc_net_bind_groups	0	0	0	0	0	1
+count	live_buffers	0	194	0	194	194	1
+count	live_textures	0	-216	0	-216	-216	1
+count	live_texture_views	0	424	0	424	424	1
+count	live_bind_groups	0	118	0	118	118	1
+count	live_samplers	0	30	0	30	30	1
+count	live_memory_allocations	0	0	0	0	0	1
+count	churn_buffers	0	103	0	103	103	1
+count	churn_texture_views	0	26	0	26	26	1
+count	churn_bind_groups	0	26	0	26	26	1
+count	live_buffer_mib	0	842.8	0	842.8	842.8	1
+count	live_texture_mib	0	1149.6	0	1149.6	1149.6	1
+count	draw_calls	0	19	0	19	19	1
+count	triangles	0	113564	0	113564	113564	1
+count	instances	0	19	0	19	19	1
+count	terrain_chunks	0	18	0	18	18	1
+count	terrain_cpu_culled	0	46	0	46	46	1
+count	tlas_instances	0	19	0	19	19	1
+count	shadow_casters	0	65	0	65	65	1
+count	shadow_cascades_rendered	0	0	0	0	0	1
+count	virtual_shadow_pages	0	0	0	0	0	1
+count	virtual_shadow_resident	0	0	0	0	0	1
+stat	Shading.frag	0	1981440	0	1981440	1981440	1
+stat	Shading.prim	0	1	0	1	1	1

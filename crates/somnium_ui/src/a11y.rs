@@ -77,6 +77,10 @@ pub enum Role {
     /// Something that appeared and should be read without being focused — a
     /// toast, a validation failure.
     Alert,
+    /// A grid of typed columns and keyed rows (MORROWIND-M item 2). Its own
+    /// role rather than `List`, because a reader navigating a table wants row
+    /// and column, and a list has neither.
+    Table,
 }
 
 impl Role {
@@ -126,6 +130,7 @@ impl Role {
             Role::Image => "image",
             Role::Dialog => "dialog",
             Role::Alert => "alert",
+            Role::Table => "table",
         }
     }
 }
@@ -389,6 +394,7 @@ impl Role {
             Role::Image => Ak::Image,
             Role::Dialog => Ak::Dialog,
             Role::Alert => Ak::Alert,
+            Role::Table => Ak::Grid,
         }
     }
 }

@@ -38,7 +38,7 @@ use somnium_ecs::reflect::{FieldFlags, TypeRegistry};
 use somnium_ecs::{Entity, FieldId, PersistentId, ReflectObject, StableId, World};
 use somnium_script::ScriptAssetId;
 use somnium_script::command::{
-    AnimationParameterValue, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken,
+    AnimationParameterValue, ForceMode, LogLevel, QueuedCommand, ScriptCommand, SpawnToken, UiValue,
 };
 use somnium_script::order::OrderKey;
 use somnium_script::snapshot::WorldView;
@@ -228,6 +228,14 @@ pub struct ApplyOutcome {
     /// that asked — a playing voice is an owned resource, and teardown can
     /// only stop it if it knows whose it is.
     pub audio: Vec<(OrderKey, ScriptAssetId, f32)>,
+    /// Authored-UI writes for the caller to apply to its own `.somui`
+    /// instances, tagged with the attachment that asked.
+    ///
+    /// Collected rather than applied here for the same reason as `audio`: the
+    /// documents belong to the game, not to the engine, and a bridge that
+    /// reached into them would have to know which game it was bridging.
+    /// MORROWIND-M2.
+    pub ui: Vec<(OrderKey, UiWrite)>,
     /// Events for the caller to dispatch.
     pub events: Vec<PendingEvent>,
     /// Log lines, attributed to their attachment.
@@ -236,6 +244,22 @@ pub struct ApplyOutcome {
     pub rejected: Vec<CommandRejection>,
     /// Commands that were applied, for the profiler.
     pub applied: usize,
+}
+
+/// One script write to an authored `.somui` document.
+///
+/// Addressed by author-given names all the way through, so the game applying it
+/// looks up exactly what the script asked for. MORROWIND-M2.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiWrite {
+    /// The document, by the name the game registered it under.
+    pub document: String,
+    /// The element's authored name.
+    pub element: String,
+    /// The property key.
+    pub property: String,
+    /// The value, already checked for finiteness.
+    pub value: UiValue,
 }
 
 /// Apply one phase's worth of commands.
@@ -391,6 +415,33 @@ pub fn apply_commands(
                     outcome.reject(order, RejectReason::InvalidValue, "volume");
                 } else {
                     outcome.audio.push((order, asset, volume));
+                    outcome.applied += 1;
+                }
+            }
+
+            ScriptCommand::SetUiProperty {
+                document,
+                element,
+                property,
+                value,
+            } => {
+                // A non-finite number would reach a widget as a NaN width or a
+                // NaN font size and take the layout with it, which is a much
+                // harder thing to trace back than a rejected command.
+                if matches!(value, UiValue::Number(number) if !number.is_finite()) {
+                    outcome.reject(order, RejectReason::InvalidValue, "ui property");
+                } else if document.is_empty() || element.is_empty() || property.is_empty() {
+                    outcome.reject(order, RejectReason::InvalidValue, "ui address");
+                } else {
+                    outcome.ui.push((
+                        order,
+                        UiWrite {
+                            document,
+                            element,
+                            property,
+                            value,
+                        },
+                    ));
                     outcome.applied += 1;
                 }
             }

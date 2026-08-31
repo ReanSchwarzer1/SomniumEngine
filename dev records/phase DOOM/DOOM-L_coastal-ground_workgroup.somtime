@@ -1,0 +1,87 @@
+# somtime v1
+# label	DOOM-L coastal-ground workgroup tree reduction
+# frames	300 measured after 180 warmup, 225 profiler samples
+# adapter	NVIDIA GeForce RTX 5080 Laptop GPU / Vulkan
+# driver	NVIDIA 610.74
+# render	1920x1032
+# columns	kind	name	depth	mean_ms	stddev_ms	min_ms	max_ms	samples
+gpu	Auto exposure	1	0.0449	0.0014	0.0417	0.0491	225
+gpu	Bloom	1	0.0792	0.0023	0.0736	0.0839	225
+gpu	Census	1	0.0021	0.0001	0.0020	0.0028	225
+gpu	Cloud composite	1	0.0023	0.0001	0.0021	0.0028	225
+gpu	Clouds	1	0.0021	0.0001	0.0020	0.0029	225
+gpu	Cull (phase 1)	1	0.0275	0.0575	0.0116	0.2680	225
+gpu	Cull (phase 2)	1	0.0123	0.0004	0.0116	0.0145	225
+gpu	DDGI	1	0.0022	0.0002	0.0020	0.0041	225
+gpu	DoF	1	0.0025	0.0003	0.0021	0.0035	225
+gpu	Editor overlays	1	0.0050	0.0001	0.0048	0.0054	225
+gpu	FSR	1	0.8073	0.1841	0.7250	1.9031	225
+gpu	Frame	0	20.1492	1.9141	16.7737	28.9487	225
+gpu	GTAO	1	0.7899	0.1214	0.6781	1.5612	225
+gpu	Game UI	2	0.0094	0.0002	0.0091	0.0100	225
+gpu	Hi-Z	1	0.0742	0.0691	0.0503	0.3497	225
+gpu	Hi-Z (phase 2)	1	0.0482	0.0015	0.0452	0.0537	225
+gpu	Lighting extra	1	0.0022	0.0002	0.0020	0.0034	225
+gpu	Motion Blur	1	0.0023	0.0001	0.0021	0.0028	225
+gpu	Post + present	1	0.0507	0.0014	0.0481	0.0556	225
+gpu	ReSTIR DI	1	0.2688	0.0073	0.2567	0.3085	225
+gpu	ReSTIR GI	1	2.9754	1.7138	2.2864	12.3061	225
+gpu	ReSTIR clear	1	0.0022	0.0002	0.0020	0.0033	225
+gpu	Shading	1	11.5263	0.3821	10.7049	12.6474	225
+gpu	Shadows	1	0.0023	0.0001	0.0020	0.0027	225
+gpu	TAA	1	0.0023	0.0001	0.0021	0.0026	225
+gpu	TLAS build	1	0.0942	0.0038	0.0864	0.1043	225
+gpu	Terrain clipmap	1	0.0021	0.0001	0.0020	0.0028	225
+gpu	Transparent	1	0.0023	0.0001	0.0021	0.0029	225
+gpu	UI	1	0.1193	0.0030	0.1111	0.1277	225
+gpu	Velocity	1	0.0221	0.0007	0.0206	0.0248	225
+gpu	Visibility (phase 1)	1	0.3354	0.0941	0.0939	0.4135	225
+gpu	Visibility (phase 2)	1	0.0232	0.0015	0.0196	0.0295	225
+gpu	Volumetrics	1	0.1312	0.0034	0.1215	0.1383	225
+gpu	Water prepass	1	2.1511	0.7662	0.1504	2.5392	225
+gpu	Water reflection	1	0.1109	0.0036	0.1004	0.1228	225
+gpu	Water shade	1	0.3040	0.0171	0.2796	0.3714	225
+cpu	Cluster cull	0	0.0151	0.0050	0.0101	0.0679	225
+cpu	Editor panels	0	0.3264	0.0849	0.2272	0.6926	225
+cpu	Environment	0	0.0344	0.0070	0.0234	0.0598	225
+cpu	Foliage	1	0.0002	0.0001	0.0000	0.0004	225
+cpu	Instances	0	0.0053	0.0009	0.0042	0.0088	225
+cpu	Jobs & assets	0	0.0644	0.2644	0.0038	1.5768	225
+cpu	Lighting extra	0	0.0112	0.0038	0.0067	0.0430	225
+cpu	Scene submit	0	0.0065	0.0011	0.0049	0.0144	225
+cpu	Terrain	0	0.0336	0.0073	0.0261	0.0752	225
+cpu	Frame wall	0	20.1989	1.9996	14.2480	29.8884	300
+cpu	Frame CPU	0	19.9550	2.0665	13.8790	29.6698	300
+cpu	Surface acquire	0	15.7180	1.9497	10.1079	24.6985	300
+hitch	median_ms	0	19.9375	0.0000	19.9375	19.9375	300
+hitch	p99_ms	0	28.1461	0.0000	28.1461	28.1461	300
+hitch	worst_ms	0	29.8884	0.0000	29.8884	29.8884	300
+hitch	over_2x_median	0	0.0000	0.0000	0.0000	0.0000	300
+hitch	worst_frame	0	134.0000	0.0000	134.0000	134.0000	300
+hitch	last_over_2x_frame	0	0.0000	0.0000	0.0000	0.0000	300
+count	alloc_churn_frames	0	74	0	74	74	1
+count	alloc_worst_frame_delta	0	1	0	1	1	1
+count	alloc_net_buffers	0	0	0	0	0	1
+count	alloc_net_textures	0	0	0	0	0	1
+count	alloc_net_bind_groups	0	0	0	0	0	1
+count	live_buffers	0	342	0	342	342	1
+count	live_textures	0	-216	0	-216	-216	1
+count	live_texture_views	0	594	0	594	594	1
+count	live_bind_groups	0	181	0	181	181	1
+count	live_samplers	0	30	0	30	30	1
+count	live_memory_allocations	0	0	0	0	0	1
+count	churn_buffers	0	74	0	74	74	1
+count	live_buffer_mib	0	845.7	0	845.7	845.7	1
+count	live_texture_mib	0	1209.1	0	1209.1	1209.1	1
+count	draw_calls	0	66	0	66	66	1
+count	triangles	0	336364	0	336364	336364	1
+count	instances	0	66	0	66	66	1
+count	terrain_chunks	0	65	0	65	65	1
+count	terrain_cpu_culled	0	191	0	191	191	1
+count	tlas_instances	0	66	0	66	66	1
+count	shadow_casters	0	218	0	218	218	1
+count	shadow_cascades_rendered	0	0	0	0	0	1
+count	virtual_shadow_pages	0	0	0	0	0	1
+count	virtual_shadow_resident	0	0	0	0	0	1
+stat	Shading.frag	0	1981440	0	1981440	1981440	1
+stat	Shading.prim	0	1	0	1	1	1

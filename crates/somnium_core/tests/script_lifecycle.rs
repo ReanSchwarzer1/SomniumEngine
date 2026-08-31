@@ -91,6 +91,7 @@ impl Harness {
             #[allow(clippy::cast_precision_loss)]
             simulation_time: self.step as f64 / 60.0,
             step: self.step,
+            stepping: false,
         }
     }
 

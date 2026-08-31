@@ -301,6 +301,12 @@ pub enum EditorEvent {
     PauseSimulation,
     /// Return to edit mode and reset the simulation clock.
     StopSimulation,
+    /// Advance exactly one fixed step while paused (MORROWIND-N).
+    ///
+    /// Only meaningful from `Paused`: stepping a running simulation is
+    /// ambiguous — it would either do nothing visible or fight the accumulator
+    /// — and stepping from Edit would advance a clock that is not running.
+    StepSimulation,
     /// Hide editor chrome and fill the monitor with the 3D view. Esc toggles off.
     ToggleImmersiveViewport,
     /// 0 translate, 1 rotate, 2 scale — same as T / R / S.
@@ -522,6 +528,20 @@ pub enum EditorEvent {
     ShowContentItemInFolder(String),
     /// Open an asset in its configured OS editor.
     EditContentAsset(String),
+    /// Pull a panel out into its own OS window, or raise the one already
+    /// showing it (MORROWIND-J step 2).
+    ///
+    /// The host acts on this because only the host has an `ActiveEventLoop`,
+    /// which is the one thing a window cannot be created without.
+    FloatPanel(crate::floating::FloatingKind),
+    /// Write the localisation table back to the project, one file per locale.
+    ///
+    /// Carries nothing: the host asks [`crate::UiManager::localisation_table`]
+    /// for the committed table, because the shape a catalogue is saved in is a
+    /// `somnium_i18n` question and this crate does not know that vocabulary.
+    SaveLocalisation,
+    /// Write the localisation table out as a CSV for a translator.
+    ExportLocalisationCsv,
     /// Copy an asset beside itself and commit the new reference through the
     /// same reflected undo path.
     MakeAssetUnique {

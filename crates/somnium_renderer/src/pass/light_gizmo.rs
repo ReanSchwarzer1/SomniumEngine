@@ -229,7 +229,14 @@ fn push_light(out: &mut Vec<LineVertex>, d: &LightGizmoDesc) {
             let range = d.range.max(0.01);
             push_wire_sphere(out, d.position, range, (hue * tint * 0.25).to_array());
             push_cone(out, d.position, dir, d.outer_angle, range, color);
-            push_cone(out, d.position, dir, d.inner_angle, range, (hue * tint * 0.55).to_array());
+            push_cone(
+                out,
+                d.position,
+                dir,
+                d.inner_angle,
+                range,
+                (hue * tint * 0.55).to_array(),
+            );
             push_arrow(out, d.position, d.position + dir * range.min(2.0), color);
         }
     }

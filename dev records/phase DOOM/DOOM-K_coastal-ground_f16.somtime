@@ -1,0 +1,87 @@
+# somtime v1
+# label	DOOM-K coastal-ground f16 splat weights
+# frames	300 measured after 180 warmup, 226 profiler samples
+# adapter	NVIDIA GeForce RTX 5080 Laptop GPU / Vulkan
+# driver	NVIDIA 610.74
+# render	1920x1032
+# columns	kind	name	depth	mean_ms	stddev_ms	min_ms	max_ms	samples
+gpu	Auto exposure	1	0.0448	0.0015	0.0414	0.0494	226
+gpu	Bloom	1	0.0795	0.0021	0.0745	0.0845	226
+gpu	Census	1	0.0021	0.0001	0.0020	0.0027	226
+gpu	Cloud composite	1	0.0023	0.0001	0.0020	0.0027	226
+gpu	Clouds	1	0.0021	0.0001	0.0020	0.0027	226
+gpu	Cull (phase 1)	1	0.0285	0.0619	0.0114	0.2881	226
+gpu	Cull (phase 2)	1	0.0122	0.0005	0.0106	0.0148	226
+gpu	DDGI	1	0.0022	0.0002	0.0020	0.0030	226
+gpu	DoF	1	0.0024	0.0001	0.0020	0.0033	226
+gpu	Editor overlays	1	0.0050	0.0001	0.0048	0.0056	226
+gpu	FSR	1	0.8022	0.1669	0.7237	1.7654	226
+gpu	Frame	0	20.2199	1.9318	16.7747	30.5818	226
+gpu	GTAO	1	0.7851	0.1360	0.6739	1.5850	226
+gpu	Game UI	2	0.0094	0.0002	0.0089	0.0100	226
+gpu	Hi-Z	1	0.0669	0.0555	0.0498	0.3323	226
+gpu	Hi-Z (phase 2)	1	0.0479	0.0016	0.0444	0.0528	226
+gpu	Lighting extra	1	0.0022	0.0002	0.0020	0.0033	226
+gpu	Motion Blur	1	0.0023	0.0001	0.0020	0.0027	226
+gpu	Post + present	1	0.0504	0.0011	0.0481	0.0545	226
+gpu	ReSTIR DI	1	0.2659	0.0063	0.2534	0.2882	226
+gpu	ReSTIR GI	1	2.9336	1.6450	2.2693	12.5777	226
+gpu	ReSTIR clear	1	0.0022	0.0002	0.0020	0.0029	226
+gpu	Shading	1	11.6165	0.4392	10.7684	12.7984	226
+gpu	Shadows	1	0.0023	0.0001	0.0020	0.0028	226
+gpu	TAA	1	0.0023	0.0001	0.0020	0.0026	226
+gpu	TLAS build	1	0.0924	0.0040	0.0848	0.1039	226
+gpu	Terrain clipmap	1	0.0021	0.0001	0.0020	0.0028	226
+gpu	Transparent	1	0.0023	0.0001	0.0021	0.0025	226
+gpu	UI	1	0.1187	0.0031	0.1105	0.1294	226
+gpu	Velocity	1	0.0217	0.0006	0.0203	0.0243	226
+gpu	Visibility (phase 1)	1	0.3321	0.0928	0.0926	0.4124	226
+gpu	Visibility (phase 2)	1	0.0256	0.0233	0.0200	0.2763	226
+gpu	Volumetrics	1	0.1299	0.0035	0.1217	0.1400	226
+gpu	Water prepass	1	2.1988	0.6701	0.1562	2.5257	226
+gpu	Water reflection	1	0.1094	0.0035	0.0991	0.1196	226
+gpu	Water shade	1	0.3059	0.0184	0.2834	0.3751	226
+cpu	Cluster cull	0	0.0164	0.0114	0.0111	0.1351	226
+cpu	Editor panels	0	0.2759	0.0844	0.1814	0.6321	226
+cpu	Environment	0	0.0341	0.0075	0.0245	0.0654	226
+cpu	Foliage	1	0.0002	0.0001	0.0000	0.0005	226
+cpu	Instances	0	0.0052	0.0008	0.0038	0.0089	226
+cpu	Jobs & assets	0	0.0729	0.2816	0.0032	1.4839	226
+cpu	Lighting extra	0	0.0109	0.0026	0.0066	0.0366	226
+cpu	Scene submit	0	0.0063	0.0015	0.0045	0.0214	226
+cpu	Terrain	0	0.0345	0.0159	0.0249	0.1728	226
+cpu	Frame wall	0	20.2698	2.1014	15.5744	30.7898	300
+cpu	Frame CPU	0	20.0292	2.1510	14.8232	30.6086	300
+cpu	Surface acquire	0	15.7910	2.0522	11.2765	25.8132	300
+hitch	median_ms	0	19.9652	0.0000	19.9652	19.9652	300
+hitch	p99_ms	0	29.5190	0.0000	29.5190	29.5190	300
+hitch	worst_ms	0	30.7898	0.0000	30.7898	30.7898	300
+hitch	over_2x_median	0	0.0000	0.0000	0.0000	0.0000	300
+hitch	worst_frame	0	150.0000	0.0000	150.0000	150.0000	300
+hitch	last_over_2x_frame	0	0.0000	0.0000	0.0000	0.0000	300
+count	alloc_churn_frames	0	62	0	62	62	1
+count	alloc_worst_frame_delta	0	1	0	1	1	1
+count	alloc_net_buffers	0	0	0	0	0	1
+count	alloc_net_textures	0	0	0	0	0	1
+count	alloc_net_bind_groups	0	0	0	0	0	1
+count	live_buffers	0	342	0	342	342	1
+count	live_textures	0	-216	0	-216	-216	1
+count	live_texture_views	0	594	0	594	594	1
+count	live_bind_groups	0	181	0	181	181	1
+count	live_samplers	0	30	0	30	30	1
+count	live_memory_allocations	0	0	0	0	0	1
+count	churn_buffers	0	62	0	62	62	1
+count	live_buffer_mib	0	845.7	0	845.7	845.7	1
+count	live_texture_mib	0	1209.1	0	1209.1	1209.1	1
+count	draw_calls	0	66	0	66	66	1
+count	triangles	0	336364	0	336364	336364	1
+count	instances	0	66	0	66	66	1
+count	terrain_chunks	0	65	0	65	65	1
+count	terrain_cpu_culled	0	191	0	191	191	1
+count	tlas_instances	0	66	0	66	66	1
+count	shadow_casters	0	218	0	218	218	1
+count	shadow_cascades_rendered	0	0	0	0	0	1
+count	virtual_shadow_pages	0	0	0	0	0	1
+count	virtual_shadow_resident	0	0	0	0	0	1
+stat	Shading.frag	0	1981440	0	1981440	1981440	1
+stat	Shading.prim	0	1	0	1	1	1

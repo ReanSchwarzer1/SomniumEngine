@@ -26,13 +26,17 @@ use crate::editor_commands::{
     FieldUndoSnapshot, SetFieldCmd, SetTransformCmd, TerrainEditCmd, TerrainRestoreOp,
     TerrainRestoreQueue, UndoStack,
 };
+use crate::editor_gizmo::{
+    GizmoFollower, apply_followers, capture_followers, entity_world_matrix, invert_affine,
+    parent_world_matrix, world_to_local_translation,
+};
 use crate::error::EngineError;
 use crate::event::{EngineEvent, translate_window_event};
 use crate::jobs::{JobHandle, JobPriority, JobSystem};
 use crate::time::TimeState;
 use crate::{
-    CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightType,
-    MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
+    AudioEmitterComponent, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
+    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
     WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
 };
@@ -402,13 +406,22 @@ struct GizmoDragState {
     ring_bitangent: glam::Vec3,
     /// Gizmo world position at drag start.
     gizmo_pos: glam::Vec3,
+    /// Parent model transform at drag start. Identity for a root entity.
+    ///
+    /// The gizmo solves its gesture in world space; authored `Transform` is
+    /// local. Keeping both directions here is what lets the seam convert once
+    /// instead of making every drag caller understand hierarchy algebra.
+    parent_world: glam::Mat4,
+    parent_world_inverse: glam::Mat4,
+    /// The selected entity's world rotation at drag start, for local axes.
+    start_world_rotation: glam::Quat,
     /// The rest of the selection, with the transform each started at.
     ///
     /// CONTROL-F made the selection a set; a gizmo that still moved one thing
     /// would have made multi-select a lie the moment anyone dragged. The
     /// *deltas* are applied to these, not the primary's final value, so twelve
     /// objects keep their relative positions.
-    followers: Vec<(u32, Transform)>,
+    followers: Vec<GizmoFollower>,
     /// Whether the drag axes follow the object's own rotation.
     local_space: bool,
 }
@@ -500,6 +513,19 @@ pub trait GameApp {
 
     /// Called after a version-2 map factory finishes (drawer double-click or tests).
     fn on_map_loaded(&mut self, _ctx: &mut EngineContext, _result: &crate::MapLoadResult) {}
+
+    /// The game's authored `.somui` documents, for `ctx:setUiProperty`.
+    ///
+    /// MORROWIND-M2. Defaulted to `None` so no existing game changes; a game
+    /// that returns `None` and whose scripts write UI gets one rejection line
+    /// naming this method, rather than a HUD that quietly never updates.
+    ///
+    /// The engine does not own these because a HUD is part of the game: how
+    /// many documents there are and what they are called is not something an
+    /// engine can decide for it.
+    fn ui_documents(&mut self) -> Option<&mut dyn crate::script_host::UiDocumentSink> {
+        None
+    }
 }
 
 /// Joins a boxed [`GameApp`] to the renderer's [`somnium_ui::GameUi`] seam.
@@ -606,8 +632,32 @@ pub struct Engine<G: GameApp> {
     world_partition: Option<crate::world_partition::WorldPartition>,
     world_partition_cell_size: f64,
     world_partition_pin: Option<crate::world_partition::CellCoord>,
-    asset_scan: Option<JobHandle<somnium_asset::database::AssetDbSnapshot>>,
+    /// The inventory and the reference graph travel together, because they
+    /// are two readings of the same disk and a panel showing one against the
+    /// other's assets is worse than no panel (MORROWIND-M item 3).
+    asset_scan: Option<
+        JobHandle<(
+            somnium_asset::database::AssetDbSnapshot,
+            somnium_asset::depend::DependencyIndex,
+        )>,
+    >,
     asset_gate: somnium_asset::database::DebouncedAssetDb,
+    /// The project's string tables, as loaded. The editor holds the *table*;
+    /// this is the catalogue it was projected from, kept because a save needs
+    /// the display names and font lists a table cannot carry.
+    locale_catalog: Option<somnium_i18n::Catalog>,
+    /// Float requests waiting for an `ActiveEventLoop`.
+    ///
+    /// `handle_editor_event` has no event loop and a window cannot be created
+    /// without one, so the request is parked here and serviced a few lines
+    /// later in `about_to_wait` — the nearest point that has both.
+    pending_float: Vec<somnium_ui::floating::FloatingKind>,
+    /// Panels the user has pulled out into their own OS windows.
+    ///
+    /// A `Vec` rather than a map keyed by `WindowId`: there are at most a
+    /// handful, they are iterated far more often than they are looked up, and a
+    /// linear scan of four is not the thing to optimise.
+    floating: Vec<FloatingWindow>,
     next_asset_scan: std::time::Instant,
     /// When shader files were last polled for hot reload (MORROWIND-C).
     last_shader_poll: std::time::Instant,
@@ -806,6 +856,78 @@ pub struct Engine<G: GameApp> {
     /// Fixed steps elapsed in this play session. Part of the deterministic
     /// clock a script sees, and reset by Stop.
     script_step: u64,
+    /// MORROWIND-N: fixed steps owed to a paused simulation.
+    ///
+    /// A counter rather than a flag so holding the Step control queues steps
+    /// instead of dropping every one that arrives inside a single frame — at
+    /// 60 Hz a key repeat is faster than the frame that would consume it.
+    pending_steps: u32,
+    /// Whether *this frame* is a hand-driven step.
+    ///
+    /// Separate from `pending_steps` because the counter is spent before the
+    /// step it pays for actually runs: deriving the flag from it made
+    /// `stepping` false during the very step it describes.
+    stepping_now: bool,
+}
+
+/// A panel in its own OS window: the parts `somnium_ui` deliberately does not
+/// own.
+///
+/// MORROWIND-J step 2. The widget tree and its draw list live in
+/// [`somnium_ui::floating::FloatingPanel`]; everything here is the platform —
+/// a window, a surface, its configuration, and the pass that puts one on the
+/// other.
+struct FloatingWindow {
+    window: std::sync::Arc<Window>,
+    surface: somnium_ui::wgpu::Surface<'static>,
+    config: somnium_ui::wgpu::SurfaceConfiguration,
+    pass: somnium_ui::pass::UiPass,
+    panel: somnium_ui::floating::FloatingPanel,
+}
+
+impl FloatingWindow {
+    /// Reconfigure for a new physical size.
+    ///
+    /// A zero-sized surface is a validation error rather than a small one, and
+    /// minimising a window is exactly how it happens.
+    fn resize(&mut self, device: &somnium_ui::wgpu::Device, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(device, &self.config);
+        self.panel.resize((width as f32, height as f32));
+    }
+
+    /// Draw the panel into its own swapchain.
+    fn render(&mut self, device: &somnium_ui::wgpu::Device, queue: &somnium_ui::wgpu::Queue) {
+        use somnium_ui::wgpu;
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(tex)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            // A window being resized or occluded fails to acquire, and skipping
+            // the frame is the whole of the correct response.
+            _ => return,
+        };
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Floating Window Encoder"),
+        });
+        self.panel.draw();
+        let size = (self.config.width, self.config.height);
+        self.pass.prepare(
+            device,
+            queue,
+            &mut self.panel.ui.draw_ctx,
+            somnium_ui::pass::UiSurface::new((size.0 as f32, size.1 as f32), size),
+        );
+        self.pass.render(&mut encoder, &view);
+        queue.submit(std::iter::once(encoder.finish()));
+        queue.present(output);
+    }
 }
 
 impl<G: GameApp + 'static> Engine<G> {
@@ -877,6 +999,9 @@ impl<G: GameApp + 'static> Engine<G> {
             world_partition_pin: None,
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
+            locale_catalog: None,
+            pending_float: Vec::new(),
+            floating: Vec::new(),
             next_asset_scan: std::time::Instant::now(),
             last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
@@ -948,6 +1073,8 @@ impl<G: GameApp + 'static> Engine<G> {
             script_input: crate::script_input::ScriptInputTracker::new(),
             input: somnium_input::InputSystem::with_default_maps(),
             play_checkpoint: None,
+            pending_steps: 0,
+            stepping_now: false,
             script_step: 0,
         };
 
@@ -1193,6 +1320,10 @@ impl<G: GameApp> Engine<G> {
             delta: dt,
             simulation_time: f64::from(self.simulation_clock.elapsed_seconds),
             step: self.script_step,
+            // MORROWIND-N. True only on a frame the step control drove; while
+            // Playing it is always false, which is what makes the flag mean
+            // "held" rather than "in the editor".
+            stepping: self.stepping_now,
         }
     }
 
@@ -1204,6 +1335,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         let report = self.scripts.sync(&mut self.world, &phase, &mut services);
         if report.hit_cap {
@@ -1217,6 +1349,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts
             .fixed_update(&mut self.world, time, &input, &mut services);
@@ -1228,6 +1361,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts
             .update(&mut self.world, time, &input, &mut services);
@@ -1786,28 +1920,8 @@ impl<G: GameApp> Engine<G> {
                 !flags.locked && !flags.hidden
             })
             .filter_map(|entity| {
-                let mesh = self.world.get::<MeshComponent>(entity)?;
-                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
-                let model = self
-                    .world
-                    .get::<WorldTransform>(entity)
-                    .map(|w| w.0)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(entity)
-                            .map(Transform::to_matrix)
-                    })?;
-                let inverse = model.inverse();
-                let local_origin = inverse.transform_point3(origin);
-                let local_direction = inverse.transform_vector3(direction);
-                let t = ray_aabb_distance(
-                    local_origin,
-                    local_direction,
-                    glam::Vec3::from_array(min),
-                    glam::Vec3::from_array(max),
-                )?;
-                let world_hit = model.transform_point3(local_origin + local_direction * t);
-                Some((origin.distance_squared(world_hit), entity))
+                entity_ray_hit_distance(&self.world, renderer, entity, origin, direction)
+                    .map(|distance| (distance, entity))
             })
             .collect();
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1909,7 +2023,19 @@ impl<G: GameApp> Engine<G> {
         let anchor = gizmo_anchor(&self.world, self.selection.primary);
         if let Some(renderer) = self.renderer.as_mut() {
             match anchor {
-                Some(pos) => renderer.set_gizmo_world_pos(pos),
+                Some(pos) => {
+                    let rotation = if self.settings.editor().gizmo_local_space {
+                        self.selection
+                            .primary
+                            .and_then(|entity| self.world.get::<WorldTransform>(entity))
+                            .map_or(glam::Quat::IDENTITY, |world| {
+                                world.0.to_scale_rotation_translation().1
+                            })
+                    } else {
+                        glam::Quat::IDENTITY
+                    };
+                    renderer.set_gizmo_world_transform(pos, rotation);
+                }
                 None => renderer.clear_gizmo(),
             }
         }
@@ -2021,6 +2147,106 @@ impl<G: GameApp> Engine<G> {
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.append_log(&format!("[content] {text}"));
             ui.push_toast(reason);
+        }
+    }
+
+    /// Where the project keeps its string tables.
+    ///
+    /// A directory rather than a file, one table per locale, because that is
+    /// what a translator is handed and what a git diff is readable in.
+    fn locale_dir(&self) -> std::path::PathBuf {
+        self.config.content_root.join("locale")
+    }
+
+    /// Load the project's catalogue and hand the editor the table for it.
+    ///
+    /// MORROWIND-M item 2. The projection happens here, in the one crate that
+    /// knows both `somnium_i18n` and `somnium_ui` — the editor is given a
+    /// `DataTable` and never learns what a catalogue is.
+    fn load_localisation(&mut self) {
+        let dir = self.locale_dir();
+        if !dir.is_dir() {
+            // A project with no translations is the ordinary case, not an
+            // error. The panel opens empty and says nothing alarming.
+            return;
+        }
+        match crate::i18n::load_catalog(&dir, "en") {
+            Ok(catalog) => {
+                let table = crate::i18n::catalog_to_table(&catalog);
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_localisation_table(table);
+                }
+                self.locale_catalog = Some(catalog);
+            }
+            Err(error) => {
+                error!("{error}");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!("[locale] {error}"));
+                }
+            }
+        }
+    }
+
+    /// Write the edited table back, one file per locale.
+    fn save_localisation(&mut self) {
+        let dir = self.locale_dir();
+        let Some(table) = self
+            .ui_manager
+            .as_ref()
+            .and_then(UiManager::localisation_table)
+            .cloned()
+        else {
+            return;
+        };
+        // The loaded catalogue is the template: it carries the display name and
+        // the font list, which a grid of strings cannot hold and which a save
+        // that dropped them would cost a language its typeface.
+        let template = self
+            .locale_catalog
+            .clone()
+            .unwrap_or_else(|| somnium_i18n::Catalog::new("en"));
+        let catalog = crate::i18n::table_to_catalog(&table, &template);
+        match crate::i18n::save_catalog(&dir, &catalog) {
+            Ok(()) => {
+                let locales = catalog.locales().len();
+                self.locale_catalog = Some(catalog);
+                // Rescan: the files just changed on disk, and the drawer is
+                // showing them.
+                self.next_asset_scan = std::time::Instant::now();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!(
+                        "[locale] saved {locales} locale(s) to {}",
+                        dir.display()
+                    ));
+                    ui.push_toast("Localisation saved");
+                }
+            }
+            Err(error) => self.report_content_error(&dir, &error),
+        }
+    }
+
+    /// Hand the table to a translator as one CSV.
+    fn export_localisation_csv(&mut self) {
+        let Some(table) = self
+            .ui_manager
+            .as_ref()
+            .and_then(UiManager::localisation_table)
+            .cloned()
+        else {
+            return;
+        };
+        let path = self.locale_dir().join("localisation.csv");
+        match std::fs::create_dir_all(self.locale_dir())
+            .and_then(|()| std::fs::write(&path, table.to_csv()))
+        {
+            Ok(()) => {
+                self.next_asset_scan = std::time::Instant::now();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.append_log(&format!("[locale] exported {}", path.display()));
+                    ui.push_toast("Exported localisation.csv");
+                }
+            }
+            Err(error) => self.report_content_error(&path, &format!("{error}")),
         }
     }
 
@@ -2170,6 +2396,7 @@ impl<G: GameApp> Engine<G> {
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
             audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
         };
         self.scripts.shutdown(&mut self.world, &mut services);
         if let Some(checkpoint) = self.play_checkpoint.take() {
@@ -2376,6 +2603,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2435,6 +2663,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
+                // MORROWIND-M item 2. Read once at startup rather than on the
+                // asset inventory's job: a catalogue is a handful of files, and
+                // rebuilding the table under a translator every time anything
+                // in the project changed would throw away their scroll
+                // position and their in-flight edit.
+                self.load_localisation();
+
+                // MORROWIND-J step 2, opened from the environment so a
+                // headless run can exercise the second surface.
+                if let Some(kind) = somnium_ui::floating::FloatingKind::from_env() {
+                    self.pending_float.push(kind);
+                    if let Some(ui) = self.ui_manager.as_mut() {
+                        ui.set_panel_floating(kind, true);
+                    }
+                }
+
                 // MORROWIND-I. Everything is initialised; show the window.
                 window.set_visible(true);
 
@@ -2450,6 +2694,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.world,
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
+                    &mut self.jobs,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -2482,6 +2727,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2497,10 +2743,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         if self.state != LifecycleState::Running {
+            return;
+        }
+
+        // MORROWIND-J step 2. The id was ignored while there was one window,
+        // and that is precisely the assumption a second window breaks. Without
+        // this line the floating log's `Resized` reaches the main render
+        // context, which then scissors the editor's 1920x1032 frame against a
+        // 900x420 target — a validation error rather than a wrong picture, and
+        // the first thing that happened when this was tried.
+        if self.floating_window_event(window_id, &event) {
             return;
         }
 
@@ -2731,6 +2987,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2831,6 +3088,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &self.selection.primary,
                     self.cursor_pos,
                     self.viewport_size(),
+                    self.settings.editor().gizmo_local_space,
                 );
                 let blocked = started.is_some() && self.settings.editor().select_only;
                 if blocked {
@@ -2844,19 +3102,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let drag = if blocked {
                     None
                 } else {
-                    started
-                    .map(|mut drag| {
-                        drag.local_space = self.settings.editor().gizmo_local_space;
-                        drag.followers = self
-                            .selection
-                            .as_slice()
-                            .iter()
-                            .filter(|entity| entity.index() != drag.entity_index)
-                            .filter_map(|entity| {
-                                Some((entity.index(), *self.world.get::<Transform>(*entity)?))
-                            })
-                            .collect();
-                        drag
+                    started.and_then(|mut drag| {
+                        drag.followers = capture_followers(
+                            &self.world,
+                            self.selection.as_slice(),
+                            drag.entity_index,
+                        )?;
+                        Some(drag)
                     })
                 };
                 if drag.is_some() {
@@ -2876,10 +3128,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ..
             } = &event
             {
-                if let Some(band) = self.marquee.take()
-                    && band.is_dragged()
-                {
-                    self.apply_marquee(band);
+                if let Some(band) = self.marquee.take() {
+                    if band.is_dragged() {
+                        self.apply_marquee(band);
+                    } else {
+                        let hit = self.entities_under_cursor().into_iter().next();
+                        self.selection.set_single(hit);
+                        self.after_selection_change();
+                    }
                     gizmo_consumed = true;
                 }
                 if let Some(drag) = self.gizmo_drag.take() {
@@ -2942,6 +3198,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -2998,13 +3255,28 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // before any phase runs, so an attachment added this frame is
         // initialised this frame. Only while Play is running — scripts are
         // not allowed to dirty the edit-time scene.
-        if self.simulation_clock.state == SimulationState::Playing {
+        // MORROWIND-N: a step is a play frame that happens to be paused, so
+        // scripts have to be reconciled for it too — otherwise stepping never
+        // initialises an attachment added while the simulation was held.
+        let stepping = self.simulation_clock.state == SimulationState::Paused
+            && self.pending_steps > 0
+            && self.play_session_active;
+        self.stepping_now = stepping;
+        if self.simulation_clock.state == SimulationState::Playing || stepping {
             self.sync_scripts(dt);
         }
 
-        if self.simulation_clock.state != SimulationState::Paused {
-            self.simulation_accumulator += dt.min(0.1);
+        if self.simulation_clock.state != SimulationState::Paused || stepping {
             let fixed_dt = self.simulation_clock.fixed_delta_seconds;
+            if stepping {
+                // Exactly one step, and never the wall clock: the point of a
+                // step is that it is the same size every time, so a slow frame
+                // cannot turn one press into three.
+                self.pending_steps -= 1;
+                self.simulation_accumulator += fixed_dt;
+            } else {
+                self.simulation_accumulator += dt.min(0.1);
+            }
             while self.simulation_accumulator >= fixed_dt {
                 {
                     let mut ctx = EngineContext::new(
@@ -3013,6 +3285,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         &mut self.world,
                         self.physics.as_mut().unwrap(),
                         self.audio.as_mut().unwrap(),
+                        &mut self.jobs,
                         self.render_ctx.as_ref(),
                         self.renderer.as_mut(),
                         &mut self.selection.primary,
@@ -3089,9 +3362,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     .gizmo_drag
                     .as_ref()
                     .is_some_and(|drag| drag.mode == GizmoMode::Translate)
-                && let Some(height) = self.surface_height_at(new_t.translation)
+                && let Some(mut world_position) = self
+                    .gizmo_drag
+                    .as_ref()
+                    .map(|drag| drag.parent_world.transform_point3(new_t.translation))
+                && let Some(height) = self.surface_height_at(world_position)
             {
-                new_t.translation.y = height;
+                world_position.y = height;
+                if let Some(drag) = self.gizmo_drag.as_ref() {
+                    new_t.translation = drag.parent_world_inverse.transform_point3(world_position);
+                }
             }
             let start = self
                 .gizmo_drag
@@ -3105,7 +3385,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // The same delta, applied to every follower's own starting
             // transform. Rotation composes and scale multiplies, because that
             // is what those operations mean; translation adds.
-            let offset = new_t.translation - start.translation;
+            let world_offset = self.gizmo_drag.as_ref().map_or_else(
+                || new_t.translation - start.translation,
+                |drag| drag.parent_world.transform_point3(new_t.translation) - drag.gizmo_pos,
+            );
             let spin = new_t.rotation * start.rotation.inverse();
             let growth = glam::Vec3::new(
                 safe_ratio(new_t.scale.x, start.scale.x),
@@ -3123,27 +3406,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .as_ref()
                 .map(|drag| drag.followers.clone())
                 .unwrap_or_default();
-            for (index, began) in followers {
-                let Some(entity) = self.world.find_entity_by_index(index) else {
-                    continue;
-                };
-                let Some(transform) = self.world.get_mut::<Transform>(entity) else {
-                    continue;
-                };
-                let mut moved = began;
-                moved.translation = began.translation + offset;
-                moved.rotation = spin * began.rotation;
-                moved.scale = began.scale * growth;
-                if let Some(pivot) = pivot {
-                    // Pivot mode: the selection turns and grows about its
-                    // shared centre rather than about each object's origin.
-                    let arm = began.translation - pivot;
-                    moved.translation = pivot + spin * (arm * growth) + offset;
-                }
-                *transform = moved;
-            }
+            apply_followers(
+                &mut self.world,
+                &followers,
+                world_offset,
+                spin,
+                growth,
+                pivot,
+            );
             if let Some(r) = &mut self.renderer {
-                r.set_gizmo_world_pos(new_t.translation);
+                let world_position = self.gizmo_drag.as_ref().map_or(new_t.translation, |drag| {
+                    drag.parent_world.transform_point3(new_t.translation)
+                });
+                r.set_gizmo_world_pos(world_position);
             }
         }
 
@@ -3160,6 +3435,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3219,7 +3495,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
         // quote about editor cost.
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Editor panels"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Editor panels");
+        }
         {
             let all_entities: Vec<somnium_ecs::Entity> = self.world.entities().collect();
             let mut names: Vec<(u32, String, Option<u32>)> = all_entities
@@ -3765,13 +4043,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Jobs & assets"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Jobs & assets");
+        }
         self.pump_shader_reload();
         self.pump_jobs();
         self.update_asset_pipeline();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
         if let Some(ui) = &mut self.ui_manager {
             if let Some(window) = &self.window {
                 ui.begin_frame(window);
@@ -3785,6 +4073,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 &mut self.world,
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
+                &mut self.jobs,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3853,12 +4142,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Scene submit"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Scene submit");
+        }
         self.submit_terrains();
         self.submit_foliage();
         self.submit_decals();
         self.sync_terrain_colliders();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
         // The gizmo follows the entity, not the last selection event. After
         // the game layer has propagated transforms, so a child is anchored
@@ -3873,14 +4168,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
-        if let Some(r) = &mut self.renderer { r.profiler.cpu_begin("Environment"); }
+        if let Some(r) = &mut self.renderer {
+            r.profiler.cpu_begin("Environment");
+        }
         self.apply_time_of_day(dt);
         self.apply_sky(dt);
         self.apply_weather(dt);
         self.publish_time_of_day();
         self.apply_post_process();
         self.apply_camera_settings();
-        if let Some(r) = &mut self.renderer {{ r.profiler.cpu_end(); }}
+        if let Some(r) = &mut self.renderer {
+            {
+                r.profiler.cpu_end();
+            }
+        }
 
         if let (Some(r), Some(c), Some(ui), Some(window)) = (
             &mut self.renderer,
@@ -3890,6 +4191,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         ) {
             r.set_editor_overlays_enabled(!self.play_session_active);
             r.time = self.simulation_clock.elapsed_seconds;
+
+            // MORROWIND-J step 3. After the game has set its camera and before
+            // the frame is recorded, because the tiles are the editor's and the
+            // camera is the game's, and this is the one place that holds both.
+            //
+            // Single stays *empty* rather than becoming a one-element list: an
+            // empty list is the path the renderer took before views existed,
+            // and a one-viewport editor should not be paying for a blit to
+            // prove a feature it is not using.
+            let layout = ui.viewport_layout();
+            if layout == somnium_ui::viewport_layout::ViewportLayout::Single
+                || self.play_session_active
+            {
+                r.set_scene_views(&[]);
+            } else {
+                let scale = window.scale_factor() as f32;
+                let tiles = layout.tiles(ui.viewport_physical_rect(scale));
+                let views = somnium_renderer::view::standard_views(&tiles, r.primary_scene_view());
+                r.set_scene_views(&views);
+            }
             // MORROWIND-E2. `self.game` is a disjoint field from the four
             // borrowed above, so the game can be handed to the renderer as a
             // callback without any of this becoming a `RefCell`.
@@ -3898,6 +4219,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             };
             r.render_with_game_ui(c, ui, window, Some(&mut adapter));
         }
+
+        // MORROWIND-J step 2. After the editor's own frame, and on the same
+        // device: each floating window has its own surface and submits its own
+        // encoder, so a slow one costs its own frame rather than the editor's.
+        self.render_floating();
 
         // ── Accessibility preferences (MORROWIND-I) ──────────────────────────
         //
@@ -3946,6 +4272,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             for ev in events {
                 self.handle_editor_event(ev);
             }
+            // Serviced here rather than in the handler: a window needs the
+            // event loop, and this is the first point after the drain that has
+            // one.
+            for kind in std::mem::take(&mut self.pending_float) {
+                self.float_panel(event_loop, kind);
+            }
             if let Some(result) = self.pending_map_load.take() {
                 let mut ctx = EngineContext::new(
                     &self.time,
@@ -3953,6 +4285,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     &mut self.world,
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
+                    &mut self.jobs,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -4341,10 +4674,11 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_scan {
             self.asset_scan = None;
             match result {
-                Ok(snapshot) => {
+                Ok((snapshot, index)) => {
                     if let Some(published) = self.asset_gate.stage(snapshot) {
                         if let Some(ui) = self.ui_manager.as_mut() {
                             ui.set_asset_snapshot(published);
+                            ui.set_dependency_index(index);
                         }
                     }
                 }
@@ -4385,8 +4719,12 @@ impl<G: GameApp> Engine<G> {
                     ctx.check_cancelled()
                         .map_err(|error| format!("{error:?}"))?;
                     let snapshot = somnium_asset::database::AssetDb::scan(root)?;
+                    ctx.set_progress(0.8);
+                    // On the job, not on the frame: this opens every scene,
+                    // prefab, material and document in the project.
+                    let index = somnium_asset::depend::DependencyIndex::build(&snapshot);
                     ctx.set_progress(1.0);
-                    Ok(snapshot)
+                    Ok((snapshot, index))
                 }) {
                 Ok(handle) => self.asset_scan = Some(handle),
                 Err(error) => warn!(?error, "asset scan queue is full"),
@@ -4525,10 +4863,16 @@ impl<G: GameApp> Engine<G> {
             // flashing it there taught people to ignore the one place an
             // import or a bake reports itself. The Jobs panel below still
             // lists everything, which is where CONTROL-I said it belonged.
+            //
+            // DOOM-H: the test used to be `priority != Background`, which only
+            // worked while every continuous system sat at that class. Voxel
+            // chunk meshing is `Visible` and correctly so, and it would have
+            // parked "voxel.chunk_mesh — 0%" and a meaningless Cancel button on
+            // the status line for as long as the camera kept moving.
             let status: Vec<_> = active
                 .iter()
                 .rev()
-                .filter(|job| job.priority != crate::jobs::JobPriority::Background)
+                .filter(|job| !job.housekeeping)
                 .map(|job| somnium_ui::UiJobStatus {
                     id: job.id,
                     name: job.name,
@@ -4571,6 +4915,7 @@ impl<G: GameApp> Engine<G> {
             &mut self.world,
             self.physics.as_mut().unwrap(),
             self.audio.as_mut().unwrap(),
+            &mut self.jobs,
             self.render_ctx.as_ref(),
             self.renderer.as_mut(),
             &mut self.selection.primary,
@@ -4741,28 +5086,8 @@ impl<G: GameApp> Engine<G> {
                 if flags.locked || flags.hidden {
                     return None;
                 }
-                let mesh = self.world.get::<MeshComponent>(entity)?;
-                let (min, max) = renderer.geometry.mesh_aabb(mesh.vertex_offset)?;
-                let model = self
-                    .world
-                    .get::<WorldTransform>(entity)
-                    .map(|w| w.0)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(entity)
-                            .map(Transform::to_matrix)
-                    })?;
-                let inverse = model.inverse();
-                let local_origin = inverse.transform_point3(origin);
-                let local_direction = inverse.transform_vector3(direction);
-                let t = ray_aabb_distance(
-                    local_origin,
-                    local_direction,
-                    glam::Vec3::from_array(min),
-                    glam::Vec3::from_array(max),
-                )?;
-                let world_hit = model.transform_point3(local_origin + local_direction * t);
-                Some((origin.distance_squared(world_hit), entity))
+                entity_ray_hit_distance(&self.world, renderer, entity, origin, direction)
+                    .map(|distance| (distance, entity))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, entity)| entity)
@@ -4825,9 +5150,7 @@ impl<G: GameApp> Engine<G> {
         // Ids are minted from the path *relative to the content root*, which
         // is the whole point of `AssetId`: the same file names the same asset
         // whatever the project happens to be checked out at.
-        let relative = path
-            .strip_prefix(&self.config.content_root)
-            .unwrap_or(path);
+        let relative = path.strip_prefix(&self.config.content_root).unwrap_or(path);
         let asset = somnium_asset::database::AssetId::from_relative_path(relative);
         let name = path
             .file_name()
@@ -4848,9 +5171,7 @@ impl<G: GameApp> Engine<G> {
             entity,
             component,
             field,
-            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(
-                asset.raw(),
-            ))),
+            value: ReflectValue::Asset(Some(somnium_ecs::reflect::AssetRef::from_raw(asset.raw()))),
             gesture: GestureId(u64::MAX - 2),
             live: false,
         });
@@ -5541,12 +5862,12 @@ impl<G: GameApp> Engine<G> {
                 if !decal.enabled || decal.opacity <= 0.001 {
                     return None;
                 }
-                let transform = self.world.get::<Transform>(entity)?;
+                let transform = entity_world_matrix(&self.world, entity)?;
                 let material = self
                     .world
                     .get::<MaterialComponent>(entity)
                     .map(|m| m.runtime_id);
-                Some((transform.to_matrix(), *decal, material))
+                Some((transform, *decal, material))
             })
             .collect();
 
@@ -6524,7 +6845,8 @@ impl<G: GameApp> Engine<G> {
             .entities()
             .filter_map(|e| {
                 let light = self.world.get::<LightComponent>(e)?;
-                let transform = self.world.get::<Transform>(e)?;
+                let transform = entity_world_matrix(&self.world, e)?;
+                let (_, rotation, position) = transform.to_scale_rotation_translation();
                 let kind = match light.light_type {
                     LightType::Directional => LightGizmoKind::Directional,
                     LightType::Point | LightType::Rect | LightType::Disc => LightGizmoKind::Point,
@@ -6532,8 +6854,8 @@ impl<G: GameApp> Engine<G> {
                 };
                 Some(LightGizmoDesc {
                     kind,
-                    position: transform.translation,
-                    direction: transform.rotation.mul_vec3(glam::Vec3::NEG_Z),
+                    position,
+                    direction: rotation.mul_vec3(glam::Vec3::NEG_Z),
                     color: light.color,
                     range: light.range,
                     inner_angle: light.inner_angle,
@@ -6647,15 +6969,16 @@ impl<G: GameApp> Engine<G> {
             .entities()
             .filter_map(|entity| {
                 let audio = self.world.get::<crate::AudioEmitterComponent>(entity)?;
-                let transform = self.world.get::<Transform>(entity)?;
+                let transform = entity_world_matrix(&self.world, entity)?;
+                let (_, rotation, position) = transform.to_scale_rotation_translation();
                 Some(LightGizmoDesc {
                     kind: if audio.cone_enabled {
                         LightGizmoKind::AudioCone
                     } else {
                         LightGizmoKind::AudioOmni
                     },
-                    position: transform.translation,
-                    direction: transform.rotation * glam::Vec3::NEG_Z,
+                    position,
+                    direction: rotation * glam::Vec3::NEG_Z,
                     color: glam::Vec3::new(0.15, 0.85, 1.0),
                     range: audio.max_distance,
                     inner_angle: audio.cone_inner_degrees.to_radians(),
@@ -6728,6 +7051,110 @@ impl<G: GameApp> Engine<G> {
                 component.virtual_texture_evictions =
                     stats.evictions.min(u64::from(u32::MAX)) as u32;
             }
+        }
+    }
+
+    /// Open a panel in its own OS window, or focus the one already showing it.
+    ///
+    /// MORROWIND-J step 2. Created here rather than anywhere else because
+    /// `create_window` needs an `ActiveEventLoop`, and this is the point in the
+    /// frame that has one *and* has just drained the editor's events.
+    fn float_panel(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        kind: somnium_ui::floating::FloatingKind,
+    ) {
+        if let Some(existing) = self.floating.iter().find(|w| w.panel.kind() == kind) {
+            // Already open. Raising it is what a user means by asking twice.
+            existing.window.focus_window();
+            return;
+        }
+        let Some(ctx) = self.render_ctx.as_ref() else {
+            return;
+        };
+        let (w, h) = kind.default_size();
+        let attrs = WindowAttributes::default()
+            .with_title(kind.title())
+            .with_inner_size(LogicalSize::new(w, h));
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => std::sync::Arc::new(window),
+            Err(error) => {
+                error!(?error, "could not open a floating window");
+                return;
+            }
+        };
+        let surface = match ctx.instance.create_surface(std::sync::Arc::clone(&window)) {
+            Ok(surface) => surface,
+            Err(error) => {
+                error!(?error, "floating window has no drawable surface");
+                return;
+            }
+        };
+        let size = window.inner_size();
+        let mut config = ctx.config.clone();
+        config.width = size.width.max(1);
+        config.height = size.height.max(1);
+        surface.configure(&ctx.device, &config);
+
+        let pass = somnium_ui::pass::UiPass::new(&ctx.device, &ctx.queue, config.format);
+        let panel = somnium_ui::floating::FloatingPanel::new(
+            kind,
+            (config.width as f32, config.height as f32),
+            somnium_ui::load_fonts,
+        );
+        info!(?kind, "floating window opened");
+        self.floating.push(FloatingWindow {
+            window,
+            surface,
+            config,
+            pass,
+            panel,
+        });
+    }
+
+    /// Route a window event to a floating window, if it belongs to one.
+    ///
+    /// Returns whether the event was consumed, so the main window's handler
+    /// does not also act on a resize that was not its own — the bug a
+    /// single-window event loop grows the moment it gains a second window.
+    fn floating_window_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+        let Some(index) = self.floating.iter().position(|w| w.window.id() == id) else {
+            return false;
+        };
+        match event {
+            WindowEvent::CloseRequested => {
+                // Closing returns the panel to the dock rather than losing it.
+                let closed = self.floating.remove(index);
+                info!(kind = ?closed.panel.kind(), "floating window closed");
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_panel_floating(closed.panel.kind(), false);
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(ctx) = self.render_ctx.as_ref() {
+                    self.floating[index].resize(&ctx.device, size.width, size.height);
+                }
+            }
+            // Everything else is the panel's: pointer, wheel, keys. The next
+            // frame redraws it, so nothing has to ask for a repaint here.
+            other => {
+                self.floating[index].panel.on_event(other);
+            }
+        }
+        true
+    }
+
+    /// Draw every floating window, after the editor's own frame.
+    fn render_floating(&mut self) {
+        let Some(ctx) = self.render_ctx.as_ref() else {
+            return;
+        };
+        for index in 0..self.floating.len() {
+            if let Some(ui) = self.ui_manager.as_ref() {
+                let log = ui.log();
+                self.floating[index].panel.sync(log);
+            }
+            self.floating[index].render(&ctx.device, &ctx.queue);
         }
     }
 
@@ -7431,21 +7858,18 @@ impl<G: GameApp> Engine<G> {
                 // code path: the audio runtime asks where the sound is, and a
                 // spline answers "at your nearest point" while everything else
                 // answers "at my origin".
-                let audio = matches!(
-                    kind,
-                    CreateKind::AudioEmitter | CreateKind::ShorelineAudio
-                )
-                .then(|| {
-                    let mut emitter = crate::AudioEmitterComponent::default();
-                    if kind == CreateKind::ShorelineAudio {
-                        // A shoreline is heard from far further than a point
-                        // source, and it loops: surf does not stop.
-                        emitter.max_distance = 120.0;
-                        emitter.min_distance = 6.0;
-                        emitter.looping = true;
-                    }
-                    emitter
-                });
+                let audio = matches!(kind, CreateKind::AudioEmitter | CreateKind::ShorelineAudio)
+                    .then(|| {
+                        let mut emitter = crate::AudioEmitterComponent::default();
+                        if kind == CreateKind::ShorelineAudio {
+                            // A shoreline is heard from far further than a point
+                            // source, and it loops: surf does not stop.
+                            emitter.max_distance = 120.0;
+                            emitter.min_distance = 6.0;
+                            emitter.looping = true;
+                        }
+                        emitter
+                    });
                 let spline = matches!(kind, CreateKind::Spline | CreateKind::ShorelineAudio)
                     .then(|| crate::SplineComponent::straight(4, 12.0));
 
@@ -7523,7 +7947,11 @@ impl<G: GameApp> Engine<G> {
                     (None, None)
                 };
 
-                let spawn_dist = if light.is_some() || audio.is_some() { 5.0 } else { 8.0 };
+                let spawn_dist = if light.is_some() || audio.is_some() {
+                    5.0
+                } else {
+                    8.0
+                };
                 let spawn_dist = if spline.is_some() { 18.0 } else { spawn_dist };
                 let (spawn_pos, look, right) =
                     camera_spawn_basis(self.renderer.as_ref(), spawn_dist);
@@ -8048,7 +8476,10 @@ impl<G: GameApp> Engine<G> {
                         .map(|n| Name::new(&format!("{}_copy", n.as_str())))
                         .unwrap_or_else(|| Name::new("Entity_copy"));
                     let light = self.world.get::<LightComponent>(entity).copied();
-                    let audio = self.world.get::<crate::AudioEmitterComponent>(entity).cloned();
+                    let audio = self
+                        .world
+                        .get::<crate::AudioEmitterComponent>(entity)
+                        .cloned();
                     let mesh = self.world.get::<MeshComponent>(entity).copied();
                     let mat = self.world.get::<MaterialComponent>(entity).copied();
                     let mesh_kind = self.world.get::<MeshKind>(entity).copied();
@@ -8469,6 +8900,12 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::FloatPanel(kind) => self.pending_float.push(kind),
+
+            EditorEvent::SaveLocalisation => self.save_localisation(),
+
+            EditorEvent::ExportLocalisationCsv => self.export_localisation_csv(),
+
             EditorEvent::EditContentAsset(path) => {
                 let path = std::path::PathBuf::from(path);
                 if let Err(error) = edit_content_asset(&path) {
@@ -8572,7 +9009,24 @@ impl<G: GameApp> Engine<G> {
                 info!("Simulation paused");
             }
 
+            EditorEvent::StepSimulation => {
+                // Refused rather than reinterpreted. Stepping a *running*
+                // simulation would either do nothing visible or fight the
+                // accumulator, and stepping from Edit would advance a clock
+                // that is not running — neither is what the control means, and
+                // guessing which one the user wanted is how a debugging tool
+                // stops being trustworthy.
+                if self.simulation_clock.state != SimulationState::Paused {
+                    info!("Step ignored: the simulation is not paused");
+                } else if !self.play_session_active {
+                    info!("Step ignored: no play session is running");
+                } else {
+                    self.pending_steps = self.pending_steps.saturating_add(1);
+                }
+            }
+
             EditorEvent::StopSimulation => {
+                self.pending_steps = 0;
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
                 self.simulation_accumulator = 0.0;
@@ -8888,6 +9342,7 @@ fn try_start_gizmo_drag(
     selected_entity: &Option<somnium_ecs::entity::Entity>,
     cursor_pos: (f32, f32),
     viewport_size: (f32, f32),
+    local_space: bool,
 ) -> Option<GizmoDragState> {
     let renderer = renderer?;
     if !renderer.editor_overlays_enabled() {
@@ -8907,22 +9362,41 @@ fn try_start_gizmo_drag(
         .normalize_or_zero();
 
     let mode = renderer.gizmo_mode;
-    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode)?;
+    let gizmo_rotation = if local_space {
+        renderer.gizmo_world_rotation
+    } else {
+        glam::Quat::IDENTITY
+    };
+    let axis = gizmo_axis_under_ray(camera_pos, ray_dir, gizmo_pos, mode, gizmo_rotation)?;
 
     let start_transform = world
         .get::<Transform>(entity)
         .copied()
         .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
+    let parent_world = parent_world_matrix(world, entity);
+    // A collapsed parent has no local-space answer for a world-space gesture.
+    // Refuse the drag instead of letting `Mat4::inverse` manufacture NaNs that
+    // poison the authored transform and the undo record.
+    let parent_world_inverse = invert_affine(parent_world)?;
+    let start_world_rotation = world.get::<WorldTransform>(entity).map_or_else(
+        || {
+            (parent_world * start_transform.to_matrix())
+                .to_scale_rotation_translation()
+                .1
+        },
+        |world| world.0.to_scale_rotation_translation().1,
+    );
 
+    let axis_dir = gizmo_rotation * axis.world_dir();
     let (start_axis_param, start_angle, ring_tangent, ring_bitangent) = match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
-            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis.world_dir()).unwrap_or(0.0);
+            let s = ray_axis_param(camera_pos, ray_dir, gizmo_pos, axis_dir).unwrap_or(0.0);
             (s, 0.0, glam::Vec3::ZERO, glam::Vec3::ZERO)
         }
         GizmoMode::Rotate => {
             let (tan, bitan) = ring_plane_basis(axis);
-            let a = ring_angle(camera_pos, ray_dir, gizmo_pos, axis.world_dir(), tan, bitan)
-                .unwrap_or(0.0);
+            let (tan, bitan) = (gizmo_rotation * tan, gizmo_rotation * bitan);
+            let a = ring_angle(camera_pos, ray_dir, gizmo_pos, axis_dir, tan, bitan).unwrap_or(0.0);
             (0.0, a, tan, bitan)
         }
     };
@@ -8931,7 +9405,7 @@ fn try_start_gizmo_drag(
         // Filled by the caller, which is the only place that knows the
         // selection and the settings.
         followers: Vec::new(),
-        local_space: false,
+        local_space,
         axis,
         mode,
         entity_index: entity.index(),
@@ -8941,6 +9415,9 @@ fn try_start_gizmo_drag(
         ring_tangent,
         ring_bitangent,
         gizmo_pos,
+        parent_world,
+        parent_world_inverse,
+        start_world_rotation,
     })
 }
 
@@ -9041,14 +9518,16 @@ fn gizmo_axis_under_ray(
     ray_dir: glam::Vec3,
     gizmo_pos: glam::Vec3,
     mode: GizmoMode,
+    rotation: glam::Quat,
 ) -> Option<GizmoAxis> {
     if ray_dir == glam::Vec3::ZERO {
         return None;
     }
     let dist = (camera_pos - gizmo_pos).length().max(0.5);
     let scale = dist * 0.15;
-    let model =
-        glam::Mat4::from_translation(gizmo_pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+    let model = glam::Mat4::from_translation(gizmo_pos)
+        * glam::Mat4::from_quat(rotation)
+        * glam::Mat4::from_scale(glam::Vec3::splat(scale));
     let inv_model = model.inverse();
     gizmo_hit_test(
         inv_model.transform_point3(camera_pos),
@@ -9118,7 +9597,7 @@ fn apply_gizmo_drag(
     // default because a scene's grid is a world-space idea; local is what you
     // want the moment anything is rotated.
     let axis_dir = if drag.local_space {
-        (drag.start_transform.rotation * drag.axis.world_dir()).normalize_or_zero()
+        (drag.start_world_rotation * drag.axis.world_dir()).normalize_or_zero()
     } else {
         drag.axis.world_dir()
     };
@@ -9129,16 +9608,17 @@ fn apply_gizmo_drag(
     match drag.mode {
         GizmoMode::Translate => {
             if let Some(s) = ray_axis_param(camera_pos, ray_dir, drag.gizmo_pos, axis_dir) {
-                let moved =
-                    drag.start_transform.translation + (s - drag.start_axis_param) * axis_dir;
+                let moved = drag.gizmo_pos + (s - drag.start_axis_param) * axis_dir;
                 // Snap the *result*, not the delta: an object already off the
                 // grid should land on it, which is what "snap to grid" means
                 // to everyone who has used one.
-                result.translation = glam::Vec3::new(
+                let snapped_world = glam::Vec3::new(
                     SnapSettings::quantise(moved.x, snap.translate_m),
                     SnapSettings::quantise(moved.y, snap.translate_m),
                     SnapSettings::quantise(moved.z, snap.translate_m),
                 );
+                result.translation =
+                    world_to_local_translation(drag.parent_world_inverse, snapped_world);
             }
         }
         GizmoMode::Scale => {
@@ -9205,6 +9685,12 @@ fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> 
     if world.get::<crate::ParticleEmitter>(entity).is_some() {
         tags.push("particles");
     }
+    if world.get::<AudioEmitterComponent>(entity).is_some() {
+        tags.push("audio");
+    }
+    if world.get::<crate::decal::DecalComponent>(entity).is_some() {
+        tags.push("decal");
+    }
     if world.get::<PostProcessComponent>(entity).is_some() {
         tags.push("postfx");
     }
@@ -9259,11 +9745,65 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
+/// Choose the component-neutral local bounds used by all viewport ray picks.
+fn entity_pick_aabb(
+    world: &somnium_ecs::World,
+    renderer: &SomniumRenderer,
+    entity: somnium_ecs::Entity,
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    if let Some(mesh) = world.get::<MeshComponent>(entity)
+        && let Some((min, max)) = renderer.geometry.mesh_aabb(mesh.vertex_offset)
+    {
+        return Some((glam::Vec3::from_array(min), glam::Vec3::from_array(max)));
+    }
+
+    // Non-mesh authoring volumes still need a viewport handle. Decals use the
+    // transform's full scale as their projection box, so a unit local box is
+    // exact. Lights and emitters use a deliberately small proxy: selecting a
+    // lamp must not claim its whole 40 m illumination range and hide every
+    // object behind it.
+    authored_proxy_aabb(world, entity)
+}
+
+fn authored_proxy_aabb(
+    world: &somnium_ecs::World,
+    entity: somnium_ecs::Entity,
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    if world.get::<crate::decal::DecalComponent>(entity).is_some() {
+        Some((glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)))
+    } else if world.get::<LightComponent>(entity).is_some()
+        || world.get::<AudioEmitterComponent>(entity).is_some()
+        || world.get::<crate::ParticleEmitter>(entity).is_some()
+    {
+        Some((glam::Vec3::splat(-0.35), glam::Vec3::splat(0.35)))
+    } else {
+        None
+    }
+}
+
+fn entity_ray_hit_distance(
+    world: &somnium_ecs::World,
+    renderer: &SomniumRenderer,
+    entity: somnium_ecs::Entity,
+    origin: glam::Vec3,
+    direction: glam::Vec3,
+) -> Option<f32> {
+    let (min, max) = entity_pick_aabb(world, renderer, entity)?;
+    let model = world
+        .get::<WorldTransform>(entity)
+        .map(|world| world.0)
+        .or_else(|| world.get::<Transform>(entity).map(Transform::to_matrix))?;
+    let inverse = invert_affine(model)?;
+    let local_origin = inverse.transform_point3(origin);
+    let local_direction = inverse.transform_vector3(direction);
+    let t = ray_aabb_distance(local_origin, local_direction, min, max)?;
+    let world_hit = model.transform_point3(local_origin + local_direction * t);
+    Some(origin.distance_squared(world_hit))
+}
+
 /// Slab-test a ray against a local-space AABB, returning the nearest positive
 /// hit distance along `direction`. `direction` need not be normalised, so the
-/// result is expressed in the same parameterisation the caller passed in —
-/// which is what lets CONTROL-E's picker transform the ray into model space
-/// once instead of transforming every box into world space.
+/// result is expressed in the same parameterisation the caller passed in.
 fn ray_aabb_distance(
     origin: glam::Vec3,
     direction: glam::Vec3,
@@ -9291,7 +9831,10 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
-    use super::{EditorFlags, SnapSettings, Transform, WorldTransform, ray_aabb_distance};
+    use super::{
+        EditorFlags, SnapSettings, Transform, WorldTransform, authored_proxy_aabb,
+        ray_aabb_distance, world_to_local_translation,
+    };
 
     /// Snapping rounds the *result*, so an object already off the grid lands
     /// on it. Rounding the delta instead would preserve the original error
@@ -9379,6 +9922,30 @@ mod viewport_control_tests {
         );
     }
 
+    #[test]
+    fn non_mesh_authoring_entities_have_pickable_proxy_bounds() {
+        let mut world = somnium_ecs::World::new();
+        let light = world.spawn((Transform::default(), crate::LightComponent::default()));
+        let audio = world.spawn((
+            Transform::default(),
+            crate::AudioEmitterComponent::default(),
+        ));
+        let particles = world.spawn((Transform::default(), crate::ParticleEmitter::default()));
+        let decal = world.spawn((
+            Transform::default(),
+            crate::decal::DecalComponent::default(),
+        ));
+        let plain = world.spawn((Transform::default(),));
+
+        for entity in [light, audio, particles, decal] {
+            assert!(
+                authored_proxy_aabb(&world, entity).is_some(),
+                "an authored viewport volume had no pick proxy"
+            );
+        }
+        assert!(authored_proxy_aabb(&world, plain).is_none());
+    }
+
     // ── Assigning an asset without a drag ──────────────────────────
 
     /// A clip lands on the Audio Emitter's clip field and nowhere else.
@@ -9440,12 +10007,8 @@ mod viewport_control_tests {
     fn look_at_origin(surface: (f32, f32)) -> (glam::Vec3, glam::Mat4) {
         let camera = glam::Vec3::new(0.0, 0.0, 12.0);
         let view = glam::Mat4::look_at_rh(camera, glam::Vec3::ZERO, glam::Vec3::Y);
-        let proj = glam::Mat4::perspective_rh(
-            60.0_f32.to_radians(),
-            surface.0 / surface.1,
-            0.1,
-            1000.0,
-        );
+        let proj =
+            glam::Mat4::perspective_rh(60.0_f32.to_radians(), surface.0 / surface.1, 0.1, 1000.0);
         (camera, proj * view)
     }
 
@@ -9462,7 +10025,34 @@ mod viewport_control_tests {
             (world - camera).normalize_or_zero(),
             glam::Vec3::ZERO,
             super::GizmoMode::Translate,
+            glam::Quat::IDENTITY,
         )
+    }
+
+    #[test]
+    fn local_gizmo_hit_testing_uses_the_same_rotation_as_drawing() {
+        let surface = (1920.0, 1080.0);
+        let (camera, view_proj) = look_at_origin(surface);
+        let cursor = (surface.0 * 0.5, surface.1 * 0.5 - 68.0);
+        let world = super::ndc_to_world(
+            cursor.0,
+            cursor.1,
+            surface.0,
+            surface.1,
+            &view_proj.inverse(),
+        );
+        let rotation = glam::Quat::from_rotation_z(90.0_f32.to_radians());
+        assert_eq!(
+            super::gizmo_axis_under_ray(
+                camera,
+                (world - camera).normalize_or_zero(),
+                glam::Vec3::ZERO,
+                super::GizmoMode::Translate,
+                rotation,
+            ),
+            Some(super::GizmoAxis::X),
+            "local X is drawn along world +Y after the quarter turn"
+        );
     }
 
     /// **The bug that made every gizmo inert.** `viewport_size` was a cache
@@ -9554,11 +10144,15 @@ mod viewport_control_tests {
         let mut world = somnium_ecs::World::new();
         let parent = world.spawn((
             Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
-            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 0.0, 0.0))),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(
+                10.0, 0.0, 0.0,
+            ))),
         ));
         let child = world.spawn((
             Transform::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
-            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(10.0, 2.0, 0.0))),
+            WorldTransform(glam::Mat4::from_translation(glam::Vec3::new(
+                10.0, 2.0, 0.0,
+            ))),
             crate::Parent { entity: parent },
         ));
         assert_eq!(
@@ -9567,13 +10161,47 @@ mod viewport_control_tests {
         );
     }
 
+    /// A world-space gizmo result must cross the inverse parent transform
+    /// before it is stored in the child's local `Transform`. Translation-only
+    /// parents hid this bug; rotation and non-uniform scale expose it.
+    #[test]
+    fn a_child_gizmo_world_delta_is_written_back_in_parent_local_space() {
+        let parent = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::new(2.0, 3.0, 4.0),
+            glam::Quat::from_rotation_y(90.0_f32.to_radians()),
+            glam::Vec3::new(10.0, -2.0, 5.0),
+        );
+        let start_local = glam::Vec3::new(1.0, 2.0, 3.0);
+        let start_world = parent.transform_point3(start_local);
+        let delta = glam::Vec3::new(4.0, -3.0, 2.0);
+        let new_local = world_to_local_translation(parent.inverse(), start_world + delta);
+
+        assert!(
+            parent
+                .transform_point3(new_local)
+                .abs_diff_eq(start_world + delta, 1e-4),
+            "the stored local point did not reproduce the gizmo's world result"
+        );
+        assert_ne!(
+            new_local,
+            start_local + delta,
+            "adding the world delta directly would only be valid for an identity parent"
+        );
+    }
+
     /// Locked and hidden exist to stop the viewport moving something. The
     /// gizmo is the viewport moving something.
     #[test]
     fn a_locked_or_hidden_entity_offers_no_handle() {
         for flags in [
-            EditorFlags { locked: true, ..EditorFlags::default() },
-            EditorFlags { hidden: true, ..EditorFlags::default() },
+            EditorFlags {
+                locked: true,
+                ..EditorFlags::default()
+            },
+            EditorFlags {
+                hidden: true,
+                ..EditorFlags::default()
+            },
         ] {
             let mut world = somnium_ecs::World::new();
             let entity = world.spawn((

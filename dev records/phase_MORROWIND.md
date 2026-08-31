@@ -1644,6 +1644,15 @@ integration. It does not deliver a conformance claim (§14.5).
 
 #### MORROWIND-J — Docking, floating windows, multiple viewports
 
+**Step 1 shipped 2026-08-30** — see [`MORROWIND-J.md`](phase%20MORROWIND/MORROWIND-J.md).
+`somnium_ui::dock` is a binary split tree of tab sets with the shipped
+arrangement as its default, and every workspace preset now goes through it and
+back, so the tree is load-bearing rather than a model nobody calls. The five
+existing workspace tests pass unchanged, which is the "nothing looks different"
+requirement verified. Persistence is `editor_dock.json`, separate from
+`editor_layout.json` because the two fail differently. The shell still consumes
+the five-region projection; steps 2 and 3 are not started.
+
 1. A dock tree (tiles, splitters, tabs) replacing the fixed five-region shell,
    with the current arrangement as the **default layout** so nothing looks
    different on first run.
@@ -1697,6 +1706,16 @@ timeline, the audio track view, and MORROWIND-H's UI animation. Reference:
 
 #### MORROWIND-M — Virtualisation, data tables, and the localisation editor
 
+**Step 1 partially shipped 2026-08-30** — see [`MORROWIND-M.md`](phase%20MORROWIND/MORROWIND-M.md).
+`somnium_ui::virtual_list` windows a uniform-height list against the clip
+rectangle a widget is drawing inside, and `KeySelection` holds a selection by
+key so scrolling and filtering cannot renumber it. The outliner is retrofitted:
+**a hundred rows and a hundred thousand rows now emit the identical number of
+primitives**, measured through `TreeView::draw`. The content drawer and asset
+browser are a different shape — one widget per entry — so they need widget
+recycling rather than draw windowing, and are not started. Items 2 and 3 are not
+started.
+
 1. A **virtualising container** — recycled rows, windowed hit-testing, stable
    selection across scroll — retro-fitted to the outliner, the content drawer
    and the asset browser. Acceptance is 100,000 rows at 60 fps; nobody has
@@ -1735,6 +1754,16 @@ cannot be loaded by `examples/vvardenfell` and driven by script, Track 1 built a
 framework nobody can reach.
 
 #### MORROWIND-N — Play-in-editor
+
+**Complete 2026-08-30** — see [`MORROWIND-N.md`](phase%20MORROWIND/MORROWIND-N.md).
+Four of the six items were already in tree from earlier phases: play/pause, the
+`WorldCheckpoint` snapshot-and-restore the plan called the hard half, separate
+input focus, and a survivable error path. Three were added or settled here — a
+**step control** (a counter, exactly one `fixed_dt`, scripts reconciled on a
+stepped frame, refused rather than reinterpreted from Playing or Editing), the
+script-visible flag as **`ctx.stepping`** (live or held, because *editor or
+game* is a constant a script can learn nothing from), and the decision **not**
+to auto-stop play on a script error. No process-separation option was taken.
 
 The editor and the game become distinguishable: a play/pause/step control, a
 snapshot of world state on enter and a restore on exit, separate input focus, a

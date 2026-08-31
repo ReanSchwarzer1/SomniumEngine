@@ -57,15 +57,6 @@ FROZEN_TOOLCHAIN = {
 # second thread pool; anything not listed here fails the row.
 SPAWN_EXEMPTIONS = {
     "crates/somnium_jobs/": "the job system itself — this is the one place a pool is allowed.",
-    "crates/somnium_voxel/src/world.rs": (
-        "PORTAL-0-C: `rayon::spawn` detaches chunk meshing onto rayon's global "
-        "pool, which is a second background scheduler and is exactly what this "
-        "row exists to forbid. Exempted rather than fixed here because routing "
-        "it through `somnium_jobs` means threading a `&mut JobSystem` through "
-        "`VoxelWorld::update`, and that is a public API change that belongs at "
-        "a MORROWIND seam, not inside a performance commit. Owed work, not an "
-        "accepted design."
-    ),
     "crates/somnium_ui/src/theme.rs": "a single-shot test asserting the theme is visible from another thread.",
     "crates/somnium_core/src/a11y_bridge.rs": (
         "a single-shot test proving AccessKit handlers work off the main thread "

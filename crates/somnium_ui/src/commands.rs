@@ -261,6 +261,8 @@ pub enum CommandAction {
     Play,
     Pause,
     Stop,
+    /// MORROWIND-N: one fixed step while paused.
+    Step,
     ToggleProfiler,
     ToggleDrawer,
     TogglePalette,
@@ -272,6 +274,20 @@ pub enum CommandAction {
     ToggleFoliage,
     ToggleImmersiveViewport,
     OpenOutputLog,
+    /// Open or close the References panel on whatever it last had.
+    OpenReferences,
+    /// Open or close the Localisation table.
+    OpenLocalisation,
+    /// Pull a panel out into its own OS window (MORROWIND-J step 2).
+    FloatPanel(crate::floating::FloatingKind),
+    /// Choose how the viewport region is divided (MORROWIND-J step 3).
+    ///
+    /// One action per named layout rather than a cycle, matching
+    /// [`Self::SetWorkspace`]: four arrangements you pick between are a menu,
+    /// and a cycle would hide three of them behind pressing the fourth again.
+    SetViewportLayout(crate::viewport_layout::ViewportLayout),
+    /// Point the References panel at the chosen content item.
+    ContentShowReferences,
     CreateEntity(CreateKind),
     DockContentDrawer,
     SetWorkspace(Workspace),
@@ -629,6 +645,7 @@ fn camera_commands() -> Vec<Command> {
 }
 
 fn declarations() -> Vec<Command> {
+    use crate::viewport_layout::ViewportLayout as VL;
     use CommandAction as A;
     use CreateKind as C;
     use Workspace as W;
@@ -804,6 +821,16 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.simulation.step",
+            "Step",
+            "Simulation",
+            None,
+            "Advance one fixed step while paused.",
+            A::Step,
+            TOOLBAR,
+            always
+        ),
+        command!(
             "editor.simulation.stop",
             "Stop",
             "Simulation",
@@ -964,6 +991,36 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.window.float_log",
+            "Output Log in a Window",
+            "Window",
+            None,
+            "Open the Output Log as a separate operating-system window.",
+            A::FloatPanel(crate::floating::FloatingKind::OutputLog),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.localisation",
+            "Localisation",
+            "Window",
+            None,
+            "Open or close the localisation table.",
+            A::OpenLocalisation,
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.window.references",
+            "References",
+            "Window",
+            None,
+            "Open or close the References panel.",
+            A::OpenReferences,
+            WINDOW,
+            always
+        ),
+        command!(
             "editor.window.dock_content",
             "Show Content Drawer",
             "Window",
@@ -1050,6 +1107,46 @@ fn declarations() -> Vec<Command> {
             None,
             "Switch to the Play workspace.",
             A::SetWorkspace(W::Play),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.viewport.layout.single",
+            "Viewports: 1",
+            "Window",
+            None,
+            "Show one full-size viewport. The default.",
+            A::SetViewportLayout(VL::Single),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.viewport.layout.split_vertical",
+            "Viewports: 2 Side by Side",
+            "Window",
+            None,
+            "Split the viewport into two, side by side.",
+            A::SetViewportLayout(VL::SplitVertical),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.viewport.layout.split_horizontal",
+            "Viewports: 2 Stacked",
+            "Window",
+            None,
+            "Split the viewport into two, one above the other.",
+            A::SetViewportLayout(VL::SplitHorizontal),
+            WINDOW,
+            always
+        ),
+        command!(
+            "editor.viewport.layout.quad",
+            "Viewports: 4",
+            "Window",
+            None,
+            "Split the viewport into four.",
+            A::SetViewportLayout(VL::Quad),
             WINDOW,
             always
         ),
@@ -1310,6 +1407,16 @@ fn declarations() -> Vec<Command> {
             None,
             "Put the chosen asset into the matching field of the selected entity.",
             A::ContentAssignToSelection,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.references",
+            "Show References",
+            "Content",
+            None,
+            "Show what uses this asset, what it uses, and what breaks if it goes.",
+            A::ContentShowReferences,
             CONTENT,
             content_target
         ),
@@ -1676,6 +1783,23 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_viewport_layout_has_a_window_menu_row() {
+        // The layouts sit beside the workspace presets, which is where a user
+        // looks for "how is the editor arranged". A variant with no row is one
+        // nobody can reach — the same failure the Create menu's test guards.
+        let registry = registry();
+        for layout in crate::viewport_layout::ViewportLayout::ALL {
+            assert!(
+                registry
+                    .menu(Menu::Window)
+                    .iter()
+                    .any(|c| c.action == CommandAction::SetViewportLayout(layout)),
+                "{layout:?} has no command"
+            );
+        }
+    }
     use super::*;
     use std::collections::HashSet;
 

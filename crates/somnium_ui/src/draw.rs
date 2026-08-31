@@ -52,6 +52,12 @@ pub struct DrawingContext {
     clip_stack: Vec<Rect>,
     current_clip: Rect,
     pub font_atlas: FontAtlas,
+    /// Whether text goes through the shaper (MORROWIND-G item 1).
+    ///
+    /// Read once, at construction, rather than per call: `SOMNIUM_UI_SHAPER` is
+    /// an A/B switch and a frame that consulted the environment per string
+    /// would be measuring `std::env::var` as much as shaping.
+    pub shaper: crate::text::ShaperPolicy,
     pub icon_atlas: IconAtlas,
     /// Phase 27-C. Lives here rather than on `UserInterface` because a widget
     /// receives `&mut DrawingContext` in `draw()` and nothing else — which is
@@ -103,6 +109,7 @@ impl DrawingContext {
             clip_stack: Vec::new(),
             current_clip: root_clip,
             font_atlas: FontAtlas::new(),
+            shaper: crate::text::ShaperPolicy::from_env(),
             icon_atlas: IconAtlas::new(),
             motion: crate::motion::Animator::new(),
             thumbnails: crate::thumbnail::ThumbnailCache::new(),
@@ -123,6 +130,16 @@ impl DrawingContext {
         self.current_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
         self.shaped.clear();
         self.transform_stack.clear();
+    }
+
+    /// The clip a widget is currently drawing inside.
+    ///
+    /// MORROWIND-M: a widget in a scroll viewer is as tall as its content, so
+    /// its own bounds say nothing about what can be seen. This is what a long
+    /// list has to consult in order to draw only the rows that are visible.
+    #[must_use]
+    pub fn clip_rect(&self) -> Rect {
+        self.current_clip
     }
 
     pub fn push_clip_rect(&mut self, rect: Rect) {
@@ -493,6 +510,101 @@ impl DrawingContext {
     /// the first version of this — rounded every letter to its own subpixel
     /// offset and made the baseline visibly ragged. Advances are untouched, so
     /// measured text width is unchanged either way.
+    /// Draw a line through the shaper, or say it could not.
+    ///
+    /// MORROWIND-G item 1 / CS-CORRECTNESS #6. Two phases, and the borrow
+    /// checker is right to insist: shaping reads the atlas (faces, coverage)
+    /// and rasterising writes it (new glyphs, new packing). The shaped line is
+    /// collected first and drawn second.
+    ///
+    /// Appendix A.5's resolution is the placement rule here — **the run origin
+    /// is snapped and the advances are not**. Rounding each advance would undo
+    /// the kerning that is most of what shaping buys; not snapping the origin
+    /// blurs the editor's own chrome, which is why the two are treated
+    /// differently rather than uniformly.
+    fn push_text_shaped(
+        &mut self,
+        text: &str,
+        origin: Vec2,
+        font_id: u8,
+        px: f32,
+        color: [u8; 4],
+        tracking: f32,
+    ) -> bool {
+        // Tracking is a designed letter-spacing on uppercase headers, and it is
+        // the one thing shaping and tracking genuinely disagree about: a shaper
+        // positions marks relative to their base, and inserting space after
+        // every glyph would push a diacritic off its letter. Headers are Latin
+        // caps, so the per-character path serves them correctly and this one
+        // declines them.
+        if tracking != 0.0 {
+            return false;
+        }
+        let direction = crate::text::Direction::of_paragraph(text);
+        let line = {
+            let Some(line) = crate::text::shape::shape_line(
+                text,
+                px,
+                &self.font_atlas,
+                self.font_atlas.chain(),
+                direction,
+                font_id,
+            ) else {
+                return false;
+            };
+            line
+        };
+
+        let ascent = self.font_atlas.ascent(px, font_id);
+        let origin_x = origin.x.round();
+        let baseline_y = (origin.y + ascent).round();
+        for glyph in &line.glyphs {
+            let Some(info) =
+                self.font_atlas
+                    .get_or_rasterize_indexed(glyph.glyph_id, px, glyph.font_id)
+            else {
+                // Opt-in, and it earned its place: this is what found the
+                // shaper/rasteriser index mismatch, by naming the glyph id and
+                // the string it came from rather than leaving a gap on screen.
+                if std::env::var("SOMNIUM_SHAPE_DEBUG").as_deref() == Ok("1") {
+                    tracing::warn!(
+                        "SHAPEDBG none gid={} face={} px={px} in {text:?}",
+                        glyph.glyph_id,
+                        glyph.font_id
+                    );
+                }
+                continue;
+            };
+            if info.px_w == 0.0 {
+                if std::env::var("SOMNIUM_SHAPE_DEBUG").as_deref() == Ok("1")
+                    && !text[glyph.cluster..].starts_with(' ')
+                {
+                    tracing::warn!(
+                        "SHAPEDBG empty gid={} face={} px={px} at {} in {text:?}",
+                        glyph.glyph_id,
+                        glyph.font_id,
+                        glyph.cluster
+                    );
+                }
+                continue;
+            }
+            let gx = origin_x + glyph.x + info.xmin;
+            let gy = baseline_y + glyph.y - (info.ymin + info.px_h);
+            let rect = Rect::new(gx, gy, info.px_w, info.px_h);
+            let uv = [
+                info.uv_min[0],
+                info.uv_min[1],
+                info.uv_max[0],
+                info.uv_max[1],
+            ];
+            self.push_primitive(
+                Primitive::glyph(rect, uv, color),
+                Some(FONT_ATLAS_TEXTURE_ID),
+            );
+        }
+        true
+    }
+
     pub fn push_text_tracked(
         &mut self,
         text: &str,
@@ -502,6 +614,15 @@ impl DrawingContext {
         color: [u8; 4],
         tracking: f32,
     ) {
+        // A single line only: the shaper places glyphs along one baseline, and
+        // the newline handling below is the caller's paragraph model. Multi-line
+        // shaped text is a wrapper around this, not a change to it.
+        if self.shaper.is_available()
+            && !text.contains('\n')
+            && self.push_text_shaped(text, origin, font_id, px, color, tracking)
+        {
+            return;
+        }
         // Ascent: distance from top-of-line to baseline (positive).
         // Phase 27-B snapped each glyph quad to whole pixels *independently*,
         // which was wrong and visibly so: `ymin + px_h` differs per glyph, so

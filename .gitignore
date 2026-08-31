@@ -99,6 +99,32 @@ dev records/phase MORROWIND/golden/*
 !dev records/phase MORROWIND/golden/manifest.json
 !dev records/phase MORROWIND/golden/*.png
 
+# Phase DOOM continuation. The original evidence folder predated the explicit
+# phase allowlists above, so its records were local-only. Keep the reviewed
+# index plus DOOM-D's matched timings and tone-mapped correctness captures.
+!dev records/phase DOOM/
+dev records/phase DOOM/*
+!dev records/phase DOOM/README.md
+!dev records/phase DOOM/DOOM-D.md
+!dev records/phase DOOM/DOOM-D_*.somtime
+!dev records/phase DOOM/DOOM-D_*.png
+!dev records/phase DOOM/DOOM-G.md
+!dev records/phase DOOM/DOOM-G_*.somtime
+!dev records/phase DOOM/DOOM-G_*.png
+!dev records/phase DOOM/DOOM-H.md
+!dev records/phase DOOM/DOOM-H_*.somtime
+!dev records/phase DOOM/DOOM-I.md
+!dev records/phase DOOM/DOOM-I_*.somtime
+!dev records/phase DOOM/DOOM-J.md
+!dev records/phase DOOM/DOOM-J_*.somtime
+!dev records/phase DOOM/DOOM-K.md
+!dev records/phase DOOM/DOOM-K_*.somtime
+!dev records/phase DOOM/DOOM-L.md
+!dev records/phase DOOM/DOOM-L_*.somtime
+!dev records/phase DOOM/DOOM-L_*.png
+!dev records/phase DOOM/DOOM-M.md
+!dev records/phase DOOM/DOOM-M_*.somtime
+
 # ── Phase PORTAL-0 (Source) ──────────────────────────────────────────────────
 # Same allowlist shape, and added in the same commit as the phase rather than
 # after it: MORROWIND-E2b found that `dev records/phase MORROWIND/` had been

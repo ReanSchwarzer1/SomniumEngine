@@ -286,6 +286,53 @@ impl UserInterface {
         self.invalidate_ancestors(handle);
     }
 
+    /// Give a node an explicit height, leaving its width and placement alone.
+    ///
+    /// MORROWIND-M. A virtualised grid builds only the tiles that can be seen
+    /// and must still be as tall as all of them: the scroll viewer measures its
+    /// content child, so without this the scrollbar would report the project as
+    /// one screen deep and there would be nowhere to scroll to.
+    /// `f32::NAN` gives the height back to layout, which is what it means
+    /// everywhere else in [`Widget`].
+    pub fn set_height(&mut self, handle: NodeHandle, height: f32) {
+        let changed = match self.nodes.try_borrow_mut(to_ih(handle)) {
+            Ok(node) => {
+                // NaN is never equal to itself, so the same-value check has to
+                // say so explicitly — otherwise handing a stretched node NaN
+                // every frame invalidates the whole layout every frame.
+                let same = node.widget.height == height
+                    || (node.widget.height.is_nan() && height.is_nan());
+                node.widget.height = height;
+                !same
+            }
+            Err(_) => false,
+        };
+        if changed {
+            self.invalidate_ancestors(handle);
+        }
+    }
+
+    /// The rectangle a node's drawing is clipped to, which is not its bounds:
+    /// a node inside a scroll viewer is clipped by the viewer, and a node that
+    /// does not clip to its own bounds inherits its parent's clip whole.
+    #[must_use]
+    pub fn clip_bounds(&self, handle: NodeHandle) -> Rect {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.clip_bounds)
+            .unwrap_or(Rect::ZERO)
+    }
+
+    /// Whether a node's layout is still valid, for tests that need to prove a
+    /// per-frame call is idempotent rather than merely correct.
+    #[must_use]
+    pub fn is_layout_valid(&self, handle: NodeHandle) -> bool {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.measure_valid && n.widget.arrange_valid)
+            .unwrap_or(false)
+    }
+
     // ── MORROWIND-I: accessibility ──────────────────────────────────────────
 
     /// Everything the accessibility tree needs about one node.

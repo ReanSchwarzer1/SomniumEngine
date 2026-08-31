@@ -46,6 +46,8 @@ pub enum IconId {
     Play,
     Pause,
     Stop,
+    /// MORROWIND-N: advance one fixed step while paused.
+    Step,
     Translate,
     Rotate,
     Scale,
@@ -62,6 +64,10 @@ pub enum IconId {
     Chevron,
     ChevronDown,
     Visibility,
+    /// The same eye, struck through: hidden.
+    VisibilityOff,
+    /// A closed padlock: locked against viewport edits.
+    Locked,
     Add,
     Delete,
     Duplicate,
@@ -69,6 +75,10 @@ pub enum IconId {
     Profiler,
     OutputLog,
     ContentDrawer,
+    /// Two chain links: the References panel, MORROWIND-M item 3.
+    Link,
+    /// A globe: the Localisation table, MORROWIND-M item 2.
+    Language,
     Cube,
     Sphere,
     Plane,
@@ -134,6 +144,7 @@ impl IconId {
         Self::Play,
         Self::Pause,
         Self::Stop,
+        Self::Step,
         Self::Translate,
         Self::Rotate,
         Self::Scale,
@@ -150,6 +161,8 @@ impl IconId {
         Self::Chevron,
         Self::ChevronDown,
         Self::Visibility,
+        Self::VisibilityOff,
+        Self::Locked,
         Self::Add,
         Self::Delete,
         Self::Duplicate,
@@ -157,6 +170,8 @@ impl IconId {
         Self::Profiler,
         Self::OutputLog,
         Self::ContentDrawer,
+        Self::Link,
+        Self::Language,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -583,6 +598,14 @@ impl IconAtlas {
                 self.line(s(16.0), t(6.0), s(16.0), t(18.0), w + 1.2);
             }
             IconId::Stop => self.rect_stroke(s(7.0), t(7.0), 10.0, 10.0, w + 0.4),
+            // A play triangle against a bar: the transport grammar everything
+            // from a tape deck to a debugger uses for "one more, then hold".
+            IconId::Step => {
+                self.line(s(7.0), t(6.0), s(7.0), t(18.0), w);
+                self.line(s(7.0), t(6.0), s(15.0), t(12.0), w);
+                self.line(s(15.0), t(12.0), s(7.0), t(18.0), w);
+                self.line(s(17.0), t(6.0), s(17.0), t(18.0), w + 1.2);
+            }
             IconId::Translate => {
                 self.line(s(12.0), t(4.0), s(12.0), t(20.0), w);
                 self.line(s(4.0), t(12.0), s(20.0), t(12.0), w);
@@ -658,6 +681,25 @@ impl IconAtlas {
                 self.line(s(3.0), t(12.0), s(8.0), t(16.0), w);
                 self.line(s(16.0), t(16.0), s(21.0), t(12.0), w);
             }
+            // The same eye with a stroke through it. Drawn as the eye *plus* a
+            // slash rather than as a different glyph, so the two states read as
+            // one control in two positions instead of two unrelated symbols —
+            // which is what makes the column scannable down a long outliner.
+            IconId::VisibilityOff => {
+                self.circle(s(12.0), t(12.0), 3.0, w, false);
+                self.line(s(3.0), t(12.0), s(8.0), t(8.0), w);
+                self.line(s(16.0), t(8.0), s(21.0), t(12.0), w);
+                self.line(s(3.0), t(12.0), s(8.0), t(16.0), w);
+                self.line(s(16.0), t(16.0), s(21.0), t(12.0), w);
+                self.line(s(4.0), t(20.0), s(20.0), t(4.0), w + 0.4);
+            }
+            IconId::Locked => {
+                self.rect_stroke(s(6.0), t(11.0), 12.0, 9.0, w);
+                self.line(s(9.0), t(11.0), s(9.0), t(8.0), w);
+                self.line(s(9.0), t(8.0), s(12.0), t(5.0), w);
+                self.line(s(12.0), t(5.0), s(15.0), t(8.0), w);
+                self.line(s(15.0), t(8.0), s(15.0), t(11.0), w);
+            }
             IconId::Add => {
                 self.line(s(12.0), t(5.0), s(12.0), t(19.0), w);
                 self.line(s(5.0), t(12.0), s(19.0), t(12.0), w);
@@ -693,6 +735,19 @@ impl IconAtlas {
                 self.rect_stroke(s(4.0), t(6.0), 16.0, 12.0, w);
                 self.line(s(4.0), t(11.0), s(20.0), t(11.0), w);
                 self.line(s(10.0), t(6.0), s(10.0), t(18.0), w);
+            }
+            IconId::Link => {
+                // Two open links, overlapping in the middle: the shape reads
+                // as "connected to" at 16 px, where a chain of four does not.
+                self.circle(s(9.0), t(12.0), 4.5, w, false);
+                self.circle(s(15.0), t(12.0), 4.5, w, false);
+            }
+            IconId::Language => {
+                // A globe: an outline, an equator and one meridian. Three
+                // strokes is the most that stays legible at 16 px.
+                self.circle(s(12.0), t(12.0), 8.0, w, false);
+                self.line(s(4.0), t(12.0), s(20.0), t(12.0), w);
+                self.circle(s(12.0), t(12.0), 4.0, w, false);
             }
             IconId::Cube => self.rect_stroke(s(6.0), t(6.0), 12.0, 12.0, w),
             IconId::Sphere => self.circle(s(12.0), t(12.0), 8.0, w, false),

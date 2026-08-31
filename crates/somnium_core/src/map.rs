@@ -186,12 +186,22 @@ pub fn spawn_map(
     render_ctx: &somnium_renderer::RenderContext,
     kind: MapKind,
 ) -> Result<MapLoadResult, String> {
+    // DOOM-I: see `create_default_landscape` for why these spans are `info!`.
+    let started = std::time::Instant::now();
     let built = match kind {
         MapKind::Coastal => create_default_landscape(renderer, render_ctx)?,
         MapKind::Island => create_island_landscape(renderer, render_ctx)?,
     };
+    let landscape = started.elapsed();
     let (preset, terrain_id, water) = spawn_landscape(world, built);
     spawn_sun_post_camera(world, &preset);
+    tracing::info!(
+        landscape_ms = landscape.as_secs_f32() * 1000.0,
+        spawn_ms = (started.elapsed() - landscape).as_secs_f32() * 1000.0,
+        total_ms = started.elapsed().as_secs_f32() * 1000.0,
+        ?kind,
+        "Map spawned"
+    );
     Ok(MapLoadResult {
         kind,
         camera_position: preset.camera_position,

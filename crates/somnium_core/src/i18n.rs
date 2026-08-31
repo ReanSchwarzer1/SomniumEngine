@@ -10,7 +10,7 @@
 //! translation table could not be loaded, checked or diffed by a tool without
 //! pulling in a widget tree, and `somnium_ui` could not be tested without one.
 
-use somnium_i18n::{Catalog, Numbers};
+use somnium_i18n::{Catalog, Numbers, Table};
 use somnium_ui::text::localize::{Argument, Resolver, TextKey};
 
 /// Resolves UI text through a loaded [`Catalog`].
@@ -179,5 +179,369 @@ mod tests {
             Some("Quit".into()),
             "Polish has no menu.quit, so English shows"
         );
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// The localisation table as a data table (MORROWIND-M, item 2)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// > *"Its first customer is the localisation table, its second is any game's
+// > item or dialogue data."*
+//
+// The join is here for the same reason `CatalogResolver` is: the data-table
+// model lives in `somnium_ui`, the catalog in `somnium_i18n`, and neither knows
+// about the other. A translator's view is *keys down, locales across*, which is
+// exactly a table of text columns — so this is a projection and not a second
+// representation.
+
+/// The column a localisation table keys on.
+pub const KEY_COLUMN: &str = "key";
+
+/// Project a catalog into an editable table: one row per key, one column per
+/// locale.
+///
+/// Keys come from the union of every locale, not from the default one. A key
+/// that exists only in a translation is usually a mistake — and it is a mistake
+/// nobody can see in a table that only lists what the default locale has.
+#[must_use]
+pub fn catalog_to_table(catalog: &Catalog) -> somnium_ui::data_table::DataTable {
+    use somnium_ui::data_table::{Cell, Column, DataTable};
+
+    let mut locales: Vec<String> = catalog.locales().into_iter().map(str::to_owned).collect();
+    locales.sort();
+
+    let mut columns = vec![Column::text(KEY_COLUMN, "Key")];
+    columns.extend(
+        locales
+            .iter()
+            .map(|locale| Column::text(locale.clone(), locale.clone())),
+    );
+    let mut table = DataTable::new(columns);
+
+    let mut keys: Vec<&str> = Vec::new();
+    for locale in &locales {
+        if let Some(entries) = catalog.table(locale) {
+            for key in entries.keys() {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+    }
+    keys.sort_unstable();
+
+    for key in keys {
+        let mut cells = vec![(KEY_COLUMN.to_owned(), Cell::Text(key.to_owned()))];
+        for locale in &locales {
+            // `Empty` and not `Text("")`: an untranslated string is not a
+            // string translated to nothing, and the `only_incomplete` filter is
+            // the whole reason a translator opens this table.
+            let cell = catalog
+                .table(locale)
+                .and_then(|entries| entries.get(key))
+                .map_or(Cell::Empty, |text| Cell::Text(text.to_owned()));
+            cells.push((locale.clone(), cell));
+        }
+        table.push_row(cells);
+    }
+    table
+}
+
+// ── The round trip, so the table can be edited and saved ────────────────────
+//
+// MORROWIND-M item 2 names the localisation table as the data grid's first
+// customer. A projection you can only read is a report; the inverse is what
+// makes it an editor.
+
+/// Read every `<locale>.json` in a directory as one catalog.
+///
+/// One file per locale, named for it, because that is what a translator is
+/// handed and what a version-control diff is readable in. A file whose name and
+/// whose `locale` field disagree is a mistake worth reporting rather than
+/// guessing at — the name wins in neither direction, because either could be
+/// the typo.
+///
+/// # Errors
+///
+/// The directory being unreadable, or any file in it not being a table.
+pub fn load_catalog(dir: &std::path::Path, default_locale: &str) -> Result<Catalog, String> {
+    let mut catalog = Catalog::new(default_locale);
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    // Sorted, so a catalog loaded twice has its locales in the same order and
+    // anything derived from it — a table's columns, a language menu — is stable.
+    files.sort();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let table: Table = serde_json::from_str(&text)
+            .map_err(|error| format!("{}: not a string table: {error}", path.display()))?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if table.locale != stem {
+            return Err(format!(
+                "{}: file is named for `{stem}` but declares locale `{}`",
+                path.display(),
+                table.locale
+            ));
+        }
+        catalog.insert(table);
+    }
+    Ok(catalog)
+}
+
+/// Write a catalog back out, one file per locale.
+///
+/// # Errors
+///
+/// The directory being uncreatable, or any file unwritable.
+pub fn save_catalog(dir: &std::path::Path, catalog: &Catalog) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for locale in catalog.locales() {
+        let Some(table) = catalog.table(locale) else {
+            continue;
+        };
+        let path = dir.join(format!("{locale}.json"));
+        let text = serde_json::to_string_pretty(table)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        // A trailing newline, because these files are reviewed by people and
+        // read by git.
+        std::fs::write(&path, format!("{text}\n"))
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The inverse of [`catalog_to_table`].
+///
+/// `template` supplies everything a table has that a grid of strings does not —
+/// the display name and the font list — so a round trip through the editor does
+/// not quietly drop the fields that make a language shippable. A locale column
+/// with no counterpart in the template becomes a new table, which is how a
+/// language gets added by adding a column.
+#[must_use]
+pub fn table_to_catalog(table: &somnium_ui::data_table::DataTable, template: &Catalog) -> Catalog {
+    use somnium_ui::data_table::View;
+
+    let mut catalog = Catalog::new(template.default_locale());
+    let rows = table.visible_rows(&View::default());
+    for column in table.columns() {
+        if column.id == KEY_COLUMN {
+            continue;
+        }
+        let mut out = match template.table(&column.id) {
+            Some(existing) => {
+                let mut carried = Table::new(&column.id);
+                carried.display_name = existing.display_name.clone();
+                carried.fonts = existing.fonts.clone();
+                carried
+            }
+            None => Table::new(&column.id),
+        };
+        for row in &rows {
+            let key = table.get(*row, KEY_COLUMN).display();
+            if key.is_empty() {
+                continue;
+            }
+            let cell = table.get(*row, &column.id);
+            // `Empty` means untranslated, and an untranslated key is *absent*
+            // from the locale rather than present as an empty string. Writing
+            // `""` would make the key look translated to every later pass —
+            // including `only_incomplete`, which is what a translator opens the
+            // table to use.
+            if cell.is_empty() {
+                continue;
+            }
+            out.strings.insert(key, cell.display());
+        }
+        catalog.insert(out);
+    }
+    catalog
+}
+
+#[cfg(test)]
+mod data_table_tests {
+    use super::*;
+    use somnium_i18n::Table;
+    use somnium_ui::data_table::{Cell, View};
+
+    fn catalog() -> Catalog {
+        let mut catalog = Catalog::new("en");
+        catalog.insert(
+            Table::new("en")
+                .with("menu.play", "Play")
+                .with("menu.quit", "Quit"),
+        );
+        // `fr` is deliberately missing `menu.quit`, and carries a key `en` does
+        // not have.
+        catalog.insert(
+            Table::new("fr")
+                .with("menu.play", "Jouer")
+                .with("menu.extra", "Bonus"),
+        );
+        catalog
+    }
+
+    #[test]
+    fn a_catalog_becomes_keys_down_and_locales_across() {
+        let table = catalog_to_table(&catalog());
+        let titles: Vec<&str> = table
+            .columns()
+            .iter()
+            .map(|column| column.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Key", "en", "fr"]);
+        assert_eq!(table.row_count(), 3, "the union of every locale's keys");
+    }
+
+    #[test]
+    fn a_key_only_a_translation_has_is_still_a_row() {
+        // Usually a mistake, and one nobody can see in a table that lists only
+        // what the default locale has.
+        let table = catalog_to_table(&catalog());
+        let keys: Vec<String> = table
+            .visible_rows(&View::default())
+            .into_iter()
+            .map(|row| table.get(row, KEY_COLUMN).display())
+            .collect();
+        assert!(keys.contains(&"menu.extra".to_owned()), "{keys:?}");
+    }
+
+    #[test]
+    fn an_untranslated_string_is_empty_rather_than_blank_text() {
+        let table = catalog_to_table(&catalog());
+        let view = View {
+            only_incomplete: true,
+            ..View::default()
+        };
+        let missing: Vec<String> = table
+            .visible_rows(&view)
+            .into_iter()
+            .map(|row| table.get(row, KEY_COLUMN).display())
+            .collect();
+        // `menu.play` is the only key both locales have.
+        assert_eq!(missing, ["menu.extra", "menu.quit"]);
+
+        let row = table
+            .visible_rows(&View::default())
+            .into_iter()
+            .find(|row| table.get(*row, KEY_COLUMN).display() == "menu.quit")
+            .unwrap();
+        assert_eq!(table.get(row, "fr"), Cell::Empty);
+    }
+
+    #[test]
+    fn a_translator_can_export_and_reimport_the_table() {
+        // The workflow the stage names: send a CSV out, get it back edited.
+        let table = catalog_to_table(&catalog());
+        let mut back = somnium_ui::data_table::DataTable::new(table.columns().to_vec());
+        back.read_csv(&table.to_csv()).expect("valid csv");
+        assert_eq!(back.row_count(), table.row_count());
+    }
+    #[test]
+    fn a_catalog_survives_the_round_trip_through_the_editable_table() {
+        // The grid edits a table; the catalog is what ships. If the projection
+        // is not invertible then every edit made in the editor is a silent
+        // partial loss, and the loss is exactly the untranslated keys.
+        let original = catalog();
+        let table = catalog_to_table(&original);
+        let back = table_to_catalog(&table, &original);
+
+        assert_eq!(back.default_locale(), original.default_locale());
+        let mut locales = back.locales();
+        locales.sort_unstable();
+        assert_eq!(locales, ["en", "fr"]);
+        for locale in ["en", "fr"] {
+            assert_eq!(
+                back.table(locale).map(|t| &t.strings),
+                original.table(locale).map(|t| &t.strings),
+                "{locale} did not survive"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untranslated_cell_comes_back_as_an_absent_key_not_an_empty_string() {
+        // The distinction the whole editor runs on. A `""` written here would
+        // make `menu.quit` look translated into French forever after.
+        let original = catalog();
+        let back = table_to_catalog(&catalog_to_table(&original), &original);
+        let french = back.table("fr").expect("fr survives");
+        assert!(
+            !french.strings.contains_key("menu.quit"),
+            "an untranslated key must not come back as a blank translation"
+        );
+    }
+
+    #[test]
+    fn the_display_name_and_fonts_survive_an_edit() {
+        // A grid of strings cannot hold them, so the template has to. Losing
+        // the font list is how a language ships as a screen of tofu boxes with
+        // the translation itself perfectly correct.
+        let mut original = Catalog::new("en");
+        let mut japanese = Table::new("ja");
+        japanese.display_name = "日本語".into();
+        japanese.fonts = vec!["Noto Sans JP".into()];
+        japanese.strings.insert("menu.play".into(), "遊ぶ".into());
+        original.insert(Table::new("en").with("menu.play", "Play"));
+        original.insert(japanese);
+
+        let back = table_to_catalog(&catalog_to_table(&original), &original);
+        let ja = back.table("ja").expect("ja survives");
+        assert_eq!(ja.display_name, "日本語");
+        assert_eq!(ja.fonts, ["Noto Sans JP"]);
+    }
+
+    #[test]
+    fn a_catalog_written_out_reads_back_the_same() {
+        let root = std::env::temp_dir().join(format!(
+            "somnium_i18n_io_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let original = catalog();
+        save_catalog(&root, &original).expect("write");
+        let back = load_catalog(&root, "en").expect("read");
+        for locale in ["en", "fr"] {
+            assert_eq!(
+                back.table(locale).map(|t| &t.strings),
+                original.table(locale).map(|t| &t.strings)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_whose_name_and_locale_disagree_is_refused() {
+        // Either half could be the typo, so guessing which to believe would
+        // silently ship one language's strings under another's name.
+        let root = std::env::temp_dir().join(format!(
+            "somnium_i18n_bad_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("de.json"),
+            serde_json::to_string(&Table::new("fr")).unwrap(),
+        )
+        .unwrap();
+        let error = load_catalog(&root, "en").expect_err("must refuse");
+        assert!(error.contains("de"), "{error}");
+        assert!(error.contains("fr"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

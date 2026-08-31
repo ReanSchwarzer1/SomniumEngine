@@ -55,6 +55,35 @@ pub struct UploadedNode {
 }
 
 /// The primary renderer struct.
+/// Bytes one view's uniform block occupies in the staging buffer.
+///
+/// 224 is what the block holds; 256 is what it is spaced at, because a copy
+/// offset has to be aligned and 256 is the alignment every backend accepts.
+const VIEW_SLOT_BYTES: u64 = 256;
+
+/// How many view slots a frame may use.
+///
+/// Four viewports plus the overlay pass, rounded up. A frame asking for more
+/// wraps rather than growing the buffer: the wrap is visible (two views share a
+/// matrix) where a silent reallocation mid-frame is not.
+const VIEW_SLOTS: u64 = 8;
+
+/// The slot the editor overlays read from, after every view has been recorded.
+const OVERLAY_VIEW_SLOT: u64 = VIEW_SLOTS - 1;
+
+/// What a frame's per-view overrides are overriding.
+///
+/// MORROWIND-J step 3. A view may turn TAA off or select a debug
+/// visualisation; something has to hold what those settings were before the
+/// loop touched them, and it cannot be the loop.
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameViewState {
+    taa: bool,
+    fsr: bool,
+    shading_debug: f32,
+    overlays: bool,
+}
+
 pub struct SomniumRenderer {
     /// Global descriptor pool (bindless arrays, includes light buffer at binding 6).
     pub global_pool: GlobalResourcePool,
@@ -80,7 +109,11 @@ pub struct SomniumRenderer {
     virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness,
     /// Explicit content revision for in-place mesh edits whose offsets/counts
     /// remain stable and therefore cannot be discovered by hashing commands.
-    virtual_shadow_caster_content_revision: u64,
+    shadow_caster_content_revision: u64,
+    /// DOOM-D: pure invalidation policy for the four persistent CSM quadrants.
+    cascade_shadow_cache: crate::shadow::cache::CascadeShadowCache,
+    /// Hash of the filtered caster content touching each resolved cascade.
+    cascade_shadow_revisions: [u64; crate::shadow::NUM_CASCADES],
 
     /// Global geometry storage.
     pub geometry: GeometryPool,
@@ -117,6 +150,24 @@ pub struct SomniumRenderer {
     /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
     /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
+    /// What the per-view overrides are overriding, for this frame.
+    frame_view_state: FrameViewState,
+    /// One slot per view, copied into the view buffer from inside the encoder.
+    view_stage: wgpu::Buffer,
+    /// Which staging slot the view currently being recorded writes into.
+    ///
+    /// Set by `apply_scene_view` rather than threaded down, because the upload
+    /// happens eighty lines into a method that already takes six arguments —
+    /// and unlike the matrices themselves, nothing else reads it.
+    view_slot: u64,
+    /// MORROWIND-J step 3. The views this frame draws.
+    ///
+    /// Empty is not "no views" — it is *the* view, the whole window with
+    /// whatever camera `set_view` was last given, which is what every frame
+    /// before this field existed drew. The editor fills it in when it wants
+    /// more than one, and clearing it puts the renderer back on the single-view
+    /// path rather than on a one-element multi-view path.
+    views: Vec<crate::view::SceneView>,
     /// Phase 13C: Accumulated local lights for the frame.
     local_lights: Vec<crate::cluster::GpuLocalLight>,
 
@@ -233,6 +284,9 @@ pub struct SomniumRenderer {
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
     pub gizmo_world_pos: Option<glam::Vec3>,
+    /// Orientation of the gizmo axes. Identity in world mode; the selected
+    /// entity's propagated rotation in local mode.
+    pub gizmo_world_rotation: glam::Quat,
 
     /// Phase 11.5I: Selection outline pass.
     outline_pass: OutlinePass,
@@ -332,6 +386,8 @@ pub struct SomniumRenderer {
     gpu_driven: bool,
     /// Whether the device supports it at all (gates the runtime toggle).
     supports_gpu_driven: bool,
+    /// Whether the device may consume GPU-authored compact draw counts.
+    supports_counted_draws: bool,
 
     /// Phase 19: environment cubemap for image-based lighting.
     ibl_pass: crate::pass::ibl::IblPass,
@@ -482,6 +538,16 @@ impl SomniumRenderer {
             label: Some("View Buffer"),
             size: 224,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // MORROWIND-J step 3. One slot per view, copied into the view buffer
+        // from inside the encoder so the update is ordered against the passes
+        // that read it. See `stage_view_buffer`.
+        let view_stage = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("View Staging"),
+            size: VIEW_SLOTS * VIEW_SLOT_BYTES,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -797,7 +863,9 @@ impl SomniumRenderer {
             virtual_shadow_gpu: None,
             virtual_shadow_work: Vec::with_capacity(64),
             virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness::default(),
-            virtual_shadow_caster_content_revision: 0,
+            shadow_caster_content_revision: 0,
+            cascade_shadow_cache: crate::shadow::cache::CascadeShadowCache::default(),
+            cascade_shadow_revisions: [0; crate::shadow::NUM_CASCADES],
             geometry,
             materials_pool,
             texture_pool,
@@ -907,6 +975,7 @@ impl SomniumRenderer {
             gizmo_pass,
             gizmo_mode: GizmoMode::Translate,
             gizmo_world_pos: None,
+            gizmo_world_rotation: glam::Quat::IDENTITY,
             light_gizmo_pass,
             light_gizmo_queue: Vec::new(),
             line_gizmo_queue: Vec::new(),
@@ -948,6 +1017,7 @@ impl SomniumRenderer {
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
             supports_gpu_driven: ctx.supports_gpu_driven(),
+            supports_counted_draws: ctx.supports_counted_draws(),
             water_pass,
             water_queue: Vec::new(),
             underwater_pass,
@@ -955,6 +1025,10 @@ impl SomniumRenderer {
             camera_submersion: 0.0,
             terrain_materials,
             shading_debug: 0.0,
+            frame_view_state: FrameViewState::default(),
+            view_stage,
+            view_slot: 0,
+            views: Vec::new(),
             debug_toggles: somnium_ui::debug::DebugToggles::from_env(),
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
@@ -1304,7 +1378,8 @@ impl SomniumRenderer {
         self.camera_pos = camera_pos;
     }
 
-    fn write_view_buffer(&self, queue: &wgpu::Queue, view_proj: glam::Mat4) {
+    /// The view uniform block, exactly as the shaders read it.
+    fn view_buffer_bytes(&self, view_proj: glam::Mat4) -> Vec<u8> {
         let inv_view_proj = view_proj.inverse();
         let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
         let mut view_data = Vec::with_capacity(224);
@@ -1315,7 +1390,45 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
         view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        view_data
+    }
+
+    fn write_view_buffer(&self, queue: &wgpu::Queue, view_proj: glam::Mat4) {
+        let view_data = self.view_buffer_bytes(view_proj);
         queue.write_buffer(&self.global_pool.view_proj_buffer, 0, &view_data);
+    }
+
+    /// Put one view's matrices where the *encoder* will pick them up.
+    ///
+    /// `Queue::write_buffer` cannot be used for this and the reason is the
+    /// whole of MORROWIND-J step 3's first bug: staged writes are applied at
+    /// the **start of the submit**, not in the order they were issued among
+    /// encoder commands. With one submit per frame that means the last write of
+    /// the frame is what every pass in it sees — so four views written this way
+    /// all render with the fourth camera, and the four tiles come out
+    /// identical. (They came out identical with the *first* camera, in fact,
+    /// because the overlay pass writes the primary matrix after the loop and
+    /// that write is the last one.)
+    ///
+    /// Staging plus `copy_buffer_to_buffer` puts the update *into* the command
+    /// stream, where it is ordered against the passes that read it.
+    fn stage_view_buffer(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        slot: u64,
+        view_proj: glam::Mat4,
+    ) {
+        let data = self.view_buffer_bytes(view_proj);
+        let offset = (slot % VIEW_SLOTS) * VIEW_SLOT_BYTES;
+        queue.write_buffer(&self.view_stage, offset, &data);
+        encoder.copy_buffer_to_buffer(
+            &self.view_stage,
+            offset,
+            &self.global_pool.view_proj_buffer,
+            0,
+            data.len() as u64,
+        );
     }
 
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
@@ -1404,11 +1517,10 @@ impl SomniumRenderer {
             .effective(self.virtual_shadow_readiness)
     }
 
-    /// Invalidate cached VSM depth after an in-place caster geometry edit.
+    /// Invalidate cached shadow depth after an in-place caster geometry edit.
     /// Transform/index/range changes are detected automatically each frame.
-    pub fn invalidate_virtual_shadow_casters(&mut self) {
-        self.virtual_shadow_caster_content_revision =
-            self.virtual_shadow_caster_content_revision.wrapping_add(1);
+    pub fn invalidate_shadow_casters(&mut self) {
+        self.shadow_caster_content_revision = self.shadow_caster_content_revision.wrapping_add(1);
     }
 
     /// Add a local light (Point or Spot) for this frame (Phase 13C).
@@ -1555,6 +1667,15 @@ impl SomniumRenderer {
         self.supports_gpu_driven
     }
 
+    /// DOOM-G counted submission. The measured small-scene result was inside
+    /// noise, so dense Phase-15 submission stays the default and this remains
+    /// an explicit experiment.
+    fn counted_draws_active(&self) -> bool {
+        self.gpu_driven
+            && self.supports_counted_draws
+            && std::env::var("SOMNIUM_DRAW_COMPACTION").as_deref() == Ok("1")
+    }
+
     /// Submit one light's gizmo for this frame (Phase 13E).
     ///
     /// Cleared every frame like the draw queue; the editor re-submits each
@@ -1593,6 +1714,12 @@ impl SomniumRenderer {
     /// Update the world-space position the gizmo should appear at.
     pub fn set_gizmo_world_pos(&mut self, pos: glam::Vec3) {
         self.gizmo_world_pos = Some(pos);
+    }
+
+    /// Update both halves of the transform gizmo's world-space frame.
+    pub fn set_gizmo_world_transform(&mut self, pos: glam::Vec3, rotation: glam::Quat) {
+        self.gizmo_world_pos = Some(pos);
+        self.gizmo_world_rotation = rotation.normalize();
     }
 
     /// Hide the gizmo (e.g. when no entity is selected).
@@ -1746,21 +1873,47 @@ impl SomniumRenderer {
         rpass.set_bind_group(1, &self.vis_pass.cutout_bind_group, &[]);
 
         if self.gpu_driven && !self.indirect.is_empty() {
-            // Phase 15A: the whole scene in one call per cull mode. Culled draws
-            // simply carry instance_count = 0 and cost nothing.
             let total = self.indirect.len();
             let split = self.single_sided_args.min(total);
-            if split > 0 {
-                rpass.set_pipeline(&self.vis_pass.pipeline);
-                rpass.multi_draw_indirect(&self.indirect.buffer, 0, split as u32);
-            }
-            if total > split {
-                rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
-                rpass.multi_draw_indirect(
-                    &self.indirect.buffer,
-                    (split as u64) * crate::indirect::ARGS_SIZE,
-                    (total - split) as u32,
-                );
+            if self.counted_draws_active() {
+                // DOOM-G: the cull phase copied only survivors into the two
+                // fixed partitions and authored their counts on the GPU. Dense
+                // args stay untouched as the phase-two/diagnostic contract.
+                if split > 0 {
+                    rpass.set_pipeline(&self.vis_pass.pipeline);
+                    rpass.multi_draw_indirect_count(
+                        self.cull_pass.compact_buffer(),
+                        0,
+                        self.cull_pass.count_buffer(),
+                        0,
+                        split as u32,
+                    );
+                }
+                if total > split {
+                    rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
+                    rpass.multi_draw_indirect_count(
+                        self.cull_pass.compact_buffer(),
+                        (split as u64) * crate::indirect::ARGS_SIZE,
+                        self.cull_pass.count_buffer(),
+                        std::mem::size_of::<u32>() as u64,
+                        (total - split) as u32,
+                    );
+                }
+            } else {
+                // Phase 15A fallback: submit the dense stream. Culled entries
+                // carry instance_count = 0 and cost no raster work.
+                if split > 0 {
+                    rpass.set_pipeline(&self.vis_pass.pipeline);
+                    rpass.multi_draw_indirect(&self.indirect.buffer, 0, split as u32);
+                }
+                if total > split {
+                    rpass.set_pipeline(&self.vis_pass.pipeline_two_sided);
+                    rpass.multi_draw_indirect(
+                        &self.indirect.buffer,
+                        (split as u64) * crate::indirect::ARGS_SIZE,
+                        (total - split) as u32,
+                    );
+                }
             }
         } else if clear {
             rpass.set_pipeline(&self.vis_pass.pipeline);
@@ -2397,6 +2550,511 @@ impl SomniumRenderer {
         };
         self.ensure_ldr_size(ctx, ldr_w, ldr_h);
 
+        // ── 4. Acquire swapchain texture ─────────────────────────────────────
+        //
+        // PORTAL-0-B times this rather than wrapping it in a CPU scope: under
+        // `PresentMode::AutoVsync` the presentation block lands here, and a
+        // scope would have to close before `end_frame` to be reported in the
+        // same frame, which this one does — but the row belongs beside
+        // `Frame wall` and `Frame CPU` rather than among the engine's own
+        // zones, because it is a wait and not work.
+        let acquire_started = std::time::Instant::now();
+        let output = match ctx.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(tex) => tex,
+            wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            _ => {
+                tracing::warn!("Failed to acquire surface texture");
+                // The per-frame queues still have to be emptied. Returning
+                // without clearing leaves this frame's submissions in place and
+                // the next frame appends to them, so everything is drawn twice
+                // — invisible for opaque geometry, but it double-blends the
+                // transparent pass and wastes a whole frame of work.
+                self.clear_frame_queues();
+                return;
+            }
+        };
+        self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
+        let surface_view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Main Render Encoder"),
+            });
+
+        // Phase 29: the profiler brackets each pass from outside, so no pass
+        // has to know it is being timed. Scopes nest — `end` closes the
+        // innermost — and the frame scope is what everything else indents under.
+        self.profiler.begin(&mut encoder, "Frame");
+
+        // Phase 29 counters, from Flax's `RenderStatsData`: a pass time says
+        // how long something took and never why, and "why" is nearly always one
+        // of these. Counted off the draw queue rather than the indirect buffer
+        // because the indirect counts are only known on the GPU — this is what
+        // was *submitted*, which is the number a regression shows up in first.
+        {
+            let c = &mut self.profiler.counters;
+            c.draw_calls = u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX);
+            c.instances = c.draw_calls;
+            c.triangles = self
+                .draw_queue
+                .iter()
+                .map(|d| d.index_count / 3)
+                .fold(0u32, u32::saturating_add);
+            c.terrain_chunks = u32::try_from(
+                self.draw_queue
+                    .iter()
+                    .filter(|d| self.terrain_material_ids.contains(&d.material_id))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+            c.tlas_instances = self.raytrace_pass.instance_count();
+        }
+
+        // ── MORROWIND-J step 3: one pass per view ────────────────────────────
+        //
+        // The scene above is recorded once *per view*, each into its own
+        // rectangle of the swapchain. `views()` is a single view in the shape
+        // the editor has always had, so a one-viewport frame records exactly
+        // what it recorded before this loop existed.
+        self.capture_frame_view_state();
+        let views = self.scene_views();
+        let mut capture_now = false;
+        for (index, view) in views.iter().enumerate() {
+            // Opt-in, like `SOMNIUM_SOMUI_DEBUG`. Four tiles that all show the
+            // same picture is the failure mode of this loop, and it is
+            // indistinguishable from four tiles that all *should* — so the one
+            // thing worth printing is what each view was actually pointed at.
+            if std::env::var("SOMNIUM_VIEW_DEBUG").as_deref() == Ok("1") {
+                tracing::info!(
+                    "VIEWDBG {index} rect={:?} eye={:?} ortho={}",
+                    view.rect,
+                    view.camera_pos,
+                    view.proj.w_axis.w == 1.0
+                );
+            }
+            capture_now |= self.record_scene_view(
+                ctx,
+                &mut encoder,
+                &surface_view,
+                view,
+                index == 0,
+                index as u64,
+            );
+        }
+        self.restore_primary_view(&views);
+
+        // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
+        // gizmos/UI so an A/B measures the scene rather than editor chrome.
+        if capture_now && self.capture.wants_display() {
+            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.capture.record_display(
+                    &ctx.device,
+                    &mut encoder,
+                    &output.texture,
+                    ctx.config.width,
+                    ctx.config.height,
+                    ctx.config.format,
+                );
+            } else {
+                tracing::warn!("display capture skipped: surface lacks COPY_SRC usage");
+            }
+        }
+
+        // Overlays draw onto the reconstructed image. The scene used a jittered
+        // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
+        // here makes gizmos and outlines swim by a pixel every frame.
+        // The same rule as the scene's upload above: one view keeps the plain
+        // write it has always used.
+        if self.views.len() > 1 {
+            self.stage_view_buffer(
+                &ctx.queue,
+                &mut encoder,
+                OVERLAY_VIEW_SLOT,
+                self.view_proj_unjittered,
+            );
+        } else {
+            self.write_view_buffer(&ctx.queue, self.view_proj_unjittered);
+        }
+
+        self.profiler.begin(&mut encoder, "Editor overlays");
+
+        // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
+        if self.editor_overlays_enabled
+            && let Some(gizmo_pos) = self.gizmo_world_pos
+        {
+            let dist = (self.camera_pos - gizmo_pos).length().max(0.5);
+            let scale = dist * 0.15;
+            let model = glam::Mat4::from_translation(gizmo_pos)
+                * glam::Mat4::from_quat(self.gizmo_world_rotation)
+                * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+            self.gizmo_pass.update_transform(&ctx.queue, model);
+            self.gizmo_pass
+                .record(&mut encoder, &surface_view, self.gizmo_mode);
+        }
+
+        // ── 8.7 Selection outline → swapchain (Phase 11.5I) ─────────────────
+        if self.editor_overlays_enabled
+            && let Some((v_off, i_off, i_cnt, model)) = self.outline_entity
+        {
+            self.outline_pass.record(
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                self.view_proj_unjittered,
+                model,
+                v_off,
+                i_off,
+                i_cnt,
+                [0.98, 0.58, 0.07, 1.0], // orange highlight (#FA9412)
+                0.007,                   // ~2-3 px at typical camera distance
+            );
+        }
+
+        // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
+        if self.editor_overlays_enabled
+            && self.light_gizmos_enabled
+            && !(self.light_gizmo_queue.is_empty() && self.line_gizmo_queue.is_empty())
+        {
+            let mut lines =
+                crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
+            lines.extend_from_slice(&self.line_gizmo_queue);
+            self.light_gizmo_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                &lines,
+            );
+        }
+
+        // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
+        if !self.pending_particles.is_empty() {
+            self.particle_pass.record(
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                self.view_proj_unjittered,
+                self.view_matrix,
+                &self.pending_particles,
+            );
+        }
+
+        self.profiler.end(&mut encoder); // Editor overlays
+
+        // ── 9. UI Overlay ────────────────────────────────────────────────────
+        self.profiler.begin(&mut encoder, "UI");
+        // MORROWIND-E2. The game first, the editor over it. A separate profiler
+        // zone on purpose: a HUD that costs two milliseconds should be visible
+        // as a HUD that costs two milliseconds, not as an editor that got
+        // slower.
+        if let Some(game_ui) = game_ui {
+            self.profiler.begin(&mut encoder, "Game UI");
+            let mut frame = somnium_ui::GameUiFrame::new(
+                window,
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                ctx.config.format,
+            );
+            game_ui.draw_ui(&mut frame);
+            let drawn = frame.drawn();
+            self.profiler.end(&mut encoder); // Game UI
+            if drawn == 0 && !self.game_ui_empty_warned {
+                self.game_ui_empty_warned = true;
+                tracing::warn!(
+                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
+                );
+            }
+        }
+        if !ui.is_immersive() {
+            ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
+        }
+        self.profiler.end(&mut encoder); // UI
+
+        // Editor evidence (Phase 26-Zeta). Unlike the display capture above,
+        // this runs *after* the UI pass, so it is the only capture that can
+        // show chrome. Phase 26-Zeta §10 asks for visual evidence that is not
+        // a fabricated screenshot; this is where it comes from.
+        if capture_now && self.capture.wants_ui() {
+            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+                self.capture.record_ui(
+                    &ctx.device,
+                    &mut encoder,
+                    &output.texture,
+                    ctx.config.width,
+                    ctx.config.height,
+                    ctx.config.format,
+                );
+            } else {
+                tracing::warn!("ui capture skipped: surface lacks COPY_SRC usage");
+            }
+        }
+
+        let stats_draws = if self.cull_stats {
+            self.indirect.len()
+        } else {
+            0
+        };
+        self.profiler.end(&mut encoder); // Frame
+        self.profiler.end_frame(&mut encoder);
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        // Must follow the submit: the map would otherwise race the copy that
+        // fills the buffer it is reading.
+        self.profiler.after_submit(&ctx.device);
+        // Phase DOOM-B. `after_submit` above already polled the device, so a
+        // census readback from an earlier frame may have landed; collect first
+        // so the newest available count is what a timing run records.
+        self.census_pass.collect();
+        self.census_pass.after_submit();
+
+        // Phase DOOM-A. After `after_submit`, because that is what polls the
+        // device and lets an earlier frame's readback callback fire — sampling
+        // before it would read the same stale frame every time and report a
+        // standard deviation of zero.
+        if let Some(run) = &mut self.timing
+            && run.active()
+        {
+            run.tick(
+                &self.profiler,
+                self.census_pass.result,
+                &ctx.adapter,
+                &ctx.device,
+                (self.render_width, self.render_height),
+            );
+        }
+        if stats_draws > 0 {
+            self.report_cull_stats(ctx, stats_draws);
+        }
+        if capture_now {
+            // After submit, so the copies recorded above have actually run.
+            // Resolved before the draw queue is cleared, because labelling a
+            // pixel as terrain means looking its instance back up in it.
+            let terrain_ids = &self.terrain_material_ids;
+            let draws = &self.draw_queue;
+            self.capture.resolve(&ctx.device, |instance| {
+                draws
+                    .get(instance as usize)
+                    .is_some_and(|d| terrain_ids.contains(&d.material_id))
+            });
+            let profile_report = self.profiler.report();
+            if self.profiler.enabled() {
+                for line in &profile_report {
+                    tracing::info!("XV-J-PROFILE {line}");
+                }
+            }
+            tracing::info!(
+                scene = ?(self.render_width, self.render_height),
+                swapchain = ?(ctx.config.width, ctx.config.height),
+                fsr = self.fsr_pass.enabled,
+                clipmap = self.clipmaps.first().map(|c| c.enabled).unwrap_or(false),
+                "DF-A-VIEWPORT"
+            );
+            if let Some(t) = self.terrains.first() {
+                tracing::info!(
+                    "XV-J-RESIDENCY compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} aerial_lod_m=80",
+                    t.layer_textures.compressed,
+                    t.layer_textures.from_assets,
+                    t.layer_textures.resolution,
+                    t.layer_textures.extra_resolution,
+                    t.wetness,
+                    t.hex_tiling,
+                );
+            }
+            // The Windows GUI executable has no console attached in release
+            // builds, so redirected stdout is legitimately empty. This
+            // explicit audit sink keeps the capture matrix reproducible and
+            // records effective pass state alongside timings/counters.
+            if let Ok(path) = std::env::var("SOMNIUM_AUDIT_LOG") {
+                let mut lines = vec![
+                    format!("scene={}x{}", self.render_width, self.render_height),
+                    format!("swapchain={}x{}", ctx.config.width, ctx.config.height),
+                    format!("surface_format={:?}", ctx.config.format),
+                    format!("device_features={:?}", ctx.features),
+                    format!(
+                        "effective fsr={} taa={} cas={} bloom={} gtao={} volumetrics={} shafts={} water_rt={} water_refract={} restir_di={} restir_gi={} motion_blur={} dof={} lighting_extra_flags=0x{:x}",
+                        self.fsr_pass.enabled,
+                        self.taa_pass.enabled(),
+                        self.cas_pass.enabled,
+                        self.bloom_pass.enabled,
+                        self.gtao_pass.enabled,
+                        self.volumetric_pass.enabled,
+                        self.volumetric_pass.enabled && self.volumetric_pass.fog.shafts,
+                        self.water_reflection_pass.enabled,
+                        self.water_reflection_pass.refract_enabled,
+                        self.restir_pass.enabled,
+                        self.restir_gi_pass.enabled,
+                        self.motion_blur_pass.enabled,
+                        self.dof_pass.enabled,
+                        self.lighting_extra_pass.flags_bits(),
+                    ),
+                    format!(
+                        "lighting_extra_accumulated_frames={}",
+                        self.lighting_extra_pass.accumulated_frames()
+                    ),
+                    format!("sun_direction_y={:.6}", self.light_direction.y),
+                ];
+                if let Some(t) = self.terrains.first() {
+                    lines.push(format!(
+                        "terrain compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} parallax={:.4}",
+                        t.layer_textures.compressed,
+                        t.layer_textures.from_assets,
+                        t.layer_textures.resolution,
+                        t.layer_textures.extra_resolution,
+                        t.wetness,
+                        t.hex_tiling,
+                        t.parallax_scale,
+                    ));
+                }
+                lines.extend(profile_report);
+                if let Err(error) = std::fs::write(&path, lines.join("\n")) {
+                    tracing::error!("audit log write to {path} failed: {error}");
+                }
+            }
+        }
+        // wgpu 30 moved presentation from the surface texture to the queue,
+        // so the present is ordered against submitted work explicitly rather
+        // than implicitly by the texture's lifetime.
+        ctx.queue.present(output);
+
+        self.clear_frame_queues();
+    }
+
+    // ── MORROWIND-J step 3: several views in one frame ──────────────────────
+
+    /// Ask for a specific set of views next frame.
+    ///
+    /// Passing an empty slice restores the single full-window view, which is
+    /// the path the renderer has always taken and not a one-element special
+    /// case of the new one.
+    pub fn set_scene_views(&mut self, views: &[crate::view::SceneView]) {
+        self.views.clear();
+        self.views.extend_from_slice(views);
+    }
+
+    /// How many views the next frame will record.
+    #[must_use]
+    pub fn scene_view_count(&self) -> usize {
+        self.views.len().max(1)
+    }
+
+    /// Remember what the per-view overrides are overriding.
+    ///
+    /// Taken once, at the top of the frame, rather than saved and restored
+    /// around each view: the second view would otherwise save the *first
+    /// view's* overrides as the thing to go back to, and the settings would
+    /// walk one view further from the truth every frame.
+    fn capture_frame_view_state(&mut self) {
+        self.frame_view_state = FrameViewState {
+            taa: self.taa_pass.enabled(),
+            fsr: self.fsr_pass.enabled,
+            shading_debug: self.shading_debug,
+            overlays: self.editor_overlays_enabled,
+        };
+    }
+
+    /// The camera the last `set_view` established, as a view.
+    ///
+    /// The unjittered projection, because a caller building tiles out of this
+    /// is going to hand it back and `set_view` re-applies the jitter — applying
+    /// it twice is a permanent half-pixel offset that reads as a soft image
+    /// nobody can find the cause of.
+    #[must_use]
+    pub fn primary_scene_view(&self) -> crate::view::SceneView {
+        crate::view::SceneView::full(self.view_matrix, self.proj_matrix, self.camera_pos)
+    }
+
+    /// This frame's views. Never empty.
+    fn scene_views(&self) -> Vec<crate::view::SceneView> {
+        if self.views.is_empty() {
+            vec![crate::view::SceneView::full(
+                self.view_matrix,
+                self.proj_matrix,
+                self.camera_pos,
+            )]
+        } else {
+            self.views.clone()
+        }
+    }
+
+    /// Point the renderer at one view before recording it.
+    ///
+    /// Temporal passes are the reason `primary` exists. TAA, FSR and ReSTIR all
+    /// carry a **history keyed to one camera**; a second view reusing it does
+    /// not merely look wrong, it reprojects last frame's other viewport into
+    /// this one and smears. So the secondary views run history-free, which is
+    /// also what makes a four-up frame affordable — and it is a statement about
+    /// what those buffers are, not a shortcut: giving every view its own
+    /// history is four times the memory for three views nobody is looking at
+    /// closely.
+    fn apply_scene_view(
+        &mut self,
+        _ctx: &RenderContext,
+        view: &crate::view::SceneView,
+        primary: bool,
+        slot: u64,
+    ) {
+        self.view_slot = slot;
+        self.set_view(view.view, view.proj, view.camera_pos);
+        if !primary {
+            self.taa_pass.set_enabled(false);
+            self.fsr_pass.enabled = false;
+        }
+        if let Some(debug_view) = view.debug_view {
+            self.shading_debug = debug_view as f32;
+        }
+        self.editor_overlays_enabled = self.frame_view_state.overlays && view.overlays;
+    }
+
+    /// Put back everything `apply_scene_view` borrowed for a secondary view.
+    ///
+    /// Without this a frame that drew a second viewport would leave TAA off for
+    /// every frame after it — the classic shape of a bug that only appears once
+    /// you have used a feature and then stopped.
+    fn restore_primary_view(&mut self, views: &[crate::view::SceneView]) {
+        if views.len() > 1 {
+            self.taa_pass.set_enabled(self.frame_view_state.taa);
+            self.fsr_pass.enabled = self.frame_view_state.fsr;
+        }
+        self.shading_debug = self.frame_view_state.shading_debug;
+        self.editor_overlays_enabled = self.frame_view_state.overlays;
+        // Overlays and picking below the loop read the primary camera, and the
+        // last view recorded was not it.
+        if let Some(primary) = views.first() {
+            self.set_view(primary.view, primary.proj, primary.camera_pos);
+        }
+    }
+
+    /// Record one view of the scene: everything from clustered lighting to the
+    /// tone-mapped image landing in this view's rectangle of the swapchain.
+    ///
+    /// MORROWIND-J step 3. This was the middle two thirds of
+    /// [`Self::render_with_game_ui`] and is unchanged in substance — it is a
+    /// method rather than a loop body in place so that the diff is a *move*
+    /// rather than a reindent of eighteen hundred lines, and so that the
+    /// per-view state it needs arrives as an argument instead of being read off
+    /// `self` by whatever set it last.
+    ///
+    /// Returns whether a frame capture was armed for this view, which is the
+    /// one fact the chrome below the loop still needs.
+    #[allow(clippy::too_many_lines)]
+    fn record_scene_view(
+        &mut self,
+        ctx: &RenderContext,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_view: &wgpu::TextureView,
+        view: &crate::view::SceneView,
+        primary: bool,
+        slot: u64,
+    ) -> bool {
+        // Rebound by value so the body below reads exactly as it did when it
+        // was inline — `&mut encoder` throughout, rather than a thousand lines
+        // of `&mut *encoder`.
+        let mut encoder = encoder;
+        self.apply_scene_view(ctx, view, primary, slot);
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
         // Bit 4 must be uniform for the whole draw: a per-pixel `traced.a`
         // skip of PCSS is varying, DXC flattens it, and every terrain pixel
@@ -2439,7 +3097,50 @@ impl SomniumRenderer {
         self.decals = decals;
         self.decals.clear();
         // ── 0. Upload view buffer ────────────────────────────────────────────
-        self.write_view_buffer(&ctx.queue, self.view_proj);
+        //
+        // Through the encoder, not `write_buffer`: see `stage_view_buffer`.
+        //
+        // **Unjittered, and deliberately.** `self.view_proj` carries the TAA /
+        // FSR sub-pixel offset, and before the staging fix below it never
+        // reached a shader: the editor overlays upload the unjittered matrix
+        // after the scene, and a `write_buffer` staged later in the frame wins
+        // for the whole frame. So the scene has always drawn unjittered, and
+        // ordering the uploads correctly turned that on for the first time —
+        // which shows up as the whole viewport shaking, hardest from a high
+        // camera where a pixel of terrain covers metres of ground.
+        //
+        // Turning jitter on is a rendering change with its own A/B to run and
+        // its own record to write. MORROWIND-J step 3 is about drawing several
+        // views, and it promised a one-viewport frame identical to the one
+        // before it. This keeps that promise; see MORROWIND-J for the finding.
+        // **One view takes the path it always took.**
+        //
+        // MORROWIND-J step 3 promised that a one-viewport frame is the frame
+        // that came before it, and the staged-copy mechanism below is only
+        // needed when several views share a command buffer. Using it
+        // unconditionally is how this change reached the editor as a viewport
+        // that shook — the copy lands *inside* the encoder where the plain
+        // write landed at the top of the submit, and every pass that reads the
+        // view buffer sees a different matrix as a result.
+        //
+        // So the default path is byte-for-byte the old one, and the new
+        // mechanism is confined to the case that cannot work without it.
+        //
+        // The multi-view branch uploads the **unjittered** matrix, because that
+        // is what a one-view frame effectively renders with: its jittered write
+        // is overwritten by the overlays' unjittered one before any pass runs.
+        // Matching it is what keeps a tile the same picture as the whole
+        // viewport, rather than the same picture plus a shake.
+        if self.views.len() > 1 {
+            self.stage_view_buffer(
+                &ctx.queue,
+                encoder,
+                self.view_slot,
+                self.view_proj_unjittered,
+            );
+        } else {
+            self.write_view_buffer(&ctx.queue, self.view_proj);
+        }
 
         // ── 0.5 Phase 19: refresh the environment cubemap ────────────────────
         // No-ops unless the sun actually moved, so this is free in the common
@@ -2468,7 +3169,15 @@ impl SomniumRenderer {
         // difference — which is why the shimmer vanished when TAA was switched
         // off: `jitter_ndc` returns zero when TAA is disabled, so the cascades
         // stopped moving.
-        let cascades = compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
+        let cascade_candidates =
+            compute_cascades(self.light_direction, self.view_proj_unjittered.inverse());
+        let shadow_cache_enabled = std::env::var("SOMNIUM_SHADOW_CACHE").as_deref() != Ok("0");
+        let cascade_cache_frame = self.cascade_shadow_cache.begin_frame(
+            cascade_candidates,
+            self.light_direction,
+            shadow_cache_enabled,
+        );
+        let cascades = cascade_cache_frame.cascades;
         self.cascade_view_projs = std::array::from_fn(|i| cascades[i].view_proj);
 
         let shadow_debug = if self.shading_debug != 0.0 {
@@ -2532,6 +3241,7 @@ impl SomniumRenderer {
         let cpu_frustum = self.cpu_frustum_active();
         let cascade_cull = self.cascade_caster_cull && !cascade_cull_env_off();
         let mut cpu_culled = 0u32;
+        let mut shadow_geometry_changed = false;
         for &(id, model) in &self.terrain_queue {
             let shoreline_regions = self.water_bodies.shoreline_lod_regions(id);
             let terrain = &mut self.terrains[id as usize];
@@ -2540,6 +3250,7 @@ impl SomniumRenderer {
             terrain.select_lods(local_cam, &shoreline_regions);
             self.rebuilt_chunks.clear();
             terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut self.rebuilt_chunks);
+            shadow_geometry_changed |= !self.rebuilt_chunks.is_empty();
             terrain.ensure_index_blocks(&ctx.queue, &mut self.geometry);
             terrain.splatmap.upload_dirty(&ctx.queue);
 
@@ -2647,6 +3358,9 @@ impl SomniumRenderer {
                 }
             }
         }
+        if shadow_geometry_changed {
+            self.invalidate_shadow_casters();
+        }
         self.profiler.counters.terrain_cpu_culled = cpu_culled;
         self.profiler.cpu_end();
 
@@ -2690,12 +3404,18 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
-            self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
+            self.instances.add_instance(gpu_instance_from_cmd(
+                &self.terrain_lod_by_vertex,
+                cmd,
+                shadow_debug,
+            ));
         }
         for cmd in &self.shadow_only_queue {
-            self.instances
-                .add_instance(gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug));
+            self.instances.add_instance(gpu_instance_from_cmd(
+                &self.terrain_lod_by_vertex,
+                cmd,
+                shadow_debug,
+            ));
         }
         // Phase 21: blended draws share the same instance buffer, appended
         // after the opaque ones (vis + shadow-only). The visibility pass only
@@ -2800,6 +3520,7 @@ impl SomniumRenderer {
             }
             self.indirect
                 .upload(&ctx.device, &ctx.queue, &self.cluster_args);
+            let counted_draws = self.counted_draws_active();
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
@@ -2819,71 +3540,10 @@ impl SomniumRenderer {
                 self.hiz_pass.mip_count(),
                 self.hiz_ready && !self.occlusion_off,
                 self.camera_pos,
+                self.single_sided_args,
+                counted_draws,
             );
             self.profiler.cpu_end();
-        }
-
-        // ── 4. Acquire swapchain texture ─────────────────────────────────────
-        //
-        // PORTAL-0-B times this rather than wrapping it in a CPU scope: under
-        // `PresentMode::AutoVsync` the presentation block lands here, and a
-        // scope would have to close before `end_frame` to be reported in the
-        // same frame, which this one does — but the row belongs beside
-        // `Frame wall` and `Frame CPU` rather than among the engine's own
-        // zones, because it is a wait and not work.
-        let acquire_started = std::time::Instant::now();
-        let output = match ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex) => tex,
-            wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
-            _ => {
-                tracing::warn!("Failed to acquire surface texture");
-                // The per-frame queues still have to be emptied. Returning
-                // without clearing leaves this frame's submissions in place and
-                // the next frame appends to them, so everything is drawn twice
-                // — invisible for opaque geometry, but it double-blends the
-                // transparent pass and wastes a whole frame of work.
-                self.clear_frame_queues();
-                return;
-            }
-        };
-        self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
-        let surface_view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Main Render Encoder"),
-            });
-
-        // Phase 29: the profiler brackets each pass from outside, so no pass
-        // has to know it is being timed. Scopes nest — `end` closes the
-        // innermost — and the frame scope is what everything else indents under.
-        self.profiler.begin(&mut encoder, "Frame");
-
-        // Phase 29 counters, from Flax's `RenderStatsData`: a pass time says
-        // how long something took and never why, and "why" is nearly always one
-        // of these. Counted off the draw queue rather than the indirect buffer
-        // because the indirect counts are only known on the GPU — this is what
-        // was *submitted*, which is the number a regression shows up in first.
-        {
-            let c = &mut self.profiler.counters;
-            c.draw_calls = u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX);
-            c.instances = c.draw_calls;
-            c.triangles = self
-                .draw_queue
-                .iter()
-                .map(|d| d.index_count / 3)
-                .fold(0u32, u32::saturating_add);
-            c.terrain_chunks = u32::try_from(
-                self.draw_queue
-                    .iter()
-                    .filter(|d| self.terrain_material_ids.contains(&d.material_id))
-                    .count(),
-            )
-            .unwrap_or(u32::MAX);
-            c.tlas_instances = self.raytrace_pass.instance_count();
         }
 
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
@@ -2892,6 +3552,13 @@ impl SomniumRenderer {
         // them reach the atlas. Phase CR-E also drops casters that miss every
         // cascade volume. See `rebuild_shadow_casters`.
         self.rebuild_shadow_casters();
+        let dirty_cascades = self.cascade_shadow_cache.finish_frame(
+            self.cascade_shadow_revisions,
+            cascade_cache_frame.view_dirty,
+            shadow_cache_enabled,
+        );
+        self.profiler.counters.shadow_cascades_rendered =
+            dirty_cascades.into_iter().map(u32::from).sum();
         self.prepare_virtual_shadow_cache(&ctx.queue, &cascades);
         self.profiler.counters.shadow_casters =
             u32::try_from(self.shadow_caster_scratch.len()).unwrap_or(u32::MAX);
@@ -2921,6 +3588,7 @@ impl SomniumRenderer {
                 &self.shadow_resources.atlas_view,
                 &self.global_pool.bind_group,
                 &self.shadow_caster_scratch,
+                dirty_cascades,
             ),
             crate::shadow::virtual_map::ShadowTechnique::Virtual => {
                 // Keep a coarse CSM render as the authored policy's
@@ -2931,6 +3599,7 @@ impl SomniumRenderer {
                     &self.shadow_resources.atlas_view,
                     &self.global_pool.bind_group,
                     &self.shadow_caster_scratch,
+                    dirty_cascades,
                 );
             }
         }
@@ -2949,6 +3618,7 @@ impl SomniumRenderer {
         // the camera moves. The second phase is what makes that safe: anything
         // wrongly rejected gets a look at fresh depth within the same frame.
         let cull_active = self.gpu_driven && !self.indirect.is_empty();
+        let counted_draws = self.counted_draws_active();
 
         if cull_active {
             // Phase DOOM-A: bracketed. This was one of the passes the §17.7
@@ -2963,6 +3633,7 @@ impl SomniumRenderer {
                 &self.hiz_pass.view,
                 0,
                 self.indirect.len(),
+                counted_draws,
             );
             self.profiler.end(&mut encoder);
         }
@@ -2992,6 +3663,7 @@ impl SomniumRenderer {
                 &self.hiz_pass.view,
                 1,
                 self.indirect.len(),
+                counted_draws,
             );
             self.profiler.end(&mut encoder);
 
@@ -4205,8 +4877,16 @@ impl SomniumRenderer {
         // a 1-pixel gizmo line or a font glyph would only ring it.
         // FSR RCAS already sharpened the HDR reconstruct; stacking CAS rings.
         let cas_active = self.cas_pass.active() && !fsr_ok;
-        let upscale = !fsr_ok
-            && (self.render_width != ctx.config.width || self.render_height != ctx.config.height);
+        // MORROWIND-J step 3. A view with a rectangle always goes through the
+        // present blit, whatever the resolution: the blit is the only thing in
+        // the chain that can land the image somewhere other than the whole
+        // surface, and it is what stops the second view of a four-up frame
+        // clearing the first.
+        let tiled = view.rect.is_some();
+        let upscale = tiled
+            || (!fsr_ok
+                && (self.render_width != ctx.config.width
+                    || self.render_height != ctx.config.height));
         {
             // Scene-sized colour target. Native writes this straight to the
             // swapchain; a lower preset lands here and is blitted after CAS.
@@ -4247,7 +4927,8 @@ impl SomniumRenderer {
             }
         }
         if upscale {
-            self.present_pass.record(&mut encoder, &surface_view);
+            self.present_pass
+                .record_into(&mut encoder, &surface_view, view.rect);
         }
 
         // DOOM-A: `Post + present` closes here. Everything below is editor
@@ -4256,268 +4937,7 @@ impl SomniumRenderer {
         // budget and the editor budget are answerable to different questions.
         self.profiler.end(&mut encoder);
 
-        // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
-        // gizmos/UI so an A/B measures the scene rather than editor chrome.
-        if capture_now && self.capture.wants_display() {
-            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
-                self.capture.record_display(
-                    &ctx.device,
-                    &mut encoder,
-                    &output.texture,
-                    ctx.config.width,
-                    ctx.config.height,
-                    ctx.config.format,
-                );
-            } else {
-                tracing::warn!("display capture skipped: surface lacks COPY_SRC usage");
-            }
-        }
-
-        // Overlays draw onto the reconstructed image. The scene used a jittered
-        // view_proj; FSR/TAA already undid that. Feeding the jittered matrix
-        // here makes gizmos and outlines swim by a pixel every frame.
-        self.write_view_buffer(&ctx.queue, self.view_proj_unjittered);
-
-        self.profiler.begin(&mut encoder, "Editor overlays");
-
-        // ── 8.5 Gizmo Pass → swapchain (after tone-mapping, before UI) ───────
-        if self.editor_overlays_enabled
-            && let Some(gizmo_pos) = self.gizmo_world_pos
-        {
-            let dist = (self.camera_pos - gizmo_pos).length().max(0.5);
-            let scale = dist * 0.15;
-            let model = glam::Mat4::from_translation(gizmo_pos)
-                * glam::Mat4::from_scale(glam::Vec3::splat(scale));
-            self.gizmo_pass.update_transform(&ctx.queue, model);
-            self.gizmo_pass
-                .record(&mut encoder, &surface_view, self.gizmo_mode);
-        }
-
-        // ── 8.7 Selection outline → swapchain (Phase 11.5I) ─────────────────
-        if self.editor_overlays_enabled
-            && let Some((v_off, i_off, i_cnt, model)) = self.outline_entity
-        {
-            self.outline_pass.record(
-                &ctx.queue,
-                &mut encoder,
-                &surface_view,
-                self.view_proj_unjittered,
-                model,
-                v_off,
-                i_off,
-                i_cnt,
-                [0.98, 0.58, 0.07, 1.0], // orange highlight (#FA9412)
-                0.007,                   // ~2-3 px at typical camera distance
-            );
-        }
-
-        // ── 8.75 Light gizmos → swapchain (Phase 13E) ────────────────────────
-        if self.editor_overlays_enabled
-            && self.light_gizmos_enabled
-            && !(self.light_gizmo_queue.is_empty() && self.line_gizmo_queue.is_empty())
-        {
-            let mut lines =
-                crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
-            lines.extend_from_slice(&self.line_gizmo_queue);
-            self.light_gizmo_pass.record(
-                &ctx.device,
-                &ctx.queue,
-                &mut encoder,
-                &surface_view,
-                &lines,
-            );
-        }
-
-        // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
-        if !self.pending_particles.is_empty() {
-            self.particle_pass.record(
-                &ctx.queue,
-                &mut encoder,
-                &surface_view,
-                self.view_proj_unjittered,
-                self.view_matrix,
-                &self.pending_particles,
-            );
-        }
-
-        self.profiler.end(&mut encoder); // Editor overlays
-
-        // ── 9. UI Overlay ────────────────────────────────────────────────────
-        self.profiler.begin(&mut encoder, "UI");
-        // MORROWIND-E2. The game first, the editor over it. A separate profiler
-        // zone on purpose: a HUD that costs two milliseconds should be visible
-        // as a HUD that costs two milliseconds, not as an editor that got
-        // slower.
-        if let Some(game_ui) = game_ui {
-            self.profiler.begin(&mut encoder, "Game UI");
-            let mut frame = somnium_ui::GameUiFrame::new(
-                window,
-                &ctx.device,
-                &ctx.queue,
-                &mut encoder,
-                &surface_view,
-                ctx.config.format,
-            );
-            game_ui.draw_ui(&mut frame);
-            let drawn = frame.drawn();
-            self.profiler.end(&mut encoder); // Game UI
-            if drawn == 0 && !self.game_ui_empty_warned {
-                self.game_ui_empty_warned = true;
-                tracing::warn!(
-                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
-                );
-            }
-        }
-        if !ui.is_immersive() {
-            ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
-        }
-        self.profiler.end(&mut encoder); // UI
-
-        // Editor evidence (Phase 26-Zeta). Unlike the display capture above,
-        // this runs *after* the UI pass, so it is the only capture that can
-        // show chrome. Phase 26-Zeta §10 asks for visual evidence that is not
-        // a fabricated screenshot; this is where it comes from.
-        if capture_now && self.capture.wants_ui() {
-            if ctx.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
-                self.capture.record_ui(
-                    &ctx.device,
-                    &mut encoder,
-                    &output.texture,
-                    ctx.config.width,
-                    ctx.config.height,
-                    ctx.config.format,
-                );
-            } else {
-                tracing::warn!("ui capture skipped: surface lacks COPY_SRC usage");
-            }
-        }
-
-        let stats_draws = if self.cull_stats {
-            self.indirect.len()
-        } else {
-            0
-        };
-        self.profiler.end(&mut encoder); // Frame
-        self.profiler.end_frame(&mut encoder);
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-        // Must follow the submit: the map would otherwise race the copy that
-        // fills the buffer it is reading.
-        self.profiler.after_submit(&ctx.device);
-        // Phase DOOM-B. `after_submit` above already polled the device, so a
-        // census readback from an earlier frame may have landed; collect first
-        // so the newest available count is what a timing run records.
-        self.census_pass.collect();
-        self.census_pass.after_submit();
-
-        // Phase DOOM-A. After `after_submit`, because that is what polls the
-        // device and lets an earlier frame's readback callback fire — sampling
-        // before it would read the same stale frame every time and report a
-        // standard deviation of zero.
-        if let Some(run) = &mut self.timing
-            && run.active()
-        {
-            run.tick(
-                &self.profiler,
-                self.census_pass.result,
-                &ctx.adapter,
-                (self.render_width, self.render_height),
-            );
-        }
-        if stats_draws > 0 {
-            self.report_cull_stats(ctx, stats_draws);
-        }
-        if capture_now {
-            // After submit, so the copies recorded above have actually run.
-            // Resolved before the draw queue is cleared, because labelling a
-            // pixel as terrain means looking its instance back up in it.
-            let terrain_ids = &self.terrain_material_ids;
-            let draws = &self.draw_queue;
-            self.capture.resolve(&ctx.device, |instance| {
-                draws
-                    .get(instance as usize)
-                    .is_some_and(|d| terrain_ids.contains(&d.material_id))
-            });
-            let profile_report = self.profiler.report();
-            if self.profiler.enabled() {
-                for line in &profile_report {
-                    tracing::info!("XV-J-PROFILE {line}");
-                }
-            }
-            tracing::info!(
-                scene = ?(self.render_width, self.render_height),
-                swapchain = ?(ctx.config.width, ctx.config.height),
-                fsr = self.fsr_pass.enabled,
-                clipmap = self.clipmaps.first().map(|c| c.enabled).unwrap_or(false),
-                "DF-A-VIEWPORT"
-            );
-            if let Some(t) = self.terrains.first() {
-                tracing::info!(
-                    "XV-J-RESIDENCY compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} aerial_lod_m=80",
-                    t.layer_textures.compressed,
-                    t.layer_textures.from_assets,
-                    t.layer_textures.resolution,
-                    t.layer_textures.extra_resolution,
-                    t.wetness,
-                    t.hex_tiling,
-                );
-            }
-            // The Windows GUI executable has no console attached in release
-            // builds, so redirected stdout is legitimately empty. This
-            // explicit audit sink keeps the capture matrix reproducible and
-            // records effective pass state alongside timings/counters.
-            if let Ok(path) = std::env::var("SOMNIUM_AUDIT_LOG") {
-                let mut lines = vec![
-                    format!("scene={}x{}", self.render_width, self.render_height),
-                    format!("swapchain={}x{}", ctx.config.width, ctx.config.height),
-                    format!("surface_format={:?}", ctx.config.format),
-                    format!("device_features={:?}", ctx.features),
-                    format!(
-                        "effective fsr={} taa={} cas={} bloom={} gtao={} volumetrics={} shafts={} water_rt={} water_refract={} restir_di={} restir_gi={} motion_blur={} dof={} lighting_extra_flags=0x{:x}",
-                        self.fsr_pass.enabled,
-                        self.taa_pass.enabled(),
-                        self.cas_pass.enabled,
-                        self.bloom_pass.enabled,
-                        self.gtao_pass.enabled,
-                        self.volumetric_pass.enabled,
-                        self.volumetric_pass.enabled && self.volumetric_pass.fog.shafts,
-                        self.water_reflection_pass.enabled,
-                        self.water_reflection_pass.refract_enabled,
-                        self.restir_pass.enabled,
-                        self.restir_gi_pass.enabled,
-                        self.motion_blur_pass.enabled,
-                        self.dof_pass.enabled,
-                        self.lighting_extra_pass.flags_bits(),
-                    ),
-                    format!(
-                        "lighting_extra_accumulated_frames={}",
-                        self.lighting_extra_pass.accumulated_frames()
-                    ),
-                    format!("sun_direction_y={:.6}", self.light_direction.y),
-                ];
-                if let Some(t) = self.terrains.first() {
-                    lines.push(format!(
-                        "terrain compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} parallax={:.4}",
-                        t.layer_textures.compressed,
-                        t.layer_textures.from_assets,
-                        t.layer_textures.resolution,
-                        t.layer_textures.extra_resolution,
-                        t.wetness,
-                        t.hex_tiling,
-                        t.parallax_scale,
-                    ));
-                }
-                lines.extend(profile_report);
-                if let Err(error) = std::fs::write(&path, lines.join("\n")) {
-                    tracing::error!("audit log write to {path} failed: {error}");
-                }
-            }
-        }
-        // wgpu 30 moved presentation from the surface texture to the queue,
-        // so the present is ordered against submitted work explicitly rather
-        // than implicitly by the texture's lifetime.
-        ctx.queue.present(output);
-
-        self.clear_frame_queues();
+        capture_now
     }
 
     /// Empty every per-frame submission queue.
@@ -4591,7 +5011,7 @@ impl SomniumRenderer {
             *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
         }
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        mix(&mut hash, self.virtual_shadow_caster_content_revision);
+        mix(&mut hash, self.shadow_caster_content_revision);
         mix(&mut hash, self.materials_pool.revision());
         for cmd in &self.draw_queue {
             mix(&mut hash, u64::from(cmd.vertex_offset));
@@ -4681,7 +5101,7 @@ impl SomniumRenderer {
         let light_revision = virtual_shadow_light_revision(self.light_direction, cascades);
         let caster_revision = virtual_shadow_caster_revision(
             self.draw_queue.iter().chain(self.shadow_only_queue.iter()),
-            self.virtual_shadow_caster_content_revision,
+            self.shadow_caster_content_revision,
         );
         self.virtual_shadow_cache
             .begin_frame(light_revision, caster_revision);
@@ -4739,6 +5159,13 @@ impl SomniumRenderer {
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
             self.cascade_view_projs.map(crate::culling::frustum_planes);
         self.shadow_caster_scratch.clear();
+        // A material edit can change alpha-tested depth without changing a
+        // command's material id. Conservatively invalidate every cascade on a
+        // pool revision; command transforms/ranges below remain per-cascade.
+        let global_shadow_revision =
+            self.shadow_caster_content_revision ^ self.materials_pool.revision().rotate_left(17);
+        self.cascade_shadow_revisions =
+            [0xcbf2_9ce4_8422_2325u64 ^ global_shadow_revision; crate::shadow::NUM_CASCADES];
         let frame_layout =
             frame_instance_layout(self.draw_queue.len(), self.shadow_only_queue.len());
         for (i, cmd) in self.draw_queue.iter().enumerate() {
@@ -4751,6 +5178,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 &self.geometry,
                 &mut self.shadow_caster_scratch,
+                &mut self.cascade_shadow_revisions,
             );
         }
         for (i, cmd) in self.shadow_only_queue.iter().enumerate() {
@@ -4765,6 +5193,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 &self.geometry,
                 &mut self.shadow_caster_scratch,
+                &mut self.cascade_shadow_revisions,
             );
         }
     }
@@ -4879,6 +5308,7 @@ fn consider_shadow_caster(
     camera_pos: glam::Vec3,
     geometry: &crate::geometry::GeometryPool,
     out: &mut Vec<crate::pass::shadow::ShadowCaster>,
+    cascade_revisions: &mut [u64; crate::shadow::NUM_CASCADES],
 ) {
     if !cmd.casts_shadow {
         return;
@@ -4889,27 +5319,55 @@ fn consider_shadow_caster(
     };
     let Some((min, max)) = geometry.mesh_aabb(cmd.vertex_offset) else {
         out.push(caster);
+        for revision in cascade_revisions {
+            mix_shadow_caster_revision(revision, cmd);
+        }
         return;
     };
     let min = glam::Vec3::from(min);
     let max = glam::Vec3::from(max);
-    if cascade_cull {
-        let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
-        if !crate::culling::aabb_in_any_frustum(cascade_planes, wmin, wmax) {
+    let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
+    let coverage: [bool; crate::shadow::NUM_CASCADES] = std::array::from_fn(|i| {
+        !cascade_cull || crate::culling::aabb_in_frustum(&cascade_planes[i], wmin, wmax)
+    });
+    if !coverage.into_iter().any(|inside| inside) {
+        return;
+    }
+    if threshold > 0.0 {
+        let half = cmd.transform.transform_vector3((max - min) * 0.5);
+        let radius = half.length();
+        let centre = cmd.transform.transform_point3((min + max) * 0.5);
+        let dist_sq = (centre - camera_pos).length_squared();
+        if !crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
             return;
         }
     }
-    if threshold <= 0.0 {
-        out.push(caster);
-        return;
+    out.push(caster);
+    for (i, inside) in coverage.into_iter().enumerate() {
+        if inside {
+            mix_shadow_caster_revision(&mut cascade_revisions[i], cmd);
+        }
     }
-    let half = cmd.transform.transform_vector3((max - min) * 0.5);
-    let radius = half.length();
-    let centre = cmd.transform.transform_point3((min + max) * 0.5);
-    let dist_sq = (centre - camera_pos).length_squared();
-    if crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
-        out.push(caster);
+}
+
+fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
+    // Queue order is not shadow content. Foliage and off-camera terrain may be
+    // collected through maps whose iteration order changes while the set does
+    // not; folding each independent fingerprint with wrapping addition keeps
+    // the revision commutative while still counting duplicate draws.
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |word: u32| {
+        fingerprint ^= u64::from(word);
+        fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(command.vertex_offset);
+    mix(command.index_offset);
+    mix(command.index_count);
+    mix(command.material_id);
+    for value in command.transform.to_cols_array() {
+        mix(value.to_bits());
     }
+    *hash = hash.wrapping_add(fingerprint);
 }
 
 /// Build a full mip chain by repeated 2×2 box filtering.
@@ -5162,7 +5620,7 @@ mod mip_tests {
 
 #[cfg(test)]
 mod frame_instance_layout_tests {
-    use super::{frame_instance_layout, gpu_instance_from_cmd};
+    use super::{frame_instance_layout, gpu_instance_from_cmd, mix_shadow_caster_revision};
     use crate::command::{DrawCommand, SortKey};
 
     fn draw(vertex: u32, index: u32, material: u32, tx: f32) -> DrawCommand {
@@ -5192,12 +5650,31 @@ mod frame_instance_layout_tests {
     }
 
     #[test]
+    fn shadow_content_revision_is_order_independent_but_transform_sensitive() {
+        let a = draw(11, 101, 1, 10.0);
+        let b = draw(22, 202, 2, 20.0);
+        let mut ab = 7;
+        mix_shadow_caster_revision(&mut ab, &a);
+        mix_shadow_caster_revision(&mut ab, &b);
+        let mut ba = 7;
+        mix_shadow_caster_revision(&mut ba, &b);
+        mix_shadow_caster_revision(&mut ba, &a);
+        assert_eq!(ab, ba, "collection order is not shadow content");
+
+        let moved = draw(22, 202, 2, 21.0);
+        let mut changed = 7;
+        mix_shadow_caster_revision(&mut changed, &a);
+        mix_shadow_caster_revision(&mut changed, &moved);
+        assert_ne!(ab, changed, "moving a caster must invalidate its depth");
+    }
+
+    #[test]
     fn final_consumer_indices_recover_each_draws_ids_on_both_visibility_paths() {
         let visible = draw(11, 101, 1, 10.0);
         let shadow_only = draw(22, 202, 2, 20.0);
         let transparent = draw(33, 303, 3, 30.0);
-        let uploaded =
-            [&visible, &shadow_only, &transparent].map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
+        let uploaded = [&visible, &shadow_only, &transparent]
+            .map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
         let layout = frame_instance_layout(1, 1);
 
         for gpu_driven in [false, true] {

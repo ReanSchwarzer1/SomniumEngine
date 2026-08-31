@@ -171,6 +171,22 @@ impl PresentPass {
     }
 
     pub fn record(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.record_into(encoder, target, None);
+    }
+
+    /// Blit the source into one rectangle of `target`, in physical pixels.
+    ///
+    /// MORROWIND-J step 3. This is how several views share one swapchain: each
+    /// records the scene into this pass's source and lands it in its own tile.
+    /// The load op follows from the rectangle — a full-surface blit clears,
+    /// because it covers everything it would have cleared anyway, and a tile
+    /// **must not**, or the second view of a four-up frame wipes the first.
+    pub fn record_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        rect: Option<(u32, u32, u32, u32)>,
+    ) {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Present Pass"),
             multiview_mask: None,
@@ -179,7 +195,11 @@ impl PresentPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: if rect.is_some() {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -189,6 +209,16 @@ impl PresentPass {
         });
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, &self.bind_group, &[]);
+        if let Some((x, y, w, h)) = rect {
+            // A zero-sized viewport is a validation error, not a no-op, and a
+            // tile can be zero-sized for a frame while a splitter is dragged
+            // to an edge.
+            if w == 0 || h == 0 {
+                return;
+            }
+            rpass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+            rpass.set_scissor_rect(x, y, w, h);
+        }
         rpass.draw(0..3, 0..1);
     }
 }

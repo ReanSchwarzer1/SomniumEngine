@@ -551,6 +551,4 @@ mod tests {
             assert_eq!(coverage(d1 as f32, (7 - d1) as f32, 0.0, 0.0), 0.0);
         }
     }
-
-
 }

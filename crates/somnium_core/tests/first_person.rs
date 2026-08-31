@@ -164,6 +164,7 @@ impl Rig {
             #[allow(clippy::cast_precision_loss)]
             simulation_time: self.step as f64 / 60.0,
             step: self.step,
+            stepping: false,
         };
         let phase = PhaseInput {
             time,
@@ -175,6 +176,7 @@ impl Rig {
             let mut services = HostServices {
                 physics: Some(&mut self.physics),
                 audio: None,
+                ui: None,
             };
             self.host.sync(&mut self.world, &phase, &mut services);
         }
@@ -184,6 +186,7 @@ impl Rig {
             let mut services = HostServices {
                 physics: Some(&mut self.physics),
                 audio: None,
+                ui: None,
             };
             self.host
                 .fixed_update(&mut self.world, time, input, &mut services);
@@ -236,9 +239,16 @@ impl Rig {
 fn action(name: &str, value: [f32; 2], pressed: bool) -> InputSnapshot {
     let active = value[0].abs().max(value[1].abs()) > 0.5;
     InputSnapshot {
-        actions: [(name.to_string(), InputActionSnapshot { value, active, pressed })]
-            .into_iter()
-            .collect(),
+        actions: [(
+            name.to_string(),
+            InputActionSnapshot {
+                value,
+                active,
+                pressed,
+            },
+        )]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -247,7 +257,11 @@ fn movement(x: f32, y: f32, sprint: bool) -> InputSnapshot {
     if sprint {
         input.actions.insert(
             "Sprint".to_string(),
-            InputActionSnapshot { value: [1.0, 0.0], active: true, pressed: false },
+            InputActionSnapshot {
+                value: [1.0, 0.0],
+                active: true,
+                pressed: false,
+            },
         );
     }
     input
@@ -298,12 +312,7 @@ fn both_character_scripts_compile_and_declare_their_fields() {
     let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(
         names,
-        vec![
-            "eyeHeight",
-            "invertMouseY",
-            "lookSensitivity",
-            "pitchLimit"
-        ]
+        vec!["eyeHeight", "invertMouseY", "lookSensitivity", "pitchLimit"]
     );
 }
 

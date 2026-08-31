@@ -6,9 +6,9 @@
 #![allow(missing_docs, clippy::wildcard_imports)]
 
 use crate::{
-    AudioEmitterComponent, Children, LightComponent, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
-    TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
-    WorldPartitionComponent, WorldTransform,
+    AudioEmitterComponent, Children, LightComponent, MaterialComponent, MeshComponent, MeshKind,
+    Name, Parent, TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent,
+    WaterComponent, WorldPartitionComponent, WorldTransform,
 };
 use somnium_ecs::reflect::{
     ChangeScope, FieldFlags, FieldId, ReflectObject, ReflectValue, StableId,

@@ -135,51 +135,47 @@ impl OitPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("OIT Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                shaders.source_or_panic("oit_composite.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("oit_composite.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("OIT Composite Pipeline Layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let composite_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("OIT Composite"),
-                layout: Some(&pipeline_layout),
-                multiview_mask: None,
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: hdr_format,
-                        // The resolve returns straight alpha and composites
-                        // over whatever opaque geometry already filled the HDR
-                        // target, exactly as the sorted path's final blend did.
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                cache: None,
-            });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("OIT Composite"),
+            layout: Some(&pipeline_layout),
+            multiview_mask: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: hdr_format,
+                    // The resolve returns straight alpha and composites
+                    // over whatever opaque geometry already filled the HDR
+                    // target, exactly as the sorted path's final blend did.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+        });
 
         let (accum_texture, accum_view) =
             Self::alloc(device, "OIT Accum", ACCUM_FORMAT, width, height);
         let (reveal_texture, reveal_view) =
             Self::alloc(device, "OIT Reveal", REVEAL_FORMAT, width, height);
-        let bind_group =
-            Self::bind(device, &bind_group_layout, &accum_view, &reveal_view);
+        let bind_group = Self::bind(device, &bind_group_layout, &accum_view, &reveal_view);
 
         Self {
             composite_pipeline,

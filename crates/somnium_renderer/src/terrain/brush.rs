@@ -158,10 +158,7 @@ fn value_noise(x: f32, z: f32) -> f32 {
     #[allow(clippy::cast_possible_truncation)]
     let (xi, zi) = (x.floor() as i32, z.floor() as i32);
     let (fx, fz) = (x - x.floor(), z - z.floor());
-    let (ux, uz) = (
-        fx * fx * (3.0 - 2.0 * fx),
-        fz * fz * (3.0 - 2.0 * fz),
-    );
+    let (ux, uz) = (fx * fx * (3.0 - 2.0 * fx), fz * fz * (3.0 - 2.0 * fz));
     let a = hash2(xi, zi);
     let b = hash2(xi + 1, zi);
     let c = hash2(xi, zi + 1);

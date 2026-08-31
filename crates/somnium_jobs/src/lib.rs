@@ -168,11 +168,17 @@ pub struct JobSnapshot {
     /// Whether cancellation can still be requested.
     pub cancellable: bool,
     /// Scheduling class it was submitted with.
-    ///
-    /// Carried so a surface can tell work a person started from housekeeping
-    /// that runs on its own — the status bar's Cancel chip shows the former
-    /// and not the latter.
     pub priority: JobPriority,
+    /// Engine work that runs on its own, rather than something a person started.
+    ///
+    /// A surface uses this to decide whether a job may borrow the status line
+    /// and its Cancel chip. Priority used to stand in for the distinction, and
+    /// that only held while every continuous system happened to be
+    /// [`JobPriority::Background`]. Voxel chunk meshing broke it: the work is
+    /// genuinely needed by the visible viewport, so downgrading its scheduling
+    /// class to keep it out of the status bar would have been lying to the
+    /// scheduler to fix a label. The two questions are now asked separately.
+    pub housekeeping: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,17 +232,19 @@ struct JobState {
     id: u64,
     name: &'static str,
     priority: JobPriority,
+    housekeeping: bool,
     status: AtomicU8,
     progress: AtomicU32,
     cancelled: AtomicBool,
 }
 
 impl JobState {
-    fn new(id: u64, name: &'static str, priority: JobPriority) -> Self {
+    fn new(id: u64, name: &'static str, priority: JobPriority, housekeeping: bool) -> Self {
         Self {
             id,
             name,
             priority,
+            housekeeping,
             status: AtomicU8::new(0),
             progress: AtomicU32::new(0),
             cancelled: AtomicBool::new(false),
@@ -252,6 +260,7 @@ impl JobState {
             progress: self.progress.load(AtomicOrdering::Relaxed) as f32 / 10_000.0,
             cancellable: !status.is_terminal(),
             priority: self.priority,
+            housekeeping: self.housekeeping,
         }
     }
 
@@ -350,6 +359,11 @@ pub struct JobDesc {
     /// A job whose deadline has passed while it was queued is **dropped, not
     /// run**. Within one priority, an earlier deadline is taken first.
     pub deadline: Option<Instant>,
+    /// Engine work nobody asked for by name. See [`JobSnapshot::housekeeping`].
+    ///
+    /// [`JobPriority::Background`] implies it, so the only submissions that
+    /// need to say so are continuous systems at a higher class.
+    pub housekeeping: bool,
 }
 
 impl JobDesc {
@@ -360,6 +374,7 @@ impl JobDesc {
             name,
             priority: JobPriority::Normal,
             deadline: None,
+            housekeeping: false,
         }
     }
 
@@ -381,6 +396,13 @@ impl JobDesc {
     #[must_use]
     pub fn within(mut self, budget: Duration) -> Self {
         self.deadline = Some(Instant::now() + budget);
+        self
+    }
+
+    /// Mark this as continuous engine work rather than a person's action.
+    #[must_use]
+    pub fn housekeeping(mut self) -> Self {
+        self.housekeeping = true;
         self
     }
 }
@@ -518,7 +540,12 @@ impl JobSystem {
         F: FnOnce(JobContext) -> Result<T, String> + Send + 'static,
     {
         let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
-        let state = Arc::new(JobState::new(id, desc.name, desc.priority));
+        let state = Arc::new(JobState::new(
+            id,
+            desc.name,
+            desc.priority,
+            desc.housekeeping || desc.priority == JobPriority::Background,
+        ));
         let (sender, receiver) = sync_channel(1);
         let task_state = Arc::clone(&state);
         let submitted = Instant::now();

@@ -8,11 +8,11 @@
 //! desired set (camera)          edit overlay (set_voxel)
 //!         │                              │
 //!         ▼                              ▼
-//! VoxelWorld::update ──► rayon task: sample terrain + edits (34³ padded)
+//! VoxelWorld::update ──► somnium_jobs job: sample terrain + edits (34³ padded)
 //!         ▲                              │ downsample for LOD (18³ / 10³)
 //!         │                              │ block_mesh::visible_block_faces
 //!         │                              ▼
-//!     mpsc channel ◄────────── ChunkMeshData { Vertex[], u32[] }
+//!     JobHandle ◄───────────── ChunkMeshData { Vertex[], u32[] }
 //!         │
 //!         ▼
 //! caller uploads to GeometryPool ──► DrawCommand ──► Visibility Buffer
@@ -34,7 +34,9 @@
 //!   `RIGHT_HANDED_Y_UP_CONFIG`; LOD via nearest-neighbour voxel resampling
 //!   before meshing (padded bounds kept aligned so outer voxels survive)
 //! - `src/chunk.rs::ChunkThread` — async chunk task pattern, adapted from
-//!   Bevy task pools to `rayon::spawn` + `std::sync::mpsc`
+//!   Bevy task pools to the engine's one `somnium_jobs` scheduler: a typed
+//!   `JobHandle` per chunk, at `JobPriority::Visible`, cancelled when the
+//!   chunk despawns (DOOM-H)
 //! - `NeedsRemesh` marker components — adapted to internal dirty flags +
 //!   a version counter that discards stale in-flight results
 //!

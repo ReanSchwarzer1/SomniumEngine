@@ -33,12 +33,31 @@ const LAMBDA: f32 = 0.5;
 const CASTER_DEPTH_EXTENSION: f32 = 1000.0;
 
 /// Per-cascade result: view-projection matrix + view-space far depth.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct CascadeData {
     /// Combined light view × orthographic projection matrix.
     pub view_proj: Mat4,
     /// View-space depth (positive, from camera) at which this cascade ends.
     pub split_depth: f32,
+    /// World-space centre of the fitted receiver sphere.
+    ///
+    /// The shadow cache quantises this by [`Self::texel_size`] to decide when
+    /// camera movement crossed a shadow texel.  It is policy input, not a GPU
+    /// layout field.
+    pub world_center: Vec3,
+    /// World metres represented by one texel in this cascade.
+    pub texel_size: f32,
+}
+
+impl Default for CascadeData {
+    fn default() -> Self {
+        Self {
+            view_proj: Mat4::IDENTITY,
+            split_depth: 0.0,
+            world_center: Vec3::ZERO,
+            texel_size: 1.0,
+        }
+    }
 }
 
 /// Compute the four cascade VP matrices and split depths from the current frame's camera.
@@ -58,10 +77,7 @@ pub fn compute_cascades(light_dir: Vec3, inv_view_proj: Mat4) -> [CascadeData; N
     // Full frustum corners in world space (NDC z ∈ [0, 1] for wgpu).
     let full_corners = frustum_corners_world(inv_view_proj);
 
-    let mut cascades = [CascadeData {
-        view_proj: Mat4::IDENTITY,
-        split_depth: 0.0,
-    }; NUM_CASCADES];
+    let mut cascades = [CascadeData::default(); NUM_CASCADES];
 
     for i in 0..NUM_CASCADES {
         let near_depth = if i == 0 { CAMERA_NEAR } else { splits[i - 1] };
@@ -71,7 +87,7 @@ pub fn compute_cascades(light_dir: Vec3, inv_view_proj: Mat4) -> [CascadeData; N
         let near_t = (near_depth - CAMERA_NEAR) / (SHADOW_DISTANCE - CAMERA_NEAR);
         let far_t = (far_depth - CAMERA_NEAR) / (SHADOW_DISTANCE - CAMERA_NEAR);
 
-        cascades[i].view_proj = cascade_vp(
+        let (view_proj, world_center, texel_size) = cascade_vp(
             light_dir,
             up,
             &full_corners,
@@ -79,7 +95,10 @@ pub fn compute_cascades(light_dir: Vec3, inv_view_proj: Mat4) -> [CascadeData; N
             far_t,
             super::CASCADE_SIZE as f32,
         );
+        cascades[i].view_proj = view_proj;
         cascades[i].split_depth = far_depth;
+        cascades[i].world_center = world_center;
+        cascades[i].texel_size = texel_size;
     }
 
     cascades
@@ -128,7 +147,7 @@ fn cascade_vp(
     near_t: f32,
     far_t: f32,
     cascade_resolution: f32,
-) -> Mat4 {
+) -> (Mat4, Vec3, f32) {
     // Sub-frustum corners by linear interpolation between near and far full-frustum corners.
     let near_corners: [Vec3; 4] = [
         full_corners[0].lerp(full_corners[4], near_t),
@@ -191,7 +210,7 @@ fn cascade_vp(
     let far = back + radius * 2.0 + CASTER_DEPTH_EXTENSION;
 
     let light_proj = ortho_rh_zo(left, right, bottom, top, near, far);
-    light_proj * light_view
+    (light_proj * light_view, center, texel_size)
 }
 
 /// Right-handed orthographic projection mapping z to [0, 1] (wgpu depth convention).

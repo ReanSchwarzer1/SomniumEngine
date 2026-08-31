@@ -65,6 +65,14 @@ Create → **Area Light**, **Disc Light**, or **Tube Light**. New lights spawn a
 
 **Soft Shadows** is percentage-closer soft shadows (PCSS). There is no separate “PCSS” label. **Contact Shadows** is the screen-space contact march. Both live on **Post Processing**. With **RT Direct Light** (ReSTIR DI) on, sun visibility already lives in the ReSTIR buffer, so the shading pipeline drops PCSS/contact from the compiled shader — unchecking the boxes alone does not delete that code until the pipeline rebuilds. Hex and Parallax are on the Terrain entity, not here (Help → **Terrain**).
 
+The four-cascade atlas is persistent. Static quadrants keep their depth until
+the sun, snapped camera cell, filtered caster set, or edited terrain geometry
+affecting that cascade changes. Distant camera-driven updates are interleaved;
+caster changes are immediate. The Profiler counter **shadow cascades** reports
+how many of four were redrawn, so a static scene should settle at zero even
+while **shadow casters** remains non-zero. `SOMNIUM_SHADOW_CACHE=0` is the
+correctness kill switch and restores all four redraws every frame.
+
 ## Light shafts (24U)
 
 **Light Shafts** shadow-tests the volume. **Shaft Amt** boosts the sun in-scatter when shafts are on (1 is unscaled air). Default on.

@@ -1,0 +1,11 @@
+{
+  "locale": "ja",
+  "display_name": "日本語",
+  "fonts": [
+    "Noto Sans JP"
+  ],
+  "strings": {
+    "menu.play": "遊ぶ",
+    "menu.quit": "終了"
+  }
+}

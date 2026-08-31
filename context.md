@@ -675,6 +675,26 @@ the camera has already left, costs nothing to abandon. The completion drain is
 budgeted for the same reason the frame limiter exists, since a burst of finished
 work arriving at once would move the hitch rather than remove it.
 
+**One scheduler, and it is now literally one.** Voxel chunk meshing was the last
+system detaching work onto rayon's global pool, and it had been carried as a
+stated GHOSTFENCE exemption since PORTAL-0-C because paying it off meant
+changing `VoxelWorld::update`'s signature. DOOM-H paid it: `EngineContext`
+carries `jobs`, chunk meshing submits like anything else, a chunk that leaves
+the keep radius has its job cancelled, and a submission the bounded queue
+refuses is retried next frame rather than lost. The exemption is gone. Only two
+uses of another thread survive, both deliberate: `for_each_mut`'s fork-join over
+a slice inside one frame, and two single-shot tests whose whole assertion is
+that something works off the main thread.
+
+A job also declares whether it is **housekeeping** — engine work that runs on
+its own — separately from its priority. The status bar had been using
+`priority != Background` as a stand-in for *"a person started this"*, which held
+only while every continuous system happened to sit at that class. Chunk meshing
+does not: a missing chunk is a hole in the view, so `Visible` is the honest
+scheduling class, and using priority to keep it out of the status bar would have
+meant lying to the scheduler to fix a label. Two questions, two answers.
+([DOOM-H](<dev records/phase DOOM/DOOM-H.md>))
+
 ## ECS, scenes, and editing
 
 The ECS groups entities by component signature and stores component columns
@@ -811,6 +831,16 @@ In tree:
 - GPU skinning into the same geometry path used by static meshes.
 - Voxel chunks and terrain submit through the visibility-buffer contract.
 
+The default indirect stream stays dense: argument `i` carries an explicit
+`first_instance` and GPU culling rejects work by writing `instance_count = 0`.
+DOOM-G added an opt-in counted consumer without weakening that invariant. With
+`SOMNIUM_DRAW_COMPACTION=1`, each cull phase appends survivors into fixed
+single-/double-sided partitions and visibility uses
+`multi_draw_indirect_count`; dense args still own phase-two revival, IDs, and
+diagnostics. The 66-object gate changed combined cull + visibility by only
+0.0072 ms, inside noise, and atomic append is not order-stable. Dense submission
+therefore remains the default. See [DOOM-G](<dev records/phase DOOM/DOOM-G.md>).
+
 ### Lighting and atmosphere
 
 In tree:
@@ -852,6 +882,22 @@ flowchart TB
 
 Cloud shadows fold into the same `shadow_factor`, so terrain, water and meshes
 read one value rather than three sources that can disagree.
+
+The conventional CSM atlas is persistent and cached per quadrant (DOOM-D).
+`CascadeShadowCache` is a pure policy module: it resolves the matrices first,
+the caster cull hashes the filtered contents touching each resolved cascade,
+and `ShadowPass` receives one dirty mask. Camera motion is quantised in shadow
+texels, sun motion has distance-scaled angular tolerances, and caster command
+changes invalidate affected volumes. In-place geometry/material edits cannot be
+identified from an unchanged command, so they conservatively invalidate all
+four. Simultaneous distant view updates are interleaved. A clean quadrant is
+never cleared or drawn. This
+ordering is a correctness rule: culling, depth raster, and shading must all use
+the same resolved matrix, including while a distant update is deferred.
+`SOMNIUM_SHADOW_CACHE=0` restores four redraws per frame, and the profiler plus
+`.somtime` publish `shadow_cascades_rendered`. The matched static gate measured
+0/4 cascades at 0.0028 ms versus 4/4 at 0.9633 ms; the detailed contract and
+evidence are in [DOOM-D](<dev records/phase DOOM/DOOM-D.md>).
 
 
 ### Materials, terrain, and water
@@ -1617,7 +1663,7 @@ schema, the command registry or the curve editor that CONTROL shipped.
 |---|---|---|
 | 26 / 26-Zeta | Editor information architecture and Nocturne Atelier design system | Most work in tree; shaping, final interaction sign-off, and selected follow-ups open |
 | 27 | Paint layer, motion, elevation, theme and first-impression work | A, B, C, E, most of D, F, and most of G in tree; H through J not started |
-| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution | A, B, C, E, F in tree; D and G through M deferred |
+| DOOM | Profiler, `.somtime`, pixel census, dynamic resolution, shadow cache, draw submission, scheduler migration, hitch metric, allocation inventory | **Closed.** Five stages produced instruments, three produced changes that hold, three produced nulls kept as records; C/E/G remain default-off experiments, K and L were measured and deleted. §9's budgets are not closed against — see [DOOM-M](<dev records/phase DOOM/DOOM-M.md>) |
 | CONTROL | Schema/editor reach, asset workflows, settings, scene lifecycle, curves, time, clouds, weather, decals | Complete, A through O |
 | PORTAL-0 | Honest frame accounting, dead dependency cleanup, job gate, two measured CPU fixes | Complete, A through G |
 
@@ -1743,17 +1789,40 @@ does not overlap. STALKER waits for both relevant outputs.
   context menu, and `Use Selected` on every asset row in Details. Unreal ships
   that second button for the same reason a drag has a dozen ways to not quite
   happen, and every one of them looks like a broken feature.
-- A gizmo drag on a **child** entity is anchored correctly but still writes a
-  world-space delta into a local transform, so it is only right while the
-  parent is unrotated and unscaled. The anchor fix made this visible; mapping
-  the delta through the inverse parent transform is the remaining half.
-- The terrain layer palette and the foliage picker are fixed built-in lists,
-  not asset fields. They therefore have no `asset_kind_mask` and are not drop
-  targets, and the Content Drawer cannot supply a terrain layer texture or a
-  foliage kind. Making them asset-backed is a scene-format change, not a UI one.
-- Viewport ray picking requires a `MeshComponent`, so the piercing menu cannot
-  reach an Audio Emitter, a light or a decal. The rubber band, which selects on
-  projected origin, can.
+- A gizmo drag on a **child** entity now solves translation in world space and
+  crosses one explicit inverse-parent seam before writing the local
+  `Transform`. Group followers carry their own inverse because they need not
+  share a parent. Singular parents refuse the gesture rather than writing
+  `NaN`, and follower capture is atomic so a multi-selection never moves only
+  its invertible members. `editor_gizmo` owns that transaction rather than the
+  `Engine` host. Local axes are rotated consistently for drawing, picking and
+  drag solving. This closes the rotated/non-uniformly-scaled-parent failure.
+- **Three of the open editor gaps are one gap.** The terrain layer palette, the
+  foliage kind picker and the brush alpha mask are all editor-private state —
+  `TerrainToolField` and `FoliageBrushField` are enums in `editor_event.rs`,
+  under a comment that says *"brush/runtime controls which deliberately remain
+  outside component schemas"*. Because they are not reflected fields they have
+  no `asset_kind_mask`, so Details cannot generate an asset picker for them and
+  the Content Drawer has nothing to drop onto. Everything that *is* reflected
+  gets both for free — `UiCanvasComponent::document` needed one line of schema
+  to become a picker and a drop target at once (MORROWIND-M2).
+
+  So the fix for all three is the same and it is a scene-format change rather
+  than a UI one: move brush and tool settings into a reflected component. That
+  also unblocks the left tool bar redesign below, which the plan is explicit
+  should wait until the tools have options worth showing.
+- Viewport ray picking no longer requires `MeshComponent`. One shared
+  `entity_ray_hit_distance` path serves ordinary selection, the piercing menu,
+  and placement: render meshes use their geometry AABB, decals use their
+  projection box, and lights/audio/particle emitters expose a deliberately
+  small authoring proxy rather than claiming their full effect radius. Their
+  visible authoring shapes and pick proxies both use propagated world matrices,
+  including when parented.
+- The left tool bar is still a narrow mode strip rather than a coherent
+  authoring workspace. Its terrain and foliage buttons expose no owned options,
+  weakly communicate the active tool, and compete with the Content Drawer for
+  horizontal hierarchy. Redesign it only after those tool options are backed by
+  assets; otherwise a new shell would merely decorate the same missing model.
 
 ### Missing systems
 
@@ -1763,9 +1832,27 @@ does not overlap. STALKER waits for both relevant outputs.
   so the left toolbar's tools have nothing to offer beyond a mode. The tools
   now say when they cannot run; they still do not open their own options.
 - Brush dab masks are procedural ([`BrushAlpha`]) rather than authored alpha
-  textures. Importing a brush alpha is the next step and needs the same asset
-  field the other pickers use.
-- Docking, large-list virtualisation, GUI authoring, and isolated play-in-editor.
+  textures. `BrushAlpha::mask` is a pure function of the pattern enum, so the
+  runtime half is a new variant carrying sampled texels; the authoring half is
+  blocked on the same reflected-component change as the terrain and foliage
+  pickers above.
+- Floating OS windows and multiple viewports. The **dock tree itself is in
+  tree** (`somnium_ui::dock`): tiles, splitters and tab sets, with the shipped
+  arrangement as its default and every workspace preset expressed through it,
+  so nothing moved. What is missing is the shell resolving tiles directly, a
+  drag-to-dock affordance, real `winit` child windows, and a renderer that
+  draws more than one view per frame (MORROWIND-J steps 2 and 3).
+- Data-table editing and the asset dependency view (MORROWIND Construction Set
+  M items 2–3). **The GUI layout editor is complete through item 4**: `.somui`
+  documents with a widget registry that is also the palette, validation that
+  names every problem, and a live property write reachable from Rust and from
+  Luau. In `hello_engine` a `.somui` is an asset kind, `UiCanvasComponent` has a
+  `document` field that is a Content Drawer drop target, and the shipped
+  `assets/ui/hello_hud.somui` is loaded on first launch. Item 5 waits on
+  MORROWIND-O's prefabs. **Play-in-editor is complete** — play/pause/step, a
+  `WorldCheckpoint` snapshot restored exactly on Stop, separate input focus, a
+  survivable error path, and `ctx.stepping` so a script can tell a hand-driven
+  step from a running frame.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2104,6 +2191,195 @@ path had never heard of. Despawn happens only after persistence succeeds.
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade
 into lower detail instead of into a missing object. ([MORROWIND-R](<dev records/phase MORROWIND/MORROWIND-R.md>))
 
+**A counter and the thing it authorises are not the same fact.** The
+play-in-editor step flag was first derived from "are steps owed", which is false
+during the very step it describes — the counter is spent before the step it pays
+for runs. It is now set once per frame as its own value.
+([MORROWIND-N](<dev records/phase MORROWIND/MORROWIND-N.md>))
+
+**"Am I in the editor" is a constant a script can learn nothing from.** Scripts
+only ever run inside a play session, so the distinction one can act on is *live
+or held* — `ctx.stepping` — because a stepped frame is one fixed step separated
+from the last by however long somebody took to press the button, and anything
+paced against the wall clock behaves differently on one.
+([MORROWIND-N](<dev records/phase MORROWIND/MORROWIND-N.md>))
+
+**A widget inside a scroll viewer is as tall as its content, so its own bounds
+say nothing about what can be seen.** The outliner's draw loop ran over every
+item — laying out, shaping a label and painting — whether or not the row was on
+screen, which is O(total rows) to show the thirty that fit, with a linear scan of
+the selection on top of each. Virtualising against the **clip rectangle** rather
+than the scroll offset means the windowing never learns what scrolling is and
+cannot disagree with the scroll viewer about it. A hundred rows and a hundred
+thousand rows now emit the identical number of primitives.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**Windowing a draw and windowing a widget tree are different problems.** A
+`TreeView` is one widget that paints rows, so the outliner only has to window
+its draw loop. A drawer tile is a real button, and it is a drop target, a drag
+source and a double-click target by being one, so the window has to decide which
+widgets *exist*:
+
+```text
+  outliner   1 widget  ──> draw loop paints rows 40..70 of 100,000
+  drawer     N widgets ──> build tiles 40..70; the other 99,970 do not exist
+```
+
+The container is a `Canvas` as tall as every row in the folder, and each of the
+~40 built tiles sits at the rectangle its index in the whole folder earns. A
+flow layout cannot do that, since it works out where the fourth tile goes from
+having been given the first three.
+
+Two traps came with it. A canvas that clipped to its own bounds cropped the
+empty state of an empty folder out of existence, and an inline rename is a text
+box parented to a tile, so a rename holds the window still until it lands.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A widget tree owns its handles, so a floating panel is rebuilt, not moved.**
+Handles index one `UserInterface`'s pool, and a second OS window is a second
+tree. A panel can only be built there if its content lives in a store:
+
+```text
+  OutputLog (store) ──┬──> docked tree    ──> rows
+                      └──> floating tree  ──> rows
+```
+
+`OutputLog` already was one, which is why the log floats first. The Content
+Drawer and Details need one before they can follow.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**`process_os_event` queues; `update` delivers.** A tree that lays out and
+paints without pumping accepts every event, queues it, and drops it next frame.
+The floating log looked right and would not scroll. The check that settles it is
+a test, not a screenshot: the log grows underneath, so "the content moved" is
+true whether or not the wheel did anything.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Ignoring a `WindowId` is an assumption there is one window.** `window_event`
+took `_window_id` for years. The first floating window routed its `Resized` into
+the main render context, resizing the editor's swapchain to the log window's
+900x420. wgpu caught it. A `CloseRequested` down the same path would have quit
+the editor because somebody shut a panel.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A shaper and a rasteriser have to agree on glyph ids.** `rustybuzz` and
+`fontdue` do not, on the editor's own `Inter-Regular.ttf`:
+
+| character | `rustybuzz` | `fontdue` |
+|---|---|---|
+| `C` | 18 | 18 |
+| `(` | 331 | 324 |
+| `:` | 366 | 365 |
+
+Letters coincide, punctuation does not, and the gap is not a constant offset.
+The symptom was missing punctuation ("Coastal Surf  CC0"). The danger is the
+case that had not happened yet: an id landing on a glyph that *does* have an
+outline draws wrong text that reads as fine, and every ligature is that case.
+The shaped path rasterises from the face the shaper read, `ttf-parser` outlines
+filled by `tiny-skia`.
+([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
+
+**Ask a fallback chain which face covers a character and you get the first one
+that does.** Regular covers Latin, so every label meant for the medium or
+semibold cut came out in regular. The caller's face gets first refusal; the
+chain sees only what it lacks.
+([MORROWIND-G](<dev records/phase MORROWIND/MORROWIND-G.md>))
+
+**`Queue::write_buffer` does not write where you call it.** Staged writes apply
+at the start of the submit, and this renderer submits once per frame:
+
+```text
+  issued:   write A · write B · [encode pass 1] · [encode pass 2] · submit
+  executed: A · B ······························> both passes read B
+```
+
+So the frame's last write wins for every pass in it. Invisible with one view;
+with four it drew the same picture four times. It also means the scene had
+always rendered unjittered, since the overlays upload after it. Uniform data
+that varies within a frame belongs in the command stream, as a staging slot plus
+`copy_buffer_to_buffer`.
+
+Fixing the ordering is itself a rendering change. Jitter reaching the shaders
+for the first time moved 1.3% of viewport pixels between consecutive frames on a
+still camera, against 0.6% before, which from a high camera looks like shaking.
+One view keeps the plain write; only multi-view takes the staged copy.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Secondary views orbit where the primary camera's ray meets the ground.** A
+fixed distance ahead does not survive a camera 150 m up, where ten metres ahead
+is empty air and the top view renders black on correct arithmetic. Their extent
+comes from the primary's projection, so they frame what it frames.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Temporal history is keyed to one camera.** TAA, FSR and ReSTIR reproject the
+last frame through the view that built it, so a second viewport reusing that
+history pulls the first viewport's pixels into itself. Secondary views run
+history-free, which is most of why four views cost 1.3x one instead of 4x.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Reading a catalogue as a table is half an editor.** Writing it back is the
+other half, and two rules carry it. An untranslated cell returns as an absent
+key, never `""`, or every untranslated string looks translated to the
+`only_incomplete` filter a translator opened the table for. And the loaded
+catalogue is the template a save writes against, so display names and font lists
+survive an edit. Throughout, `somnium_ui` is handed a `DataTable` and never
+learns what a catalogue is.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A focused widget that claims text input swallows every key before the game
+sees it.** Claim it always and a grid nobody clicked into eats the fly-cam's
+WASD, which presents as the camera not responding. Claim it never and typing `w`
+into a cell switches the gizmo to Translate while `Delete` removes the selected
+entity. The curve editor already had the rule: the keyboard belongs to a widget
+only while it has a selection. Closing a panel over a focused widget releases
+it.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**Cook-plan edges are declared; editor edges are not.** Nobody declares that a
+scene uses a mesh. They drop the mesh on an entity and a field holds an id. So
+`somnium_asset::depend` reads the project structurally: an id appears either as
+`{"$asset": ...}` or as a bare 32-hex string, and one scanner covers scenes,
+prefabs, materials and `.somui`. A new asset field cannot go missing because
+nobody taught it twice. What the scanner cannot read it counts, because a view
+claiming a `.glb` references nothing gets believed. It builds on the asset
+inventory's own job, so graph and drawer describe the same disk.
+([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**A selection is held by key, never by index.** Filtering, sorting, expanding a
+parent and scrolling all renumber positions; the key is the thing the user
+picked. Storing indices is why a selection appears to jump when a list changes
+underneath it. ([MORROWIND-M](<dev records/phase MORROWIND/MORROWIND-M.md>))
+
+**An affordance that only appears once you have used it is not an affordance.**
+The Outliner's hide and lock badges were drawn only when the flag was *set*, so
+a visible unlocked row showed an empty gutter — the click target was there and
+worked, and nothing on screen said so. Both badges now draw on every row, an eye
+and a padlock, differing by weight rather than by position: a set flag at full
+secondary colour, an unset one a ghost that firms up under the pointer. That
+keeps a long list scannable — the hidden rows are the ones visible from across
+the column — while leaving every row clickable. The ghost alpha is floored
+rather than merely scaled, because a token change that made disabled text
+translucent would otherwise divide it to zero and restore the invisible gutter
+in a way a primitive-count test cannot see.
+
+**`EditorFlags::hidden` is an authoring state, not an unload.** A hidden UI
+canvas keeps its `.somui` loaded and registered, so a script writing to that
+document does not start failing because somebody clicked an eye — the first
+version conflated *which canvas* with *whether it draws*, and with hidden as the
+shipped default that meant a rejection line per frame in the Output Log. Which
+document is wanted comes from the canvas; whether it draws comes from the eye.
+
+**A dock arrangement is a tree, and the five-region shell is a projection of
+it.** The tree owns the collapse rules — a tile that loses its last tab is
+removed and its sibling promoted, a closed tab never steals focus from the
+active one, a panel cannot appear twice, the last panel cannot be closed — so a
+caller says *"dock Details to the right of Viewport"* and never performs tree
+surgery. Ratios are clamped when resolved rather than when dragged, so a layout
+carried to a small monitor and back comes back unchanged. The projection to the
+old five numbers returns `Option`: once something is docked it has no honest
+answer, and saying so is what stops it outliving the thing it projects.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
 **Large-world positions are exact CPU integer cells plus small local f32
 offsets.** Shader soft-double was the alternative. The CPU design was chosen
 because it is reversible, keeps the complexity outside every shader, and
@@ -2124,6 +2400,81 @@ removes terrain streaming, clipmap recentring and LOD transitions from the
 measurement. A flythrough is a different experiment, and it is the one that
 matters for hitches rather than for steady-state cost. Conflating them produces a
 mean that describes neither. ([DOOM-A](<dev records/phase_DOOM.md>))
+
+**A metric that cannot see the first frame cannot see the largest stall.**
+`Frame wall` is a tick-to-tick interval, so the first tick had no previous tick
+and its interval was dropped. Runs reported a 120 ms CPU maximum beside a 31.9 ms
+wall maximum — impossible of one frame, and true only because the frame in
+question had no interval at all. Startup is now its own `hitch startup_ms` row
+rather than folded into the frame statistics, because an eight-second outlier
+takes a 20.0 ± 2.1 ms mean to 33.7 ± 336.5 ms and quietly changes what every
+later comparison is measuring. ([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
+
+**A hitch threshold is relative to the run, not absolute.** `hitch
+over_2x_median` counts frames longer than twice the run's own median. An absolute
+threshold calls every frame of a 30 fps scene a hitch and none of a 240 fps one,
+and the question being asked is whether the frame rate visibly broke step.
+`worst_frame` and `last_over_2x_frame` say *where*, which is what separates
+one-off startup cost from a steady-state fault.
+([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
+
+**Allocation counters are gauges, so read the per-frame delta and not the
+endpoints.** A resource created every frame and destroyed the next nets to zero
+over a window, and that is exactly the churn worth finding. Sampling every
+measured frame, Coastal moves exactly one object on a churning frame and it is
+always `(wgpu internal) Staging`, wgpu's own pool for `write_buffer`. **Island
+does not meet the same bar**: 100 of 300 steady-state frames churn, four move a
+texture view and a bind group, and one moves 75 objects at once — five unrelated
+per-frame labels halving and doubling together, named and not yet attributed.
+Counters say *that* something moved; only the allocator report's labels say
+*which*, which is what `SOMNIUM_ALLOC_TRACE=1` prints.
+([DOOM-J](<dev records/phase DOOM/DOOM-J.md>))
+
+**Read a `.somtime` header before its numbers.** Environment variables do not
+persist between shell invocations, so a run can quietly lose its resolution, its
+camera and its static-scene flag and still write a plausible-looking file. One
+such run reported a 49% frame-time win; `# render` said 1280x720 against the
+baseline's 1920x1032, `draw_calls` said 195 against 66, and `Shading.frag` said
+921 600 against 1 981 440. The controls are in the header, and a comparison whose
+controls moved is not a comparison. Two already-published Island runs were found
+the same way and re-measured. ([DOOM-K](<dev records/phase DOOM/DOOM-K.md>))
+
+**Subgroups are blocked by the toolchain, not the hardware.** naga 30 rejects
+`enable subgroups;` as unimplemented and does not know `subgroupElect`, while
+the adapter reports subgroups available at 32–32 lanes. The intrinsics work
+without the directive, gated on `Features::SUBGROUP` from Rust — which means a
+shader cannot state its own requirement, and no default path can depend on one
+yet. The reduction that was converted moved 0.0011 ms at most, because it runs
+in one workgroup out of about 7 740.
+([DOOM-L](<dev records/phase DOOM/DOOM-L.md>))
+
+**A resolution change between sessions invalidates every earlier baseline.**
+DOOM-A measured Coastal at 2560×1392 and the whole continuation at 1920×1032,
+because "maximized Native" resolved differently on a different display. On a
+frame the census showed to be per-pixel cost, that 46% pixel difference means
+`38.392 → 20.385 ms` is not an improvement at all. Phase DOOM's §9 budgets are
+therefore *not* closed against, and closing them needs the baseline re-taken.
+([DOOM-M](<dev records/phase DOOM/DOOM-M.md>))
+
+**Half precision in the terrain inner loop is a null result, twice.** The
+thirty-two entry splat-weight array and its scan were compiled at f16 behind a
+shader define; back-to-back repetitions moved Shading by −0.320 ms and then
++0.156 ms. The sign flips, both are inside the noise band, and the stage's 5%
+gate is far away. Reverted, as the stage prescribed, with the numbers kept —
+the null *is* the deliverable. ([DOOM-K](<dev records/phase DOOM/DOOM-K.md>))
+
+**The geometry pools are 384 MiB of fixed reservation at about 3% occupancy, and
+that is the trade that makes the frame allocation-free.** They are allocated once
+at construction and never grow, so uploading geometry cannot reallocate. The
+footprint is the price of the guarantee, and nothing measured says footprint is
+the constraint. ([DOOM-J](<dev records/phase DOOM/DOOM-J.md>))
+
+**A tone-mapped capture cannot resolve a change smaller than its own variance.**
+Two runs of one unchanged build differ at frame 120 by 2.80% of pixels with a
+peak channel delta of 53. A candidate differing by 3.03% and 59 is therefore
+evidence of nothing, in either direction — which is why DOOM-I's correctness
+claim rests on a numeric audit of the values themselves and not on a picture.
+([DOOM-I](<dev records/phase DOOM/DOOM-I.md>))
 
 **A standard deviation from one run cannot judge a comparison across two.**
 Between-session drift on this hardware is larger than within-run spread: the same

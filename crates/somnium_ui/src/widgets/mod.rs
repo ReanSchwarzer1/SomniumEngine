@@ -14,6 +14,8 @@ pub mod combo_box;
 pub mod command_palette;
 pub mod context_menu;
 pub mod curve_editor;
+/// MORROWIND-M item 2: the grid that draws a [`crate::data_table::DataTable`].
+pub mod data_grid;
 pub mod gradient_editor;
 pub mod grid;
 pub mod image;
@@ -56,8 +58,7 @@ pub use property_row::{PropertyRow, PropertyRowBuilder, PropertyRowMessage};
 pub use scroll_viewer::{ScrollViewer, ScrollViewerBuilder};
 pub use search_box::{
     Breadcrumb, BreadcrumbBuilder, BreadcrumbMessage, SearchBox, SearchBoxBuilder,
-    SearchBoxMessage, Tooltip, TooltipBuilder, build_property_row, place_tooltip,
-    tooltip_size,
+    SearchBoxMessage, Tooltip, TooltipBuilder, build_property_row, place_tooltip, tooltip_size,
 };
 pub use slider::{Slider, SliderBuilder, SliderMessage};
 pub use splitter::{Splitter, SplitterBuilder, SplitterMessage, SplitterOrientation};

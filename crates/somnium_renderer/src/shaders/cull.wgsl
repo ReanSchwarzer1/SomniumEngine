@@ -48,7 +48,8 @@ struct CullParams {
     view_proj: mat4x4<f32>,
     hiz_size: vec2<f32>,
     hiz_mip_count: u32,
-    _pad: u32,
+    single_sided_args: u32,
+    counted_draws: u32,
     camera_pos: vec4<f32>,
 }
 
@@ -61,6 +62,21 @@ struct CullParams {
 /// are not recorded: they are still off-screen in phase two, and resurrecting
 /// them would draw geometry outside the view.
 @group(0) @binding(5) var<storage, read_write> occluded_flags: array<u32>;
+/// DOOM-G output. The dense `draws` array remains authoritative for phase-two
+/// revival and diagnostics; only visible arguments are copied here.
+@group(0) @binding(6) var<storage, read_write> compact_draws: array<DrawArgs>;
+@group(0) @binding(7) var<storage, read_write> draw_counts: array<atomic<u32>, 2>;
+
+fn emit_visible(i: u32) {
+    if params.counted_draws == 0u {
+        return;
+    }
+    let single_sided = i < params.single_sided_args;
+    let bucket = select(1u, 0u, single_sided);
+    let base = select(params.single_sided_args, 0u, single_sided);
+    let slot = atomicAdd(&draw_counts[bucket], 1u);
+    compact_draws[base + slot] = draws[i];
+}
 
 /// Is this world AABB hidden behind what the pyramid already records?
 ///
@@ -151,6 +167,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // down to a single copy.
         if params.phase == 1u {
             draws[i].instance_count = 0u;
+        } else {
+            emit_visible(i);
         }
         occluded_flags[i] = 0u;
         return;
@@ -260,6 +278,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Phase one left this at 0. Revival is always a single instance;
         // the CPU no longer collapses copies into instance_count > 1.
         draws[i].instance_count = 1u;
+    }
+    if !hidden {
+        emit_visible(i);
     }
     if params.phase == 0u {
         // Remember it for phase two, which re-tests against a fresher pyramid.

@@ -1,7 +1,9 @@
 pub mod a11y;
 pub mod color;
 pub mod commands;
+pub mod data_table;
 pub mod debug;
+pub mod dock;
 pub mod drag_drop;
 pub mod draw;
 pub mod editor;
@@ -23,6 +25,8 @@ pub mod pool;
 pub mod primitive;
 pub mod runtime;
 pub mod shaped;
+pub mod somui;
+pub mod somui_editor;
 pub mod style;
 pub mod text;
 pub mod theme;
@@ -31,6 +35,17 @@ pub mod timeline;
 pub mod types;
 pub mod typography;
 pub mod ui;
+/// MORROWIND-J step 2: a panel living in its own OS window.
+/// `wgpu`, as this crate sees it.
+///
+/// Re-exported so a host can build a surface for a [`floating`] window without
+/// taking its own direct dependency and risking a second, incompatible `wgpu`
+/// in the graph — the classic way two crates end up unable to hand each other
+/// a device.
+pub use wgpu;
+pub mod floating;
+pub mod viewport_layout;
+pub mod virtual_list;
 pub mod widget;
 pub mod widgets;
 pub mod workspace;
@@ -167,15 +182,14 @@ enum GeneratedEdit {
     /// element edit addresses the same schema field as any other — the write
     /// path rebuilds the whole array and sends it, so undo, multi-select and
     /// serialization need to know nothing about collections.
-    Element { index: u16, lane: u8 },
+    Element {
+        index: u16,
+        lane: u8,
+    },
 }
 
 /// One lane of one array element, as a number, when it is one.
-fn element_lane(
-    items: &[somnium_ecs::reflect::ReflectValue],
-    index: u16,
-    lane: u8,
-) -> Option<f32> {
+fn element_lane(items: &[somnium_ecs::reflect::ReflectValue], index: u16, lane: u8) -> Option<f32> {
     use somnium_ecs::reflect::ReflectValue as RV;
     #[allow(clippy::cast_possible_truncation)]
     match items.get(index as usize)? {
@@ -401,6 +415,10 @@ pub struct UiJobStatus {
 /// Rows the overlay can show before it starts dropping them.
 pub const PROFILER_ROWS: usize = 40;
 
+/// Space between content-drawer tiles, in both axes. This was the wrap panel's
+/// gap; now it is the difference between a tile and the cell it is placed in.
+const CONTENT_GAP: f32 = 10.0;
+
 /// Names shown in the foliage picker (Phase 17F).
 ///
 /// Mirrors `somnium_core::FOLIAGE_PALETTE` by index. The UI crate deliberately
@@ -493,6 +511,8 @@ struct EditorLayout {
     play_label: NodeHandle,
     immersive_button: NodeHandle,
     pause_button: NodeHandle,
+    /// MORROWIND-N: advance one fixed step while paused.
+    step_button: NodeHandle,
     pause_label: NodeHandle,
     stop_button: NodeHandle,
     stop_label: NodeHandle,
@@ -613,6 +633,25 @@ struct EditorLayout {
     help_toc: Vec<(NodeHandle, u8)>,
     help_close: NodeHandle,
     log_panel: NodeHandle,
+    references_panel: NodeHandle,
+    references_button: NodeHandle,
+    references_title: NodeHandle,
+    references_list: NodeHandle,
+    locale_panel: NodeHandle,
+    locale_button: NodeHandle,
+    locale_search: NodeHandle,
+    locale_incomplete: NodeHandle,
+    locale_grid: NodeHandle,
+    locale_actions: Vec<(NodeHandle, LocaleAction)>,
+}
+
+/// A verb in the Localisation panel's header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocaleAction {
+    /// Write the catalogue back to disk, one file per locale.
+    Save,
+    /// Hand the table to a translator as a CSV.
+    ExportCsv,
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
@@ -695,6 +734,8 @@ pub struct UiManager {
     play_label: NodeHandle,
     immersive_button: NodeHandle,
     pause_button: NodeHandle,
+    /// MORROWIND-N: advance one fixed step while paused.
+    step_button: NodeHandle,
     #[allow(dead_code)]
     pause_label: NodeHandle,
     stop_button: NodeHandle,
@@ -913,7 +954,24 @@ pub struct UiManager {
     help_menu_open: bool,
     tooltip_since: Option<(NodeHandle, std::time::Instant)>,
     help_page: u8,
+    /// The tiles that currently exist, in the order they were built.
     content_entries: Vec<(NodeHandle, crate::metaphor::ContentEntry)>,
+    /// Every entry the last query returned, whether or not it has a tile.
+    ///
+    /// MORROWIND-M. This is the list the drawer *shows*; `content_entries` is
+    /// the screenful of it that was built. Keeping both is what lets the
+    /// window move without asking the asset database anything.
+    content_all: Vec<crate::metaphor::ContentEntry>,
+    /// The window `content_entries` was built for, or `None` if it is stale.
+    content_window: Option<crate::virtual_list::GridWindow>,
+    /// MORROWIND-M item 3. Built with the asset inventory, on its job, so the
+    /// graph and the drawer always describe the same disk.
+    dependency_index: somnium_asset::depend::DependencyIndex,
+    /// The asset the References panel is answering about.
+    references_subject: Option<somnium_asset::database::AssetId>,
+    /// One row per listed asset, so a click can name what it landed on.
+    references_rows: Vec<(NodeHandle, somnium_asset::database::AssetId)>,
+    references_open: bool,
     outliner_entity_handles: HashMap<u32, somnium_ecs::Entity>,
     outliner_selection: Vec<u32>,
     clipboard_filled: bool,
@@ -1001,6 +1059,32 @@ pub struct UiManager {
     script_errors: usize,
     chrome_layout: crate::layout_persist::ChromeLayout,
     log_open: bool,
+    references_panel: NodeHandle,
+    references_button: NodeHandle,
+    references_title: NodeHandle,
+    references_list: NodeHandle,
+    locale_panel: NodeHandle,
+    locale_button: NodeHandle,
+    locale_search: NodeHandle,
+    locale_incomplete: NodeHandle,
+    locale_grid: NodeHandle,
+    locale_actions: Vec<(NodeHandle, LocaleAction)>,
+    locale_open: bool,
+    /// Panels currently living in their own OS window (MORROWIND-J step 2).
+    ///
+    /// The manager does not own those windows — the host does — but it has to
+    /// know, so the docked copy of a floated panel stops claiming space.
+    floating_panels: std::collections::BTreeSet<crate::floating::FloatingKind>,
+    /// MORROWIND-J step 3. How the viewport region is divided.
+    viewport_layout: crate::viewport_layout::ViewportLayout,
+    /// Whether the panel is filtered to rows with an untranslated cell.
+    locale_only_incomplete: bool,
+    /// The last committed state of the localisation table.
+    ///
+    /// The grid owns the live one — it is mid-edit most of the time it is
+    /// looked at — and publishes a copy on every commit. This is what a save
+    /// writes, so a save can never catch a half-typed cell.
+    locale_table: Option<crate::data_table::DataTable>,
     title_drag: NodeHandle,
     title_label: NodeHandle,
     win_min: NodeHandle,
@@ -1022,7 +1106,12 @@ pub struct UiManager {
 /// did rather than left pointing at an unloaded id — a missing SemiBold should
 /// cost the header its weight, not its glyphs. Returns the UI Regular id, which
 /// is what the existing `font_id` parameter threaded through `build_*` means.
-fn load_fonts(ui: &mut UserInterface) -> u8 {
+/// Load the bundled editor faces into a tree, returning the base font id.
+///
+/// Public since MORROWIND-J step 2: a floating window builds its own
+/// [`ui::UserInterface`], and text in it that fell back to a system face would
+/// be visibly not the editor's.
+pub fn load_fonts(ui: &mut UserInterface) -> u8 {
     use typography::{FontRegistry, FontRole};
 
     const FACES: [(FontRole, &[u8], &str); 5] = [
@@ -1403,6 +1492,7 @@ impl UiManager {
             play_label: layout.play_label,
             immersive_button: layout.immersive_button,
             pause_button: layout.pause_button,
+            step_button: layout.step_button,
             pause_label: layout.pause_label,
             stop_button: layout.stop_button,
             stop_label: layout.stop_label,
@@ -1554,6 +1644,12 @@ impl UiManager {
             tooltip_since: None,
             help_page: 0,
             content_entries: Vec::new(),
+            content_all: Vec::new(),
+            content_window: None,
+            dependency_index: somnium_asset::depend::DependencyIndex::default(),
+            references_subject: None,
+            references_rows: Vec::new(),
+            references_open: false,
             outliner_entity_handles: HashMap::new(),
             outliner_selection: Vec::new(),
             clipboard_filled: false,
@@ -1607,6 +1703,21 @@ impl UiManager {
             help_toc: layout.help_toc,
             help_close: layout.help_close,
             log_panel: layout.log_panel,
+            references_panel: layout.references_panel,
+            references_button: layout.references_button,
+            references_title: layout.references_title,
+            references_list: layout.references_list,
+            locale_panel: layout.locale_panel,
+            locale_button: layout.locale_button,
+            locale_search: layout.locale_search,
+            locale_incomplete: layout.locale_incomplete,
+            locale_grid: layout.locale_grid,
+            locale_actions: layout.locale_actions,
+            locale_open: false,
+            floating_panels: std::collections::BTreeSet::new(),
+            viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
+            locale_only_incomplete: false,
+            locale_table: None,
             title_last_click: None,
             immersive: false,
             immersive_restore_fullscreen: None,
@@ -1808,6 +1919,11 @@ impl UiManager {
                 self.log_open = true;
             }
         }
+        // Neither References nor Localisation is ever a preset's answer: one
+        // is scoped to an asset a preset does not know, and the other is a
+        // document you open on purpose.
+        self.references_open = false;
+        self.locale_open = false;
         self.apply_bottom_panel();
 
         self.chrome_layout = crate::layout_persist::ChromeLayout {
@@ -1920,6 +2036,11 @@ impl UiManager {
         let (logical_w, logical_h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let (phys_w, phys_h) = self.physical_size;
         self.native_ui.perform_layout();
+        // MORROWIND-M. Between the two layout passes on purpose: the first
+        // gives the drawer's canvas the bounds this reads, and the second
+        // arranges whatever tiles the new window built, so a scroll costs one
+        // frame's rebuild rather than a frame of empty drawer.
+        self.sync_content_tiles();
         self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
@@ -3056,9 +3177,11 @@ impl UiManager {
 
     pub fn set_play_overlays_hidden(&mut self, hidden: bool) {
         if hidden {
-            if self.drawer_open || self.log_open {
+            if self.drawer_open || self.log_open || self.references_open || self.locale_open {
                 self.drawer_open = false;
                 self.log_open = false;
+                self.references_open = false;
+                self.locale_open = false;
                 self.apply_bottom_panel();
             }
             if self.help_open {
@@ -3112,25 +3235,76 @@ impl UiManager {
         } else {
             self.drawer_open = true;
             self.log_open = false;
+            self.references_open = false;
+            self.locale_open = false;
         }
         self.apply_bottom_panel();
     }
 
     fn toggle_log_panel(&mut self) {
+        // Floated: the panel is not in this window, so opening the dock slot
+        // for it would show an empty one beside a full window.
+        if self.is_panel_floating(crate::floating::FloatingKind::OutputLog) {
+            self.editor_events.push_back(EditorEvent::FloatPanel(
+                crate::floating::FloatingKind::OutputLog,
+            ));
+            return;
+        }
         if self.log_open {
             self.log_open = false;
         } else {
             self.log_open = true;
             self.drawer_open = false;
+            self.references_open = false;
+            self.locale_open = false;
+        }
+        self.apply_bottom_panel();
+    }
+
+    /// MORROWIND-M item 3. Opens on whatever the panel was last pointed at,
+    /// which for a first press is nothing and says so.
+    fn toggle_references_panel(&mut self) {
+        if self.references_open {
+            self.references_open = false;
+        } else {
+            self.references_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+            self.locale_open = false;
+            self.refresh_references_panel();
+        }
+        self.apply_bottom_panel();
+    }
+
+    /// MORROWIND-M item 2. The localisation table, which is empty until a
+    /// project with a `locale/` directory has been loaded.
+    fn toggle_locale_panel(&mut self) {
+        if self.locale_open {
+            self.locale_open = false;
+        } else {
+            self.locale_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+            self.references_open = false;
         }
         self.apply_bottom_panel();
     }
 
     fn apply_bottom_panel(&mut self) {
-        let show = self.drawer_open || self.log_open;
+        let show = self.drawer_open || self.log_open || self.references_open || self.locale_open;
         self.native_ui
             .set_visibility(self.content_drawer, self.drawer_open);
         self.native_ui.set_visibility(self.log_panel, self.log_open);
+        self.native_ui
+            .set_visibility(self.references_panel, self.references_open);
+        self.native_ui
+            .set_visibility(self.locale_panel, self.locale_open);
+        // A hidden widget must not keep the keyboard. The grid holds it while a
+        // cell is chosen, which is right while you can see the cell and is the
+        // fly-cam silently not responding once the panel is closed over it.
+        if !self.locale_open && self.native_ui.focused() == self.locale_grid {
+            self.native_ui.release_keyboard();
+        }
         self.native_ui.send(UiMessage::new(
             self.outer_grid,
             MessageDirection::ToWidget,
@@ -4226,6 +4400,7 @@ impl UiManager {
             A::Play => self.editor_events.push_back(EditorEvent::PlaySimulation),
             A::Pause => self.editor_events.push_back(EditorEvent::PauseSimulation),
             A::Stop => self.editor_events.push_back(EditorEvent::StopSimulation),
+            A::Step => self.editor_events.push_back(EditorEvent::StepSimulation),
             A::ToggleProfiler => self.editor_events.push_back(EditorEvent::ToggleProfiler),
             A::ToggleDrawer => self.toggle_drawer(),
             A::TogglePalette => self.toggle_palette(),
@@ -4241,6 +4416,27 @@ impl UiManager {
                 .editor_events
                 .push_back(EditorEvent::ToggleImmersiveViewport),
             A::OpenOutputLog => self.toggle_log_panel(),
+            A::OpenReferences => self.toggle_references_panel(),
+            A::OpenLocalisation => self.toggle_locale_panel(),
+            A::FloatPanel(kind) => {
+                self.set_panel_floating(kind, true);
+                self.editor_events.push_back(EditorEvent::FloatPanel(kind));
+            }
+            A::SetViewportLayout(layout) => self.set_viewport_layout(layout),
+            A::ContentShowReferences => {
+                // Only an asset has references. A folder is a place, and the
+                // command is disabled for one because `content_target` gates
+                // on there being an item at all — but a virtual engine
+                // primitive has no id either, and that is not a failure worth
+                // a message.
+                if let Some(asset) = self
+                    .content_menu_target
+                    .as_ref()
+                    .and_then(|entry| entry.asset_id)
+                {
+                    self.show_references_for(asset);
+                }
+            }
             A::CreateEntity(kind) => self
                 .editor_events
                 .push_back(EditorEvent::CreateEntity(kind)),
@@ -4624,9 +4820,305 @@ impl UiManager {
     }
 
     /// Atomically replace the drawer's inventory with a worker-built snapshot.
+    /// Resolve an asset reference back to its record.
+    ///
+    /// An `AssetId` is a hash of a path, so a component that stores one cannot
+    /// recover the path on its own — it needs the database that hashed it. The
+    /// shell already holds the snapshot; a game reading an authored asset field
+    /// should not have to keep a second copy of it in step.
+    #[must_use]
+    pub fn asset_record(
+        &self,
+        id: somnium_asset::database::AssetId,
+    ) -> Option<&somnium_asset::database::AssetRecord> {
+        self.asset_db.get(id)
+    }
+
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+    }
+
+    /// Whether a panel is currently living in its own OS window.
+    #[must_use]
+    pub fn is_panel_floating(&self, kind: crate::floating::FloatingKind) -> bool {
+        self.floating_panels.contains(&kind)
+    }
+
+    /// Record that a panel has been floated or returned to the dock.
+    ///
+    /// The docked copy is hidden while the panel is out, because two live
+    /// copies of the Output Log is not a feature — and because the bottom row
+    /// showing an empty log beside a floating window full of lines is the kind
+    /// of wrong that makes people distrust both.
+    pub fn set_panel_floating(&mut self, kind: crate::floating::FloatingKind, floating: bool) {
+        let changed = if floating {
+            self.floating_panels.insert(kind)
+        } else {
+            self.floating_panels.remove(&kind)
+        };
+        if !changed {
+            return;
+        }
+        match kind {
+            crate::floating::FloatingKind::OutputLog => {
+                if floating && self.log_open {
+                    // It has left the dock; the dock should not keep its space.
+                    self.log_open = false;
+                    self.apply_bottom_panel();
+                }
+            }
+        }
+    }
+
+    /// How the viewport region is divided this frame (MORROWIND-J step 3).
+    #[must_use]
+    pub fn viewport_layout(&self) -> crate::viewport_layout::ViewportLayout {
+        self.viewport_layout
+    }
+
+    /// Choose how the viewport region is divided.
+    pub fn set_viewport_layout(&mut self, layout: crate::viewport_layout::ViewportLayout) {
+        if self.viewport_layout == layout {
+            return;
+        }
+        self.viewport_layout = layout;
+        self.push_toast(layout.label());
+    }
+
+    /// The viewport's rectangle in **physical** pixels.
+    ///
+    /// Physical, because it is handed to the renderer, and the renderer draws
+    /// into a swapchain measured in physical pixels. Handing it logical ones on
+    /// a 150% display puts three quarters of the scene in the top-left corner —
+    /// the classic DPI bug, and one that looks like a layout error.
+    #[must_use]
+    pub fn viewport_physical_rect(&self, scale: f32) -> (u32, u32, u32, u32) {
+        let b = self.native_ui.screen_bounds(self.viewport_handle);
+        let scale = if scale > 0.0 { scale } else { 1.0 };
+        (
+            (b.x * scale).max(0.0) as u32,
+            (b.y * scale).max(0.0) as u32,
+            (b.w * scale).max(0.0) as u32,
+            (b.h * scale).max(0.0) as u32,
+        )
+    }
+
+    /// Hand the editor a localisation catalogue, already projected as a table.
+    ///
+    /// A `DataTable` and not a `Catalog`: `somnium_ui` does not know what a
+    /// catalogue is and must not learn — the projection lives in
+    /// `somnium_core::i18n`, which is the one place that knows both
+    /// vocabularies. See [`Self::localisation_table`] for the way back.
+    pub fn set_localisation_table(&mut self, table: crate::data_table::DataTable) {
+        self.locale_table = Some(table.clone());
+        self.native_ui.send(UiMessage::new(
+            self.locale_grid,
+            MessageDirection::ToWidget,
+            crate::widgets::data_grid::DataGridMessage::SetTable(Box::new(table)),
+        ));
+    }
+
+    /// The last committed state of the table, for a host about to save it.
+    #[must_use]
+    pub fn localisation_table(&self) -> Option<&crate::data_table::DataTable> {
+        self.locale_table.as_ref()
+    }
+
+    /// Open the Localisation panel on the table already loaded.
+    pub fn show_localisation(&mut self) {
+        if !self.locale_open {
+            self.toggle_locale_panel();
+        }
+    }
+
+    /// The project's reference graph, rebuilt with the asset inventory.
+    ///
+    /// MORROWIND-M item 3. It arrives from the same job as the snapshot, so
+    /// the two always describe the same disk — a graph a scan behind the
+    /// drawer would name assets the drawer cannot show.
+    pub fn set_dependency_index(&mut self, index: somnium_asset::depend::DependencyIndex) {
+        self.dependency_index = index;
+        if self.references_open {
+            self.refresh_references_panel();
+        }
+    }
+
+    /// Point the References panel at an asset and bring it forward.
+    pub fn show_references_for(&mut self, asset: somnium_asset::database::AssetId) {
+        self.references_subject = Some(asset);
+        if !self.references_open {
+            self.references_open = true;
+            self.drawer_open = false;
+            self.log_open = false;
+        }
+        self.refresh_references_panel();
+        self.apply_bottom_panel();
+    }
+
+    /// The three questions, in the order they get asked.
+    ///
+    /// Outgoing first — it is the one with an answer even for an asset nothing
+    /// uses — then incoming, then the transitive breakage, which comes last
+    /// because it is a superset of incoming and reads as an alarm rather than
+    /// as information.
+    fn refresh_references_panel(&mut self) {
+        self.native_ui.clear_children(self.references_list);
+        self.references_rows.clear();
+
+        let Some(subject) = self.references_subject else {
+            self.native_ui
+                .send(TextMessage::set_text(self.references_title, "References"));
+            self.reference_note(
+                "Right-click an asset in the Content Drawer and choose Show References.",
+            );
+            return;
+        };
+
+        let name = self
+            .asset_db
+            .get(subject)
+            .map(|record| record.relative_path.clone())
+            .unwrap_or_else(|| format!("{subject}"));
+        self.native_ui.send(TextMessage::set_text(
+            self.references_title,
+            &format!("References - {name}"),
+        ));
+
+        // A folder is a place, not an asset: it references nothing and
+        // nothing references it, and the three lists would all be empty in a
+        // way that reads as "safe to delete" when its contents may not be.
+        if self
+            .asset_db
+            .get(subject)
+            .is_some_and(|record| record.kind == somnium_asset::database::AssetKind::Folder)
+        {
+            self.reference_note(
+                "A folder has no references of its own. Ask about the assets inside it.",
+            );
+            return;
+        }
+
+        let uses = self.dependency_index.references(subject);
+        let used_by = self.dependency_index.referenced_by(subject);
+        let breakage = self.dependency_index.breakage(subject);
+        let dangling = self.dependency_index.dangling(subject);
+        let scannable = self
+            .asset_db
+            .get(subject)
+            .is_some_and(|record| somnium_asset::depend::is_scannable(record.kind));
+
+        if scannable {
+            self.reference_section(&format!("Uses ({})", uses.len()), &uses);
+        } else {
+            // A `.glb` names its own textures, a script names assets by path,
+            // and the index reads neither. Reporting that as "uses nothing" is
+            // the lie that would make a dependency view worse than none.
+            self.reference_note(
+                "References are read out of scenes, prefabs, materials and UI documents. This kind is not one of them, so what it uses is not listed here.",
+            );
+        }
+        self.reference_section(&format!("Used by ({})", used_by.len()), &used_by);
+
+        // Only when it differs from the direct dependents: repeating the same
+        // three rows under a scarier heading teaches people to ignore it.
+        if breakage.len() > used_by.len() {
+            self.reference_section(
+                &format!("Breaks if deleted ({})", breakage.len()),
+                &breakage,
+            );
+        }
+        if !dangling.is_empty() {
+            self.reference_section(&format!("Missing ({})", dangling.len()), &dangling);
+        }
+        if uses.is_empty() && used_by.is_empty() && dangling.is_empty() && scannable {
+            self.reference_note(
+                "Nothing in the project references this, and it references nothing.",
+            );
+        }
+    }
+
+    /// A heading, then one clickable row per asset.
+    fn reference_section(&mut self, heading: &str, assets: &[somnium_asset::database::AssetId]) {
+        if assets.is_empty() {
+            return;
+        }
+        let t = theme::active();
+        let head = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
+            left: 8.0,
+            top: 8.0,
+            right: 0.0,
+            bottom: 2.0,
+        }))
+        .with_role(TextRole::SectionCaps)
+        .with_text(heading)
+        .with_font_id(self.font_id)
+        .build();
+        self.native_ui.add_node(head, self.references_list);
+
+        for asset in assets {
+            let record = self.asset_db.get(*asset).cloned();
+            // An id with no record is a reference to something that is not in
+            // the project. The raw id is the only honest label, and it is what
+            // you paste into a search.
+            let label = record
+                .as_ref()
+                .map(|record| record.relative_path.clone())
+                .unwrap_or_else(|| format!("{asset}"));
+            let icon = record
+                .as_ref()
+                .map(|record| crate::metaphor::icon_for_path(&record.absolute_path, false))
+                .unwrap_or(crate::icons::IconId::Warn);
+            let tint = if record.is_some() {
+                theme::TEXT_PRIMARY
+            } else {
+                t.semantic.status.warning.bytes()
+            };
+            let row = ButtonBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::ROW_HEIGHT)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .build();
+            let row = self.native_ui.add_node(row, self.references_list);
+            let line =
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_orientation(Orientation::Horizontal)
+                    .build();
+            let line = self.native_ui.add_node(line, row);
+            let glyph = ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_width(14.0)
+                    .with_height(14.0)
+                    .with_margin(Thickness::axes(8.0, 4.0)),
+            )
+            .with_icon(icon)
+            .with_size(14.0)
+            .with_tint(tint)
+            .build();
+            self.native_ui.add_node(glyph, line);
+            let text =
+                TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(0.0, 4.0)))
+                    .with_text(&label)
+                    .with_font_size(11.0)
+                    .with_font_id(self.font_id)
+                    .with_color(tint)
+                    .build();
+            self.native_ui.add_node(text, line);
+            self.references_rows.push((row, *asset));
+        }
+    }
+
+    /// A line of prose in the panel, for the states a list cannot express.
+    fn reference_note(&mut self, text: &str) {
+        let note = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(8.0)))
+            .with_text(text)
+            .with_font_size(11.0)
+            .with_font_id(self.font_id)
+            .with_color(theme::active().semantic.text.secondary.bytes())
+            .with_wrap(true)
+            .build();
+        self.native_ui.add_node(note, self.references_list);
     }
 
     /// Select sort order for the current database query.
@@ -4696,27 +5188,92 @@ impl UiManager {
                     .filter(|entry| entry.is_engine && self.content_kind.accepts(entry)),
             );
         }
+        self.content_all = entries;
+        // Forget the window rather than the tiles: the folder changed, so the
+        // tiles the old window named are about to describe different assets.
+        self.content_window = None;
+        self.sync_content_tiles();
+        self.refresh_content_breadcrumb();
+    }
+
+    /// Which tiles the drawer can show, given the layout it last had.
+    ///
+    /// The seam is the outliner's — a clip rectangle and a content origin —
+    /// but the answer is put to a different use: here it decides which tiles
+    /// *exist*, not which of the existing ones paint.
+    fn content_grid_window(&self) -> crate::virtual_list::GridWindow {
+        let (tile_w, tile_h, _) = self.content_density.metrics();
+        let canvas = self.native_ui.screen_bounds(self.content_list);
+        // Pitch, not size: the gap belongs to the cell. The last column has no
+        // gap after it, so the width offered is one gap wider than the panel —
+        // without that, a panel that fits four tiles is told it fits three.
+        crate::virtual_list::GridWindow::new(
+            canvas.y,
+            (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP),
+            canvas.w + CONTENT_GAP,
+            self.content_all.len(),
+            self.native_ui.screen_bounds(self.content_scroll),
+        )
+    }
+
+    /// Build exactly the tiles the window names, and nothing else.
+    ///
+    /// MORROWIND-M. The outliner virtualises its *draw*, because a `TreeView`
+    /// is one widget that paints rows itself. The drawer cannot: a tile is a
+    /// real button with a real icon and a real label, and it is a drop target
+    /// and a drag source by being one. So here the window decides which
+    /// widgets are built, and the canvas is left as tall as all of them.
+    ///
+    /// Cheap to call every frame: it compares the window it would build
+    /// against the one it did, and a drawer nobody scrolled does nothing.
+    fn sync_content_tiles(&mut self) {
+        let window = self.content_grid_window();
+        if self.content_window == Some(window) {
+            return;
+        }
+        // An inline rename is a text box parented to a tile. Rebuilding under
+        // it would delete the field being typed into, so a scroll during a
+        // rename leaves the window stale until the rename lands. Never on the
+        // first build, or the rename would be parented to nothing.
+        if self.content_inline_rename.is_some() && self.content_window.is_some() {
+            return;
+        }
+
         let (tile_w, tile_h, icon_px) = self.content_density.metrics();
-        self.native_ui.clear_children(self.content_list);
-        self.content_entries.clear();
+        let pitch = (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP);
         let font_id = self.font_id;
         let parent = self.content_list;
+        self.native_ui.clear_children(parent);
+        self.content_entries.clear();
+        self.content_window = Some(window);
 
         // Phase 27-G. A drawer with nothing in it used to be a blank grey
         // rectangle, which reads as broken rather than as empty. A filtered
         // miss and a genuinely empty folder are different situations and get
         // different copy — offering "import a model" to someone who mistyped a
         // search would be the wrong advice.
-        if entries.is_empty() {
+        if self.content_all.is_empty() {
             let state = if self.content_filter.is_empty() {
                 crate::metaphor::empty::CONTENT
             } else {
                 crate::metaphor::empty::CONTENT_FILTERED
             };
+            // The height still gets set, to the nought rows an empty folder
+            // is: the canvas does not clip, so the empty state is visible
+            // regardless, and the scrollbar correctly says there is nowhere to
+            // scroll to.
+            self.native_ui.set_height(parent, 0.0);
             crate::editor::parts::build_empty_state(&mut self.native_ui, parent, font_id, state);
+            return;
         }
 
-        for entry in entries {
+        // As tall as the whole folder, though only a screenful was built.
+        self.native_ui
+            .set_height(parent, window.content_height(pitch.1));
+
+        let visible = self.content_all[window.range()].to_vec();
+        for (offset, entry) in visible.into_iter().enumerate() {
+            let index = window.first + offset;
             // A selected tile keeps the raised fill but gains the selection
             // wash, so selection reads the same way here as in the Outliner.
             let selected = self.content_selection.contains(&entry.path);
@@ -4812,8 +5369,17 @@ impl UiManager {
                 self.native_ui.add_node(badge, col_h);
             }
 
+            // Absolute placement is what the window rests on: a tile sits
+            // where its index *in the whole folder* puts it, not where its
+            // position among the built widgets would.
+            let cell = window.tile_rect(index, pitch);
+            self.native_ui
+                .place_node(bh, crate::types::Rect::new(cell.x, cell.y, tile_w, tile_h));
             self.content_entries.push((bh, entry));
         }
+    }
+
+    fn refresh_content_breadcrumb(&mut self) {
         let mut parts = vec!["Game".to_string()];
         if !self.content_path.is_empty() {
             for p in self.content_path.split(['/', '\\']) {
@@ -5355,12 +5921,12 @@ impl UiManager {
                 asset_actions,
                 collection_actions,
             ) = build_generated_details(
-                    &mut self.native_ui,
-                    self.inspector_stack,
-                    self.font_id,
-                    &panels,
-                    &self.asset_db,
-                );
+                &mut self.native_ui,
+                self.inspector_stack,
+                self.font_id,
+                &panels,
+                &self.asset_db,
+            );
             self.generated_root = root;
             self.generated_bindings = bindings;
             self.generated_rows = rows;
@@ -5642,6 +6208,9 @@ impl UiManager {
     }
 
     /// The Output Log's state.
+    ///
+    /// The store, not the widgets — which is what lets a floating window build
+    /// its own tree from the same lines (MORROWIND-J step 2).
     #[must_use]
     pub fn log(&self) -> &crate::log::OutputLog {
         &self.log
@@ -6211,18 +6780,14 @@ impl UiManager {
                                 .iter()
                                 .map(|(_, entry)| entry)
                                 .find(|entry| {
-                                    !entry.is_dir
-                                        && self.content_selection.contains(&entry.path)
+                                    !entry.is_dir && self.content_selection.contains(&entry.path)
                                 })
                                 .and_then(|entry| entry.asset_id);
                             match (chosen, self.selected_entity) {
                                 (Some(asset), Some(entity)) => {
-                                    let accepted = self
-                                        .asset_db
-                                        .get(asset)
-                                        .is_some_and(|record| {
-                                            record.kind.bit() & binding.asset_kind_mask != 0
-                                        });
+                                    let accepted = self.asset_db.get(asset).is_some_and(|record| {
+                                        record.kind.bit() & binding.asset_kind_mask != 0
+                                    });
                                     if accepted {
                                         let gesture = self.allocate_property_gesture();
                                         self.editor_events.push_back(
@@ -6230,14 +6795,11 @@ impl UiManager {
                                                 entity,
                                                 component: binding.component,
                                                 field: binding.field,
-                                                value:
-                                                    somnium_ecs::reflect::ReflectValue::Asset(
-                                                        Some(
-                                                            somnium_ecs::reflect::AssetRef::from_raw(
-                                                                asset.raw(),
-                                                            ),
-                                                        ),
-                                                    ),
+                                                value: somnium_ecs::reflect::ReflectValue::Asset(
+                                                    Some(somnium_ecs::reflect::AssetRef::from_raw(
+                                                        asset.raw(),
+                                                    )),
+                                                ),
                                                 gesture,
                                                 live: false,
                                             },
@@ -6248,8 +6810,9 @@ impl UiManager {
                                         );
                                     }
                                 }
-                                (None, _) => self
-                                    .push_toast("Select a file in the Content Drawer first"),
+                                (None, _) => {
+                                    self.push_toast("Select a file in the Content Drawer first")
+                                }
                                 (_, None) => self.push_toast("Select an entity first"),
                             }
                         }
@@ -6361,6 +6924,17 @@ impl UiManager {
                 }
             }
 
+            // A committed cell edit in the Localisation grid. Outside the
+            // button block on purpose: a `DataGridMessage` is not a
+            // `ButtonMessage`, and a handler nested in there would never run.
+            if let Some(crate::widgets::data_grid::DataGridMessage::Edited { table, .. }) =
+                msg.data::<crate::widgets::data_grid::DataGridMessage>()
+            {
+                // A commit, not a keystroke: this is the state a save writes.
+                self.locale_table = Some((**table).clone());
+                continue;
+            }
+
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if let Some((_, id)) = self
                     .menu_command_items
@@ -6442,6 +7016,10 @@ impl UiManager {
                     self.run_command_id("editor.viewport.immersive");
                     continue;
                 }
+                if msg.destination == self.step_button {
+                    self.run_command_id("editor.simulation.step");
+                    continue;
+                }
                 if msg.destination == self.pause_button {
                     self.run_command_id("editor.simulation.pause");
                     continue;
@@ -6520,6 +7098,46 @@ impl UiManager {
                 }
                 if msg.destination == self.log_button {
                     self.toggle_log_panel();
+                    continue;
+                }
+                if msg.destination == self.references_button {
+                    self.toggle_references_panel();
+                    continue;
+                }
+                if msg.destination == self.locale_button {
+                    self.toggle_locale_panel();
+                    continue;
+                }
+                if let Some(action) = self
+                    .locale_actions
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .map(|(_, action)| *action)
+                {
+                    match action {
+                        LocaleAction::Save => {
+                            self.editor_events.push_back(EditorEvent::SaveLocalisation);
+                        }
+                        LocaleAction::ExportCsv => {
+                            self.editor_events
+                                .push_back(EditorEvent::ExportLocalisationCsv);
+                        }
+                    }
+                    continue;
+                }
+                // Walking the graph is the point of the panel: a row is a
+                // link, so clicking one asks the same three questions about
+                // what it names. A row for an asset that is not in the project
+                // is not a link to anywhere.
+                if let Some((_, asset)) = self
+                    .references_rows
+                    .iter()
+                    .find(|(row, _)| *row == msg.destination)
+                    .copied()
+                {
+                    if self.asset_db.get(asset).is_some() {
+                        self.show_references_for(asset);
+                    }
                     continue;
                 }
                 if msg.destination == self.drawer_button {
@@ -6728,6 +7346,17 @@ impl UiManager {
                 if msg.destination == self.content_engine_toggle {
                     self.show_engine_content = !self.show_engine_content;
                     self.refresh_content_list();
+                    continue;
+                }
+                if msg.destination == self.locale_incomplete {
+                    self.locale_only_incomplete = !self.locale_only_incomplete;
+                    self.native_ui.send(UiMessage::new(
+                        self.locale_grid,
+                        MessageDirection::ToWidget,
+                        crate::widgets::data_grid::DataGridMessage::SetOnlyIncomplete(
+                            self.locale_only_incomplete,
+                        ),
+                    ));
                     continue;
                 }
                 // Phase 16-D: an attachment's enable box, or one of its
@@ -6942,6 +7571,15 @@ impl UiManager {
                 if msg.destination == self.content_search {
                     self.content_filter = q.clone();
                     self.refresh_content_list();
+                }
+                if msg.destination == self.locale_search {
+                    // Straight through to the grid: the filter is the view's,
+                    // and the view belongs to the widget that draws it.
+                    self.native_ui.send(UiMessage::new(
+                        self.locale_grid,
+                        MessageDirection::ToWidget,
+                        crate::widgets::data_grid::DataGridMessage::SetFilter(q.clone()),
+                    ));
                 }
                 if msg.destination == self.outliner_search {
                     self.outliner_filter = q.clone();
@@ -7426,6 +8064,171 @@ mod elysium_tests {
             ui.draw_ctx.instance_count() > 0,
             "an empty state that draws nothing is the bug it exists to prevent"
         );
+    }
+
+    #[test]
+    fn the_drawer_canvas_carries_the_whole_folders_height_and_scrolls_by_it() {
+        // MORROWIND-M. The two facts the windowed drawer rests on, neither of
+        // which is visible from `GridWindow`'s own tests:
+        //
+        //   1. a canvas given an explicit height makes the scroll viewer above
+        //      it scrollable to that height, even with a screenful of children;
+        //   2. the canvas's screen `y` is the content origin the window reads,
+        //      and it moves by exactly the scroll.
+        //
+        // Get either wrong and the drawer builds the right number of tiles for
+        // the wrong part of the folder.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.perform_layout();
+
+        // 40,000 assets at the comfortable density, four rows of which exist.
+        let (tile_w, tile_h, _) = crate::metaphor::ContentDensity::Comfortable.metrics();
+        let pitch = (tile_w + CONTENT_GAP, tile_h + CONTENT_GAP);
+        let canvas_before = ui.screen_bounds(layout.content_list);
+        let window = crate::virtual_list::GridWindow::new(
+            canvas_before.y,
+            pitch,
+            canvas_before.w + CONTENT_GAP,
+            40_000,
+            ui.screen_bounds(layout.content_scroll),
+        );
+        ui.set_height(layout.content_list, window.content_height(pitch.1));
+        let mut tiles = Vec::new();
+        for index in window.range() {
+            let cell = window.tile_rect(index, pitch);
+            let tile = ui.add_node(
+                ButtonBuilder::new(WidgetBuilder::new()).build(),
+                layout.content_list,
+            );
+            ui.place_node(
+                tile,
+                crate::types::Rect::new(cell.x, cell.y, tile_w, tile_h),
+            );
+            tiles.push((index, tile));
+        }
+        ui.perform_layout();
+
+        assert!(
+            !tiles.is_empty() && tiles.len() < 200,
+            "a screenful, not a folder: {}",
+            tiles.len()
+        );
+        let first = ui.screen_bounds(tiles[0].1);
+        assert!(
+            (first.y - canvas_before.y).abs() < 0.5,
+            "the first tile should sit at the top of the canvas, not {first:?}"
+        );
+
+        // Scroll a hundred rows down. The canvas rises by exactly that much,
+        // which is what tells the next window which rows are now in view.
+        let scroll = 100.0 * pitch.1;
+        ui.send(UiMessage::new(
+            layout.content_scroll,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseWheel {
+                pos: {
+                    let b = ui.screen_bounds(layout.content_scroll);
+                    glam::Vec2::new(b.x + b.w * 0.5, b.y + b.h * 0.5)
+                },
+                // Negative is downward: the viewer subtracts the delta.
+                delta: -scroll,
+                mods: Modifiers::default(),
+            },
+        ));
+        let _ = ui.update();
+        ui.perform_layout();
+
+        let canvas_after = ui.screen_bounds(layout.content_list);
+        assert!(
+            (canvas_before.y - canvas_after.y - scroll).abs() < 1.0,
+            "the canvas moved by {} rather than {scroll}",
+            canvas_before.y - canvas_after.y
+        );
+        let moved = crate::virtual_list::GridWindow::new(
+            canvas_after.y,
+            pitch,
+            canvas_after.w + CONTENT_GAP,
+            40_000,
+            ui.screen_bounds(layout.content_scroll),
+        );
+        // Row 100 is the one the scroll landed on. The window must never
+        // start *below* it — that is a band of empty drawer along the top —
+        // and must not start far above it either, or the saving is spent on
+        // tiles nobody can see. The slack is the overscan row plus the one the
+        // canvas's own margin straddles.
+        let first_row = moved.first / moved.columns;
+        assert!(
+            first_row <= 100 && first_row + 2 >= 100,
+            "a hundred rows of scroll built from row {first_row}"
+        );
+    }
+
+    #[test]
+    fn an_empty_folder_does_not_crop_its_own_empty_state() {
+        // MORROWIND-M, and the trap under it. The canvas is given an explicit
+        // height so the scroll viewer knows how deep the folder is — but an
+        // empty folder is nought rows deep. A canvas that cropped to its own
+        // bounds would build the "this folder is empty" panel perfectly and
+        // then crop it out of existence, which reads to the user exactly like
+        // the blank grey rectangle the empty state exists to replace.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.set_height(layout.content_list, 0.0);
+        let column = crate::editor::parts::build_empty_state(
+            &mut ui,
+            layout.content_list,
+            font_id,
+            crate::metaphor::empty::CONTENT,
+        );
+        assert!(column.is_some(), "the empty state must build a container");
+        ui.perform_layout();
+
+        assert_eq!(
+            ui.screen_bounds(layout.content_list).h,
+            0.0,
+            "fixture: an empty folder is nought rows tall"
+        );
+        let clip = ui.clip_bounds(column);
+        assert!(
+            clip.h > 0.0 && clip.w > 0.0,
+            "the empty state was clipped away by its own container: {clip:?}"
+        );
+        // It is still clipped by the drawer, which is the clip that matters.
+        let drawer = ui.screen_bounds(layout.content_scroll);
+        assert!(clip.h <= drawer.h + 0.5, "{clip:?} escaped {drawer:?}");
+    }
+
+    #[test]
+    fn setting_the_height_a_node_already_has_does_not_invalidate_layout() {
+        // `sync_content_tiles` runs every frame. If the same height counted as
+        // a change, an idle drawer would re-lay-out the whole shell forever.
+        let mut ui = UserInterface::new(1600.0, 900.0);
+        let font_id = load_fonts(&mut ui);
+        let layout = build_editor_layout(
+            &mut ui,
+            font_id,
+            crate::layout_persist::ChromeLayout::default(),
+        );
+        ui.set_height(layout.content_list, 4_000.0);
+        ui.perform_layout();
+        ui.set_height(layout.content_list, 4_000.0);
+        assert!(ui.is_layout_valid(layout.content_list));
+        // NaN is never equal to itself, so the same-value check has to say so.
+        ui.set_height(layout.content_list, f32::NAN);
+        ui.perform_layout();
+        ui.set_height(layout.content_list, f32::NAN);
+        assert!(ui.is_layout_valid(layout.content_list));
     }
 }
 
@@ -7927,6 +8730,7 @@ mod zeta_layout_tests {
             layout.play_button,
             layout.immersive_button,
             layout.pause_button,
+            layout.step_button,
             layout.stop_button,
             layout.palette_button,
         ] {
@@ -8013,6 +8817,7 @@ mod must_not_break {
             ("foliage mode", l.foliage_toolbar_button),
             ("play", l.play_button),
             ("pause", l.pause_button),
+            ("step", l.step_button),
             ("stop", l.stop_button),
             ("immersive play", l.immersive_button),
             ("file menu", l.file_button),
@@ -8020,6 +8825,8 @@ mod must_not_break {
             ("camera speed", l.camera_speed_slider),
             ("content drawer", l.drawer_button),
             ("output log", l.log_button),
+            ("references", l.references_button),
+            ("localisation", l.locale_button),
             ("help", l.help_button),
         ] {
             assert!(!handle.is_none(), "{name} is missing from the shell");

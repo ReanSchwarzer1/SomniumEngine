@@ -447,9 +447,7 @@ pub fn acceptance_for(
         // empty sky are different problems, and the author has to be able to
         // tell which one they are looking at.
         let why = match &target {
-            DropTarget::AssetField { .. } => {
-                "This field does not accept that kind of asset"
-            }
+            DropTarget::AssetField { .. } => "This field does not accept that kind of asset",
             DropTarget::Outliner(Some(_)) => "Only a material or a script can go on an entity",
             DropTarget::Outliner(None) => "Nothing here to drop onto",
             DropTarget::Viewport { .. } => "Nothing in the viewport accepts that",

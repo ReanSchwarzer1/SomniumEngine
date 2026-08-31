@@ -19,6 +19,11 @@ use glam::Vec2;
 /// drag-down bulk toggle to work.
 pub const BADGE_COLUMN: f32 = 34.0;
 
+/// The faintest an unset badge may be drawn.
+///
+/// Below this it stops being a quiet affordance and becomes an invisible one.
+const GHOST_MIN_ALPHA: u8 = 40;
+
 #[derive(Clone, Debug)]
 pub struct TreeItem {
     pub id: u32,
@@ -58,7 +63,11 @@ pub struct TreeView {
     pub selected: Option<u32>,
     /// Every selected row. Contains the primary once the host has published a
     /// set; empty means "primary only", which is what a fresh tree shows.
-    pub selected_set: Vec<u32>,
+    ///
+    /// Held by key and kept sorted — see [`crate::virtual_list::KeySelection`]
+    /// for why an index-based selection is the thing that appears to jump when
+    /// a list is filtered or scrolled.
+    pub selection: crate::virtual_list::KeySelection,
     pub font_id: u8,
     pub px: f32,
     /// Index of the row under the cursor, so hover is a row wash rather than a
@@ -107,11 +116,26 @@ impl Control for TreeView {
         // grammar reads weight before it reads the fill.
         let selected_style = text_style(TextRole::BodyStrong);
         let rest_style = text_style(TextRole::Body);
-        for (i, item) in self.items.iter().enumerate() {
+        // MORROWIND-M. This loop used to run over every item, shaping a label
+        // for each, whether or not the row was on screen — O(total rows) to
+        // show the thirty that fit. Inside a scroll viewer the widget is as
+        // tall as its content, so the clip is the only thing that knows what
+        // is visible.
+        let window = crate::virtual_list::RowWindow::new(
+            b.y,
+            theme::TREE_ROW_HEIGHT,
+            self.items.len(),
+            ctx.clip_rect(),
+        );
+        for i in window.range() {
+            let item = &self.items[i];
             let y = b.y + i as f32 * theme::TREE_ROW_HEIGHT;
             let row = Rect::new(b.x, y, b.w, theme::TREE_ROW_HEIGHT);
             let primary = self.selected == Some(item.id);
-            let selected = primary || self.selected_set.contains(&item.id);
+            // Binary search, not a scan. `Vec::contains` per row is
+            // O(rows x selected) per frame, which is invisible at ten rows and
+            // quadratic at a hundred thousand.
+            let selected = primary || self.selection.contains(item.id);
             let interaction = if selected {
                 Interaction::Selected
             } else if self.hovered == Some(i) {
@@ -172,14 +196,51 @@ impl Control for TreeView {
                 let dot = Rect::new(badge_x - 14.0, mid - 3.0, 6.0, 6.0);
                 ctx.push_round_rect(dot, 3.0, t.semantic.status.error.bytes());
             }
-            if item.locked {
-                let bar = Rect::new(badge_x + 2.0, mid - 5.0, 8.0, 10.0);
-                ctx.push_round_rect_border(bar, 2.0, 1.0, t.semantic.text.secondary.bytes());
-            }
-            if item.hidden {
-                let bar = Rect::new(badge_x + 14.0, mid - 1.0, 12.0, 2.0);
-                ctx.push_rect_filled(bar, t.semantic.text.secondary.bytes());
-            }
+            // **Both badges are drawn on every row**, which is the whole
+            // affordance. Before this they appeared only when the flag was
+            // *set*, so a visible unlocked row showed an empty gutter — the
+            // click target was there and worked, and nothing on screen said so.
+            // A control you have to already know about is one nobody finds.
+            //
+            // The states differ by weight rather than by position, after
+            // Unreal: a set flag is at full secondary colour, an unset one is a
+            // ghost that firms up when the pointer is on the row. That keeps a
+            // long outliner scannable — the hidden rows are the ones you can
+            // see from across the column — while leaving every row clickable.
+            let hovered_row = self.hovered == Some(i);
+            let badge_tint = |set: bool| {
+                if set {
+                    t.semantic.text.secondary.bytes()
+                } else if hovered_row {
+                    t.semantic.text.disabled.bytes()
+                } else {
+                    // Floored, not just divided. `disabled / 3` on a `u8` is
+                    // zero for any theme whose disabled text is already
+                    // translucent, and a fully transparent badge is the empty
+                    // gutter this change exists to remove — reintroduced by a
+                    // token change, in a way the primitive-count test cannot
+                    // see.
+                    let mut ghost = t.semantic.text.disabled.bytes();
+                    ghost[3] = (ghost[3] / 3).max(GHOST_MIN_ALPHA);
+                    ghost
+                }
+            };
+            let badge = |ctx: &mut DrawingContext, x: f32, icon: IconId, set: bool| {
+                let rect = Rect::new(x, mid - 6.0, 12.0, 12.0);
+                let (uv, tex) = icon.draw_quad(rect);
+                ctx.push_textured_rect(rect, uv, badge_tint(set), tex);
+            };
+            badge(ctx, badge_x, IconId::Locked, item.locked);
+            badge(
+                ctx,
+                badge_x + 14.0,
+                if item.hidden {
+                    IconId::VisibilityOff
+                } else {
+                    IconId::Visibility
+                },
+                item.hidden,
+            );
             let indent = 8.0 + item.depth as f32 * 14.0;
             // Hierarchy guides: one hairline per ancestor level, so a deep
             // tree reads as a tree rather than as a list of varying margins.
@@ -248,7 +309,7 @@ impl Control for TreeView {
             return;
         }
         if let Some(TreeViewMessage::SetSelectedSet(ids)) = msg.data::<TreeViewMessage>() {
-            self.selected_set = ids.clone();
+            self.selection = crate::virtual_list::KeySelection::from_keys(ids.iter().copied());
             msg.handled = true;
             return;
         }
@@ -426,7 +487,7 @@ impl TreeViewBuilder {
             Box::new(TreeView {
                 items: Vec::new(),
                 selected: None,
-                selected_set: Vec::new(),
+                selection: crate::virtual_list::KeySelection::default(),
                 font_id: self.font_id,
                 px: self.px,
                 hovered: None,
@@ -446,12 +507,116 @@ impl TreeViewMessage {
 mod tests {
     use super::*;
 
+    /// A tree of `n` rows, laid out as a scroll viewer would lay it out: as
+    /// tall as its content.
+    fn tree_of(n: usize) -> (Widget, TreeView) {
+        let mut widget = Widget::default();
+        widget.actual_local_position = Vec2::new(0.0, 0.0);
+        widget.actual_local_size = Vec2::new(300.0, n as f32 * theme::TREE_ROW_HEIGHT);
+        let view = TreeView {
+            items: (0..n)
+                .map(|i| TreeItem {
+                    id: i as u32,
+                    label: format!("Entity {i}"),
+                    depth: 0,
+                    icon: crate::metaphor::icon_for_entity_name("Cube"),
+                    has_children: false,
+                    expanded: false,
+                    hidden: false,
+                    locked: false,
+                    script_error: false,
+                })
+                .collect(),
+            selected: None,
+            selection: crate::virtual_list::KeySelection::default(),
+            font_id: 0,
+            px: 12.0,
+            hovered: None,
+            badge_drag: None,
+        };
+        (widget, view)
+    }
+
+    /// Primitives emitted for `n` rows through a 660 px viewport.
+    fn primitives_for(n: usize) -> usize {
+        let (widget, view) = tree_of(n);
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+        ctx.instances.len()
+    }
+
+    /// MORROWIND-M. The acceptance criterion is 100,000 rows at 60 fps, and the
+    /// only way there is for the per-frame work to stop depending on the total.
+    ///
+    /// This is that, measured through the real draw path rather than asserted
+    /// about the windowing arithmetic: the same viewport emits the same number
+    /// of primitives whether the tree holds a hundred rows or a hundred
+    /// thousand. Before virtualisation the second number was a thousand times
+    /// the first, and every one of those primitives carried a shaped label.
+    #[test]
+    fn drawing_a_hundred_thousand_rows_costs_what_thirty_rows_cost() {
+        let small = primitives_for(100);
+        let huge = primitives_for(100_000);
+        assert!(small > 0, "the fixture drew nothing");
+        assert_eq!(
+            small, huge,
+            "100 rows emitted {small} primitives and 100,000 emitted {huge}"
+        );
+    }
+
+    #[test]
+    fn scrolling_deep_into_a_long_tree_costs_the_same_as_not_scrolling() {
+        // A thousand rows down, the work is the same size and it is *different*
+        // work — the labels drawn are the ones under the clip.
+        let (mut widget, view) = tree_of(100_000);
+        widget.actual_local_position = Vec2::new(0.0, -1000.0 * theme::TREE_ROW_HEIGHT);
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+        let scrolled = ctx.instances.len();
+
+        // Not exactly equal, and the difference is the point rather than slop:
+        // at scroll zero there is no row above the clip, so the top overscan
+        // row does not exist. One row of difference is the whole budget.
+        let unscrolled = primitives_for(100_000);
+        let one_row = primitives_for(1);
+        assert!(
+            scrolled >= unscrolled && scrolled <= unscrolled + one_row,
+            "scrolled {scrolled}, unscrolled {unscrolled}, one row {one_row}"
+        );
+    }
+
+    /// The affordance has to exist *before* you use it.
+    ///
+    /// Both badges are drawn on every row, so a visible unlocked row costs the
+    /// same primitives as a hidden locked one. Before this the gutter was empty
+    /// until a flag was set: the click target worked and nothing said so, which
+    /// is the bug this asserts against.
+    #[test]
+    fn every_row_draws_its_badges_whatever_state_it_is_in() {
+        let plain = primitives_for(1);
+
+        let (widget, mut view) = tree_of(1);
+        view.items[0].hidden = true;
+        view.items[0].locked = true;
+        let mut ctx = DrawingContext::new(300.0, 660.0);
+        ctx.push_clip_rect(Rect::new(0.0, 0.0, 300.0, 660.0));
+        view.draw(&widget, &mut ctx);
+
+        assert_eq!(
+            plain,
+            ctx.instances.len(),
+            "a visible unlocked row must draw the same badges as a hidden locked one"
+        );
+    }
+
     #[test]
     fn empty_tree_has_no_selection() {
         let t = TreeView {
             items: Vec::new(),
             selected: None,
-            selected_set: Vec::new(),
+            selection: crate::virtual_list::KeySelection::default(),
             font_id: 0,
             px: 12.0,
             hovered: None,

@@ -367,7 +367,9 @@ mod tests {
                 .collect(),
             closed: true,
         };
-        let inside = ring.closest_point(glam::Mat4::IDENTITY, Vec3::ZERO).unwrap();
+        let inside = ring
+            .closest_point(glam::Mat4::IDENTITY, Vec3::ZERO)
+            .unwrap();
         assert!(
             (inside.length() - 20.0).abs() < 2.0,
             "from the centre the ring is about 20 m away, got {:.2}",
@@ -395,7 +397,12 @@ mod tests {
         );
 
         let shore = world.spawn((crate::Transform::default(), line()));
-        let heard = audible_position(&world, shore, glam::Mat4::IDENTITY, Vec3::new(7.0, 0.0, 9.0));
+        let heard = audible_position(
+            &world,
+            shore,
+            glam::Mat4::IDENTITY,
+            Vec3::new(7.0, 0.0, 9.0),
+        );
         assert!(
             (heard.x - 7.0).abs() < 0.6 && heard.z.abs() < 0.6,
             "heard at the nearest point of the path, got {heard:?}"

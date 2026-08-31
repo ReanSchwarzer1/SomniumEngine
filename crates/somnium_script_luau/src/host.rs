@@ -28,7 +28,7 @@ use somnium_script::backend::{
     ScriptSource, Severity,
 };
 use somnium_script::command::{
-    AnimationParameterValue, CommandBuffer, ForceMode, LogLevel, ScriptCommand,
+    AnimationParameterValue, CommandBuffer, ForceMode, LogLevel, ScriptCommand, UiValue,
 };
 use somnium_script::ids::ScriptAssetId;
 use somnium_script::snapshot::{ScriptSnapshot, WorldView};
@@ -498,6 +498,7 @@ pub fn build_ctx<'scope, 'env>(
     ctx.set("time", snapshot.time.simulation_time)?;
     ctx.set("fixedDelta", snapshot.time.fixed_delta)?;
     ctx.set("step", snapshot.time.step)?;
+    ctx.set("stepping", snapshot.time.stepping)?;
 
     // ── Input ────────────────────────────────────────────────────
     let input = lua.create_table()?;
@@ -663,6 +664,48 @@ pub fn build_ctx<'scope, 'env>(
                 commands.borrow_mut().push(ScriptCommand::PlayAudio {
                     asset: ScriptAssetId::from_path(&asset_path),
                     volume,
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    // ── Authored UI (MORROWIND-M2) ───────────────────────────────
+    //
+    // One call rather than `setUiText` / `setUiNumber` / `setUiVisible`,
+    // because unlike the animation parameters below there is no ambiguity to
+    // resolve: Luau's boolean, number and string map onto exactly one `UiValue`
+    // each, and the widget kind is what decides whether it understood the
+    // property. Three calls here would be three call sites to keep in step for
+    // no information gained.
+    ctx.set(
+        "setUiProperty",
+        scope.create_function(
+            move |_,
+                  (_ctx, document, element, property, value): (
+                Table,
+                String,
+                String,
+                String,
+                mlua::Value,
+            )| {
+                let value = match value {
+                    mlua::Value::Boolean(value) => UiValue::Bool(value),
+                    mlua::Value::Integer(value) => UiValue::Number(value as f64),
+                    mlua::Value::Number(value) => UiValue::Number(value),
+                    mlua::Value::String(value) => UiValue::Text(value.to_str()?.to_owned()),
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "setUiProperty takes a boolean, number or string, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                commands.borrow_mut().push(ScriptCommand::SetUiProperty {
+                    document,
+                    element,
+                    property,
+                    value,
                 });
                 Ok(())
             },

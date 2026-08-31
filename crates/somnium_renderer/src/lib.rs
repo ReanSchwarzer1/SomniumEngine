@@ -35,6 +35,8 @@ pub mod skinning;
 pub mod terrain;
 pub mod texture_pool;
 pub mod timing;
+/// MORROWIND-J step 3: one view of the scene, and how a frame's views tile.
+pub mod view;
 pub mod viewport_resolution;
 pub mod water_body;
 

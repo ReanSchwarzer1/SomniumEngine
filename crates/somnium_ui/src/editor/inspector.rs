@@ -18,10 +18,10 @@ use crate::{
         check_box::CheckBoxBuilder,
         color_picker::ColorSwatchBuilder,
         combo_box::ComboBoxBuilder,
-        grid::{Column, GridBuilder, Row},
         combo_box::{ComboBoxMessage, ComboDropdownBuilder},
         curve_editor::CurveEditorBuilder,
         gradient_editor::GradientEditorBuilder,
+        grid::{Column, GridBuilder, Row},
         image::ImageBuilder,
         numeric_field::NumericFieldBuilder,
         popup::{PopupBuilder, PopupPlacement},
@@ -395,14 +395,14 @@ pub(crate) fn build_generated_details(
                                     .with_margin(Thickness::axes(1.0, 0.0)),
                             )
                             .with_value(value)
-                                .with_mixed(model.mixed)
-                                .with_drag_step(model.step.unwrap_or(0.05) as f32)
-                                .with_unit(if model.editor == PropertyEditorKind::Euler {
-                                    "°"
-                                } else {
-                                    model.unit.unwrap_or("")
-                                })
-                                .build(),
+                            .with_mixed(model.mixed)
+                            .with_drag_step(model.step.unwrap_or(0.05) as f32)
+                            .with_unit(if model.editor == PropertyEditorKind::Euler {
+                                "°"
+                            } else {
+                                model.unit.unwrap_or("")
+                            })
+                            .build(),
                             lane_panel,
                         );
                         let mut binding = base.clone();
@@ -599,10 +599,9 @@ pub(crate) fn build_generated_details(
                         somnium_ecs::reflect::ReflectValue::Array(items) => items.as_slice(),
                         _ => &[],
                     };
-                    let column =
-                        StackPanelBuilder::new(widget.with_background(theme::TRANSPARENT))
-                            .with_orientation(Orientation::Vertical)
-                            .build();
+                    let column = StackPanelBuilder::new(widget.with_background(theme::TRANSPARENT))
+                        .with_orientation(Orientation::Vertical)
+                        .build();
                     let column = ui.add_node(column, row_handle);
 
                     for (index, item) in items.iter().enumerate() {
@@ -664,7 +663,11 @@ pub(crate) fn build_generated_details(
 
                         for (offset, glyph, action) in [
                             (lanes + 1, "+", CollectionAction::Duplicate(index as u16)),
-                            (lanes + 2, "\u{2212}", CollectionAction::Remove(index as u16)),
+                            (
+                                lanes + 2,
+                                "\u{2212}",
+                                CollectionAction::Remove(index as u16),
+                            ),
                         ] {
                             let button = ui.add_node(
                                 ButtonBuilder::new(
@@ -696,15 +699,16 @@ pub(crate) fn build_generated_details(
                         .build(),
                         column,
                     );
-                    let add_label =
-                        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 3.0)))
-                            .with_role(TextRole::Caption)
-                            .with_text(if items.is_empty() {
-                                "Add first point"
-                            } else {
-                                "Add point"
-                            })
-                            .build();
+                    let add_label = TextBuilder::new(
+                        WidgetBuilder::new().with_margin(Thickness::axes(8.0, 3.0)),
+                    )
+                    .with_role(TextRole::Caption)
+                    .with_text(if items.is_empty() {
+                        "Add first point"
+                    } else {
+                        "Add point"
+                    })
+                    .build();
                     ui.add_node(add_label, add);
                     collection_actions
                         .insert(add, (base.component, base.field, CollectionAction::Append));

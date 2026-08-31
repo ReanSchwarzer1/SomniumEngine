@@ -9,7 +9,7 @@ authors.workspace = true
 
 [dependencies]
 somnium_asset = { workspace = true }
+somnium_jobs  = { workspace = true }
 glam          = { workspace = true }
 block-mesh    = { workspace = true }
 ndshape       = { workspace = true }
-rayon         = { workspace = true }

@@ -4,7 +4,7 @@
 > cycle on anything the player could not see, and measuring before believing.*
 
 > **Codename:** DOOM (id Tech 6/7/8)
-> **Status:** **A, B, C, E, F IN TREE** (2026-08-16). D and G–M deferred.
+> **Status:** **A–G IN TREE** (updated 2026-08-30). C, E, and G are measured default-off experiments; D is complete. H–M remain open, with H's premise superseded by MORROWIND-B's shipped `somnium_jobs` scheduler.
 > See **§15 As shipped** at the end of this file before reading the plan above:
 > §1's thesis did not survive DOOM-B, and C and E are default **off**.
 > **Predecessor:** Phase CR (Crysis) established *where* the frame goes.
@@ -843,3 +843,43 @@ Anything further on Coastal ground is the terrain material's 8 splatmap fetches,
 32-wide scan and four layer samples. Distance does not reduce them (DOOM-E
 proved that). The designed cheap path remains Phase DF's clipmap, still default
 off and still gated on DF-E.
+
+---
+
+## 16. Continuation — 2026-08-30
+
+Section 15 remains the dated 2026-08-16 close-out and is not rewritten as if D
+had existed then. Work resumed after MORROWIND and the wgpu 30 migration changed
+several premises.
+
+### DOOM-D is complete
+
+The conventional atlas now caches each cascade independently. On the matched
+static Coastal-ground gate, cache on reports **0/4 cascades and 0.0028 ms**;
+`SOMNIUM_SHADOW_CACHE=0` reports **4/4 and 0.9633 ms**, both with 218 casters.
+See [`phase DOOM/DOOM-D.md`](phase%20DOOM/DOOM-D.md) for the invalidation
+contract, failure archaeology, commands, timings, and tone-mapped captures.
+
+### G–M rebase before implementation
+
+| Stage | Current-tree reading | Next gate |
+|---|---|---|
+| **G — draw submission** | **Measured, default off.** Dense args remain authoritative; the cull phases can append survivors into fixed single-/double-sided partitions consumed by `multi_draw_indirect_count`. At 66 objects, combined cull + visibility changed 0.3270 → 0.3198 ms, inside noise. Atomic append also does not preserve draw order. | Keep `SOMNIUM_DRAW_COMPACTION=1` for a future scale sweep; do not deepen into stable scan compaction without evidence. See [`DOOM-G.md`](phase%20DOOM/DOOM-G.md). |
+| **H — real jobs** | **Complete.** The planned Rayon replacement was obsolete — MORROWIND-B had already shipped the bounded scheduler — so H became migration and proof. Voxel chunk meshing, the last `rayon::spawn` in the tree and a GHOSTFENCE exemption since PORTAL-0-C, now runs on `somnium_jobs`; the exemption is gone. Installing ~118 chunk meshes held the main-thread drain to 1.83 ms against its 2 ms budget. | Done. See [`DOOM-H.md`](phase%20DOOM/DOOM-H.md). The chunk *upload* is still main-thread and unbudgeted — that belongs to I. |
+| **I — off critical path** | **Complete.** The re-profile found steady state already hitch-free on both maps and the entire stall in startup: 8.2 s, of which 6.9 s was `mean_albedo_from_sources` decoding thirty-two layers' surface maps as well as their albedos, Lanczos3-resizing each to 256, serially — to produce thirty-two average colours. Coastal startup **8210.8 → 1574.3 ms**. | Done. See [`DOOM-I.md`](phase%20DOOM/DOOM-I.md). The hitch metric it required now exists as `hitch` rows. Map load is still synchronous, and the measurement no longer says that is the thing to fix. |
+| **J — bandwidth/formats/allocations** | **Complete.** wgpu's internal counters are on in every build and sampled per frame. Coastal meets the criterion — one object moves on a churning frame, always `(wgpu internal) Staging`. **Island does not**: 100/300 frames churn, four move a texture view and a bind group, and one moves 75 objects at once. Inventory: 1901.7 MiB allocated of 2368.0 MiB reserved, largest row 384 MiB of fixed geometry pools at ~3% occupancy. | Done as an instrument; Island's churn is named and unattributed, and that is the open thread. See [`DOOM-J.md`](phase%20DOOM/DOOM-J.md). No format changed — the census says per-pixel cost, not bandwidth. There is still no bytes-per-frame counter. |
+| **K — fp16** | **Complete and reverted.** The splat-weight array and its scan were compiled at half precision behind `//!if TERRAIN_F16`. Two back-to-back Coastal repetitions: Shading −0.320 ms then **+0.156 ms** — the sign flips, both inside the band, nowhere near the 5% gate. | Done. See [`DOOM-K.md`](phase%20DOOM/DOOM-K.md). Capability probes kept; this adapter has `SHADER_F16` and `SUBGROUP`. The stage's "byte-comparable capture" gate is **not available** — DOOM-I measured 2.80% capture variance on an unchanged build — and any future precision experiment needs a different correctness gate. |
+| **L — subgroups** | **Complete and reverted.** Two of the three named sites are not cross-lane problems at all. Of the five workgroup reductions in tree, only auto exposure is resolvable (σ 3% of mean); its 256-wide tree became one `subgroupAdd` per lane. Two reps: −0.0003 and −0.0011 ms, both inside band — `resolve_exposure` runs in 1 workgroup of ~7 740. | Done. See [`DOOM-L.md`](phase%20DOOM/DOOM-L.md). **naga 30 rejects `enable subgroups;` and has no `subgroupElect`** — the toolchain, not the hardware, is what blocks a default subgroup path. |
+| **M — close-out** | **Complete.** Final 180/300 runs on both maps at 1920×1032: Coastal 20.385 ± 1.968 ms, Island 13.179 ± 0.836 ms, unattributed 0.6% / 1.1%. Kill switches inventoried, Help written for D and F, K and L deleted, C/E/G kept as default-off experiments. | Done. See [`DOOM-M.md`](phase%20DOOM/DOOM-M.md). **§9's budgets are not closed against**: DOOM-A was measured at 2560×1392 and every continuation run is at 1920×1032, so the baseline must be re-taken before the targets mean anything. Seven open threads are named there. |
+
+**Phase DOOM is closed.** D, H, I, J, K, L and M are complete; C, E and G
+remain as measured default-off experiments, and K and L were measured and
+deleted. The close-out, the kill-switch inventory and seven named open threads
+are in [`DOOM-M.md`](phase%20DOOM/DOOM-M.md).
+
+Two harness variables were added by this continuation and are documented in
+[`phase DOOM/README.md`](phase%20DOOM/README.md): `SOMNIUM_TIME_STATIC=1`
+(suppress the demo boat, so D's zero-work gate can be measured) and
+`SOMNIUM_VOXEL=1` (spawn the voxel terrain at map load, so H's streaming is
+visible to a timing run at all). Both are opt-in and neither changes normal
+play.

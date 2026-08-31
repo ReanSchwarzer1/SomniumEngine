@@ -47,6 +47,13 @@ pub struct RenderContext {
 /// the renderer falls back to the per-draw CPU loop instead.
 pub const GPU_DRIVEN_FEATURES: wgpu::Features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
 
+/// DOOM-G: GPU-authored draw counts for compacted indirect streams.
+///
+/// Optional even when the dense GPU-driven path is available. Without it the
+/// cull shader keeps zeroing `instance_count` in place and the visibility pass
+/// uses `multi_draw_indirect`, preserving the Phase 15 fallback exactly.
+pub const DRAW_COUNT_FEATURES: wgpu::Features = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+
 /// Feature needed to build and trace acceleration structures (Phase 24J).
 ///
 /// In wgpu 30 `EXPERIMENTAL_RAY_QUERY` still covers both building acceleration
@@ -88,6 +95,22 @@ pub const PIPELINE_STATS_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_STA
 /// Detect, do not demand — a GPU without BC still starts on the RGBA8 path.
 /// Never request this bit if the adapter lacks it.
 pub const BC_COMPRESSION_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC;
+
+/// DOOM-K. `enable f16;` in WGSL, and half-precision arithmetic in a shader.
+///
+/// Detected, never demanded, and requesting it does not change a single shader
+/// on its own: a pipeline has to be compiled with the narrower types before any
+/// of it reaches the GPU. The flag exists so the experiment can *ask* whether
+/// the device would allow it, which is a different question from whether it
+/// helps.
+pub const SHADER_F16_FEATURES: wgpu::Features = wgpu::Features::SHADER_F16;
+
+/// DOOM-L. Subgroup ballot, broadcast and reduction intrinsics in WGSL.
+///
+/// Same contract: detected and requested when present, and no default path may
+/// depend on it — a device without subgroups must take a scalar or
+/// workgroup-shared path that produces identical results.
+pub const SUBGROUP_FEATURES: wgpu::Features = wgpu::Features::SUBGROUP;
 
 /// Features FSR 3 needs on the device (detect, do not demand).
 ///
@@ -190,6 +213,21 @@ impl RenderContext {
             required_features
         };
 
+        // DOOM-G: counted submission is a second optional tier. The compacted
+        // stream is only a draw consumer; dense args remain authoritative for
+        // two-phase culling and diagnostics.
+        let counted_draws = gpu_driven && available_features.contains(DRAW_COUNT_FEATURES);
+        if counted_draws {
+            info!("GPU-counted indirect submission available");
+        } else if gpu_driven {
+            info!("GPU-counted indirect submission unavailable — keeping dense zero-count args");
+        }
+        let required_features = if counted_draws {
+            required_features | DRAW_COUNT_FEATURES
+        } else {
+            required_features
+        };
+
         // Phase 24J: same pattern — detect, do not demand.
         let ray_tracing = available_features.contains(RAY_TRACING_FEATURES);
         if ray_tracing {
@@ -241,6 +279,34 @@ impl RenderContext {
         }
         let required_features = if bc {
             required_features | BC_COMPRESSION_FEATURES
+        } else {
+            required_features
+        };
+
+        // DOOM-K and DOOM-L: detect, do not demand, and log either way. Both
+        // stages are experiments whose expected result is "no", and an
+        // experiment that cannot say whether the hardware would even allow it
+        // has not started.
+        let shader_f16 = available_features.contains(SHADER_F16_FEATURES);
+        if shader_f16 {
+            info!("Half-precision shader arithmetic available (f16)");
+        } else {
+            info!("Half-precision shader arithmetic unavailable — f32 only");
+        }
+        let required_features = if shader_f16 {
+            required_features | SHADER_F16_FEATURES
+        } else {
+            required_features
+        };
+
+        let subgroups = available_features.contains(SUBGROUP_FEATURES);
+        if subgroups {
+            info!("Subgroup operations available");
+        } else {
+            info!("Subgroup operations unavailable — scalar and workgroup paths only");
+        }
+        let required_features = if subgroups {
+            required_features | SUBGROUP_FEATURES
         } else {
             required_features
         };
@@ -375,6 +441,11 @@ impl RenderContext {
         self.features.contains(GPU_DRIVEN_FEATURES)
     }
 
+    /// Whether DOOM-G may issue `multi_draw_indirect_count`.
+    pub fn supports_counted_draws(&self) -> bool {
+        self.features.contains(DRAW_COUNT_FEATURES)
+    }
+
     /// Whether BC7 terrain packs may be uploaded (Phase XV-E).
     pub fn supports_bc_compression(&self) -> bool {
         self.features.contains(BC_COMPRESSION_FEATURES)
@@ -383,6 +454,16 @@ impl RenderContext {
     /// Whether FSR 3 may create `Rg16Float` storage images and load AMD SPIR-V.
     pub fn supports_fsr(&self) -> bool {
         self.features.contains(FSR_FEATURES)
+    }
+
+    /// Whether a shader may `enable f16` (DOOM-K).
+    pub fn supports_shader_f16(&self) -> bool {
+        self.features.contains(SHADER_F16_FEATURES)
+    }
+
+    /// Whether a shader may use subgroup intrinsics (DOOM-L).
+    pub fn supports_subgroups(&self) -> bool {
+        self.features.contains(SUBGROUP_FEATURES)
     }
 
     /// Resize the surface.

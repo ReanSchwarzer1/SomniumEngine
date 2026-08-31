@@ -76,6 +76,10 @@ pub mod fallback;
 pub mod ime;
 pub mod localize;
 pub mod markup;
+/// MORROWIND-G item 1: rasterising a glyph the shaper chose.
+pub mod raster;
+/// MORROWIND-G item 1: turning a string into positioned glyphs.
+pub mod shape;
 
 pub use fallback::{FaceCoverage, FallbackChain};
 pub use ime::{Composition, ImeEvent};
@@ -241,20 +245,26 @@ impl StyledRun {
 
 /// Whether the shaper is enabled.
 ///
-/// Reads `SOMNIUM_UI_SHAPER`, per Appendix A.5. **Default off**: turning it on
-/// changes every glyph position in the editor, and GHOSTFENCE has no golden
-/// reference to A/B against yet.
+/// Reads `SOMNIUM_UI_SHAPER`, per Appendix A.5. **Default on** since
+/// CS-CORRECTNESS #6: A.5 asks for the switch to be landed, A/B'd, and only
+/// then flipped, and that A/B was run — shaped chrome is tighter and correctly
+/// kerned at the same crispness, because the run origin is still snapped.
+///
+/// `SOMNIUM_UI_SHAPER=0` is the way back, and it is a real one: the
+/// per-character path is not a stub kept for the tests, it is what tracked text
+/// still uses and what every glyph falls back to when shaping cannot produce
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ShaperPolicy {
     /// `fontdue` per-character advances, block-origin snapped. Phase 27's
     /// behaviour, byte for byte.
-    #[default]
+    ///
+    /// Still the path for tracked text, where letter-spacing and mark
+    /// positioning genuinely disagree, and the fallback wherever shaping cannot
+    /// produce a glyph.
     PerCharacter,
     /// Shaped runs: sub-pixel advances within a run, the run origin snapped.
-    ///
-    /// **Not implemented.** Selecting it is how the A/B gets set up once there
-    /// is a golden image to compare against; until then it behaves as
-    /// [`Self::PerCharacter`] and says so.
+    #[default]
     Shaped,
 }
 
@@ -263,19 +273,22 @@ impl ShaperPolicy {
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var("SOMNIUM_UI_SHAPER").as_deref() {
+            Ok("0") => Self::PerCharacter,
             Ok("1") => Self::Shaped,
-            _ => Self::PerCharacter,
+            _ => Self::default(),
         }
     }
 
     /// Whether shaping is actually available.
     ///
-    /// Always `false` today. The method exists so the call site that will
-    /// branch on it is written once, now, rather than retrofitted — and so
-    /// `Shaped` cannot be mistaken for "working" by reading the enum.
+    /// True for [`Self::Shaped`] since CS-CORRECTNESS #6 landed
+    /// [`crate::text::shape`]. The method stays because the *policy* and the
+    /// *implementation* are still two questions: a build with no faces loaded
+    /// answers the second one differently, and the call site should ask rather
+    /// than assume.
     #[must_use]
     pub fn is_available(self) -> bool {
-        false
+        self == Self::Shaped
     }
 }
 
@@ -358,11 +371,18 @@ mod tests {
         assert_eq!(run.motion, Motion::None);
     }
 
-    /// The shaper is off, and says so, rather than being selectable-but-broken.
+    /// The shaper is on, and there is a real way back.
+    ///
+    /// Appendix A.5 asked for the switch to be landed, A/B'd and only then
+    /// flipped. All three happened. The way back has to keep working — a
+    /// default nobody can undo is not a default, it is a rewrite.
     #[test]
-    fn the_shaper_is_off_by_default_and_admits_it() {
-        assert_eq!(ShaperPolicy::default(), ShaperPolicy::PerCharacter);
-        assert!(!ShaperPolicy::Shaped.is_available());
-        assert!(!ShaperPolicy::PerCharacter.is_available());
+    fn the_shaper_is_on_by_default_and_can_be_turned_off() {
+        assert_eq!(ShaperPolicy::default(), ShaperPolicy::Shaped);
+        assert!(ShaperPolicy::Shaped.is_available());
+        assert!(
+            !ShaperPolicy::PerCharacter.is_available(),
+            "the per-character path is the fallback, not a second shaper"
+        );
     }
 }

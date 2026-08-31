@@ -57,7 +57,7 @@ impl GpuCullAabb {
 
 /// Culling parameters uniform: the six frustum planes plus the draw count.
 ///
-/// **Size**: 112 bytes.
+/// **Size**: 224 bytes.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct GpuCullParams {
@@ -81,7 +81,11 @@ pub struct GpuCullParams {
     pub hiz_size: [f32; 2],
     /// Levels in the pyramid, so the shader can clamp its mip choice.
     pub hiz_mip_count: u32,
-    pub _pad: u32,
+    /// Dense argument boundary between single- and double-sided pipelines.
+    pub single_sided_args: u32,
+    /// DOOM-G: `1` appends survivors to GPU-counted compact streams.
+    pub counted_draws: u32,
+    pub _pad: [u32; 3],
     /// World-space camera position, for the Phase 15F normal-cone test
     /// (`w` unused).
     pub camera_pos: [f32; 4],
@@ -708,14 +712,16 @@ mod layout_tests {
         //   view_proj         mat4x4<f32>           offset 112 (align 16), size 64
         //   hiz_size          vec2<f32>             offset 176
         //   hiz_mip_count     u32                   offset 184
-        //   _pad              u32                   offset 188
-        //   camera_pos        vec4<f32>             offset 192, size 16
-        //                                           total  208
+        //   single_sided_args u32                   offset 188
+        //   counted_draws     u32                   offset 192
+        //   implicit padding                        offset 196, size 12
+        //   camera_pos        vec4<f32>             offset 208, size 16
+        //                                           total  224
         //
         // A mismatch here does not fail to compile or validate — the shader
         // simply reads the wrong words and culls the wrong things, which shows
         // up as geometry flickering out rather than as an error.
-        assert_eq!(std::mem::size_of::<GpuCullParams>(), 208);
+        assert_eq!(std::mem::size_of::<GpuCullParams>(), 224);
         assert_eq!(std::mem::align_of::<GpuCullParams>(), 4);
 
         let p = GpuCullParams {
@@ -727,7 +733,9 @@ mod layout_tests {
             view_proj: [[0.0; 4]; 4],
             hiz_size: [0.0; 2],
             hiz_mip_count: 0,
-            _pad: 0,
+            single_sided_args: 0,
+            counted_draws: 0,
+            _pad: [0; 3],
             camera_pos: [0.0; 4],
         };
         let base = &p as *const _ as usize;
@@ -737,6 +745,8 @@ mod layout_tests {
         assert_eq!(off(&p.view_proj as *const _ as *const u8), 112);
         assert_eq!(off(&p.hiz_size as *const _ as *const u8), 176);
         assert_eq!(off(&p.hiz_mip_count as *const _ as *const u8), 184);
-        assert_eq!(off(&p.camera_pos as *const _ as *const u8), 192);
+        assert_eq!(off(&p.single_sided_args as *const _ as *const u8), 188);
+        assert_eq!(off(&p.counted_draws as *const _ as *const u8), 192);
+        assert_eq!(off(&p.camera_pos as *const _ as *const u8), 208);
     }
 }
