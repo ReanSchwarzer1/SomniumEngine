@@ -43,6 +43,11 @@ authors = ["Somnium Engine Contributors"]
 # `dep = { workspace = true }` to keep versions in sync.
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
+# -- Build-time only --------------------------------------------------------
+# Links the engine mark into the executable as a Windows icon resource. Build
+# dependency of the editor binary alone; nothing in the engine links it.
+winresource = "0.1"
+
 # -- Internal crates --------------------------------------------------------
 somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }

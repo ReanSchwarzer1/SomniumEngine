@@ -12,7 +12,13 @@ pub const DETAILS_MAX: f32 = 520.0;
 /// Splitter thickness, twice — the tool splitter and the content splitter.
 const SPLITTERS: f32 = 12.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// What the shell looked like when the editor last closed: the widths a
+/// splitter drag records, and which panels were in windows of their own.
+///
+/// Deliberately not `Copy`. It stopped being a handful of floats when it
+/// gained the floating set, and a hidden clone of a growing struct on every
+/// splitter drag is not something a derive should be deciding.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChromeLayout {
     pub tools: f32,
     /// Viewport width in pixels. **Derived**, not authoritative: it is what the
@@ -27,6 +33,18 @@ pub struct ChromeLayout {
     #[serde(default)]
     pub details: f32,
     pub outliner: f32,
+    /// Panels that were in their own window when the editor last closed.
+    ///
+    /// MORROWIND-J step 2. Stored by the panel's own slug rather than by
+    /// index, so a build that adds a floatable panel reads an old file without
+    /// mistaking one panel for another; an unrecognised name is dropped on
+    /// load, which is what makes the file safe to hand backwards as well.
+    ///
+    /// `serde(default)` because every layout file written before this existed
+    /// has no such key, and an editor that would not open over a missing
+    /// key would be a worse editor than one that opens with nothing floating.
+    #[serde(default)]
+    pub floating: Vec<String>,
 }
 
 impl Default for ChromeLayout {
@@ -36,6 +54,7 @@ impl Default for ChromeLayout {
             viewport: 0.0,
             details: DETAILS_DEFAULT,
             outliner: 300.0,
+            floating: Vec::new(),
         }
     }
 }
@@ -51,6 +70,13 @@ impl ChromeLayout {
     /// deliberate splitter drag, because a drag inside the range round-trips
     /// unchanged.
     pub fn resolved(mut self, window_w: f32, window_h: f32) -> Self {
+        // A name this build does not know is a panel it cannot open, and
+        // carrying it would leave the file claiming a window that never
+        // appears. Duplicates go the same way: the manager keys on the panel.
+        let mut seen = std::collections::BTreeSet::new();
+        self.floating.retain(|name| {
+            crate::floating::FloatingKind::from_slug(name).is_some() && seen.insert(name.clone())
+        });
         self.tools = self.tools.clamp(120.0, 280.0);
         self.outliner = self.outliner.clamp(120.0, (window_h * 0.6).max(160.0));
 
@@ -139,12 +165,12 @@ pub fn load() -> ChromeLayout {
         .unwrap_or_default()
 }
 
-pub fn save(layout: ChromeLayout) {
+pub fn save(layout: &ChromeLayout) {
     let path = layout_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(&layout) {
+    if let Ok(json) = serde_json::to_string_pretty(layout) {
         let _ = std::fs::write(path, json);
     }
 }
@@ -202,6 +228,59 @@ mod tests {
         }
     }
 
+    // ── MORROWIND-J: which panels were in windows of their own ────────────
+
+    #[test]
+    fn a_layout_file_from_before_floating_windows_still_loads() {
+        // Every file on disk today has no such key. An editor that refused to
+        // open over a missing one would be a worse editor than one that opens
+        // with nothing floating, which is also what it looked like when the
+        // file was written.
+        let legacy = r#"{"tools":168.0,"viewport":0.0,"details":340.0,"outliner":300.0}"#;
+        let parsed: ChromeLayout = serde_json::from_str(legacy).expect("parses");
+        assert!(parsed.floating.is_empty());
+    }
+
+    #[test]
+    fn a_panel_this_build_does_not_have_is_dropped_rather_than_carried() {
+        // A file written by a later build names a panel this one cannot open.
+        // Carrying it would leave the layout claiming a window that never
+        // appears, and there would be nothing to close.
+        let ahead = ChromeLayout {
+            floating: vec![
+                "outliner".into(),
+                "timeline".into(),
+                "outliner".into(),
+                "".into(),
+            ],
+            ..ChromeLayout::default()
+        };
+        let r = ahead.resolved(1920.0, 1080.0);
+        assert_eq!(
+            r.floating,
+            vec!["outliner".to_string()],
+            "unknown and duplicate dropped"
+        );
+    }
+
+    #[test]
+    fn every_floatable_panel_survives_the_file() {
+        for kind in crate::floating::FloatingKind::ALL {
+            let stored = ChromeLayout {
+                floating: vec![kind.slug().to_owned()],
+                ..ChromeLayout::default()
+            };
+            let text = serde_json::to_string(&stored).expect("serialises");
+            let back: ChromeLayout = serde_json::from_str(&text).expect("parses");
+            let back = back.resolved(1920.0, 1080.0);
+            assert_eq!(
+                back.floating,
+                vec![kind.slug().to_string()],
+                "{kind:?} did not survive the round trip"
+            );
+        }
+    }
+
     #[test]
     fn a_deliberate_drag_inside_the_range_round_trips() {
         // Resolving must not fight the user: a stored layout whose Details
@@ -211,8 +290,9 @@ mod tests {
             viewport: 1920.0 - 200.0 - SPLITTERS - 380.0,
             details: 380.0,
             outliner: 300.0,
+            ..ChromeLayout::default()
         };
-        assert_eq!(stored.resolved(1920.0, 1080.0), stored);
+        assert_eq!(stored.clone().resolved(1920.0, 1080.0), stored);
     }
 
     #[test]
@@ -240,6 +320,7 @@ mod tests {
             viewport: 2040.0,
             details: 0.0,
             outliner: 300.0,
+            ..ChromeLayout::default()
         };
         let r = legacy.resolved(1280.0, 720.0);
         assert!(

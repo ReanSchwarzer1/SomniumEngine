@@ -533,7 +533,23 @@ pub enum EditorEvent {
     ///
     /// The host acts on this because only the host has an `ActiveEventLoop`,
     /// which is the one thing a window cannot be created without.
-    FloatPanel(crate::floating::FloatingKind),
+    ///
+    /// The point is where the window should appear, in the editor window's
+    /// physical pixels, and it is `None` for the menu and the header button:
+    /// neither has a place in mind, and a window that opened under the pointer
+    /// because that is where the menu happened to be is a window in the way.
+    FloatPanel(crate::floating::FloatingKind, Option<(f32, f32)>),
+    /// A panel was carried out of its own window by its header and let go.
+    ///
+    /// Whether that landed over the editor is a question about two
+    /// operating-system windows, so the host answers it: over the editor means
+    /// dock, anywhere else means the window simply moved.
+    PanelDropped(crate::floating::FloatingKind),
+    /// Close the window showing a panel and return it to the dock.
+    ///
+    /// The manager has already collapsed the dock's side of it; this is the
+    /// half only the host can do, because only the host owns the window.
+    ClosePanelWindow(crate::floating::FloatingKind),
     /// Write the localisation table back to the project, one file per locale.
     ///
     /// Carries nothing: the host asks [`crate::UiManager::localisation_table`]

@@ -37,6 +37,16 @@ pub struct Splitter {
 impl Control for Splitter {
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let bar = theme::SPLITTER_THICKNESS;
+        // One child is not a split. MORROWIND-J step 2: a panel that has left
+        // for its own window leaves its neighbour alone in here, and a
+        // neighbour still measured against half the space renders as a panel
+        // with a hole beside it.
+        if widget.children.len() < 2 {
+            if let Some(&only) = widget.children.first() {
+                ctx.measure_child(only, available);
+            }
+            return available;
+        }
         match self.orientation {
             SplitterOrientation::Horizontal => {
                 let first = self.first_size.clamp(
@@ -70,6 +80,20 @@ impl Control for Splitter {
 
     fn arrange_override(&self, widget: &Widget, ctx: &mut LayoutCtx, final_size: Vec2) -> Vec2 {
         let bar = theme::SPLITTER_THICKNESS;
+        if widget.children.len() < 2 {
+            if let Some(&only) = widget.children.first() {
+                ctx.arrange_child(
+                    only,
+                    Rect::new(
+                        widget.actual_local_position.x,
+                        widget.actual_local_position.y,
+                        final_size.x,
+                        final_size.y,
+                    ),
+                );
+            }
+            return final_size;
+        }
         let ox = widget.actual_local_position.x;
         let oy = widget.actual_local_position.y;
         match self.orientation {
@@ -118,6 +142,11 @@ impl Control for Splitter {
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+        // Nothing to divide, so no divider: a hairline across a panel that
+        // reaches both edges is a line with nothing on one side of it.
+        if widget.children.len() < 2 {
+            return;
+        }
         let b = widget.screen_bounds();
         let bar = theme::SPLITTER_THICKNESS;
         let rect = match self.orientation {
@@ -208,6 +237,12 @@ impl Control for Splitter {
 
 impl Splitter {
     fn hit_rect(&self, widget: &Widget) -> Rect {
+        // A divider that is not drawn must not be draggable either, or the
+        // panel filling a one-child splitter has an invisible resize cursor
+        // running down the middle of it.
+        if widget.children.len() < 2 {
+            return Rect::new(0.0, 0.0, 0.0, 0.0);
+        }
         let r = self.bar_rect(widget);
         const SLOP: f32 = 4.0;
         match self.orientation {

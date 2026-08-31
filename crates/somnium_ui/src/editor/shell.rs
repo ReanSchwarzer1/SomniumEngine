@@ -63,6 +63,64 @@ fn command_tooltip(id: &str) -> String {
 
 // ── Editor layout builder ─────────────────────────────────────────────────────
 
+/// A panel header: its caption, and the button that sends it to its own window.
+///
+/// MORROWIND-J step 2. One helper rather than the same grid written per panel,
+/// so every header puts the button in the same place at the same size. The
+/// caption stretches and the button is `auto`, which is what keeps the glyph
+/// pinned to the right edge whatever the panel is called.
+fn panel_header(
+    ui: &mut UserInterface,
+    header: NodeHandle,
+    caption: &str,
+    font_id: u8,
+) -> NodeHandle {
+    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let grid = ui.add_node(grid, header);
+
+    let text = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
+        Thickness {
+            left: 8.0,
+            top: 5.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
+    ))
+    .with_role(TextRole::SectionCaps)
+    .with_text(caption)
+    .with_font_id(font_id)
+    .build();
+    ui.add_node(text, grid);
+
+    let button = ButtonBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
+            .with_width(20.0)
+            .with_height(18.0)
+            .with_margin(Thickness::axes(4.0, 2.0))
+            .with_background(theme::TRANSPARENT),
+    )
+    .build();
+    let button = ui.add_node(button, grid);
+    let glyph = ImageBuilder::new(
+        WidgetBuilder::new()
+            .with_width(12.0)
+            .with_height(12.0)
+            .with_margin(Thickness::uniform(3.0)),
+    )
+    .with_icon(IconId::Float)
+    .with_size(12.0)
+    .with_tint(theme::active().semantic.text.secondary.bytes())
+    .build();
+    ui.add_node(glyph, button);
+    button
+}
+
 pub(crate) fn build_editor_layout(
     ui: &mut UserInterface,
     font_id: u8,
@@ -561,10 +619,32 @@ pub(crate) fn build_editor_layout(
     .build();
     let vp_bar_h = ui.add_node(vp_bar, viewport_handle);
 
-    let vp_stack = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .with_orientation(Orientation::Horizontal)
+    // Two columns, and the split is the point. A horizontal stack that runs out
+    // of room does not shrink; it lays its last children out past the edge,
+    // where they clip to nothing. That is a bar which silently loses whichever
+    // control was added most recently, and the one added most recently is the
+    // one that puts the viewport back in the window.
+    //
+    // So: the scrolling content stretches and truncates, and the actions get an
+    // `auto` column they always fit in.
+    let vp_bar_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
         .build();
-    let vp_stack_h = ui.add_node(vp_stack, vp_bar_h);
+    let vp_bar_grid_h = ui.add_node(vp_bar_grid, vp_bar_h);
+
+    let vp_stack = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            // Truncates at its cell rather than drawing over the actions.
+            .with_clip_to_bounds(true)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let vp_stack_h = ui.add_node(vp_stack, vp_bar_grid_h);
 
     let cam_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 10.0,
@@ -764,10 +844,22 @@ pub(crate) fn build_editor_layout(
     );
     ui.set_visibility(time_cluster, false);
 
+    // The bar's reserved end: whatever the middle is showing, these two are
+    // in the window.
+    let vp_actions = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let vp_actions_h = ui.add_node(vp_actions, vp_bar_grid_h);
+
     // The overflow chevron, shown only when the cluster is hidden.
     let (snap_overflow, _) = labeled_icon_button(
         ui,
-        vp_stack_h,
+        vp_actions_h,
         IconId::ChevronDown,
         "Snap",
         "Snapping and gizmo options.",
@@ -775,6 +867,18 @@ pub(crate) fn build_editor_layout(
         22.0,
     );
     ui.set_visibility(snap_overflow, false);
+
+    // Detaching the viewport takes this bar with it, which is what makes the
+    // button in the floating window the way back.
+    let (viewport_float, _) = labeled_icon_button(
+        ui,
+        vp_actions_h,
+        IconId::Float,
+        "Float",
+        "Move the viewport into its own window.",
+        font_id,
+        22.0,
+    );
 
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
@@ -1056,16 +1160,7 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let out_hdr_h = ui.add_node(out_hdr, out_grid_h);
-    let out_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 5.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_role(TextRole::SectionCaps)
-    .with_text("OUTLINER")
-    .build();
-    ui.add_node(out_hdr_txt, out_hdr_h);
+    let outliner_float = panel_header(ui, out_hdr_h, "OUTLINER", font_id);
 
     let outliner_search = {
         let n = SearchBoxBuilder::new(
@@ -1121,16 +1216,7 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let ins_hdr_h = ui.add_node(ins_hdr, ins_grid_h);
-    let ins_hdr_txt = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 5.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
-    .with_role(TextRole::SectionCaps)
-    .with_text("DETAILS")
-    .build();
-    ui.add_node(ins_hdr_txt, ins_hdr_h);
+    let details_float = panel_header(ui, ins_hdr_h, "DETAILS", font_id);
 
     let inspector_search = {
         let n = SearchBoxBuilder::new(
@@ -1235,16 +1321,30 @@ pub(crate) fn build_editor_layout(
     .build();
     let log_hdr_h = ui.add_node(log_hdr_border, log_panel);
 
-    let log_header = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-        left: 8.0,
-        top: 4.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
+    // A Border stacks its children, so the caption and the toolbar were drawn
+    // on top of each other. Invisible while the docked panel is wide enough for
+    // the toolbar to sit clear of the title, and not invisible at all in a 900
+    // px window, where the first filter chip lands on the word "Output".
+    let log_hdr_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+        .add_row(Row::stretch())
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .add_column(Column::auto())
+        .build();
+    let log_hdr_grid_h = ui.add_node(log_hdr_grid, log_hdr_h);
+
+    let log_header = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
+        Thickness {
+            left: 8.0,
+            top: 4.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
+    ))
     .with_role(TextRole::SectionCaps)
     .with_text("Output Log")
     .build();
-    ui.add_node(log_header, log_hdr_h);
+    ui.add_node(log_header, log_hdr_grid_h);
 
     // ── CONTROL-I: the log's own toolbar ────────────────────────────────────
     //
@@ -1253,12 +1353,14 @@ pub(crate) fn build_editor_layout(
     // beside a title, and a second 22 px band would cost a line of log.
     let log_tools = StackPanelBuilder::new(
         WidgetBuilder::new()
+            .with_row(0)
+            .with_column(1)
             .with_horizontal_alignment(HorizontalAlignment::Right)
             .with_background(theme::TRANSPARENT),
     )
     .with_orientation(Orientation::Horizontal)
     .build();
-    let log_tools = ui.add_node(log_tools, log_hdr_h);
+    let log_tools = ui.add_node(log_tools, log_hdr_grid_h);
 
     let mut log_severity_chips = Vec::new();
     for severity in crate::log::LogSeverity::ALL {
@@ -1325,6 +1427,27 @@ pub(crate) fn build_editor_layout(
         IconId::Undo,
         "History",
         "The undo history. Click a row to go there.",
+        font_id,
+        18.0,
+    );
+    // Its own column rather than the end of the toolbar. The toolbar is nine
+    // controls long and truncates in a narrow window; the control that puts the
+    // panel back is not one to lose that way.
+    let log_actions = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(2)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
+    let log_actions = ui.add_node(log_actions, log_hdr_grid_h);
+    let (log_float, _) = labeled_icon_button(
+        ui,
+        log_actions,
+        IconId::Float,
+        "Float",
+        "Move the Output Log into its own window.",
         font_id,
         18.0,
     );
@@ -1970,6 +2093,18 @@ pub(crate) fn build_editor_layout(
         status_stats,
         status_stats_button,
         vp_bar_h,
+        title_drag_area: menu_grid_h,
+        outliner_grid: out_grid_h,
+        details_grid: ins_grid_h,
+        outliner_header: out_hdr_h,
+        details_header: ins_hdr_h,
+        log_header: log_hdr_h,
+        outliner_float,
+        details_float,
+        log_float,
+        viewport_float,
+        vp_stack: vp_stack_h,
+        vp_actions: vp_actions_h,
         snap_cluster,
         snap_grid_combo,
         snap_angle_combo,

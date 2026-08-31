@@ -1,7 +1,9 @@
 # MORROWIND-J — docking, floating windows, multiple viewports
 
-**Status:** steps 1, 2 and 3 of 4 complete, 2026-08-31. The dock tree exists
-and is load-bearing; the Output Log can be pulled out into a real OS window; the
+**Status:** steps 1, 2 and 3 of 4 complete, 2026-08-31. The dock tree exists and
+is load-bearing; the Outliner, Details, the viewport and the Output Log can each
+be pulled out into a real OS window, by a button, by the Window menu or by
+dragging the panel's header, and the arrangement survives a restart; the
 renderer draws several views per frame, each with its own camera, and the
 default is still one full-size viewport.
 
@@ -10,13 +12,13 @@ default is still one full-size viewport.
 | Step | State |
 |---|---|
 | 1. A dock tree (tiles, splitters, tabs) with the current arrangement as the default | **Done** — this record |
-| 2. Floating windows as real OS windows via winit | **Done** for the Output Log — see below |
+| 2. Floating windows as real OS windows via winit | **Done** for every major panel, by button, menu or header drag — see below |
 | 3. Multiple viewports, each with its own camera, view mode and overlays | **Done** — see below |
 | 4. Layout persistence, named workspaces, reset | Persistence **done**; workspaces and reset already shipped in Phase 26-Zeta-F |
 
 Both expensive halves are done. Step 3 — *"the renderer learns to render more
-than one view per frame"* — is measured; step 2 is real OS windows, for one panel
-so far and by a mechanism that generalises.
+than one view per frame"* — is measured; step 2 is real OS windows, for every
+panel a person would want out, by moving the panel rather than copying it.
 
 ## The constraint that shaped step 1
 
@@ -124,80 +126,354 @@ resolved rectangles; nothing in it needs the projection to have been wrong.
 
 ## Step 2 — a panel in its own OS window
 
-**Done for the Output Log, 2026-08-31.** A real `winit` child window with its
-own `wgpu` surface, its own widget tree and its own pass, opened from the Window
-menu and returned to the dock when it is closed.
+**Done, 2026-08-31.** The Outliner, Details, the viewport and the Output Log
+each open as a real `winit` child window with its own `wgpu` surface, from a
+button on the panel's own header or from the Window menu. *Default Layout*
+brings them all home, and so does closing a window.
 
-### A floating panel is not a widget
+### A second window is a second surface, not a second widget tree
 
-That is the whole shape of the problem. A second OS window is a second
-**surface**, and a surface is what a `UiPass` renders into — so a floating panel
-owns a parallel stack, and the interesting question is where to cut it:
+A surface is what a `UiPass` renders into, so a floating panel does need a
+parallel stack on the platform side. The question was where to cut it.
 
 ```text
    main window            floating window
    ───────────            ───────────────
    winit::Window          winit::Window        ┐ somnium_core: the platform
-   wgpu::Surface          wgpu::Surface        │ — windows, surfaces, configs
-   wgpu::SurfaceConfig    wgpu::SurfaceConfig  ┘
-   ─────────────────────────────────────────────
-   UserInterface          UserInterface        ┐ somnium_ui: a widget tree
-   UiPass                 UiPass               ┘ — and how to paint one
+   wgpu::Surface          wgpu::Surface        ┘ — windows and surfaces
+   ─────────────╲──────────────────╱────────────
+      one UserInterface, one DrawingContext, one UiPass
 ```
 
-`somnium_ui::floating::FloatingPanel` is everything below the line and nothing
-above it, which is what lets the rebuild logic — the part with the bugs — be
-tested with no GPU and no event loop at all. `somnium_core` holds the window and
-the surface, because it always has.
+The first cut of this put a whole second `UserInterface` in the floating window
+and rebuilt the panel there from its data. That shipped, for the Output Log,
+and it was the wrong seam.
 
-### Why the panel is rebuilt rather than moved
+The pass is shared for a reason that is not thrift. A `UiPass` owns the GPU copy
+of the font atlas, the icon atlas, the thumbnail atlas and every registered
+texture, and each of those uploads is guarded by a dirty flag that the **first**
+pass to prepare clears. A second pass therefore draws against blank atlases, and
+the result is not subtle and not obviously about atlases: panels, sliders,
+check boxes and scroll bars all appear, and not one glyph or icon does. It reads
+as a font that failed to load in the second window only.
 
-A widget tree belongs to one `UserInterface`: handles are indices into its pool,
-and a node cannot be re-parented across two of them. So detaching a panel means
-**building it again** in the new tree from the same data — and that is only
-possible when the panel's content is a *store* rather than a pile of widgets.
+So one pass, prepared once per window, and the ordering is load-bearing: the
+editor's own frame is recorded **and submitted** before any floating window
+prepares. Staged writes apply at the start of the submit that follows them, so
+the editor's submit sees the editor's data and each window's submit sees its
+own.
 
-`log::OutputLog` is exactly that, and it is why the Output Log is the panel that
-floats first. A panel whose state lives in its widgets could not be detached
-without first being given somewhere else to keep it.
+### Why the panel is moved rather than rebuilt
 
-### Three decisions the tests hold down
+Rebuilding only works for a panel whose content is a *store*. `log::OutputLog`
+is one and the Outliner's projected rows are one, which is why those two floated
+first. Details is not. Its rows are generated from reflected schemas against the
+live selection, and each control is wired to an editing path through a map keyed
+on that control's own handle:
 
-- **The cache key is the newest entry's id, not the row count.** A log at
-  capacity loses a line for every line it gains, so a length-keyed cache would
-  freeze the window the moment the buffer first filled. A busy editor logs every
-  frame, and a second window that rebuilt a thousand rows to add one would cost
-  more than the editor beside it.
-- **Closing returns the panel to the dock.** A floated panel hides its docked
-  copy — two live Output Logs is not a feature, and the bottom row showing an
-  empty one beside a full window is the kind of wrong that makes people distrust
-  both. Closing the window puts it back.
-- **A zero-sized surface is a validation error, not a small one**, and
-  minimising a window is how it happens.
-
-### Two bugs, and the second one was invisible
-
-**A queued message nobody pumps is a message thrown away.**
-`UserInterface::process_os_event` does not dispatch: it *queues* a `UiMessage`,
-and `update` is what delivers it. The panel's `draw` laid out and painted
-without pumping, so every wheel event was accepted, queued, and dropped on the
-next frame. The window looked entirely correct and would not scroll.
-
-Worse, it defeated the obvious check. A screenshot before and after scrolling
-shows different text either way, because the log keeps growing underneath, so
-"the content moved" proves nothing. What settles it is a test that fails without
-the fix:
-
-```rust
-panel.draw();
-let top = panel.rows_origin();
-panel.ui.send(/* MouseWheel, delta -600 */);
-panel.draw();
-assert!(panel.rows_origin() < top);
+```text
+  msg.destination ──> generated_bindings ──> (StableId, FieldId, edit)
+                      generated_rows          ──> the world
+                      generated_asset_choices
 ```
 
-Removing the two `update` calls turns that into `the rows did not move: 0 then
-0`, which is the only evidence worth having.
+A second tree means second handles, so it means a second copy of that wiring,
+and then two copies to keep honest against every schema change. The viewport is
+worse: it is a hole the renderer draws through, and there is nothing to rebuild
+at all.
+
+So the panel is **detached** instead. It is unlinked from its parent in the tree
+it already lives in, given a root of its own, and laid out against the floating
+window's size:
+
+```text
+                    one UserInterface, one pool of handles
+
+   window root ── outer grid ── content split ── right split ── OUTLINER
+   detached root ─────────────────────────────────────────────── DETAILS
+                                                                 ↑
+                                              same handles as an hour ago,
+                                              so the same bindings, the same
+                                              message routes, the same gestures
+```
+
+`UserInterface::detach` / `reattach` / `draw_detached` / `set_input_root` is the
+whole mechanism, and `UiManager::panel_root` is the only table that says which
+piece of the tree each panel is. Everything else about floating is the same four
+lines whichever panel it is.
+
+What it buys:
+
+- **A floating panel is not a lesser copy.** The floating Outliner has the
+  filters, the context menu and the drag-and-drop, because it is the docked one.
+- **The dock needs no compensating adjustment.** A detached node is out of its
+  parent's child list, so a splitter left with one child gives it the column.
+  The rebuild version had to hide the node *and* drive the splitter to zero, and
+  even then a header and one row stayed visible, because a splitter clamps to
+  what its child says it needs.
+- **`floating.rs` lost the rebuild path entirely** — 570 lines down to an enum
+  and its names — and the Outliner stopped cloning its rows every refresh to
+  feed a copy that no longer exists.
+
+### Laid out at the window's origin, which is the trick
+
+A detached subtree is arranged into `Rect::new(0, 0, w, h)` of the window
+hosting it. The surface's coordinates and the widget's coordinates are then the
+same numbers, so drawing translates nothing and hit-testing translates nothing —
+`set_input_root` moves where picking *starts*, and that is all. It is also what
+lets the editor's viewport tools work in a window the editor does not own: this
+window's cursor position and `viewport_physical_rect` are already in one space.
+
+Focus and pointer capture stay shared on purpose. A drag begun in a floating
+window and finished over the main one is one gesture, and two independent
+capture states would cut it in half.
+
+### The root each detached panel gets, and why
+
+A popup is placed by being a child of a root — a root arranges its children at
+the position they ask for, rather than into a cell. Once there is more than one
+window there is more than one root, and a combo box in a floating Details would
+otherwise drop its list into the main window, at coordinates that meant
+something in the other one.
+
+So `detach` builds a second root, with the same control the window's own root
+uses, and `Control::popup_anchor` is the hook that finds popups hanging off the
+wrong one. Defaulted on the trait, overridden by `Popup`, because the popup
+already knows its anchor and a registry beside it would be a second place for
+the answer to be wrong. `reattach` moves any stray back to the window's root
+before freeing the host: a popup destroyed underneath the control that owns it
+is a dangling handle in that control.
+
+### The viewport, which is not only widgets
+
+Its chrome — the context bar, the overlays, the profiler panel, the axis
+gizmo — detaches like any other panel. The picture under it does not.
+
+The picture is not recorded twice. The floating window's swapchain image is
+acquired *before* the editor's encoder exists, and handed to
+`render_with_game_ui` as a `SceneTarget`; everything from the visibility pass to
+the particles then lands there instead, and only the editor's chrome still goes
+to the editor's window.
+
+```text
+  acquire viewport window's image ──────────────┐
+                                                │
+  render_with_game_ui(ctx, ui, window, ui, target)
+     passes 1..8   scene, shadows, shading, post  ──> target
+     8.5..8.8      gizmo, outline, light gizmos, particles ──> target
+     9             menus, panels, status bar     ──> this window
+                                                │
+  render_floating: the context bar over it, then present ──┘
+```
+
+The first version of this recorded the scene a second time for the second
+window, which works and costs a whole extra frame of scene work — and puts the
+floating viewport on the *secondary*-view path, without TAA, without FSR and
+without ReSTIR's history, because all three are bound to one camera and one
+rectangle. Redirecting keeps it on the primary path, the one the editor has
+always used, and leaves the editor's own window with no scene to draw at all.
+
+Three consequences worth stating rather than discovering:
+
+- **The editor's swapchain has to be cleared.** Nothing draws a scene into it
+  any more and the UI pass loads rather than clears, so without an explicit
+  clear it keeps whatever was in that buffer two frames ago. On a
+  triple-buffered surface that reads as a flicker behind the panels.
+- **The main window stops tiling.** `viewport_physical_rect` reports the *other*
+  window's rectangle once the viewport is floated, so a four-up layout tiled
+  against it would put views wherever those numbers land in this swapchain.
+  While the viewport is out, the frame takes the whole-surface view.
+- **The internal targets follow the window that holds the scene.** They are
+  sized from the editor's swapchain, and a floating viewport is a different
+  size; `resize_scene_targets` re-points them on float, on dock, and on that
+  window's own resize.
+
+### A panel window is owned, not merely second
+
+A floating panel created as an ordinary top-level window sits *behind* the
+editor the moment the editor is clicked. So a panel pulled out vanished when it
+was used, which is exactly when it was wanted, and it read as the window having
+minimised itself.
+
+`with_owner_window` is the whole fix. From MSDN: an owned window is always above
+its owner in the z-order, and is hidden when its owner is minimised. Both halves
+are wanted. A tool window that can be buried under the thing it is a tool for is
+not a tool window, and one that stays on screen after the editor is minimised is
+litter.
+
+### The editor's face
+
+Two icons and two places, and they are not the same place.
+
+| shown by | comes from | covers |
+|---|---|---|
+| a running window | `with_window_icon`, `with_taskbar_icon` | taskbar button, alt-tab, window list |
+| the file | an icon resource in the binary | Explorer, a shortcut pinned before launch |
+
+Both draw `assets/brand/somnium-s-eclipse.svg`, which is the mark the title bar
+already draws. One drawing rather than a hand-made bitmap beside it, because a
+mark that drifts from the one on screen reads as two applications.
+
+Windows keeps `ICON_SMALL` and `ICON_BIG` separately and setting only the small
+one leaves a blurred upscale in the place people actually look, so both are set.
+The resource is a committed `.ico` at six sizes, written by
+`somnium_ui::brand_ico` and regenerated by
+`cargo run -p somnium_ui --example brand_icon`. Its container is written here
+rather than taken from a dependency: an entry may hold a PNG, which would be
+smaller, but pulling in an encoder for a file that changes about once a year is
+a poor trade, and the BMP payload is a header, the pixels bottom-up, and a mask
+that 32-bit entries do not use. Three tests hold the directory down, because a
+wrong offset does not fail loudly: the icon simply does not appear, in a place
+nothing in this repository can look at.
+
+### Every window is on its own display
+
+The shell has laid out in **logical units** since Phase 27:
+`reposition_panels` divides by the window's scale factor and hands the tree the
+result, and `ui_scale` is applied at the two boundaries where the operating
+system counts device pixels, pointer positions coming in and the scissor rect
+going out. `FontAtlas::render_scale`'s own doc comment still said the opposite
+long after it stopped being true, which is how the remaining gap was mis-stated
+twice before anyone read the code.
+
+What was actually missing was a second display. Each floating window now carries
+its own scale factor, is laid out by it, and converts the pointer positions it
+sends with the same one. That pairing is the half that matters: a window laid
+out at one factor and clicked at another responds a fraction of the way from
+where it was touched, and the error grows across the panel rather than being a
+constant nobody would notice.
+
+One thing stays shared, because it has to. There is one glyph atlas, so it has
+one raster scale, and the only safe choice is the largest in play: a glyph
+rasterised for 100% and drawn at 150% is soft, where one rasterised for 150% and
+drawn at 100% is merely supersampled.
+
+### The layout remembers which panels were out
+
+Stored in `editor_layout.json` beside the splitter widths, by the panel's own
+slug rather than by index, so a build that adds a floatable panel reads an older
+file without mistaking one panel for another and an unknown name is dropped
+rather than carried. Carrying it would leave the file claiming a window that
+never appears, with nothing to close.
+
+Restoring the file is not itself a change to write back. Doing it panel by panel
+would save a partial set after each one, and an editor that did not survive the
+startup it was in the middle of would have lost the rest.
+
+### Carrying a panel by its header
+
+```text
+  press on a header
+        │
+        ├─ on a control (Button, Slider, ComboBox, TextInput …) ─> not a drag
+        │
+        └─ elsewhere ── move 6 px ──> armed
+                                        │
+              was docked  ──────────────┤── released outside the panel ──> floats there
+                                        │
+              was floating ─────────────┴── released over the editor ────> docks
+```
+
+Not [`crate::drag_drop`], which carries assets and entities and answers
+questions this gesture does not have: one payload kind, no acceptance rule, no
+effect to choose, no reason to explain. What it does have that asset dragging
+does not is a second operating-system window on the other end. The two share
+nothing but the word.
+
+Three decisions worth stating:
+
+- **Which part of a header is a handle is asked of the accessibility role.** A
+  list of handles to exclude would need extending every time a header gained a
+  control, and nothing would fail when it was not. A control already has to say
+  what it is, to a screen reader, and that answer is the one wanted here. The
+  Output Log's header carries ten controls; none of them tears the panel off.
+- **The threshold latches.** A hand that travels well past six pixels and comes
+  back to rest near the press has still dragged, and disarming there would turn
+  a carried panel back into a click.
+- **A release inside the panel's own window never docks it.** A floating panel
+  is always above the editor, so a point inside it belongs to it, and a panel
+  window dropped over the editor overlaps it nearly always. Without that test
+  the panel would dock every time the hand let go without leaving.
+
+Where it stops: a panel goes back to the slot it came from, not to a *different*
+one. Dropping a panel into another panel's slot is the shell resolving dock
+tiles directly, which is step 1's remaining half rather than step 2's.
+
+### The things painted over a window, which are not widgets
+
+The axis gizmo, the statistics panel and the selection rubber band are drawn
+after the tree from rectangles the host stored; the drag ghost and the tooltip
+are drawn after everything. None of them is a node, so none of them travels with
+a detached subtree the way the context bar does, and all of them kept being
+painted into the editor's window at coordinates that meant something in another
+one.
+
+They are aimed now, and by two different rules, because they answer two
+different questions:
+
+| overlay | belongs to the window holding |
+|---|---|
+| axis gizmo, statistics, rubber band | the viewport |
+| drag ghost, tooltip | the pointer |
+
+The second is not the first. A drag begun in the floating Outliner and finished
+over the editor's viewport is one gesture in two windows, and the ghost has to
+be in the one the hand is in.
+
+### Input, and the one event that is not the panel's
+
+```text
+  winit WindowEvent ──> floating_window_event
+                          ├─ not a floating window's ────────> Main
+                          ├─ close / resize / scale ─────────> Handled
+                          ├─ widgets took it ────────────────> Handled
+                          └─ viewport widgets declined it ───> Viewport
+                                                                 │
+       the editor's own path: shortcuts, camera, gizmo, picking ─┘
+```
+
+The third arm is what makes a floating Outliner finish at its widgets. The
+fourth is why flying the camera and dragging a gizmo still work in the floating
+viewport: those are not widget behaviour, they are the editor's, and the
+editor's input path has to run for that window too. It runs with the main
+window's tree skipped, because feeding the same event there as well would hover
+and click whatever the editor happens to have at the same coordinates.
+
+### Two layout bugs a second window found in the first one
+
+**A hidden widget kept every pixel it used to occupy.** `measure_node` reads its
+cache before it checks visibility, and the hidden branch returned zero without
+writing that zero into the record a container arranges from:
+
+```text
+  measure(node):
+    if cached and same constraint  -> return stored desired_size   ← stale
+    if not visible                 -> return ZERO                  ← never stored
+```
+
+So the viewport's context bar had a 478 px hole in it where the snapping cluster
+had been hidden, and the two controls after the hole — the overflow chevron and
+the float button — were arranged past the bar's right edge, where they clipped
+to nothing. The bar read as having lost them. This was the other half of the
+"some options in the viewport bar are not visible" report; the first half was a
+collapse rule reading the window's width instead of the bar's.
+
+**Two panels out of one splitter came back in the wrong order.** The index a
+detach records is the panel's place in the list it was removed *from*, and by
+the time Details leaves the Outliner has already gone, so both record 0 and
+docking them puts Details on top. What has to be recorded is the place the panel
+held before *anything* left, and what has to be restored is that place minus the
+siblings still out. Both directions, in any order, because *Default Layout*
+returns them together and nothing says which goes first.
+
+**A horizontal bar that runs out of room drops its newest control.** A stack
+does not shrink, it places the overflow past the edge, and the control added
+most recently is the one that goes. In a bar of viewport options the newest one
+was the button that puts the viewport back in the window. The bar is a grid now:
+the content stretches and truncates, the actions get an `auto` column they
+always fit in. The Output Log's header had the same shape of bug for a different
+reason — a `Border` stacks its children, so the caption and the toolbar were
+drawn on top of each other, invisible only while the panel was wide enough.
 
 ### The bug a second window was always going to find
 
@@ -218,30 +494,86 @@ validation failure, which is the good outcome: the same event reaching the wrong
 handler could as easily have been a `CloseRequested` quitting the editor because
 somebody shut the log.
 
-Events are routed by id first now, and the handler says so.
+### The bug that was invisible, from the version this replaced
+
+Kept because it is still true of the tree. `UserInterface::process_os_event`
+does not dispatch: it *queues* a `UiMessage`, and `update` is what delivers it.
+The rebuilt panel's `draw` laid out and painted without pumping, so every wheel
+event was accepted, queued and dropped on the next frame. The window looked
+entirely correct and would not scroll.
+
+Worse, it defeated the obvious check. A screenshot before and after scrolling
+shows different text either way, because the log keeps growing underneath, so
+"the content moved" proves nothing. Only a test that fails without the fix
+settles it — removing the two `update` calls turned it into `the rows did not
+move: 0 then 0`. Under the current design the question cannot arise: the
+editor's own frame pumps the tree, and there is only one tree.
 
 ### Verification
 
-`SOMNIUM_FLOAT=log` opens the window at startup, so an automated run exercises
-the second surface rather than leaving it to a menu nobody clicks in a headless
-test. A screenshot of the running editor shows the second window titled
-*Output Log — Somnium*, with the OS's own chrome, live log lines in the editor's
-own faces, and the main window still at 59 fps.
+`SOMNIUM_FLOAT` opens windows at startup, so an automated run exercises the
+second surface instead of leaving it to a menu nobody clicks in a headless test.
+It takes a comma-separated list, because the interesting case is more than one:
+a single window can only prove that it does not conflict with the *editor*, and
+every window draws through the same pass.
 
-Five tests cover the detached panel with no GPU: it builds without a window,
-rows follow the log, an unchanged log does not rebuild, a log that drops from
-the front still does, and a resize is a layout rather than a rebuild.
+`SOMNIUM_FLOAT_PNG=<file>` writes each of those windows back as a PNG, named for
+the panel. It exists because `FrameCapture` reads the editor's swapchain, which
+left a floating window as the one part of the editor nobody could look at
+without pointing a camera at the screen — and the note at the top of `capture.rs`
+is about exactly why nobody should be doing that. `SOMNIUM_CAPTURE_QUIT` waits
+for these as well as for the editor's own, since a second window opens later and
+therefore reaches any given frame number later.
+
+Each window also reports once what it drew:
+
+```
+floating window drew its panel kind=Outliner  window=(360, 720)   panel=(360.0, 720.0)  instances=257
+floating window drew its panel kind=Details   window=(400, 800)   panel=(400.0, 800.0)  instances=102
+floating window drew its panel kind=Viewport  window=(1280, 760)  panel=(1280.0, 760.0) instances=94
+floating window drew its panel kind=OutputLog window=(1120, 460)  panel=(1120.0, 460.0) instances=2534
+```
+
+Thirty tests cover this step with no GPU and no event loop. On the tree: a panel leaves the dock and comes back to the same slot, three siblings
+come back in order however they left and however they return, it is laid out at its window's origin, it
+gives the dock's pinned height back when it returns, the main window stops
+drawing it while the floating one starts, a click in the floating window reaches
+the widget that is *there* rather than the one at the same coordinates in the
+editor, an open popup follows its anchor into the window and back out again, a
+closed one does not move, a hidden child stops taking up room, a resize is a
+layout rather than a rebuild, and a node cannot be reparented into its own
+subtree.
+
+On the header drag: a wobbling hand is still a click, a travelling one has
+dragged and stays dragged, each panel's band is its own handle, every float
+button lives in its header and reads as a control there, every caption does not,
+and the rule terminates on a hit from outside. On the layout file: a file
+written before floating windows still loads, a panel this build does not have is
+dropped rather than carried, and every floatable panel survives the round trip.
+On the mark: it rasterises at both window sizes, it is strokes rather than a
+transparent square or a filled one, the tint reaches every covered pixel, and
+the icon file's directory describes the images that follow it, with no gaps
+and no trailing bytes.
+
+Captures confirm the rest. All four windows open at once and every one of them
+draws text, icons and its full toolbar, which is what proves the shared pass:
+the floating Output Log has the severity chips, the search box and the six verbs
+the rebuilt version never had. The floating viewport shows the scene at its own
+aspect with its context bar and its axis gizmo. The main window closes over each
+gap: with Details out the Outliner fills the right column, with the viewport out
+the panels fill the content area and no scene shows through beside them.
 
 ### What step 2 does not claim
 
-- **Only the Output Log floats.** The mechanism is general and the enum has one
-  variant; the next panel is the work of teaching it to rebuild itself from a
-  store, which for the Content Drawer and Details means giving them one.
-- **The floating window's own controls are not built.** It scrolls, but the
-  log's filter chips, search and clear button live in the docked copy.
-- **A panel cannot be dragged out**, only opened from the menu. The drag is a
-  shell gesture; this is the window underneath it.
-- Layout persistence does not remember an open floating window across a restart.
+- **A panel goes home, not somewhere new.** Dragging one out floats it and
+  dragging it back docks it where it was; dropping it into a *different* slot
+  needs the shell to resolve dock tiles directly, which is step 1's remaining
+  half.
+- **A floating window's position is not remembered**, only the fact that the
+  panel was in one. It reopens at its default size, or where it was torn off.
+- **The glyph atlas has one raster scale for every window.** Text on the less
+  dense of two displays is supersampled rather than exact. Two atlases would fix
+  it and cost twice the atlas.
 
 ## Step 3 — several views in one frame
 
@@ -372,12 +704,14 @@ which is non-interactive.
   into a tile to give it the camera is a shell change, not a renderer one.
 - **Gizmos, the selection outline and picking are the primary view's.** A click
   in a secondary tile picks through the primary camera.
-- Step 2, floating OS windows, is still not started.
+- A **floated** viewport is a separate mechanism from a tile, and deliberately
+  so: a tile is a rectangle of this swapchain, and a floating viewport is
+  another window. See step 2.
 
 ## What step 1 does not claim
 
 No panel can be dragged to a new dock in the running editor yet. The tree can
 express the arrangement, mutate it correctly and persist it; the shell does not
-yet render a drop target or resolve tiles directly. That is the first half of
-step 2, and it is a shell change rather than a model one — which was the point
-of doing the model first.
+yet render a drop target or resolve tiles directly. Step 2 built the window a
+panel is dragged *to*; the drag itself is a shell change rather than a model
+one — which was the point of doing the model first.

@@ -209,6 +209,18 @@ pub trait Control: Send + 'static {
         None
     }
 
+    /// The control this one is floating over, if it is an open popup.
+    ///
+    /// MORROWIND-J step 2. A popup is placed by being a child of a root, and
+    /// once a panel can live in a second window there is more than one root to
+    /// be a child of. This is how the interface finds the popups that are
+    /// hanging off the wrong one: a defaulted hook, because the popup already
+    /// knows its anchor and a registry beside it would be a second place for
+    /// the answer to be wrong.
+    fn popup_anchor(&self) -> Option<crate::message::NodeHandle> {
+        None
+    }
+
     /// Bottom-up measure: return desired size given available space.
     /// Containers must call `ctx.measure_child()` for each child here.
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {

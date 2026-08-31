@@ -881,6 +881,22 @@ pub struct EditorFlags {
     pub locked: bool,
 }
 
+/// Whether the Outliner's eye has hidden this entity from the viewport.
+///
+/// One function because every submission path has to agree. Before this the
+/// check was copy-pasted into the paths that had it and simply absent from the
+/// rest, so hiding a mesh worked while hiding a terrain, a decal, foliage or a
+/// water body did nothing. A rule spread across six call sites is a rule that
+/// holds in five of them.
+///
+/// Absent flags mean visible, which is the overwhelming majority of entities.
+#[must_use]
+pub fn is_hidden(world: &somnium_ecs::World, entity: somnium_ecs::Entity) -> bool {
+    world
+        .get::<EditorFlags>(entity)
+        .is_some_and(|flags| flags.hidden)
+}
+
 /// Scene data this build does not understand, kept verbatim so saving cannot
 /// destroy it — CONTROL-J, following Stride's `IUnloadable`.
 ///

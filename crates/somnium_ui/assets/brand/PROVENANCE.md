@@ -40,6 +40,23 @@ Outlined glyph shapes remain covered by Inter's SIL OFL 1.1 — outlining is not
 licence escape, and the OFL is satisfied because the licence text ships with the
 font under `assets/fonts/Inter-OFL.txt`.
 
+## somnium.ico
+
+`somnium.ico` is the eclipse mark at 16, 24, 32, 48, 64 and 128 px, in the
+Nocturne accent, generated from `somnium-s-eclipse.svg` by
+
+```text
+cargo run -p somnium_ui --example brand_icon -- crates/somnium_ui/assets/brand/somnium.ico
+```
+
+It is committed rather than built because the alternative is rasterising SVG on
+every machine that compiles the editor, for a drawing that changes about once a
+year. It exists at all because a running window takes its icon from
+`somnium_ui::brand`, and a *file* in a folder cannot: Explorer and a pinned
+shortcut read an icon resource out of the binary, which the editor's
+`build.rs` links. Regenerate it whenever the mark changes, or the two will
+disagree and nothing will say so.
+
 No font binary, icon, colour value, or mark was taken from Lumina, Unreal, or
 another reference editor. Trademark clearance for the Somnium name and the
 Eclipse mark remains an owner task before public release.

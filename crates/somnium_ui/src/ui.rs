@@ -54,6 +54,54 @@ fn to_nh(h: IH) -> NodeHandle {
     h.transmute()
 }
 
+/// A subtree taken out of the window's layout so a second surface can host it.
+///
+/// MORROWIND-J step 2. The first cut of floating windows built the panel a
+/// *second* time in a second [`UserInterface`], which works only for a panel
+/// whose whole content is a store and duplicates every binding the docked panel
+/// already owns. A detached subtree **is** the docked panel: the same handles,
+/// so the same message routing, the same edits and the same widgets.
+#[derive(Clone, Copy, Debug)]
+struct Detached {
+    /// The panel itself. Every public method is keyed on this, because it is
+    /// the handle the caller already has.
+    handle: NodeHandle,
+    /// A second root, built for this window and owning only the panel.
+    ///
+    /// Not an extra layer for its own sake: a popup is placed by being a child
+    /// of a root, which arranges its children at the position they ask for
+    /// rather than into a cell. Without a root of its own, a combo box in a
+    /// floating Details has nowhere to drop its list except the main window.
+    host: NodeHandle,
+    /// Where the panel came from, and where in it.
+    ///
+    /// The index is the panel's place in the parent's children *as they were
+    /// before anything left* — not its place in the list it was actually
+    /// removed from. Those differ as soon as two siblings are out at once, and
+    /// the difference is not academic: float the Outliner and then Details, and
+    /// both record index 0, so docking them again puts Details above the
+    /// Outliner.
+    parent: NodeHandle,
+    index: usize,
+    /// The hosting surface's size, in layout units.
+    size: Vec2,
+    /// What the dock had pinned about the panel's own size and placement.
+    ///
+    /// A panel fills its window; in the dock it may well not, because the dock
+    /// gave it a height or centred it in a cell. Those are the dock's opinions
+    /// and they are restored the moment it goes back.
+    docked: DockedFit,
+}
+
+/// The size and placement a panel had before a window took it.
+#[derive(Clone, Copy, Debug)]
+struct DockedFit {
+    width: f32,
+    height: f32,
+    horizontal: HorizontalAlignment,
+    vertical: VerticalAlignment,
+}
+
 pub struct UserInterface {
     pub nodes: NodePool,
     /// MORROWIND-I. Accessibility preferences in force for this interface.
@@ -102,6 +150,17 @@ pub struct UserInterface {
     modal_focus: Option<ModalFocus>,
     /// Handle of the viewport area; mouse events here pass through to the game.
     pub viewport_handle: NodeHandle,
+    /// Subtrees another surface is hosting. See [`Detached`].
+    detached: Vec<Detached>,
+    /// Where hit-testing starts. The window's root, or a detached subtree while
+    /// its own window's events are being fed in.
+    input_root_ih: IH,
+    /// The root the pointer was last seen under.
+    ///
+    /// Unlike `input_root_ih` this outlives the event: the drag ghost and the
+    /// tooltip belong to the window the pointer is in, and both are drawn on a
+    /// frame rather than on an event.
+    pointer_root_ih: IH,
 }
 
 impl UserInterface {
@@ -141,6 +200,9 @@ impl UserInterface {
             axis_widget_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
             modal_focus: None,
             viewport_handle: NodeHandle::NONE,
+            detached: Vec::new(),
+            input_root_ih: root_ih,
+            pointer_root_ih: root_ih,
         }
     }
 
@@ -310,6 +372,27 @@ impl UserInterface {
         if changed {
             self.invalidate_ancestors(handle);
         }
+    }
+
+    /// A node's measured desired size, from the last layout.
+    ///
+    /// What a widget *asked* for, as opposed to what it was given. A container
+    /// that fits its children reports the width it needs, which is how a caller
+    /// can ask "does this fit" instead of guessing at a threshold.
+    #[must_use]
+    pub fn desired_size(&self, handle: NodeHandle) -> Vec2 {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.desired_size)
+            .unwrap_or(Vec2::ZERO)
+    }
+
+    /// Whether a node is set visible. Its own flag, not its ancestors'.
+    #[must_use]
+    pub fn visibility(&self, handle: NodeHandle) -> bool {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .is_ok_and(|n| n.widget.visibility)
     }
 
     /// The rectangle a node's drawing is clipped to, which is not its bounds:
@@ -501,6 +584,16 @@ impl UserInterface {
         self.measure_node(root, screen);
         let root_rect = Rect::new(0.0, 0.0, screen.x, screen.y);
         self.arrange_node(root, root_rect);
+        // A detached subtree has no parent to be measured by, so it is laid out
+        // against the window hosting it instead of this one, and at that
+        // window's origin: the coordinates its surface draws with are then the
+        // same numbers its pointer events arrive in, and neither side has to
+        // translate.
+        for detached in self.detached.clone() {
+            let ih = to_ih(detached.host);
+            self.measure_node(ih, detached.size);
+            self.arrange_node(ih, Rect::new(0.0, 0.0, detached.size.x, detached.size.y));
+        }
     }
 
     pub(crate) fn measure_node(&mut self, handle: IH, available: Vec2) -> Vec2 {
@@ -524,6 +617,20 @@ impl UserInterface {
             return snap.desired_size;
         }
         if !snap.visibility {
+            // Written through, not merely returned. A container arranges from
+            // the stored `desired_size`, and returning zero while leaving the
+            // last visible measure in the record means a hidden child keeps
+            // every pixel it used to occupy.
+            //
+            // That is what put a 478 px hole in the viewport's context bar
+            // where the snapping cluster had been, and pushed the two controls
+            // after it — the overflow chevron and the float button — past the
+            // bar's right edge, where they clipped to nothing. The bar looked
+            // like it had lost them.
+            let node = self.nodes.borrow_mut(handle);
+            node.widget.prev_measure = available;
+            node.widget.desired_size = Vec2::ZERO;
+            node.widget.measure_valid = true;
             return Vec2::ZERO;
         }
 
@@ -710,7 +817,7 @@ impl UserInterface {
     // -----------------------------------------------------------------------
 
     pub fn hit_test(&self, point: Vec2) -> NodeHandle {
-        to_nh(self.pick_node(self.root_ih, point))
+        to_nh(self.pick_node(self.input_root_ih, point))
     }
 
     /// True if `handle` is `ancestor` or a descendant of it.
@@ -1030,7 +1137,7 @@ impl UserInterface {
 
     /// Tooltip string on the widget under `pos`, walking parents if empty.
     pub fn tooltip_at(&self, pos: Vec2) -> String {
-        let mut h = self.hit_test(pos);
+        let mut h = to_nh(self.pick_node(self.pointer_root_ih, pos));
         while h.is_some() {
             if let Ok(n) = self.nodes.try_borrow(to_ih(h)) {
                 if !n.widget.tooltip.is_empty() {
@@ -1139,10 +1246,25 @@ impl UserInterface {
         self.draw_ctx.clear(self.screen_size.x, self.screen_size.y);
         self.update_global_visibility(self.root_ih, true);
         self.draw_node(self.root_ih);
-        self.draw_axis_widget();
-        self.draw_statistics();
-        self.draw_marquee();
-        self.draw_drag_overlay();
+        self.draw_overlays(self.root_ih);
+    }
+
+    /// Everything painted over a window's tree rather than in it.
+    ///
+    /// MORROWIND-J step 2. These are not widgets, so they do not travel with a
+    /// detached subtree the way the context bar does — they have to be aimed.
+    /// The axis gizmo, the statistics panel and the rubber band belong to
+    /// whichever window the viewport is in; the drag ghost belongs to whichever
+    /// window the pointer is in, which is not always the same one.
+    fn draw_overlays(&mut self, root: IH) {
+        if to_ih(self.host_for(self.viewport_handle)) == root {
+            self.draw_axis_widget();
+            self.draw_statistics();
+            self.draw_marquee();
+        }
+        if self.pointer_root_ih == root {
+            self.draw_drag_overlay();
+        }
     }
 
     /// The corner axis widget. Three labelled ends, each a click target.
@@ -1535,6 +1657,382 @@ impl UserInterface {
     }
 
     // -----------------------------------------------------------------------
+    // MORROWIND-J step 2: subtrees hosted by a second surface
+    // -----------------------------------------------------------------------
+
+    /// Move a node under a different parent inside this interface.
+    ///
+    /// A list edit, not a rebuild. Handles index one pool, so the node keeps
+    /// its identity and every map keyed on it, every binding, every open
+    /// gesture, stays valid across the move. Refuses a cycle, because a node
+    /// made to contain its own ancestor is a layout that does not terminate.
+    pub fn reparent(&mut self, handle: NodeHandle, new_parent: NodeHandle) -> bool {
+        if handle.is_none() || new_parent.is_none() || handle == new_parent {
+            return false;
+        }
+        if self.is_under(new_parent, handle) {
+            return false;
+        }
+        if self.parent(handle) == new_parent {
+            return true;
+        }
+        if self.unlink(handle).is_none() {
+            return false;
+        }
+        self.link_at(handle, new_parent, usize::MAX)
+    }
+
+    /// Take a node out of its parent's child list without freeing it.
+    ///
+    /// Returns the parent it left and the index it held there, which is all
+    /// [`Self::reattach`] needs to undo this exactly.
+    fn unlink(&mut self, handle: NodeHandle) -> Option<(NodeHandle, usize)> {
+        let parent = self.parent(handle);
+        let mut removed = None;
+        if let Ok(p) = self.nodes.try_borrow_mut(to_ih(parent)) {
+            if let Some(index) = p.widget.children.iter().position(|&c| c == handle) {
+                p.widget.children.remove(index);
+                p.widget.invalidate_layout();
+                removed = Some(index);
+            }
+        }
+        let index = removed?;
+        if let Ok(n) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            n.widget.parent = NodeHandle::NONE;
+        }
+        self.invalidate_ancestors(parent);
+        Some((parent, index))
+    }
+
+    /// Put an unlinked node back under a parent at a position.
+    ///
+    /// `usize::MAX` appends. Any other index is clamped, because the parent may
+    /// have gained or lost children while the node was away.
+    fn link_at(&mut self, handle: NodeHandle, parent: NodeHandle, index: usize) -> bool {
+        let linked = if let Ok(p) = self.nodes.try_borrow_mut(to_ih(parent)) {
+            let at = index.min(p.widget.children.len());
+            p.widget.children.insert(at, handle);
+            p.widget.invalidate_layout();
+            true
+        } else {
+            false
+        };
+        if !linked {
+            return false;
+        }
+        if let Ok(n) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            n.widget.parent = parent;
+        }
+        self.invalidate_ancestors(parent);
+        true
+    }
+
+    /// Hand a subtree to another surface, sized in that surface's units.
+    ///
+    /// The node leaves its parent's child list, so the dock closes over the gap
+    /// on its own: a splitter with one child left gives the whole column to it,
+    /// and nothing has to be told the panel is gone. It keeps existing, keeps
+    /// its handles, and is laid out and drawn against `size` instead.
+    pub fn detach(&mut self, handle: NodeHandle, size: Vec2) -> bool {
+        if self.detached.iter().any(|d| d.handle == handle) {
+            self.set_detached_size(handle, size);
+            return true;
+        }
+        let size = size.max(Vec2::ONE);
+        let Some((parent, index)) = self.unlink(handle) else {
+            return false;
+        };
+        let index = self.original_index(parent, index);
+        let host = self.spawn_host(size);
+        self.link_at(handle, host, usize::MAX);
+        let docked = self.fill_window(handle);
+        self.detached.push(Detached {
+            handle,
+            host,
+            parent,
+            index,
+            size,
+            docked,
+        });
+        self.invalidate_subtree(host);
+        true
+    }
+
+    /// Put a detached subtree back where it came from.
+    ///
+    /// Anything else the host had picked up — an open popup, a tooltip — goes
+    /// to the window's root rather than being freed with the host, because a
+    /// popup destroyed underneath the control that owns it leaves that control
+    /// holding a handle to nothing.
+    pub fn reattach(&mut self, handle: NodeHandle) -> bool {
+        let Some(pos) = self.detached.iter().position(|d| d.handle == handle) else {
+            return false;
+        };
+        let record = self.detached.remove(pos);
+        if self.input_root_ih == to_ih(record.host) {
+            self.input_root_ih = self.root_ih;
+        }
+        self.unlink(handle);
+        self.restore_fit(handle, record.docked);
+        // Its old place, minus the siblings that are still out. Those will
+        // insert themselves ahead of it when they come back, whichever order
+        // they come back in.
+        let missing = self
+            .detached
+            .iter()
+            .filter(|d| d.parent == record.parent && d.index < record.index)
+            .count();
+        let at = record.index.saturating_sub(missing);
+        let linked = self.link_at(handle, record.parent, at);
+        let strays = self
+            .nodes
+            .try_borrow(to_ih(record.host))
+            .map(|n| n.widget.children.clone())
+            .unwrap_or_default();
+        for stray in strays {
+            self.unlink(stray);
+            self.link_at(stray, self.root(), usize::MAX);
+        }
+        self.remove_node(record.host);
+        self.invalidate_subtree(handle);
+        linked
+    }
+
+    /// Let a panel fill whatever it is put in, returning what it had before.
+    ///
+    /// A pinned height is the dock's arrangement, not the panel's own, and a
+    /// panel that kept it would sit in a 200 px band in the middle of its
+    /// window with the rest of the glass empty.
+    fn fill_window(&mut self, handle: NodeHandle) -> DockedFit {
+        let mut fit = DockedFit {
+            width: f32::NAN,
+            height: f32::NAN,
+            horizontal: HorizontalAlignment::Stretch,
+            vertical: VerticalAlignment::Stretch,
+        };
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            fit = DockedFit {
+                width: node.widget.width,
+                height: node.widget.height,
+                horizontal: node.widget.horizontal_alignment,
+                vertical: node.widget.vertical_alignment,
+            };
+            node.widget.width = f32::NAN;
+            node.widget.height = f32::NAN;
+            node.widget.horizontal_alignment = HorizontalAlignment::Stretch;
+            node.widget.vertical_alignment = VerticalAlignment::Stretch;
+        }
+        fit
+    }
+
+    /// Give the dock's arrangement back to a panel that is returning to it.
+    fn restore_fit(&mut self, handle: NodeHandle, fit: DockedFit) {
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(handle)) {
+            node.widget.width = fit.width;
+            node.widget.height = fit.height;
+            node.widget.horizontal_alignment = fit.horizontal;
+            node.widget.vertical_alignment = fit.vertical;
+        }
+    }
+
+    /// Where a node sat before any of its siblings left.
+    ///
+    /// `removed_at` is its place in the list it was just taken out of, which is
+    /// short by one for every sibling already gone from in front of it. Walking
+    /// the earlier records in order restores the count, because each one that
+    /// sat at or before the running position pushes it along by one.
+    fn original_index(&self, parent: NodeHandle, removed_at: usize) -> usize {
+        let mut earlier: Vec<usize> = self
+            .detached
+            .iter()
+            .filter(|d| d.parent == parent)
+            .map(|d| d.index)
+            .collect();
+        earlier.sort_unstable();
+        let mut index = removed_at;
+        for gone in earlier {
+            if gone <= index {
+                index += 1;
+            }
+        }
+        index
+    }
+
+    /// A second root, for one window, sized to it.
+    ///
+    /// The same control the window's own root uses, so a popup, a tooltip and
+    /// a drag ghost land in a floating window exactly the way they land here.
+    fn spawn_host(&mut self, size: Vec2) -> NodeHandle {
+        let widget = Widget {
+            name: "DetachedRoot".into(),
+            width: size.x,
+            height: size.y,
+            clip_bounds: Rect::new(0.0, 0.0, size.x, size.y),
+            ..Widget::default()
+        };
+        let host = self.nodes.spawn(UiNode::new(widget, Box::new(RootControl)));
+        if let Ok(node) = self.nodes.try_borrow_mut(host) {
+            node.widget.handle = to_nh(host);
+        }
+        to_nh(host)
+    }
+
+    /// Whether another surface is hosting this subtree.
+    #[must_use]
+    pub fn is_detached(&self, handle: NodeHandle) -> bool {
+        self.detached.iter().any(|d| d.handle == handle)
+    }
+
+    /// Every subtree currently hosted elsewhere.
+    #[must_use]
+    pub fn detached_handles(&self) -> Vec<NodeHandle> {
+        self.detached.iter().map(|d| d.handle).collect()
+    }
+
+    /// Tell a detached subtree how big its window is now.
+    pub fn set_detached_size(&mut self, handle: NodeHandle, size: Vec2) {
+        let size = size.max(Vec2::ONE);
+        let mut host = NodeHandle::NONE;
+        for detached in &mut self.detached {
+            if detached.handle == handle && detached.size != size {
+                detached.size = size;
+                host = detached.host;
+            }
+        }
+        if host.is_none() {
+            return;
+        }
+        if let Ok(node) = self.nodes.try_borrow_mut(to_ih(host)) {
+            node.widget.width = size.x;
+            node.widget.height = size.y;
+            node.widget.clip_bounds = Rect::new(0.0, 0.0, size.x, size.y);
+        }
+        self.invalidate_subtree(host);
+    }
+
+    /// Fill the drawing context with one detached subtree instead of the window.
+    ///
+    /// Called after [`Self::draw`] and after that frame's upload, because both
+    /// write the same context: the host draws the main window, uploads it, then
+    /// asks for each floating window in turn.
+    pub fn draw_detached(&mut self, handle: NodeHandle) -> bool {
+        let Some((host, size)) = self
+            .detached
+            .iter()
+            .find(|d| d.handle == handle)
+            .map(|d| (d.host, d.size))
+        else {
+            return false;
+        };
+        self.draw_ctx.clear(size.x, size.y);
+        self.update_global_visibility(to_ih(host), true);
+        self.draw_node(to_ih(host));
+        self.draw_overlays(to_ih(host));
+        true
+    }
+
+    /// Route the events that follow to a detached subtree.
+    ///
+    /// [`NodeHandle::NONE`] restores the window's own tree. Focus and pointer
+    /// capture stay shared on purpose: a drag begun in a floating window and
+    /// finished over the main one is one gesture, and two independent capture
+    /// states would cut it in half.
+    pub fn set_input_root(&mut self, handle: NodeHandle) {
+        self.input_root_ih = match self.detached.iter().find(|d| d.handle == handle) {
+            Some(detached) => to_ih(detached.host),
+            // Anything that is not a detached panel, `NONE` included, means
+            // the window's own tree: a caller that names a docked panel is
+            // asking for the window that panel is in.
+            None => self.root_ih,
+        };
+    }
+
+    /// The root the pointer was last seen under, for a caller placing
+    /// something that follows it.
+    #[must_use]
+    pub fn pointer_root(&self) -> NodeHandle {
+        to_nh(self.pointer_root_ih)
+    }
+
+    /// Which surface's root a node belongs to.
+    ///
+    /// What a popup has to be parented to in order to open in the same window
+    /// as the control that raised it. Returns the window's root for anything
+    /// still docked.
+    #[must_use]
+    pub fn host_for(&self, handle: NodeHandle) -> NodeHandle {
+        for detached in &self.detached {
+            if self.is_under(handle, detached.host) {
+                return detached.host;
+            }
+        }
+        self.root()
+    }
+
+    /// Put every open popup in the window its anchor is in.
+    ///
+    /// A combo box in a floating Details drops its list into that window, and a
+    /// menu opened in the main window stays there. Costs nothing while nothing
+    /// is detached, and while something is, it walks the roots' own children
+    /// rather than the tree: a popup is always a child of a root, which is the
+    /// point of roots.
+    pub fn rehome_popups(&mut self) {
+        if self.detached.is_empty() {
+            return;
+        }
+        let mut roots = Vec::with_capacity(self.detached.len() + 1);
+        roots.push(self.root());
+        roots.extend(self.detached.iter().map(|d| d.host));
+        let mut moves = Vec::new();
+        for root in &roots {
+            let children = self
+                .nodes
+                .try_borrow(to_ih(*root))
+                .map(|n| n.widget.children.clone())
+                .unwrap_or_default();
+            for child in children {
+                let Some(anchor) = self.popup_anchor(child) else {
+                    continue;
+                };
+                let host = self.host_for(anchor);
+                if host != *root {
+                    moves.push((child, host));
+                }
+            }
+        }
+        for (popup, host) in moves {
+            self.reparent(popup, host);
+        }
+    }
+
+    /// What an open popup is anchored to, or `None` for anything else.
+    fn popup_anchor(&self, handle: NodeHandle) -> Option<NodeHandle> {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .ok()
+            .and_then(|node| node.control.popup_anchor())
+    }
+
+    /// Invalidate a node and everything under it.
+    ///
+    /// [`Self::invalidate_ancestors`] walks the other way, and a subtree that
+    /// has just changed the size it is measured against needs both: the cached
+    /// measure at every depth was taken against the old one.
+    fn invalidate_subtree(&mut self, handle: NodeHandle) {
+        let children = match self.nodes.try_borrow_mut(to_ih(handle)) {
+            Ok(node) => {
+                node.widget.measure_valid = false;
+                node.widget.arrange_valid = false;
+                node.widget.children.clone()
+            }
+            Err(_) => return,
+        };
+        for child in children {
+            self.invalidate_subtree(child);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // OS event routing
     // -----------------------------------------------------------------------
 
@@ -1570,6 +2068,10 @@ impl UserInterface {
                 false
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // The pointer is in whichever window fed this event, and the
+                // drag ghost and the tooltip are drawn there rather than where
+                // the same coordinates happen to land in the editor.
+                self.pointer_root_ih = self.input_root_ih;
                 self.cursor_pos = self.to_logical(position.x, position.y);
                 let crossed = self.drag_drop.pointer_moved(self.cursor_pos);
                 if crossed {
@@ -2766,6 +3268,330 @@ mod drag_overlay_tests {
         assert!(
             painted > quiet.draw_ctx.instances.len(),
             "an active drag must add the highlight and the ghost"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+    use crate::types::Thickness;
+    use crate::widget::WidgetBuilder;
+    use crate::widgets::{
+        border::BorderBuilder,
+        button::ButtonBuilder,
+        popup::{Popup, PopupBuilder, PopupMessage},
+        stack_panel::StackPanelBuilder,
+    };
+
+    /// A dock: two panels stacked in a container, the shape the right column
+    /// has.
+    fn dock() -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let column = ui.add_node(StackPanelBuilder::new(WidgetBuilder::new()).build(), root);
+        let top = ui.add_node(
+            BorderBuilder::new(WidgetBuilder::new().with_height(200.0))
+                .with_stroke_thickness(Thickness::ZERO)
+                .build(),
+            column,
+        );
+        let bottom = ui.add_node(
+            BorderBuilder::new(WidgetBuilder::new().with_height(200.0))
+                .with_stroke_thickness(Thickness::ZERO)
+                .build(),
+            column,
+        );
+        ui.perform_layout();
+        (ui, column, top, bottom)
+    }
+
+    #[test]
+    fn a_detached_panel_leaves_the_dock_and_comes_back_to_the_same_slot() {
+        // The reason detaching is a list edit rather than a hidden node: the
+        // container closes the gap by itself, and returning is an insert at the
+        // index the panel held rather than a size somebody remembered.
+        let (mut ui, column, top, bottom) = dock();
+        assert!(ui.detach(top, Vec2::new(360.0, 720.0)));
+
+        let children = ui
+            .nodes
+            .try_borrow(to_ih(column))
+            .map(|n| n.widget.children.clone())
+            .unwrap();
+        assert_eq!(children, vec![bottom], "the dock still holds the panel");
+
+        assert!(ui.reattach(top));
+        let children = ui
+            .nodes
+            .try_borrow(to_ih(column))
+            .map(|n| n.widget.children.clone())
+            .unwrap();
+        assert_eq!(children, vec![top, bottom], "came back below the other one");
+    }
+
+    #[test]
+    fn a_detached_panel_is_laid_out_at_its_own_window_origin() {
+        // What makes the whole mechanism cheap: the surface's coordinates and
+        // the widget's coordinates are the same numbers, so neither drawing nor
+        // hit-testing has to translate anything.
+        let (mut ui, _column, top, _bottom) = dock();
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+
+        let bounds = ui.screen_bounds(top);
+        assert_eq!((bounds.x, bounds.y), (0.0, 0.0), "{bounds:?}");
+        assert_eq!(bounds.w, 360.0, "{bounds:?}");
+    }
+
+    #[test]
+    fn the_window_does_not_draw_what_it_no_longer_holds() {
+        let (mut ui, _column, top, _bottom) = dock();
+        ui.perform_layout();
+        ui.draw();
+        let docked = ui.draw_ctx.instances.len();
+
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+        ui.draw();
+        assert!(
+            ui.draw_ctx.instances.len() < docked,
+            "the main window still painted the detached panel: {} then {}",
+            docked,
+            ui.draw_ctx.instances.len()
+        );
+
+        assert!(ui.draw_detached(top), "and the floating window painted it");
+        assert!(!ui.draw_ctx.instances.is_empty());
+    }
+
+    #[test]
+    fn a_click_in_a_floating_window_reaches_the_widget_that_is_there() {
+        // The bug this rules out: hit-testing rooted at the window's tree finds
+        // whatever happens to sit at the same coordinates in the *main* window,
+        // so a click in the floating panel presses a button in the editor.
+        let (mut ui, _column, top, bottom) = dock();
+        let floating_button = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(80.0).with_height(24.0)).build(),
+            top,
+        );
+        // Same place in the other panel, which is what a shared hit test would
+        // find instead.
+        let docked_button = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(80.0).with_height(24.0)).build(),
+            bottom,
+        );
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+        ui.draw();
+        ui.draw_detached(top);
+
+        let at = ui.screen_bounds(floating_button);
+        let point = Vec2::new(at.x + at.w * 0.5, at.y + at.h * 0.5);
+
+        ui.set_input_root(top);
+        let hit = ui.hit_test(point);
+        ui.set_input_root(NodeHandle::NONE);
+        assert!(
+            ui.is_under(hit, floating_button) || hit == floating_button,
+            "hit {hit:?}, wanted {floating_button:?}"
+        );
+        assert_ne!(hit, docked_button);
+    }
+
+    #[test]
+    fn a_popup_follows_the_control_that_opened_it_into_its_window() {
+        // A combo box in a floating Details has to drop its list into that
+        // window. Popups are placed by being a child of a root, so this is the
+        // half of the mechanism that gives the second window one.
+        let (mut ui, _column, top, _bottom) = dock();
+        let anchor = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(80.0).with_height(24.0)).build(),
+            top,
+        );
+        let root = ui.root();
+        let popup = ui.add_node(
+            PopupBuilder::new(WidgetBuilder::new())
+                .with_anchor(anchor)
+                .build(),
+            root,
+        );
+        ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        ui.update();
+
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.rehome_popups();
+        assert_ne!(
+            ui.parent(popup),
+            root,
+            "the popup stayed in the main window"
+        );
+        assert_eq!(ui.host_for(anchor), ui.parent(popup));
+
+        // And back, when the panel returns: a popup left hanging off a host
+        // that is about to be freed is a dangling handle in whatever opened it.
+        ui.reattach(top);
+        assert_eq!(ui.parent(popup), root);
+    }
+
+    #[test]
+    fn a_closed_popup_is_not_moved_anywhere() {
+        let (mut ui, _column, top, _bottom) = dock();
+        let anchor = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(80.0).with_height(24.0)).build(),
+            top,
+        );
+        let root = ui.root();
+        let popup = ui.add_node(
+            PopupBuilder::new(WidgetBuilder::new())
+                .with_anchor(anchor)
+                .build(),
+            root,
+        );
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.rehome_popups();
+        assert_eq!(ui.parent(popup), root);
+        let _ = std::marker::PhantomData::<Popup>;
+    }
+
+    #[test]
+    fn a_resized_window_relays_the_panel_out_rather_than_rebuilding_it() {
+        let (mut ui, _column, top, _bottom) = dock();
+        let child = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_height(24.0)).build(),
+            top,
+        );
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+
+        ui.set_detached_size(top, Vec2::new(500.0, 300.0));
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(top).w, 500.0);
+        assert!(
+            ui.screen_bounds(child).w > 0.0,
+            "the same node, still laid out"
+        );
+    }
+
+    #[test]
+    fn the_dock_gets_its_arrangement_back_when_the_panel_returns() {
+        // A panel fills its own window, so detaching drops whatever height the
+        // dock had pinned on it. Dropping it permanently would leave a panel
+        // that came home stretched over its neighbour.
+        let (mut ui, _column, top, _bottom) = dock();
+        ui.perform_layout();
+        let docked = ui.screen_bounds(top).h;
+        assert_eq!(docked, 200.0);
+
+        ui.detach(top, Vec2::new(360.0, 720.0));
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(top).h, 720.0, "filled its window");
+
+        ui.reattach(top);
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(top).h, docked, "and gave the height back");
+    }
+
+    #[test]
+    fn siblings_come_back_in_order_however_they_left() {
+        // Two panels out of one splitter is not a corner case: it is the
+        // Outliner and Details, and the Window menu's *Default Layout* returns
+        // them together. Recording the index each was removed *from* puts
+        // Details above the Outliner, because by the time Details leaves the
+        // Outliner has already gone and both record 0.
+        //
+        // Every order, both ways, because the bug is order-dependent and one
+        // ordering passing proves nothing about the others.
+        let orders: [([usize; 3], [usize; 3]); 4] = [
+            ([0, 1, 2], [0, 1, 2]),
+            ([2, 1, 0], [0, 1, 2]),
+            ([1, 2, 0], [2, 0, 1]),
+            ([0, 2, 1], [1, 0, 2]),
+        ];
+        for (out, back) in orders {
+            let mut ui = UserInterface::new(800.0, 600.0);
+            let root = ui.root();
+            let column = ui.add_node(StackPanelBuilder::new(WidgetBuilder::new()).build(), root);
+            let panels: Vec<_> = (0..3)
+                .map(|_| {
+                    ui.add_node(
+                        BorderBuilder::new(WidgetBuilder::new().with_height(100.0))
+                            .with_stroke_thickness(Thickness::ZERO)
+                            .build(),
+                        column,
+                    )
+                })
+                .collect();
+
+            for i in out {
+                assert!(ui.detach(panels[i], Vec2::new(300.0, 400.0)));
+            }
+            for i in back {
+                assert!(ui.reattach(panels[i]));
+            }
+
+            let children = ui
+                .nodes
+                .try_borrow(to_ih(column))
+                .map(|n| n.widget.children.clone())
+                .unwrap();
+            assert_eq!(children, panels, "detached {out:?} then docked {back:?}");
+        }
+    }
+
+    #[test]
+    fn a_hidden_child_stops_taking_up_room() {
+        // The measure cache is read before the visibility check, and the hidden
+        // branch used to return zero without writing it into the record a
+        // container arranges from. So a hidden child kept every pixel it had
+        // when it was last visible.
+        //
+        // In the viewport bar that was a 478 px hole where the snapping cluster
+        // had been, with the two controls after it — the overflow chevron and
+        // the float button — pushed past the bar's edge and clipped to
+        // nothing. The bar read as having lost them.
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let root = ui.root();
+        let bar = ui.add_node(
+            StackPanelBuilder::new(WidgetBuilder::new())
+                .with_orientation(crate::widgets::stack_panel::Orientation::Horizontal)
+                .build(),
+            root,
+        );
+        let first = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(24.0)).build(),
+            bar,
+        );
+        let after = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(60.0).with_height(24.0)).build(),
+            bar,
+        );
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(after).x, 200.0);
+
+        ui.set_visibility(first, false);
+        ui.perform_layout();
+        assert_eq!(
+            ui.screen_bounds(after).x,
+            0.0,
+            "the hidden control still reserved its width"
+        );
+
+        ui.set_visibility(first, true);
+        ui.perform_layout();
+        assert_eq!(ui.screen_bounds(after).x, 200.0, "and gave it back");
+    }
+
+    #[test]
+    fn a_node_cannot_be_reparented_into_its_own_subtree() {
+        let (mut ui, column, top, _bottom) = dock();
+        assert!(
+            !ui.reparent(column, top),
+            "a container made to contain its own ancestor never finishes laying out"
         );
     }
 }

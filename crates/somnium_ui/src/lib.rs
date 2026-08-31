@@ -1,4 +1,6 @@
 pub mod a11y;
+pub mod brand;
+pub mod brand_ico;
 pub mod color;
 pub mod commands;
 pub mod data_table;
@@ -547,8 +549,32 @@ struct EditorLayout {
     status_stats_button: NodeHandle,
     /// Floating viewport-context scope; a child of the viewport, not a grid row.
     /// Held for the layout regression test that pins the 68 px scene budget.
+    /// The empty middle of the title bar, which drags the window like the
+    /// left cluster does.
+    title_drag_area: NodeHandle,
+    /// The Outliner's and Details' whole containers: what a floating window
+    /// hosts, and what the dock stops holding while it does.
+    outliner_grid: NodeHandle,
+    details_grid: NodeHandle,
+    /// The band across the top of each panel: its caption, and the strip a
+    /// person grabs to carry the panel to another window.
+    outliner_header: NodeHandle,
+    details_header: NodeHandle,
+    log_header: NodeHandle,
+    /// The float button on each panel: the Outliner and Details headers, the
+    /// Output Log's toolbar, the viewport's context bar.
+    outliner_float: NodeHandle,
+    details_float: NodeHandle,
+    log_float: NodeHandle,
+    viewport_float: NodeHandle,
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
+    /// The context bar's horizontal stack, so the overflow rule can ask what
+    /// the bar needs instead of guessing at a width.
+    vp_stack: NodeHandle,
+    /// The bar's reserved right-hand column: the overflow chevron and the
+    /// float button, which the content beside them can never squeeze out.
+    vp_actions: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -655,6 +681,84 @@ pub enum LocaleAction {
 }
 
 // ── UiManager ────────────────────────────────────────────────────────────────
+
+/// A panel being carried by its header, between the dock and a window.
+///
+/// MORROWIND-J step 2. Not [`crate::drag_drop`], which carries assets and
+/// entities and answers questions this gesture does not have: there is one
+/// payload kind, no acceptance rule, no effect to choose and no reason to
+/// explain. What it does have that asset dragging does not is a second window
+/// on the other end, so the two share nothing but the word.
+#[derive(Clone, Copy, Debug)]
+struct PanelDrag {
+    kind: crate::floating::FloatingKind,
+    /// Where the press landed, in the window it landed in.
+    from: Vec2,
+    /// Whether the panel was already in its own window when the drag began.
+    ///
+    /// It decides what the release means, and it cannot be re-read at the end:
+    /// tearing a panel off changes the answer halfway through.
+    was_floating: bool,
+    /// Whether the pointer has travelled far enough to mean a drag.
+    armed: bool,
+}
+
+impl PanelDrag {
+    /// Let the pointer's new position decide whether this is a drag yet.
+    ///
+    /// Latching, not a live comparison: a hand that travels well past the
+    /// threshold and comes back to rest near the press has still dragged, and
+    /// disarming there would turn a carried panel back into a click.
+    fn moved_to(&mut self, cursor: Vec2) {
+        self.armed |= self.from.distance(cursor) >= PANEL_DRAG_THRESHOLD;
+    }
+}
+
+/// Whether a press landed on something in a header that does its own thing.
+///
+/// Every header carries controls: a float button, and for the Output Log nine
+/// more. Arming a drag under one of them would make it work only if the hand
+/// were perfectly still, and dragging away from it would both swallow the
+/// click and tear the panel off.
+///
+/// Asked of the accessibility role rather than of a list of handles, because
+/// the list would have to be extended every time a header gained a control and
+/// nothing would fail when it was not. A control already has to say what it is,
+/// to a screen reader, and that answer is the one wanted here.
+fn hit_is_a_control(ui: &UserInterface, hit: NodeHandle, header: NodeHandle) -> bool {
+    use crate::a11y::Role;
+    let mut node = hit;
+    for _ in 0..32 {
+        if node.is_none() || node == header {
+            return false;
+        }
+        if let Some(probe) = ui.a11y_probe(node) {
+            if matches!(
+                probe.role,
+                Role::Button
+                    | Role::CheckBox
+                    | Role::Slider
+                    | Role::TextInput
+                    | Role::ComboBox
+                    | Role::Tab
+                    | Role::MenuItem
+                    | Role::ListItem
+            ) {
+                return true;
+            }
+        }
+        node = ui.parent(node);
+    }
+    false
+}
+
+/// How far the pointer must travel before a press on a header is a drag.
+///
+/// Layout units. Small enough that the gesture feels immediate, large enough
+/// that a click which wobbles by a pixel is still a click: the buttons in a
+/// panel header sit inside the same band, and tearing the panel off instead of
+/// pressing one of them would be the worse failure.
+const PANEL_DRAG_THRESHOLD: f32 = 6.0;
 
 /// Combined UI manager — wraps the native wgpu widget tree rendered by UiPass.
 /// Which list the bottom panel is showing.
@@ -880,6 +984,24 @@ pub struct UiManager {
     outliner_menu_popup: NodeHandle,
     outliner_menu: NodeHandle,
     preferences: crate::editor::preferences::PreferencesHandles,
+    title_drag_area: NodeHandle,
+    outliner_grid: NodeHandle,
+    details_grid: NodeHandle,
+    outliner_header: NodeHandle,
+    details_header: NodeHandle,
+    log_header: NodeHandle,
+    outliner_float: NodeHandle,
+    details_float: NodeHandle,
+    log_float: NodeHandle,
+    viewport_float: NodeHandle,
+    vp_stack: NodeHandle,
+    /// The bar's reserved right-hand column: the overflow chevron and the
+    /// float button, which the content beside them can never squeeze out.
+    /// The viewport's context bar. Its own border is the empty strip between
+    /// the controls, which is the only part of a bar full of controls that a
+    /// person can grab.
+    vp_bar_h: NodeHandle,
+    vp_actions: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -1070,6 +1192,26 @@ pub struct UiManager {
     locale_grid: NodeHandle,
     locale_actions: Vec<(NodeHandle, LocaleAction)>,
     locale_open: bool,
+    /// What the viewport's context bar needs to show every control inline.
+    ///
+    /// Measured once from a layout that had them all, rather than declared as a
+    /// window width, so the rule stays right when the bar's contents change.
+    context_bar_full_width: Option<f32>,
+    /// The header drag in flight, if there is one.
+    panel_drag: Option<PanelDrag>,
+    /// Whether a change to the floating set should be written to the layout.
+    ///
+    /// False only while the layout file is being *applied*. Restoring it panel
+    /// by panel would otherwise write a partial set back after each one, and an
+    /// editor that did not survive the startup it was in the middle of would
+    /// have lost the rest.
+    remember_floating: bool,
+    /// Device pixels per layout unit for each floating window's display.
+    ///
+    /// A second window can be on a second monitor at a second scale factor, and
+    /// the editor's is no answer for it. Kept per panel because the atlas is
+    /// shared and has to be rasterised for the densest of them.
+    floating_scales: std::collections::BTreeMap<crate::floating::FloatingKind, f32>,
     /// Panels currently living in their own OS window (MORROWIND-J step 2).
     ///
     /// The manager does not own those windows — the host does — but it has to
@@ -1443,7 +1585,7 @@ impl UiManager {
         let font_id = load_fonts(&mut native_ui);
 
         let layout_sizes = crate::layout_persist::load().resolved(sw, sh);
-        let layout = build_editor_layout(&mut native_ui, font_id, layout_sizes);
+        let layout = build_editor_layout(&mut native_ui, font_id, layout_sizes.clone());
         let ui_pass = UiPass::new(device, queue, output_format);
 
         // Tell the UserInterface which handle is the viewport so mouse events pass through.
@@ -1593,6 +1735,19 @@ impl UiManager {
             outliner_menu_popup: layout.outliner_menu_popup,
             outliner_menu: layout.outliner_menu,
             preferences: layout.preferences,
+            title_drag_area: layout.title_drag_area,
+            outliner_grid: layout.outliner_grid,
+            details_grid: layout.details_grid,
+            outliner_header: layout.outliner_header,
+            details_header: layout.details_header,
+            log_header: layout.log_header,
+            outliner_float: layout.outliner_float,
+            details_float: layout.details_float,
+            log_float: layout.log_float,
+            viewport_float: layout.viewport_float,
+            vp_stack: layout.vp_stack,
+            vp_bar_h: layout.vp_bar_h,
+            vp_actions: layout.vp_actions,
             snap_cluster: layout.snap_cluster,
             snap_grid_combo: layout.snap_grid_combo,
             snap_angle_combo: layout.snap_angle_combo,
@@ -1714,6 +1869,10 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
+            context_bar_full_width: None,
+            panel_drag: None,
+            remember_floating: true,
+            floating_scales: std::collections::BTreeMap::new(),
             floating_panels: std::collections::BTreeSet::new(),
             viewport_layout: crate::viewport_layout::ViewportLayout::from_env().unwrap_or_default(),
             locale_only_incomplete: false,
@@ -1757,8 +1916,49 @@ impl UiManager {
         // A window that opens narrow must start collapsed, not collapse on its
         // first resize.
         this.apply_collapse_rules(this.window_size.0);
+        // Before the audit hook, which is an override for one capture rather
+        // than a description of the editor a person left behind.
+        let reopen = this.chrome_layout.floating.clone();
+        this.reopen_floating_panels(&reopen);
         this.apply_audit_startup_state();
         this
+    }
+
+    /// Put back the panels that were in their own windows last time.
+    ///
+    /// The manager detaches them here and asks the host for the windows, the
+    /// same two steps the Window menu takes, so a restored layout goes through
+    /// no path of its own. Unknown names were already dropped by
+    /// [`crate::layout_persist::ChromeLayout::resolved`].
+    fn reopen_floating_panels(&mut self, slugs: &[String]) {
+        self.remember_floating = false;
+        for kind in slugs
+            .iter()
+            .filter_map(|slug| crate::floating::FloatingKind::from_slug(slug))
+        {
+            self.float_panel(kind);
+        }
+        self.remember_floating = true;
+    }
+
+    /// Write down which panels are in windows of their own.
+    ///
+    /// Called from the one place that changes it, so the file cannot describe
+    /// an arrangement the editor is not in.
+    fn remember_floating_panels(&mut self) {
+        if !self.remember_floating {
+            return;
+        }
+        let slugs: Vec<String> = self
+            .floating_panels
+            .iter()
+            .map(|kind| kind.slug().to_owned())
+            .collect();
+        if slugs == self.chrome_layout.floating {
+            return;
+        }
+        self.chrome_layout.floating = slugs;
+        crate::layout_persist::save(&self.chrome_layout);
     }
 
     /// Put one existing editor surface into a deterministic startup state for
@@ -1805,19 +2005,27 @@ impl UiManager {
         self.window_size = (logical_w.round() as u32, logical_h.round() as u32);
 
         self.native_ui.set_ui_scale(ui_scale);
-        // Dragging a window between monitors changes the scale factor, which
-        // invalidates every cached glyph. `set_render_scale` is a no-op when the
-        // ratio is unchanged, so this costs nothing on an ordinary resize.
-        self.native_ui
-            .draw_ctx
-            .font_atlas
-            .set_render_scale(ui_scale);
-        self.native_ui
-            .draw_ctx
-            .icon_atlas
-            .set_render_scale(ui_scale);
+        self.apply_raster_scale();
         self.native_ui.resize(logical_w, logical_h);
         self.apply_collapse_rules(self.window_size.0);
+    }
+
+    /// Rasterise glyphs and icons for the densest display in play.
+    ///
+    /// One atlas serves every window, so it has one raster scale, and the only
+    /// safe choice is the largest: a glyph rasterised for 100% and drawn at
+    /// 150% is soft, where one rasterised for 150% and drawn at 100% is merely
+    /// supersampled. Dragging a window between monitors changes a scale factor,
+    /// which invalidates every cached glyph, so `set_render_scale` is a no-op
+    /// when the ratio is unchanged and this costs nothing on a plain resize.
+    fn apply_raster_scale(&mut self) {
+        let scale = self
+            .floating_scales
+            .values()
+            .copied()
+            .fold(self.ui_scale, f32::max);
+        self.native_ui.draw_ctx.font_atlas.set_render_scale(scale);
+        self.native_ui.draw_ctx.icon_atlas.set_render_scale(scale);
     }
 
     /// Switch to a named workspace and lay the shell out accordingly.
@@ -1931,8 +2139,12 @@ impl UiManager {
             viewport: (window_w - preset.tools - preset.details).max(200.0),
             details: preset.details,
             outliner: preset.outliner,
+            // A workspace preset says where the panels go in this window; it
+            // has no opinion about the ones that are in windows of their own,
+            // and taking one would close them.
+            floating: self.chrome_layout.floating.clone(),
         };
-        crate::layout_persist::save(self.chrome_layout);
+        crate::layout_persist::save(&self.chrome_layout);
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
@@ -2041,12 +2253,22 @@ impl UiManager {
         // arranges whatever tiles the new window built, so a scroll costs one
         // frame's rebuild rather than a frame of empty drawer.
         self.sync_content_tiles();
+        self.measure_context_bar();
         self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
         self.native_ui.perform_layout();
         self.native_ui.draw();
-        window.set_cursor(self.native_ui.cursor_kind().to_winit());
+        // A carried panel is the whole pointer's business while it is being
+        // carried, so it outranks whatever the cursor happens to be over. The
+        // only feedback the gesture has: without it, a drag that has armed and
+        // one that has not look identical until the hand is let go.
+        let cursor = if self.panel_drag_armed() {
+            crate::node::CursorKind::Move
+        } else {
+            self.native_ui.cursor_kind()
+        };
+        window.set_cursor(cursor.to_winit());
         self.ui_pass.prepare(
             device,
             queue,
@@ -2321,6 +2543,10 @@ impl UiManager {
             }
             self.arm_internal_drag();
             let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+            // Noted rather than acted on: whether this is a drag or a click on
+            // something inside the header is not known until the pointer either
+            // moves or does not.
+            self.begin_panel_drag(hit);
             if self.is_title_chrome_hit(hit) {
                 if hit == self.win_min || hit == self.win_max || hit == self.win_close {
                     // Fall through so the button Click is delivered.
@@ -2364,6 +2590,10 @@ impl UiManager {
             }
         }
         let consumed = self.native_ui.process_os_event(event);
+        self.cancel_panel_drag_on_blur(event);
+        if matches!(event, WindowEvent::CursorMoved { .. }) {
+            self.update_panel_drag();
+        }
         if matches!(event, WindowEvent::CursorMoved { .. }) && self.native_ui.is_dragging() {
             self.refresh_drop_acceptance();
             return true;
@@ -2377,6 +2607,7 @@ impl UiManager {
             }
         ) {
             self.badge_drag_value = None;
+            self.end_panel_drag();
             self.complete_drop();
         }
         consumed
@@ -3247,6 +3478,7 @@ impl UiManager {
         if self.is_panel_floating(crate::floating::FloatingKind::OutputLog) {
             self.editor_events.push_back(EditorEvent::FloatPanel(
                 crate::floating::FloatingKind::OutputLog,
+                None,
             ));
             return;
         }
@@ -3294,7 +3526,10 @@ impl UiManager {
         let show = self.drawer_open || self.log_open || self.references_open || self.locale_open;
         self.native_ui
             .set_visibility(self.content_drawer, self.drawer_open);
-        self.native_ui.set_visibility(self.log_panel, self.log_open);
+        // A floated log is not in this row any more, and its own window is the
+        // only place it shows: the row's choice must not switch it off there.
+        let log_visible = self.log_open || self.native_ui.is_detached(self.log_panel);
+        self.native_ui.set_visibility(self.log_panel, log_visible);
         self.native_ui
             .set_visibility(self.references_panel, self.references_open);
         self.native_ui
@@ -3549,7 +3784,18 @@ impl UiManager {
     }
 
     fn is_title_chrome_hit(&self, hit: NodeHandle) -> bool {
-        hit == self.title_drag || self.native_ui.is_under(hit, self.title_drag)
+        // The left cluster and everything in it, plus the empty middle of the
+        // bar. The middle is an **exact** hit rather than `is_under`: the menu
+        // buttons and the command palette live inside the same container, and
+        // dragging the window instead of opening the File menu would be a
+        // worse bug than the one this fixes.
+        //
+        // Before this, only the auto-sized left column dragged, so the obvious
+        // place to grab a window — the wide empty strip in the middle — did
+        // nothing.
+        hit == self.title_drag
+            || self.native_ui.is_under(hit, self.title_drag)
+            || hit == self.title_drag_area
     }
 
     fn transient_overlay_open(&self) -> bool {
@@ -3992,11 +4238,24 @@ impl UiManager {
         local_space: bool,
         select_only: bool,
     ) {
-        let rules = CollapseRules::for_width(self.window_size.0 as f32);
-        self.native_ui
-            .set_visibility(self.snap_cluster, rules.context_bar_snap_inline);
-        self.native_ui
-            .set_visibility(self.snap_overflow, !rules.context_bar_snap_inline);
+        // Measured, not guessed. This used to read a 1600 px constant, so at
+        // 1280 the cluster collapsed into a chevron while the bar still had
+        // room for it, and the controls only appeared after a resize crossed
+        // the threshold. The bar can say what it needs; asking is both more
+        // accurate and immune to the chrome changing width later.
+        // The actions column is reserved, so what the middle of the bar has to
+        // fit in is whatever is left beside it.
+        let available = self.native_ui.screen_bounds(self.viewport_handle).w
+            - self.native_ui.desired_size(self.vp_actions).x;
+        let inline = match self.context_bar_full_width {
+            // Not measured yet. Stay inline so the next layout can measure it
+            // — a hidden node measures to zero, so the one way to learn the
+            // width is to have shown it once.
+            None => true,
+            Some(needed) => available >= needed,
+        };
+        self.native_ui.set_visibility(self.snap_cluster, inline);
+        self.native_ui.set_visibility(self.snap_overflow, !inline);
 
         let grid = nearest_index(&SNAP_GRID_VALUES, translate_m);
         let angle = nearest_index(&SNAP_ANGLE_VALUES, rotate_deg);
@@ -4020,6 +4279,25 @@ impl UiManager {
             self.select_only_toggle,
             select_only,
         ));
+    }
+
+    /// Learn what the context bar needs, once, from a layout that had it all.
+    ///
+    /// Called after `perform_layout`, because `desired_size` is only meaningful
+    /// once something has measured it. Recorded a single time: the cached width
+    /// is what keeps the rule from oscillating, since hiding the cluster shrinks
+    /// the stack and would otherwise immediately argue for showing it again.
+    fn measure_context_bar(&mut self) {
+        if self.context_bar_full_width.is_some() {
+            return;
+        }
+        if !self.native_ui.visibility(self.snap_cluster) {
+            return;
+        }
+        let needed = self.native_ui.desired_size(self.vp_stack).x;
+        if needed > 1.0 {
+            self.context_bar_full_width = Some(needed);
+        }
     }
 
     /// Publish the corner axis widget. `axes` are the world X/Y/Z directions
@@ -4418,9 +4696,12 @@ impl UiManager {
             A::OpenOutputLog => self.toggle_log_panel(),
             A::OpenReferences => self.toggle_references_panel(),
             A::OpenLocalisation => self.toggle_locale_panel(),
-            A::FloatPanel(kind) => {
-                self.set_panel_floating(kind, true);
-                self.editor_events.push_back(EditorEvent::FloatPanel(kind));
+            A::FloatPanel(kind) => self.float_panel(kind),
+            A::DockAllPanels => {
+                for kind in self.dock_all_panels() {
+                    self.editor_events
+                        .push_back(EditorEvent::ClosePanelWindow(kind));
+                }
             }
             A::SetViewportLayout(layout) => self.set_viewport_layout(layout),
             A::ContentShowReferences => {
@@ -4613,6 +4894,9 @@ impl UiManager {
     }
 
     fn reanchor_open_popups(&mut self) {
+        // Before the anchors are resolved, so a popup raised from a floating
+        // panel is already in that panel's window when it is placed.
+        self.native_ui.rehome_popups();
         let open = [
             (self.file_popup_open, self.file_popup, self.file_button),
             (
@@ -4658,6 +4942,12 @@ impl UiManager {
     }
 
     fn update_tooltip(&mut self) {
+        // The tooltip is one node and there is more than one window. It goes to
+        // the root the pointer is under, which is also where `tooltip_at`
+        // resolves from, so a floating panel gets its own tooltips instead of
+        // the editor getting a tooltip for whatever sits at the same place.
+        let host = self.native_ui.pointer_root();
+        self.native_ui.reparent(self.tooltip, host);
         let pos = self.native_ui.cursor_pos;
         let text = self.native_ui.tooltip_at(pos);
         if text.is_empty() {
@@ -4676,7 +4966,10 @@ impl UiManager {
                         .font_atlas
                         .measure_text(&text, 11.0, self.font_id),
                 );
-                let window = self.native_ui.screen_size;
+                // The window the tooltip is *in*, so it is kept inside that
+                // one's edges rather than the editor's.
+                let host_bounds = self.native_ui.screen_bounds(host);
+                let window = Vec2::new(host_bounds.w, host_bounds.h);
                 self.native_ui
                     .send(TextMessage::set_text(self.tooltip, text));
                 self.native_ui.set_desired_position(
@@ -4845,13 +5138,130 @@ impl UiManager {
         self.floating_panels.contains(&kind)
     }
 
-    /// Record that a panel has been floated or returned to the dock.
+    // ── MORROWIND-J step 2: carrying a panel by its header ──────────────────
+
+    /// The band a person grabs to carry each panel.
     ///
-    /// The docked copy is hidden while the panel is out, because two live
-    /// copies of the Output Log is not a feature — and because the bottom row
-    /// showing an empty log beside a floating window full of lines is the kind
-    /// of wrong that makes people distrust both.
+    /// The viewport's band is its context bar, which is the only chrome it has.
+    fn panel_header_for(&self, hit: NodeHandle) -> Option<crate::floating::FloatingKind> {
+        use crate::floating::FloatingKind;
+        [
+            (self.outliner_header, FloatingKind::Outliner),
+            (self.details_header, FloatingKind::Details),
+            (self.log_header, FloatingKind::OutputLog),
+            (self.vp_bar_h, FloatingKind::Viewport),
+        ]
+        .into_iter()
+        .find(|(header, _)| hit == *header || self.native_ui.is_under(hit, *header))
+        .map(|(_, kind)| kind)
+    }
+
+    /// Abandon a header drag whose release is never coming.
+    ///
+    /// A window that loses focus mid-gesture — alt-tab, a system dialog — may
+    /// never deliver the button going up, and an armed drag left behind would
+    /// carry the panel off on the *next* release, somewhere nobody dragged it.
+    fn cancel_panel_drag_on_blur(&mut self, event: &WindowEvent) {
+        if matches!(event, WindowEvent::Focused(false)) {
+            self.panel_drag = None;
+        }
+    }
+
+    /// Note a press that might become a header drag.
+    fn begin_panel_drag(&mut self, hit: NodeHandle) {
+        // Any press ends whatever was in flight. A drag whose release was
+        // eaten — by a window move, by focus leaving — must not still be armed
+        // when the hand comes back.
+        self.panel_drag = None;
+        let Some(kind) = self.panel_header_for(hit) else {
+            return;
+        };
+        let header = match kind {
+            crate::floating::FloatingKind::Outliner => self.outliner_header,
+            crate::floating::FloatingKind::Details => self.details_header,
+            crate::floating::FloatingKind::OutputLog => self.log_header,
+            crate::floating::FloatingKind::Viewport => self.vp_bar_h,
+        };
+        if hit_is_a_control(&self.native_ui, hit, header) {
+            return;
+        }
+        self.panel_drag = Some(PanelDrag {
+            kind,
+            from: self.native_ui.cursor_pos,
+            was_floating: self.is_panel_floating(kind),
+            armed: false,
+        });
+    }
+
+    /// Arm the drag once the pointer has travelled far enough.
+    fn update_panel_drag(&mut self) {
+        let cursor = self.native_ui.cursor_pos;
+        if let Some(drag) = self.panel_drag.as_mut() {
+            drag.moved_to(cursor);
+        }
+    }
+
+    /// Finish a header drag, if one was in flight.
+    ///
+    /// A panel dragged out of the dock floats where it was dropped, which this
+    /// can decide by itself. A panel dragged out of its *window* asks the host,
+    /// because whether the pointer ended up over the editor is a question about
+    /// two operating-system windows and this crate owns neither.
+    fn end_panel_drag(&mut self) {
+        let Some(drag) = self.panel_drag.take() else {
+            return;
+        };
+        if !drag.armed {
+            return;
+        }
+        if drag.was_floating {
+            self.editor_events
+                .push_back(EditorEvent::PanelDropped(drag.kind));
+            return;
+        }
+        // Dropped inside the panel it came from is not a tear-off; it is a
+        // hand that moved while clicking a header.
+        let panel = self.native_ui.screen_bounds(self.panel_root(drag.kind));
+        let cursor = self.native_ui.cursor_pos;
+        if panel.contains(cursor) {
+            return;
+        }
+        self.float_panel_at(drag.kind, cursor);
+    }
+
+    /// Whether a header drag is far enough along to be showing feedback.
+    #[must_use]
+    pub fn panel_drag_armed(&self) -> bool {
+        self.panel_drag.is_some_and(|drag| drag.armed)
+    }
+
+    /// The subtree a floating window shows.
+    ///
+    /// The one place the mapping from "a panel" to "a piece of the widget tree"
+    /// is written down. Everything else about floating — detaching, sizing,
+    /// drawing, routing input — is the same four lines whichever panel it is,
+    /// which is what this table buys.
+    #[must_use]
+    pub fn panel_root(&self, kind: crate::floating::FloatingKind) -> NodeHandle {
+        use crate::floating::FloatingKind;
+        match kind {
+            FloatingKind::Outliner => self.outliner_grid,
+            FloatingKind::Details => self.details_grid,
+            FloatingKind::Viewport => self.native_ui.viewport_handle,
+            FloatingKind::OutputLog => self.log_panel,
+        }
+    }
+
+    /// Move a panel between the dock and its own window.
+    ///
+    /// The dock needs no compensating adjustment. A detached node is out of its
+    /// parent's child list, so the splitter that held the Outliner above
+    /// Details now holds one child and gives it the column; the earlier version
+    /// of this had to hide the node *and* drive the splitter to zero, because
+    /// hiding alone left a header and a row behind.
     pub fn set_panel_floating(&mut self, kind: crate::floating::FloatingKind, floating: bool) {
+        use crate::floating::FloatingKind;
+
         let changed = if floating {
             self.floating_panels.insert(kind)
         } else {
@@ -4860,15 +5270,214 @@ impl UiManager {
         if !changed {
             return;
         }
-        match kind {
-            crate::floating::FloatingKind::OutputLog => {
-                if floating && self.log_open {
-                    // It has left the dock; the dock should not keep its space.
-                    self.log_open = false;
-                    self.apply_bottom_panel();
-                }
-            }
+        let root = self.panel_root(kind);
+        if root.is_none() {
+            return;
         }
+        if floating {
+            let (w, h) = kind.default_size();
+            self.native_ui
+                .detach(root, glam::Vec2::new(w as f32, h as f32));
+            // The dock may have been hiding it — the Output Log usually is.
+            // Its own window is the only place it shows now, so a hidden node
+            // there is an empty window.
+            self.native_ui.set_visibility(root, true);
+        } else {
+            self.native_ui.reattach(root);
+            self.floating_scales.remove(&kind);
+            self.apply_raster_scale();
+        }
+        if kind == FloatingKind::OutputLog {
+            // The bottom row is a swap between four panels, and the log has
+            // just left it or rejoined it. `apply_bottom_panel` is the only
+            // thing that knows which of the four the row should show.
+            self.log_open = !floating && self.log_open;
+            self.apply_bottom_panel();
+        }
+        self.remember_floating_panels();
+    }
+
+    /// Send a panel out into its own window, and tell the host to open one.
+    pub fn float_panel(&mut self, kind: crate::floating::FloatingKind) {
+        self.set_panel_floating(kind, true);
+        self.editor_events
+            .push_back(EditorEvent::FloatPanel(kind, None));
+    }
+
+    /// The same, for a panel that was carried somewhere and let go there.
+    ///
+    /// The point is the pointer's, converted out of layout units, because the
+    /// host places operating-system windows and the operating system counts in
+    /// device pixels.
+    fn float_panel_at(&mut self, kind: crate::floating::FloatingKind, at: Vec2) {
+        let scale = self.native_ui.ui_scale().max(0.1);
+        self.set_panel_floating(kind, true);
+        self.editor_events.push_back(EditorEvent::FloatPanel(
+            kind,
+            Some((at.x * scale, at.y * scale)),
+        ));
+    }
+
+    /// Put every floating panel back in the dock.
+    ///
+    /// The Window menu's *Default Layout*. Returns the panels the host has to
+    /// close windows for, because this crate does not own them.
+    pub fn dock_all_panels(&mut self) -> Vec<crate::floating::FloatingKind> {
+        let floating: Vec<_> = self.floating_panels.iter().copied().collect();
+        for kind in &floating {
+            self.set_panel_floating(*kind, false);
+        }
+        floating
+    }
+
+    /// Lay a floating panel out for its window's size and display.
+    ///
+    /// `size` is in layout units, which the caller derived with `scale`; the
+    /// scale comes along because the atlas has to know about it and because
+    /// this window's pointer events convert with it.
+    pub fn resize_floating(
+        &mut self,
+        kind: crate::floating::FloatingKind,
+        size: (f32, f32),
+        scale: f32,
+    ) {
+        let root = self.panel_root(kind);
+        self.native_ui
+            .set_detached_size(root, glam::Vec2::new(size.0, size.1));
+        self.floating_scales.insert(kind, scale.clamp(0.5, 8.0));
+        self.apply_raster_scale();
+    }
+
+    /// Paint one floating panel into another window's surface.
+    ///
+    /// Returns the number of instances drawn, or `None` if that panel is not in
+    /// a window right now.
+    ///
+    /// Must run **after** the main window's frame has been recorded *and
+    /// submitted*: both windows share one drawing context and one
+    /// [`UiPass`], because both are one interface. That sharing is not an
+    /// optimisation. Each pass owns the GPU copies of the font atlas, the icon
+    /// atlas, the thumbnail atlas and every registered texture, and every one
+    /// of those uploads is guarded by a dirty flag that the *first* pass to
+    /// prepare clears. A second pass therefore renders against blank atlases:
+    /// backgrounds, sliders and check boxes appear, and not one glyph or icon
+    /// does.
+    pub fn render_floating(
+        &mut self,
+        kind: crate::floating::FloatingKind,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        surface: crate::pass::UiSurface,
+    ) -> Option<usize> {
+        let root = self.panel_root(kind);
+        if !self.native_ui.draw_detached(root) {
+            return None;
+        }
+        self.ui_pass
+            .prepare(device, queue, &mut self.native_ui.draw_ctx, surface);
+        self.ui_pass.render(encoder, view);
+        Some(self.native_ui.draw_ctx.instances.len())
+    }
+
+    /// Layout units per device pixel, for a host sizing a second window.
+    ///
+    /// One number for every window, because there is one widget tree. A
+    /// floating window that laid itself out at its *own* monitor's scale and
+    /// then had its clicks converted at this one's would put every control a
+    /// little away from where it responds.
+    #[must_use]
+    pub fn ui_scale(&self) -> f32 {
+        self.native_ui.ui_scale()
+    }
+
+    /// The cursor a floating window should be showing, if the pointer is in it.
+    ///
+    /// `None` when it is not, because one interface has one hovered widget and
+    /// every window asking for its shape would give them all the same one. A
+    /// window that never asked kept the plain arrow over splitters, text boxes
+    /// and buttons alike, which is the whole tell that it is a second-class
+    /// copy of a panel rather than the panel.
+    #[must_use]
+    pub fn floating_cursor(
+        &self,
+        kind: crate::floating::FloatingKind,
+    ) -> Option<crate::node::CursorKind> {
+        let root = self.panel_root(kind);
+        if !self.native_ui.is_detached(root)
+            || self.native_ui.pointer_root() != self.native_ui.host_for(root)
+        {
+            return None;
+        }
+        Some(if self.panel_drag_armed() {
+            crate::node::CursorKind::Move
+        } else {
+            self.native_ui.cursor_kind()
+        })
+    }
+
+    /// Where a panel was laid out, for a host reporting what its window drew.
+    #[must_use]
+    pub fn panel_bounds(&self, kind: crate::floating::FloatingKind) -> crate::types::Rect {
+        self.native_ui.screen_bounds(self.panel_root(kind))
+    }
+
+    /// Feed a floating window's input to the panel it is showing.
+    ///
+    /// The events arrive in that window's coordinates, and a detached subtree
+    /// is laid out at its window's origin, so no translation is involved: the
+    /// only thing that has to change is where hit-testing starts.
+    pub fn process_floating_event(
+        &mut self,
+        kind: crate::floating::FloatingKind,
+        event: &WindowEvent,
+    ) -> bool {
+        let root = self.panel_root(kind);
+        if !self.native_ui.is_detached(root) {
+            return false;
+        }
+        // A pointer position arrives in this window's device pixels, and this
+        // window may be on a display of its own. Converting it with the
+        // editor's factor puts every click a fraction of the way across the
+        // panel from where it was made, which grows with the distance from the
+        // origin and so reads as a panel that works at the top and not at the
+        // bottom.
+        let editor_scale = self.native_ui.ui_scale();
+        if let Some(scale) = self.floating_scales.get(&kind).copied() {
+            self.native_ui.set_ui_scale(scale);
+        }
+        self.native_ui.set_input_root(root);
+        // Before the tree sees the press, so the hit test still resolves
+        // against this window rather than against whatever the press turns
+        // out to open.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+            ..
+        } = event
+        {
+            let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+            self.begin_panel_drag(hit);
+        }
+        let consumed = self.native_ui.process_os_event(event);
+        self.cancel_panel_drag_on_blur(event);
+        if matches!(event, WindowEvent::CursorMoved { .. }) {
+            self.update_panel_drag();
+        }
+        if matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            }
+        ) {
+            self.end_panel_drag();
+        }
+        self.native_ui.set_input_root(NodeHandle::NONE);
+        self.native_ui.set_ui_scale(editor_scale);
+        consumed
     }
 
     /// How the viewport region is divided this frame (MORROWIND-J step 3).
@@ -6657,7 +7266,7 @@ impl UiManager {
                 } else if msg.destination == self.right_split_h {
                     self.chrome_layout.outliner = *size;
                 }
-                crate::layout_persist::save(self.chrome_layout);
+                crate::layout_persist::save(&self.chrome_layout);
                 continue;
             }
             if let Some(ButtonMessage::DoubleClick) = msg.data::<ButtonMessage>() {
@@ -7102,6 +7711,21 @@ impl UiManager {
                 }
                 if msg.destination == self.references_button {
                     self.toggle_references_panel();
+                    continue;
+                }
+                // One arm per panel rather than a map: four is not a table,
+                // and the handles are already fields.
+                if let Some(kind) = [
+                    (self.outliner_float, crate::floating::FloatingKind::Outliner),
+                    (self.details_float, crate::floating::FloatingKind::Details),
+                    (self.log_float, crate::floating::FloatingKind::OutputLog),
+                    (self.viewport_float, crate::floating::FloatingKind::Viewport),
+                ]
+                .into_iter()
+                .find(|(handle, _)| *handle == msg.destination)
+                .map(|(_, kind)| kind)
+                {
+                    self.float_panel(kind);
                     continue;
                 }
                 if msg.destination == self.locale_button {
@@ -9060,5 +9684,129 @@ mod collection_editor_tests {
             0,
             "a type with no numeric lanes draws no row rather than a broken one"
         );
+    }
+}
+
+#[cfg(test)]
+mod panel_drag_tests {
+    use super::*;
+    use crate::floating::FloatingKind;
+
+    fn drag(kind: FloatingKind) -> PanelDrag {
+        PanelDrag {
+            kind,
+            from: Vec2::new(100.0, 10.0),
+            was_floating: false,
+            armed: false,
+        }
+    }
+
+    #[test]
+    fn a_hand_that_wobbles_is_still_a_click() {
+        // The header carries the float button. A press that moves a pixel
+        // while the button goes down must not tear the panel off instead.
+        let mut d = drag(FloatingKind::Outliner);
+        d.moved_to(Vec2::new(102.0, 11.0));
+        assert!(!d.armed);
+    }
+
+    #[test]
+    fn a_hand_that_travels_has_dragged_and_stays_dragged() {
+        let mut d = drag(FloatingKind::Outliner);
+        d.moved_to(Vec2::new(400.0, 300.0));
+        assert!(d.armed);
+        // Back to where it started. A carried panel let go near the press is
+        // still a carried panel; disarming here would make a long drag that
+        // returned home silently do nothing.
+        d.moved_to(Vec2::new(100.0, 10.0));
+        assert!(d.armed);
+    }
+
+    #[test]
+    fn each_panel_header_is_its_own_band() {
+        // Four distinct handles. Two panels sharing one would make the drag
+        // carry whichever the table happened to name first.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        let bands = [
+            layout.outliner_header,
+            layout.details_header,
+            layout.log_header,
+            layout.vp_bar_h,
+        ];
+        for (i, a) in bands.iter().enumerate() {
+            assert!(a.is_some(), "band {i} was never built");
+            for b in &bands[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn the_float_button_lives_in_the_header_and_reads_as_a_control() {
+        // Both halves matter. Inside the header is what makes the button
+        // reachable by the drag rule at all; reading as a Button is what stops
+        // the rule arming underneath it.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        for (header, button) in [
+            (layout.outliner_header, layout.outliner_float),
+            (layout.details_header, layout.details_float),
+            (layout.log_header, layout.log_float),
+            (layout.vp_bar_h, layout.viewport_float),
+        ] {
+            assert!(
+                ui.is_under(button, header),
+                "the float button left its header, so the drag rule cannot see it"
+            );
+            assert!(
+                hit_is_a_control(&ui, button, header),
+                "a press on the float button would arm a header drag"
+            );
+        }
+    }
+
+    #[test]
+    fn the_caption_is_not_a_control_so_the_band_can_be_grabbed() {
+        // The inverse, and the one that makes the gesture exist: a press on
+        // the header itself, or on its caption, has to be draggable.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        for header in [
+            layout.outliner_header,
+            layout.details_header,
+            layout.log_header,
+        ] {
+            assert!(!hit_is_a_control(&ui, header, header));
+            let caption = ui.first_child(header);
+            assert!(caption.is_some(), "the header has no caption");
+            assert!(
+                !hit_is_a_control(&ui, caption, header),
+                "the caption reads as a control, so the band cannot be grabbed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rule_terminates_on_a_hit_outside_the_header() {
+        // `hit_is_a_control` walks to the root when the hit is not under the
+        // header at all, which is what a stale handle looks like. It must
+        // answer rather than loop.
+        let mut ui = UserInterface::new(1920.0, 1080.0);
+        let layout =
+            build_editor_layout(&mut ui, 0, crate::layout_persist::ChromeLayout::default());
+        assert!(!hit_is_a_control(
+            &ui,
+            NodeHandle::NONE,
+            layout.outliner_header
+        ));
+        assert!(!hit_is_a_control(
+            &ui,
+            layout.viewport_handle,
+            layout.outliner_header
+        ));
     }
 }

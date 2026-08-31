@@ -6,74 +6,137 @@
 //!
 //! # What a floating panel actually needs
 //!
-//! Not a widget. A second OS window is a second **surface**, and a surface is
-//! the thing a [`crate::pass::UiPass`] renders into — so a floating panel owns
-//! a whole parallel stack:
+//! Not a widget. A second OS window is a second **surface**, so the host owns a
+//! second window and a second surface. It owns nothing else:
 //!
 //! ```text
 //!   main window          floating window
 //!   ───────────          ───────────────
-//!   winit::Window        winit::Window        ← the host owns both
-//!   wgpu::Surface        wgpu::Surface        ← and both configurations
-//!   UserInterface        UserInterface        ← here
-//!   UiPass               UiPass               ← here
+//!   winit::Window        winit::Window        ┐ the host's (somnium_core)
+//!   wgpu::Surface        wgpu::Surface        ┘
+//!         ╲                    ╱
+//!          ╲                  ╱
+//!     one UserInterface, one DrawingContext, one UiPass
+//!          root ── … ── dock          detached ── DETAILS
 //! ```
 //!
-//! The split matters: everything above the line is the host's (`somnium_core`
-//! creates windows and surfaces; this crate has never known what a `Surface`
-//! is), and everything below is a self-contained widget tree that happens not
-//! to be the editor's.
+//! One [`crate::pass::UiPass`], and that is not thrift. A pass owns the GPU
+//! copy of the font atlas, the icon atlas, the thumbnail atlas and every
+//! registered texture, and each upload is guarded by a dirty flag that the
+//! first pass to prepare clears. A second pass therefore draws against blank
+//! atlases: panels, sliders and check boxes appear, and not one glyph or icon
+//! does. It looked exactly like a font that had failed to load.
 //!
-//! # Why the panel is rebuilt rather than moved
+//! # Why the panel is moved rather than rebuilt
 //!
-//! A widget tree belongs to one [`crate::ui::UserInterface`]: handles are
-//! indices into its pool, and a node cannot be re-parented across two of them.
-//! So detaching a panel means *building it again* in the new tree from the same
-//! data — which is only possible because the panel's content is a **store**
-//! rather than a pile of widgets. [`crate::log::OutputLog`] is that store, and
-//! it is the reason the Output Log is the panel that floats first.
-
-use crate::{
-    log::{LogSeverity, OutputLog},
-    message::NodeHandle,
-    theme,
-    types::{Rect, Thickness},
-    typography::{TextRole, text_style},
-    ui::UserInterface,
-    widget::WidgetBuilder,
-    widgets::{
-        border::BorderBuilder,
-        scroll_viewer::ScrollViewerBuilder,
-        stack_panel::{Orientation, StackPanelBuilder},
-        text::TextBuilder,
-    },
-};
+//! The first cut of this built the panel a *second* time in a second
+//! [`crate::ui::UserInterface`], from the same data. That works, and it works
+//! only for a panel whose entire content is a store: the Output Log's lines,
+//! the Outliner's projected rows. Details fails it. Its rows are generated from
+//! reflected schemas and every one of them is wired to an editing path through
+//! a map keyed on the row's handle, so rebuilding it in a second tree means
+//! rebuilding that wiring too, and then keeping two copies of it honest.
+//!
+//! So the panel is not rebuilt. It is **detached**: unlinked from its parent in
+//! the tree it already lives in, laid out against the floating window's size,
+//! and drawn into the floating window's surface.
+//! [`crate::ui::UserInterface::detach`] is the whole mechanism, and because the
+//! handles never change, every binding, every message route and every open
+//! gesture survives the move without knowing it happened.
+//!
+//! Two consequences worth stating, because they are what the design bought:
+//!
+//! * A floating panel is not a lesser copy. The floating Outliner has the
+//!   filters, the context menu and the drag-and-drop the docked one has,
+//!   because it *is* the docked one.
+//! * The dock closes the gap by itself. A splitter with one child left gives
+//!   that child the column, so nothing has to remember a size to collapse.
 
 /// Which panel a floating window is showing.
 ///
-/// An enum rather than a `NodeHandle` because the window outlives any tree: it
-/// is closed and reopened, and what it must remember across that is *which
-/// panel it is*, not where the widgets were.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// An enum rather than a [`crate::message::NodeHandle`], because the window
+/// outlives any particular layout: it is closed and reopened, and what it has
+/// to remember across that is *which panel it is*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FloatingKind {
+    /// The Outliner's entity tree.
+    Outliner,
+    /// The Details panel, schema-generated rows and all.
+    Details,
+    /// The 3D viewport, its context bar and its overlays.
+    Viewport,
     /// The Output Log.
     OutputLog,
 }
 
 impl FloatingKind {
-    /// The panel `SOMNIUM_FLOAT` asks to open at startup, if it asks for one.
+    /// Every panel that can float, in menu order.
+    pub const ALL: [Self; 4] = [
+        Self::Outliner,
+        Self::Details,
+        Self::Viewport,
+        Self::OutputLog,
+    ];
+
+    /// The panels `SOMNIUM_FLOAT` asks to open at startup.
     ///
-    /// A window that only a menu can open is a window no automated run can
-    /// look at, and this one has a GPU surface of its own — the part most worth
-    /// exercising outside a human's hands.
+    /// A window only a menu can open is a window no automated run can look at,
+    /// and these have GPU surfaces of their own. Comma-separated, because the
+    /// interesting case is more than one: every window draws through the same
+    /// pass, and one window can only ever prove that it does not conflict with
+    /// the editor.
     #[must_use]
-    pub fn from_env() -> Option<Self> {
-        match std::env::var("SOMNIUM_FLOAT").ok()?.trim() {
-            "log" => Some(Self::OutputLog),
-            other => {
-                tracing::warn!("SOMNIUM_FLOAT={other} is not a panel name; ignoring");
-                None
-            }
+    pub fn from_env() -> Vec<Self> {
+        let Ok(raw) = std::env::var("SOMNIUM_FLOAT") else {
+            return Vec::new();
+        };
+        raw.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .filter_map(|name| {
+                let found = Self::from_slug(name);
+                if found.is_none() {
+                    tracing::warn!("SOMNIUM_FLOAT={name} is not a panel name; ignoring");
+                }
+                found
+            })
+            .collect()
+    }
+
+    /// The panel a slug names, if this build has one.
+    ///
+    /// The inverse of [`Self::slug`], and the reason a layout file stores names
+    /// rather than indices: a build that adds a floatable panel can still read
+    /// a file written by one that did not, and an unknown name is a panel that
+    /// does not exist rather than the wrong panel opening.
+    #[must_use]
+    pub fn from_slug(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.slug() == name)
+    }
+
+    /// The panel's name in an environment variable and in a file name.
+    ///
+    /// One table rather than two: the name `SOMNIUM_FLOAT` accepts is the name
+    /// `SOMNIUM_FLOAT_PNG` writes, so a run that asked for four windows comes
+    /// back with four files that say which is which.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::OutputLog => "log",
+            Self::Outliner => "outliner",
+            Self::Details => "details",
+            Self::Viewport => "viewport",
+        }
+    }
+
+    /// The name as it reads in a menu.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OutputLog => "Output Log",
+            Self::Outliner => "Outliner",
+            Self::Details => "Details",
+            Self::Viewport => "Viewport",
         }
     }
 
@@ -81,7 +144,10 @@ impl FloatingKind {
     #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
-            Self::OutputLog => "Output Log — Somnium",
+            Self::OutputLog => "Output Log - Somnium",
+            Self::Outliner => "Outliner - Somnium",
+            Self::Details => "Details - Somnium",
+            Self::Viewport => "Viewport - Somnium",
         }
     }
 
@@ -89,178 +155,27 @@ impl FloatingKind {
     #[must_use]
     pub const fn default_size(self) -> (u32, u32) {
         match self {
-            // Wide and short: a log is read a line at a time, and the lines are
-            // long.
-            Self::OutputLog => (900, 420),
-        }
-    }
-}
-
-/// One panel, detached: its own widget tree and its own draw list.
-///
-/// Deliberately does **not** own the window or the surface. This type can be
-/// built and driven in a test with no GPU and no event loop, which is what
-/// keeps the rebuild logic — the part with the bugs — testable.
-pub struct FloatingPanel {
-    kind: FloatingKind,
-    /// The panel's own widget tree.
-    pub ui: UserInterface,
-    font_id: u8,
-    /// The viewport the rows scroll inside.
-    scroll: NodeHandle,
-    /// Where rows are appended.
-    stack: NodeHandle,
-    /// Rows currently built, so a refresh replaces rather than appends.
-    rows: Vec<NodeHandle>,
-    /// The log revision this tree was built for.
-    ///
-    /// A log grows every frame in a busy editor, and rebuilding a thousand rows
-    /// per frame to add one is how a second window costs more than the editor.
-    built_for: Option<u64>,
-}
-
-impl FloatingPanel {
-    /// Build the panel's tree at a logical size.
-    ///
-    /// `fonts` loads the same faces the editor uses; a second tree has a second
-    /// atlas, and text in a floating window that fell back to a system face
-    /// would be visibly not the editor's.
-    pub fn new(
-        kind: FloatingKind,
-        logical: (f32, f32),
-        fonts: impl FnOnce(&mut UserInterface) -> u8,
-    ) -> Self {
-        let mut ui = UserInterface::new(logical.0.max(1.0), logical.1.max(1.0));
-        let font_id = fonts(&mut ui);
-        let root = ui.root();
-
-        let panel = BorderBuilder::new(
-            WidgetBuilder::new()
-                .with_background(theme::BG_PANEL)
-                .with_foreground(theme::TRANSPARENT),
-        )
-        .with_stroke_thickness(Thickness::ZERO)
-        .build();
-        let panel = ui.add_node(panel, root);
-
-        let scroll =
-            ScrollViewerBuilder::new(WidgetBuilder::new().with_background(theme::BG_DARK)).build();
-        let scroll = ui.add_node(scroll, panel);
-        let stack =
-            StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-                .with_orientation(Orientation::Vertical)
-                .build();
-        let stack = ui.add_node(stack, scroll);
-
-        Self {
-            kind,
-            ui,
-            font_id,
-            scroll,
-            stack,
-            rows: Vec::new(),
-            built_for: None,
+            // Wide and short: a log is read a line at a time, the lines are
+            // long, and its toolbar is nine controls that a narrower window
+            // would truncate. Tall and narrow: an outliner is a list of short
+            // names, and Details is a column of rows. The viewport is the one
+            // that wants area, because it is the thing being looked at.
+            Self::OutputLog => (1120, 460),
+            Self::Outliner => (360, 720),
+            Self::Details => (400, 800),
+            Self::Viewport => (1280, 760),
         }
     }
 
-    #[must_use]
-    pub fn kind(&self) -> FloatingKind {
-        self.kind
-    }
-
-    /// Feed the window's input to the panel's tree.
+    /// Whether this window needs the renderer to draw a scene into it.
     ///
-    /// Returns whether the tree consumed it. Without this the panel is a
-    /// picture: the scroll viewer never sees a wheel event, so a log longer
-    /// than the window is a log you can only read the top of.
-    ///
-    /// Everything is forwarded, including the pointer motion. A wheel event
-    /// carries a position, and the tree routes it to whatever is under that
-    /// position, so a window that forwarded only wheels would scroll whichever
-    /// widget the pointer was last over in some other window.
-    pub fn on_event(&mut self, event: &winit::event::WindowEvent) -> bool {
-        self.ui.process_os_event(event)
-    }
-
-    /// Lay the tree out for a new window size, in logical pixels.
-    pub fn resize(&mut self, logical: (f32, f32)) {
-        self.ui.resize(logical.0.max(1.0), logical.1.max(1.0));
-    }
-
-    /// Rebuild the rows if the log has moved on.
-    ///
-    /// Keyed on the log's newest id rather than on its length: a log at
-    /// capacity drops from the front as it gains at the back, so the length
-    /// stops changing long before the content does.
-    pub fn sync(&mut self, log: &OutputLog) {
-        let newest = log.entries().last().map(|entry| entry.id);
-        if self.built_for == newest && !self.rows.is_empty() {
-            return;
-        }
-        self.built_for = newest;
-
-        for row in std::mem::take(&mut self.rows) {
-            self.ui.remove_node(row);
-        }
-        let style = text_style(TextRole::Body);
-        for entry in log.visible() {
-            let colour = match entry.severity {
-                LogSeverity::Error => theme::active().semantic.status.error.bytes(),
-                LogSeverity::Warn => theme::active().semantic.status.warning.bytes(),
-                _ => theme::TEXT_PRIMARY,
-            };
-            let row = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
-                .with_text(&entry.rendered())
-                .with_font_id(self.font_id)
-                .with_font_size(style.px)
-                .with_color(colour)
-                .build();
-            self.rows.push(self.ui.add_node(row, self.stack));
-        }
-        self.ui.invalidate_ancestors(self.stack);
-    }
-
-    /// How many rows the tree currently holds.
+    /// True for exactly one panel, and the reason it is a method rather than an
+    /// `== Viewport` at the call site: the host has to acquire, record and
+    /// present a second scene surface, and that branch should be named for what
+    /// it is instead of for which variant happens to want it.
     #[must_use]
-    pub fn row_count(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// Pump, lay out and draw.
-    ///
-    /// The pump is not optional and its absence is not visible.
-    /// [`crate::ui::UserInterface::process_os_event`] **queues** a `UiMessage`;
-    /// nothing dispatches it until `update` runs. A panel that laid out and
-    /// painted without pumping took every wheel event, put it on the queue, and
-    /// threw it away next frame, so the window looked right and would not
-    /// scroll.
-    ///
-    /// Twice, for the reason the shell does it twice: a handler can send
-    /// further messages, and a scroll that only invalidated layout on the
-    /// following frame lags the pointer by one.
-    pub fn draw(&mut self) {
-        let _ = self.ui.update();
-        let _ = self.ui.update();
-        self.ui.perform_layout();
-        self.ui.draw();
-    }
-
-    /// Where the rows sit, for a test that needs to see them move.
-    #[must_use]
-    pub fn rows_origin(&self) -> f32 {
-        self.ui.screen_bounds(self.stack).y
-    }
-
-    /// The scroll viewport's handle, so a caller can address it directly.
-    #[must_use]
-    pub fn scroll_handle(&self) -> NodeHandle {
-        self.scroll
-    }
-
-    /// The rectangle the tree was laid out for.
-    #[must_use]
-    pub fn bounds(&self) -> Rect {
-        self.ui.screen_bounds(self.ui.root())
+    pub const fn hosts_scene(self) -> bool {
+        matches!(self, Self::Viewport)
     }
 }
 
@@ -268,146 +183,50 @@ impl FloatingPanel {
 mod tests {
     use super::*;
 
-    /// No faces: a tree with no font still has to build, because a floating
-    /// window that panicked when the atlas was empty would take the editor with
-    /// it.
-    fn panel() -> FloatingPanel {
-        FloatingPanel::new(FloatingKind::OutputLog, (900.0, 420.0), |_| 0)
-    }
-
     #[test]
-    fn a_detached_panel_builds_without_a_window_or_a_gpu() {
-        // The reason this type does not own the surface. If it did, none of the
-        // tests below could exist.
-        let mut panel = panel();
-        panel.draw();
-        assert_eq!(panel.kind(), FloatingKind::OutputLog);
-        assert_eq!(panel.row_count(), 0, "an empty log has no rows");
-    }
-
-    #[test]
-    fn the_wheel_scrolls_the_rows() {
-        // The bug this pins: `process_os_event` *queues* a `UiMessage`, and
-        // nothing dispatches it until `update` runs. A panel that laid out and
-        // painted without pumping accepted every wheel event, put it on the
-        // queue, and dropped it on the next frame. The window looked correct
-        // and would not scroll, and a screenshot could not tell the difference
-        // because the log kept growing under it.
-        let mut log = OutputLog::default();
-        for i in 0..200 {
-            log.append(i as f64, &format!("line {i}"));
+    fn every_floatable_panel_has_a_name_and_a_size() {
+        // `ALL` is what the Window menu is written against, so a variant
+        // missing from it is a panel nobody can float.
+        assert_eq!(FloatingKind::ALL.len(), 4);
+        for kind in FloatingKind::ALL {
+            assert!(!kind.label().is_empty());
+            assert!(kind.title().contains(kind.label()));
+            let (w, h) = kind.default_size();
+            assert!(w > 100 && h > 100, "{kind:?} opens at {w}x{h}");
         }
-        let mut panel = panel();
-        panel.sync(&log);
-        panel.draw();
-        let top = panel.rows_origin();
-
-        panel.ui.send(crate::message::UiMessage::new(
-            panel.scroll_handle(),
-            crate::message::MessageDirection::ToWidget,
-            crate::message::WidgetMessage::MouseWheel {
-                pos: glam::Vec2::new(400.0, 200.0),
-                // Negative is downward: the viewer subtracts the delta.
-                delta: -600.0,
-                mods: crate::message::Modifiers::default(),
-            },
-        ));
-        panel.draw();
-
-        assert!(
-            panel.rows_origin() < top,
-            "the rows did not move: {} then {}",
-            top,
-            panel.rows_origin()
-        );
     }
 
     #[test]
-    fn a_log_shorter_than_the_window_does_not_scroll() {
-        // The other half. A scroll viewer clamps to its content, so two lines
-        // in a 420 px window stay put however hard the wheel is turned.
-        let mut log = OutputLog::default();
-        log.append(0.0, "one");
-        log.append(1.0, "two");
-        let mut panel = panel();
-        panel.sync(&log);
-        panel.draw();
-        let top = panel.rows_origin();
-
-        panel.ui.send(crate::message::UiMessage::new(
-            panel.scroll_handle(),
-            crate::message::MessageDirection::ToWidget,
-            crate::message::WidgetMessage::MouseWheel {
-                pos: glam::Vec2::new(400.0, 200.0),
-                delta: -600.0,
-                mods: crate::message::Modifiers::default(),
-            },
-        ));
-        panel.draw();
-
-        assert_eq!(panel.rows_origin(), top);
-    }
-
-    #[test]
-    fn rows_follow_the_log() {
-        let mut log = OutputLog::default();
-        for i in 0..5 {
-            log.append(i as f64, &format!("line {i}"));
+    fn a_slug_round_trips_and_an_unknown_one_is_nobody() {
+        for kind in FloatingKind::ALL {
+            assert_eq!(FloatingKind::from_slug(kind.slug()), Some(kind));
         }
-        let mut panel = panel();
-        panel.sync(&log);
-        assert_eq!(panel.row_count(), 5);
-
-        log.append(5.0, "one more");
-        panel.sync(&log);
-        assert_eq!(panel.row_count(), 6);
+        // What a layout file from a later build looks like to this one.
+        assert_eq!(FloatingKind::from_slug("timeline"), None);
+        assert_eq!(FloatingKind::from_slug(""), None);
+        assert_eq!(FloatingKind::from_slug("Outliner"), None, "slugs are exact");
     }
 
     #[test]
-    fn an_unchanged_log_does_not_rebuild_the_rows() {
-        // A busy editor logs every frame, and a second window that rebuilt a
-        // thousand rows to add one costs more than the editor it is beside.
-        let mut log = OutputLog::default();
-        log.append(0.0, "hello");
-        let mut panel = panel();
-        panel.sync(&log);
-        let first = panel.rows.clone();
-
-        panel.sync(&log);
-        assert_eq!(panel.rows, first, "the same log rebuilt the same rows");
-    }
-
-    #[test]
-    fn a_log_that_drops_from_the_front_still_rebuilds() {
-        // The reason the cache key is the newest id and not the row count. A
-        // log at capacity loses a line for every line it gains, so a
-        // length-keyed cache would freeze the window on the first full buffer.
-        let mut log = OutputLog::with_capacity(4);
-        for i in 0..4 {
-            log.append(i as f64, &format!("line {i}"));
+    fn every_panel_answers_to_its_own_slug() {
+        // `from_env` is written against `slug`, so a variant whose slug
+        // collided with another would silently open the wrong window.
+        for kind in FloatingKind::ALL {
+            assert!(!kind.slug().is_empty());
+            let same: Vec<_> = FloatingKind::ALL
+                .into_iter()
+                .filter(|other| other.slug() == kind.slug())
+                .collect();
+            assert_eq!(same, vec![kind], "{:?} shares a slug", kind);
         }
-        let mut panel = panel();
-        panel.sync(&log);
-        let before = panel.row_count();
-
-        log.append(9.0, "pushes one out");
-        panel.sync(&log);
-        assert_eq!(panel.row_count(), before, "still full");
-        assert_ne!(panel.built_for, Some(3), "but rebuilt for the newer entry");
     }
 
     #[test]
-    fn resizing_relays_out_rather_than_rebuilding() {
-        let mut log = OutputLog::default();
-        log.append(0.0, "hello");
-        let mut panel = panel();
-        panel.sync(&log);
-        let rows = panel.rows.clone();
-
-        panel.resize((400.0, 300.0));
-        panel.draw();
-        assert_eq!(panel.rows, rows, "a resize is a layout, not a rebuild");
-        let bounds = panel.bounds();
-        assert!(bounds.w > 0.0 && bounds.h > 0.0, "{bounds:?}");
+    fn only_the_viewport_asks_the_renderer_for_anything() {
+        let scene: Vec<_> = FloatingKind::ALL
+            .into_iter()
+            .filter(|kind| kind.hosts_scene())
+            .collect();
+        assert_eq!(scene, vec![FloatingKind::Viewport]);
     }
 }

@@ -2082,7 +2082,15 @@ impl GameApp for HelloGame {
                     let l_col = archetype
                         .column_index(ComponentId::of::<LightComponent>())
                         .unwrap();
+                    // Hiding a light hides what it lights, not just its gizmo.
+                    // One lookup per archetype, since most carry no flags.
+                    let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
                     for row in 0..archetype.len() {
+                        if let Some(col) = flags_col
+                            && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
+                        {
+                            continue;
+                        }
                         let transform = unsafe { archetype.column(t_col).get::<Transform>(row) };
                         let light = unsafe { archetype.column(l_col).get::<LightComponent>(row) };
 
@@ -2339,7 +2347,13 @@ impl GameApp for HelloGame {
             // The Viking boat is a single ECS/physics entity backed by the
             // original GLB's multi-node render hierarchy. Submit every part
             // against the shared rigid-body root without flooding the outliner.
-            if let Some(boat) = self.boat.as_ref() {
+            // The boat is one ECS entity drawn as many parts, so its flags are
+            // asked once for the whole hierarchy rather than per part.
+            if let Some(boat) = self
+                .boat
+                .as_ref()
+                .filter(|boat| !somnium_core::is_hidden(ctx.world, boat.entity))
+            {
                 let root = glam::Mat4::from_scale_rotation_translation(
                     Vec3::splat(0.01),
                     ctx.physics.get_rotation(boat.body),
