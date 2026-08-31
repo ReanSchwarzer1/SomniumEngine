@@ -1837,13 +1837,15 @@ does not overlap. STALKER waits for both relevant outputs.
   blocked on the same reflected-component change as the terrain and foliage
   pickers above.
 - Prefabs, and the GUI layout editor's item 5 that waits on them (MORROWIND-O,
-  M2 item 5). MORROWIND-J is otherwise closed: the dock tree, real `winit` child
-  windows and several views per frame all landed on 2026-08-31, and on the same
-  day every major panel learned to float — Outliner, Details, viewport and
-  Output Log, each from a button on its own header. A floated viewport is the
-  primary view redirected into that window, not a second recording, so it costs
-  no extra scene work and keeps TAA, FSR and ReSTIR. What J still lacks is a
-  drag-to-dock affordance and a shell that resolves tiles directly.
+  M2 item 5). MORROWIND-J is closed: the dock tree, real `winit` child windows,
+  several views per frame, and every major panel floating — Outliner, Details,
+  viewport and Output Log, from a button on its own header, from the Window
+  menu, or by dragging that header. A floated viewport is the primary view
+  redirected into that window rather than a second recording, so it costs no
+  extra scene work and keeps TAA, FSR and ReSTIR. What J still lacks is a shell
+  that resolves dock tiles directly: a panel dragged out floats and a panel
+  dragged back goes to the slot it came from, but it cannot yet be dropped into
+  a *different* slot.
 - Root motion, IK/events, and animation compression/task graph.
 - Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
@@ -2273,6 +2275,38 @@ So the viewport's context bar had a 478 px hole where the snapping cluster had
 been, and the two controls after it were laid out past the bar's edge, where
 they clipped to nothing. The bar read as having lost them. Zero is written
 through now.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A second top-level window is not a panel; an owned one is.** A floating panel
+created as an ordinary window sat *behind* the editor the moment the editor was
+clicked, so a panel pulled out vanished when it was used, which is when it was
+wanted. An owned window is always above its owner in the z-order and hides and
+restores with it. That is the whole difference between a tool window and a
+second application.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**A window icon and a file icon come from different places.** `with_window_icon`
+covers what a *running* window shows: the taskbar button, alt-tab, the window
+list. Explorer and a pinned shortcut read an icon resource out of the binary,
+which only the linker can put there. Both are the same drawing, and the drawing
+is the one the title bar already uses, because a mark that drifts from the one
+on screen reads as two applications.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**The shell has laid out in logical units since Phase 27.** What it did not have
+was more than one display to be on. Every window carries its own scale factor
+now, converts its own pointer positions with it, and the one shared glyph atlas
+rasterises for the densest of them: rasterised for 150% and drawn at 100% is
+supersampled, the other way round is soft. `FontAtlas::render_scale`'s doc still
+said layout was in physical pixels long after it was not, which is how the gap
+was mis-stated twice.
+([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Which part of a header is a handle is a question the widgets can answer.**
+Dragging a panel by its header has to not fire on the controls inside it, and a
+list of handles to exclude would need extending every time a header gained one,
+with nothing failing when it was not. A control already has to say what it is,
+to a screen reader; that answer is the one the drag rule wants.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **An index recorded on the way out is stale by the time a sibling follows.**
