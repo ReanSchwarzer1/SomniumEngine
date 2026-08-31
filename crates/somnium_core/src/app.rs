@@ -7388,16 +7388,26 @@ impl<G: GameApp> Engine<G> {
             // docked panel would have run.
             other => {
                 let kind = self.floating[index].kind;
-                let consumed = match self.ui_manager.as_mut() {
-                    Some(ui) => ui.process_floating_event(kind, other),
-                    None => false,
+                let (consumed, detached) = match self.ui_manager.as_mut() {
+                    Some(ui) => (
+                        ui.process_floating_event(kind, other),
+                        ui.is_panel_floating(kind),
+                    ),
+                    None => (false, false),
                 };
-                if kind.hosts_scene() && !consumed {
+                if kind.hosts_scene() && detached && !consumed {
                     // The pointer was over the render rather than over the
                     // bar. A detached viewport is laid out at its window's
                     // origin, so this window's cursor position and
                     // `viewport_physical_rect` are already in the same space
                     // and the editor's tools need no translation to work here.
+                    //
+                    // `detached` is not redundant with owning the window. The
+                    // manager docks the panel on the frame the command runs and
+                    // the host closes the window on the next one, so in between
+                    // this window is real and its viewport is not. Falling
+                    // through then would hand the editor's viewport tools a
+                    // pointer position measured in a window they are not in.
                     return FloatingRoute::Viewport;
                 }
             }
