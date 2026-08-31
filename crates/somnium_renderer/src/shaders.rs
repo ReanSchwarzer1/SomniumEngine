@@ -226,14 +226,16 @@ impl Shaders {
 
     /// Poll watched files and apply what changed. Debug builds only.
     ///
-    /// `validate` is handed the composed source for each dependent variant and
-    /// should return naga's diagnostic on failure. **A module whose new source
-    /// does not validate is not installed**, its old text stays, and the
-    /// diagnostic comes back in [`ReloadOutcome::failures`] — the caller shows
-    /// it and keeps drawing with the pipelines it already had.
+    /// `validate` is handed the root module's name, the composed source for
+    /// each dependent variant, and the map from that source's lines back to the
+    /// files they were written in. It should return the compiler's diagnostic
+    /// on failure. **A module whose new source does not validate is not
+    /// installed**, its old text stays, and the diagnostic comes back in
+    /// [`ReloadOutcome::failures`] — the caller shows it and keeps drawing with
+    /// the pipelines it already had.
     pub fn poll_reload(
         &self,
-        validate: impl FnMut(&str, &str) -> Result<(), String>,
+        validate: impl FnMut(&str, &str, &somnium_shader::SourceMap) -> Result<(), String>,
     ) -> ReloadOutcome {
         let mut system = self.system.lock().expect("shader system poisoned");
         let changed = system.poll_reload();

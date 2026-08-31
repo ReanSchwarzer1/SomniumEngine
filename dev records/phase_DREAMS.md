@@ -19,12 +19,16 @@
 > Experimental rendering without a budget meter is a research demo. This phase
 > takes both halves.
 >
-> **Status:** **DRAFT, plan only, nothing in tree.** Written 2026-08-31 against
-> `3ecbda6` on `dev`. Every audit row below is **measured** from that tree or
-> from `context.md`; the research rows in §6 are **read, not run**, and §6.4
-> states the confidence on each one. Nothing here is an implementation
-> commitment: DREAMS-A's first job is to replace the survey's guesses with
-> measurements on this hardware.
+> **Status:** **ACTIVE. DREAMS-A complete, 2026-08-31.** Drafted against
+> `3ecbda6`; A landed against `3cc321a`. B through E are plan only.
+>
+> **A correction this document already owes.** §4.2 originally listed "any
+> shader module system" as an absence. It is not one: MORROWIND-C built one,
+> with named includes, conditional compilation, variant keys and hot reload.
+> The row was written from `context.md`, which describes the renderer and not
+> the shader system. **An absence claimed from a summary is not a measurement**,
+> and §4.2 and §7's DREAMS-A entry are corrected below. The rest of §4 was
+> checked against the tree and stands.
 >
 > **Relationship to MORROWIND: alongside, not after.** This is the unusual thing
 > about this phase and §1.2 is entirely about it. MORROWIND **freezes the
@@ -159,9 +163,9 @@ Three arguments, and the third is the real one.
 
 ## 2. Goals
 
-1. Land a **shading-language and shader-tooling layer** that makes the other
-   four sub-phases writable at all. Somnium hand-writes 55 WGSL modules with no
-   imports, no generics and no conditional compilation.
+1. Make the other four sub-phases writable at all. **Done by DREAMS-A**, and
+   not the way this line expected: the module system already existed, and what
+   was missing was a shader error that names the file it is in.
 2. Land a **sampling and filtering substrate**: blue-noise sequences, stochastic
    texture filtering, and the deterministic fixture that lets a stochastic
    technique be compared to anything.
@@ -223,7 +227,7 @@ guess.
 
 | Absent | Evidence |
 |---|---|
-| Any shader module system | 55 hand-written WGSL modules, `include_str!`-style composition, no imports |
+| ~~Any shader module system~~ **Corrected by DREAMS-A** | MORROWIND-C's `somnium_shader` has named includes, `//!if` conditionals, variant keys, hot reload and a budget report. What it lacked was **diagnostics that name the file an error is in**, which DREAMS-A measured and fixed. Generics and interfaces remain absent |
 | Any blue-noise or low-discrepancy sequence | No noise asset, no sampler table; stochastic passes use hash functions |
 | Any stochastic or wave-cooperative texture filtering | Texture reads are hardware-filtered `textureSample` |
 | Any many-light importance sampling | Locals are clustered and all shaded; there is no light BVH and no per-pixel light selection |
@@ -409,7 +413,7 @@ does not.
 
 ```mermaid
 flowchart TB
-    A["DREAMS-A · GADGET<br/>the shading language"] --> B["DREAMS-B · GRAIN<br/>sampling and filtering"]
+    A["DREAMS-A · GADGET<br/>the shading language<br/>(done: stayed, fixed diagnostics)"] --> B["DREAMS-B · GRAIN<br/>sampling and filtering"]
     B --> C["DREAMS-C · BUBBLE<br/>light transport"]
     B --> D["DREAMS-D · FLECK<br/>geometry that is not a triangle"]
     B --> E["DREAMS-E · PUPPET<br/>appearance"]
@@ -426,34 +430,35 @@ in any order or dropped individually.
 
 ### DREAMS-A · GADGET — the shading language
 
-**Question:** can Somnium's shaders be written in something with modules and
-conditional compilation, without giving up naga, wgpu or the existing 55
-modules?
+**Complete, 2026-08-31.** Record:
+[DREAMS-A.md](<phase DREAMS/DREAMS-A.md>).
 
-**Why it is first:** every other sub-phase in this phase multiplies shader
-variants. Stochastic filtering needs a switch through every texture read. Glints
-need a term threaded through the BSDF. A software rasteriser needs the
-visibility-buffer layout shared between a compute shader and a fragment shader
-that currently duplicate it. Doing four of those against 55 hand-written modules
-with no `import` is how a phase becomes a mess.
+**Question, as asked:** can Somnium's shaders be written in something with
+modules and conditional compilation?
 
-**Scope:**
+**Question, as it turned out:** they already are. MORROWIND-C's
+`somnium_shader` has named includes, `//!if` conditionals, define registration,
+variant keys, hot reload that never silently reverts, and a budget report. So
+the real question was whether that system has a ceiling DREAMS-B through E would
+hit, and whether Slang or WESL raises it.
 
-- Decide between Slang, WESL and staying put, on measured criteria: build time,
-  what breaks in naga, whether hot reload survives, and how many of the 55
-  modules have to change.
-- Whichever wins, **port exactly one non-trivial module** and leave the other 54
-  alone. A migration is not this sub-phase.
-- Prove the SPIR-V passthrough path works for a hand-written module, since
-  `wgpu-ffx` already proves it works for a vendored one.
-- Shader hot reload, if the chosen path makes it cheap.
+**Decision: stay.** The measured ceiling was diagnostics, not the language.
 
-**Legitimate outcome:** "neither is worth it, here is the build-time and
-breakage table". That is a complete sub-phase.
+| Measured | Result |
+|---|---|
+| Composition cost | 2.87 ms for `shading.wgsl` cold, 0.8 µs cached, 8.03 ms for all 55 roots at startup. Not a problem |
+| Diagnostics | An error on line 48 of `brdf.wgsl` was reported as `wgsl:195` and labelled `shading.wgsl`, a file it is not in. **The one real cost** |
+| WESL 0.4.4 | Real source maps, generics, wildcard imports, MIT OR Apache-2.0, and `rust-version = 1.97.1` against a tree frozen at rustc 1.88. Not adoptable without a toolchain bump |
+| Slang | **Not measured.** Needs a `slangc` binary that is not on this machine. Its strongest argument survives: `PASSTHROUGH_SHADERS` is already requested in tree for FSR's SPIR-V |
+| Generics | Wanted by exactly one of B through E (PUPPET's layered BSDF). One of four is not a migration |
 
-**Risk:** naga is the compatibility surface for every other backend. A path that
-bypasses naga on Vulkan and not elsewhere is a fork in the shader pipeline, and
-§7.1 must say what that costs before it is taken.
+**What landed instead:** a line-origin map built during the composition that was
+already happening. 10 spans for 4,801 composed lines, 0.5% of a startup-only
+path, and the diagnostic now reads `brdf.wgsl:48:37`.
+
+**Re-opened when, not if:** if PUPPET needs generics, this comes back with a
+concrete case rather than a guess. §3 of the record says what measuring Slang
+would take.
 
 ### DREAMS-B · GRAIN — sampling and filtering
 
@@ -652,15 +657,26 @@ No sub-phase closes without all four.
 
 ---
 
-## 14. Start checklist for DREAMS-A
+## 14. Start checklist
 
-1. Create `dev records/phase DREAMS/` and open `ATTRIBUTION.md` §13K.
-2. Add the four THERMOMETER rows to `tools/ghostfence/run.py` as a separate gate,
-   or as a sibling script. Do not weaken GHOSTFENCE to make room for it.
-3. Re-measure §4.3 on the machine the phase will run on, and correct this
-   document if any feature bit differs.
-4. Build the Slang and WESL comparison against **one** real module, not a toy.
-5. Publish the table and the decision before writing anything else.
+**DREAMS-A, done:** `dev records/phase DREAMS/` exists, `ATTRIBUTION.md` §13K is
+open, §4.3's feature bits were re-read from `wgpu-types-30.0.1` in the local
+registry, and the language table and decision are published in the record.
+
+THERMOMETER's four rows were filled by hand in the DREAMS-A record rather than
+by a script. **Writing that script is DREAMS-B's first task**, because B is the
+first sub-phase whose work reaches the GPU and therefore the first whose rows a
+person cannot fill from memory.
+
+**DREAMS-B, to start:**
+
+1. Write the THERMOMETER script beside `tools/ghostfence/run.py`. Do not weaken
+   GHOSTFENCE to make room for it.
+2. Build the deterministic capture fixture **before** any technique. It is the
+   thing MORROWIND-AC turned out to need and the thing C, D and E are blocked
+   on.
+3. Only then: blue noise, then stochastic texture filtering, then collaborative
+   filtering.
 
 ---
 

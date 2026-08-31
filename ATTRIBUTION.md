@@ -2524,3 +2524,33 @@ Source pages:
 - <https://opengameart.org/content/beach-ocean-waves>
 - <https://opengameart.org/content/footsteps-0>
 - <https://opengameart.org/content/water-splash-and-sand-footsteps>
+
+## 13K. Phase DREAMS — Media Molecule (experimental rendering, 2026-08-31)
+
+Opened by **DREAMS-A**. §13E and §13F belong to Phase 27, §13G to CONTROL,
+§13H to MORROWIND, §13I to KENSHI and §13J to STALKER; **this phase edits none
+of them.**
+
+DREAMS reads research code more heavily than any previous phase, and much of
+that code ships under non-commercial, academic-only or entirely unstated terms.
+The rule for this phase is therefore **stricter** than §13H's:
+
+> Research code is read for the idea and never linked, never vendored, and
+> never adapted line by line. A permissive implementation that DREAMS actually
+> depends on goes through the same audit as any other dependency and is
+> recorded below with its licence before it lands.
+
+### 13K.1 DREAMS-A — source-mapped shader diagnostics
+
+No third-party source, code, identifiers or layouts were used. The change is a
+line-origin map built during the composition `somnium_shader` already performs,
+and the two alternatives it was measured against were evaluated and **not
+adopted**:
+
+| Considered | Licence | Outcome |
+|---|---|---|
+| [WESL](https://wesl-lang.dev/) / `wesl` crate | MIT OR Apache-2.0 | **Not adopted.** 0.4.4 declares `rust-version = 1.97.1`; the tree is frozen at rustc 1.88, so only 0.4.0 is installable and every upgrade would be a frozen-toolchain change. Nothing from it was read into the tree. |
+| [Slang](https://shader-slang.org/) | Apache-2.0 with LLVM exception | **Not adopted and not measured.** Evaluating it needs a `slangc` binary that is not installed on the development machine; the option is left open in the DREAMS-A record with the reason. |
+
+The `//!include` / `//!if` directive language the map serves is MORROWIND-C's,
+recorded at §13H.5 and §13H.7. DREAMS-A did not change it.

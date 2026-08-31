@@ -2437,6 +2437,40 @@ impl SomniumRenderer {
     /// 3. **A good edit swaps atomically.** The new module and pipeline are
     ///    built before either replaces its predecessor.
     ///
+    /// Say where a shader error is, in the file somebody has open.
+    ///
+    /// DREAMS-A. naga parses the *composed* text, so it reports a line in a
+    /// string built from up to eight files. Before this the message was
+    /// prefixed with the **root** module's name, which for an error inside
+    /// `brdf.wgsl` names a file the error is not in: measured, the diagnostic
+    /// read `wgsl:195` for a mistake on line 48 of a 120-line module.
+    ///
+    /// The composed snippet is kept. It is what naga drew the caret under, and
+    /// dropping it would trade one confusing message for a shorter one.
+    fn shader_diagnostic(
+        root: &str,
+        source: &str,
+        map: &somnium_shader::SourceMap,
+        error: &naga::front::wgsl::ParseError,
+    ) -> String {
+        let body = error.emit_to_string(source);
+        let Some(location) = error.location(source) else {
+            // No span to translate. The root's name is still the best label
+            // available, and saying so is better than dropping the label.
+            return format!("{root}: {body}");
+        };
+        let line = location.line_number as usize;
+        match map.locate(line) {
+            Some(origin) => format!(
+                "{}:{}:{} (composed {root} line {line})\n{body}",
+                origin.module, origin.line, location.line_position,
+            ),
+            // The hoisted `enable` header, which was lifted out of several
+            // modules and belongs to none of them.
+            None => format!("{root}: hoisted header line {line}\n{body}"),
+        }
+    }
+
     /// Coverage is honest and partial: the shading pass rebuilds, because it is
     /// the acceptance case and `brdf.wgsl` composes into it. Every other pass
     /// reports its reload and keeps its existing pipeline until it grows a
@@ -2444,7 +2478,7 @@ impl SomniumRenderer {
     /// message says which passes are waiting so the gap is visible rather than
     /// mistaken for a shader that did not take.
     pub fn reload_shaders(&mut self, ctx: &RenderContext) -> Option<String> {
-        let outcome = self.shaders.poll_reload(|module, source| {
+        let outcome = self.shaders.poll_reload(|module, source, map| {
             // Parse only. Full validation needs capability flags that mirror the
             // device's, and a parse failure is the overwhelming majority of what
             // a mid-edit save produces; a variant that parses and fails
@@ -2452,7 +2486,7 @@ impl SomniumRenderer {
             // the old pipeline in place either way.
             naga::front::wgsl::parse_str(source)
                 .map(|_| ())
-                .map_err(|error| format!("{module}: {}", error.emit_to_string(source)))
+                .map_err(|error| Self::shader_diagnostic(module, source, map, &error))
         });
 
         if outcome.is_empty() {
@@ -2784,13 +2818,8 @@ impl SomniumRenderer {
             let mut lines =
                 crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
             lines.extend_from_slice(&self.line_gizmo_queue);
-            self.light_gizmo_pass.record(
-                &ctx.device,
-                &ctx.queue,
-                &mut encoder,
-                scene_view,
-                &lines,
-            );
+            self.light_gizmo_pass
+                .record(&ctx.device, &ctx.queue, &mut encoder, scene_view, &lines);
         }
 
         // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────

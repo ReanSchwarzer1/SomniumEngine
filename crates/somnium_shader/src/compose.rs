@@ -43,6 +43,122 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+/// Where one line of a composed shader came from.
+///
+/// DREAMS-A. Composition concatenates 55 modules into one string, and naga
+/// reports errors against that string: a mistake on line 48 of `brdf.wgsl` is
+/// reported as line 195 of a 4,801-line text with no file name, and the
+/// renderer then prefixed it with the name of the *root* module, which is a
+/// file the error is not in. That was measured, not assumed, and it is the
+/// tax every shader written in DREAMS-B through E would have paid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    /// The module the line was written in.
+    ///
+    /// The name rather than the [`ModuleId`], so a map can be read without the
+    /// registry that produced it. The consumer is a diagnostic, and a
+    /// diagnostic wants the word a person would type into a file open dialog.
+    pub module: &'static str,
+    /// Its 1-based line number in that module's own source.
+    pub line: usize,
+}
+
+/// A lookup from a line of composed WGSL back to the line somebody wrote.
+///
+/// Runs rather than lines: consecutive composed lines from consecutive source
+/// lines of one module collapse into a single span, so the map for
+/// `shading.wgsl` is a handful of entries rather than 4,801. Composition
+/// already walks the modules in order, so building it costs one comparison per
+/// line and no extra pass.
+#[derive(Clone, Debug, Default)]
+pub struct SourceMap {
+    /// Sorted by `composed`, never empty of order.
+    spans: Vec<Span>,
+    /// Lines occupied by the hoisted `enable`/`requires` header, which belong
+    /// to no single module because they were lifted out of several.
+    header: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    /// 1-based first line of the run in the composed text.
+    composed: usize,
+    module: &'static str,
+    /// 1-based source line that `composed` corresponds to.
+    source: usize,
+    /// How many lines the run covers.
+    len: usize,
+}
+
+impl SourceMap {
+    /// Note that the next composed line came from `module`'s line `source`.
+    fn push(&mut self, module: &'static str, source: usize, composed: usize) {
+        if let Some(last) = self.spans.last_mut() {
+            // Extend the run when both sides advanced by one, which is the
+            // common case and the reason this stays small.
+            if last.module == module
+                && last.source + last.len == source
+                && last.composed + last.len == composed
+            {
+                last.len += 1;
+                return;
+            }
+        }
+        self.spans.push(Span {
+            composed,
+            module,
+            source,
+            len: 1,
+        });
+    }
+
+    /// Shift every span down, for the `enable` header prepended after emission.
+    fn shift(&mut self, lines: usize) {
+        if lines == 0 {
+            return;
+        }
+        self.header = lines;
+        for span in &mut self.spans {
+            span.composed += lines;
+        }
+    }
+
+    /// Where a 1-based line of the composed text was written.
+    ///
+    /// `None` for a line in the hoisted header, and for a line past the end.
+    #[must_use]
+    pub fn locate(&self, composed_line: usize) -> Option<Origin> {
+        if composed_line == 0 || composed_line <= self.header {
+            return None;
+        }
+        // The last span that starts at or before the line. `partition_point`
+        // rather than a scan, because a shader reload asks this once per
+        // diagnostic and a scan would still be fine; the binary search is here
+        // because the spans are already sorted and it costs nothing to say so.
+        let index = self
+            .spans
+            .partition_point(|span| span.composed <= composed_line);
+        let span = self.spans.get(index.checked_sub(1)?)?;
+        let offset = composed_line - span.composed;
+        (offset < span.len).then_some(Origin {
+            module: span.module,
+            line: span.source + offset,
+        })
+    }
+
+    /// How many runs the map holds, for a test that cares it stays small.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Whether the map covers nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+}
+
 /// A registered WGSL module.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ModuleId(pub u32);
@@ -259,6 +375,19 @@ impl Registry {
     /// hand-written concatenation would have produced — which is what makes the
     /// migration from `include_str!` a move rather than a rewrite.
     pub fn resolve(&self, root: ModuleId, defines: Defines) -> Result<String, ComposeError> {
+        self.resolve_mapped(root, defines).map(|(text, _)| text)
+    }
+
+    /// Resolve, and say where every line of the result came from.
+    ///
+    /// The map is what turns a naga diagnostic from a line number in a
+    /// 209 KB blob into a file and a line somebody can open. Building it is
+    /// free: composition already visits each line in order.
+    pub fn resolve_mapped(
+        &self,
+        root: ModuleId,
+        defines: Defines,
+    ) -> Result<(String, SourceMap), ComposeError> {
         let mut out = String::new();
         let mut emitted = HashSet::new();
         // BTreeSet: `enable` order must be deterministic, or two runs of the
@@ -266,6 +395,8 @@ impl Registry {
         // anything.
         let mut enables = BTreeSet::new();
         let mut stack = Vec::new();
+        let mut map = SourceMap::default();
+        let mut emitted_lines = 0usize;
         self.emit(
             root,
             defines,
@@ -273,10 +404,12 @@ impl Registry {
             &mut emitted,
             &mut enables,
             &mut stack,
+            &mut map,
+            &mut emitted_lines,
         )?;
 
         if enables.is_empty() {
-            return Ok(out);
+            return Ok((out, map));
         }
         let mut header = String::new();
         for line in &enables {
@@ -284,7 +417,8 @@ impl Registry {
             header.push('\n');
         }
         header.push_str(&out);
-        Ok(header)
+        map.shift(enables.len());
+        Ok((header, map))
     }
 
     /// Every module `root` transitively includes under `defines`, itself first.
@@ -300,6 +434,8 @@ impl Registry {
         let mut emitted = HashSet::new();
         let mut enables = BTreeSet::new();
         let mut stack = Vec::new();
+        let mut map = SourceMap::default();
+        let mut lines = 0usize;
         self.emit(
             root,
             defines,
@@ -307,12 +443,15 @@ impl Registry {
             &mut emitted,
             &mut enables,
             &mut stack,
+            &mut map,
+            &mut lines,
         )?;
         let mut ids: Vec<_> = emitted.into_iter().collect();
         ids.sort_unstable();
         Ok(ids)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit(
         &self,
         id: ModuleId,
@@ -321,6 +460,8 @@ impl Registry {
         emitted: &mut HashSet<ModuleId>,
         enables: &mut BTreeSet<String>,
         stack: &mut Vec<&'static str>,
+        map: &mut SourceMap,
+        emitted_lines: &mut usize,
     ) -> Result<(), ComposeError> {
         let module = &self.modules[id.0 as usize];
 
@@ -369,7 +510,16 @@ impl Registry {
                                 wanted: wanted.clone(),
                             },
                         )?;
-                        self.emit(child, defines, out, emitted, enables, stack)?;
+                        self.emit(
+                            child,
+                            defines,
+                            out,
+                            emitted,
+                            enables,
+                            stack,
+                            map,
+                            emitted_lines,
+                        )?;
                     }
                     "if" => {
                         if condition.is_some() {
@@ -453,6 +603,8 @@ impl Registry {
                 continue;
             }
 
+            *emitted_lines += 1;
+            map.push(module.name, number, *emitted_lines);
             out.push_str(line);
             out.push('\n');
         }
@@ -726,5 +878,144 @@ mod tests {
         assert_eq!(both.count(), 2);
         assert!(!Defines::bit(SKINNED).contains(Defines::bit(ALPHA_CUTOUT)));
         assert!(Defines::NONE.contains(Defines::NONE));
+    }
+
+    // ── DREAMS-A: the source map ────────────────────────────────────────────
+
+    #[test]
+    fn a_line_maps_back_to_the_module_it_was_written_in() {
+        // The measurement that opened DREAMS-A: an error on line 48 of a
+        // 120-line module arrived as "line 195" of a 4,801-line text with no
+        // file name, and the renderer labelled it with the *root* module,
+        // which is a file the error is not in.
+        let mut r = Registry::default();
+        let child = r.register("child.wgsl", "// c1\n// c2\n// c3\n");
+        let root = r.register("root.wgsl", "// r1\n//!include \"child.wgsl\"\n// r2\n");
+        let (text, map) = r.resolve_mapped(root, Defines::NONE).unwrap();
+
+        assert_eq!(text, "// r1\n// c1\n// c2\n// c3\n// r2\n");
+        let _ = child;
+        assert_eq!(
+            map.locate(1),
+            Some(Origin {
+                module: "root.wgsl",
+                line: 1
+            })
+        );
+        assert_eq!(
+            map.locate(2),
+            Some(Origin {
+                module: "child.wgsl",
+                line: 1
+            })
+        );
+        assert_eq!(
+            map.locate(4),
+            Some(Origin {
+                module: "child.wgsl",
+                line: 3
+            })
+        );
+        assert_eq!(
+            map.locate(5),
+            Some(Origin {
+                module: "root.wgsl",
+                line: 3
+            })
+        );
+        assert_eq!(map.locate(6), None, "past the end");
+        assert_eq!(map.locate(0), None, "lines are 1-based");
+    }
+
+    #[test]
+    fn the_hoisted_header_belongs_to_no_module() {
+        // `enable` is lifted out of whichever module declared it and emitted
+        // first. Attributing those lines to one module would name a file that
+        // does not have them at that line.
+        let mut r = Registry::default();
+        r.register("child.wgsl", "enable f16;\n// c1\n");
+        let root = r.register("root.wgsl", "//!include \"child.wgsl\"\n// r1\n");
+        let (text, map) = r.resolve_mapped(root, Defines::NONE).unwrap();
+
+        assert!(text.starts_with("enable f16;\n"));
+        assert_eq!(map.locate(1), None, "the hoisted header");
+        assert_eq!(
+            map.locate(2),
+            Some(Origin {
+                module: "child.wgsl",
+                line: 2
+            })
+        );
+        assert_eq!(
+            map.locate(3),
+            Some(Origin {
+                module: "root.wgsl",
+                line: 2
+            })
+        );
+    }
+
+    #[test]
+    fn a_skipped_block_does_not_shift_the_map() {
+        // Lines a `//!if` removed are not emitted, so every line after them
+        // must still resolve to the line somebody wrote, not to that line plus
+        // the size of the block.
+        let mut r = Registry::default();
+        let root = r.register(
+            "root.wgsl",
+            "// a\n//!if SKINNED\n// gone\n// gone\n//!endif\n// b\n",
+        );
+        r.register_define(SKINNED, "SKINNED");
+        let (text, map) = r.resolve_mapped(root, Defines::NONE).unwrap();
+
+        assert_eq!(text, "// a\n// b\n");
+        assert_eq!(
+            map.locate(1),
+            Some(Origin {
+                module: "root.wgsl",
+                line: 1
+            })
+        );
+        assert_eq!(
+            map.locate(2),
+            Some(Origin {
+                module: "root.wgsl",
+                line: 6
+            }),
+            "`// b` is line 6 of the file even though it is line 2 of the output"
+        );
+    }
+
+    #[test]
+    fn the_map_is_runs_rather_than_lines() {
+        // A map with an entry per line would be 4,801 entries for the shading
+        // pass. Consecutive lines from one module collapse, so the size is the
+        // number of times composition switched files, which is small.
+        let mut r = Registry::default();
+        let child = r.register("child.wgsl", &"// c\n".repeat(500));
+        let root = r.register(
+            "root.wgsl",
+            &format!(
+                "{}//!include \"child.wgsl\"\n{}",
+                "// r\n".repeat(500),
+                "// r\n".repeat(500)
+            ),
+        );
+        let _ = child;
+        let (text, map) = r.resolve_mapped(root, Defines::NONE).unwrap();
+        assert_eq!(text.lines().count(), 1500);
+        assert_eq!(map.len(), 3, "root, child, root");
+    }
+
+    #[test]
+    fn resolve_and_resolve_mapped_produce_the_same_text() {
+        // `resolve` is the old entry point and every caller of it must keep
+        // getting exactly what it got before the map existed.
+        let mut r = Registry::default();
+        r.register("child.wgsl", "enable f16;\n// c\n");
+        let root = r.register("root.wgsl", "//!include \"child.wgsl\"\n// r\n");
+        let plain = r.resolve(root, Defines::NONE).unwrap();
+        let (mapped, _) = r.resolve_mapped(root, Defines::NONE).unwrap();
+        assert_eq!(plain, mapped);
     }
 }
