@@ -94,13 +94,24 @@ impl FloatingKind {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .filter_map(|name| {
-                let found = Self::ALL.into_iter().find(|kind| kind.slug() == name);
+                let found = Self::from_slug(name);
                 if found.is_none() {
                     tracing::warn!("SOMNIUM_FLOAT={name} is not a panel name; ignoring");
                 }
                 found
             })
             .collect()
+    }
+
+    /// The panel a slug names, if this build has one.
+    ///
+    /// The inverse of [`Self::slug`], and the reason a layout file stores names
+    /// rather than indices: a build that adds a floatable panel can still read
+    /// a file written by one that did not, and an unknown name is a panel that
+    /// does not exist rather than the wrong panel opening.
+    #[must_use]
+    pub fn from_slug(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.slug() == name)
     }
 
     /// The panel's name in an environment variable and in a file name.
@@ -183,6 +194,17 @@ mod tests {
             let (w, h) = kind.default_size();
             assert!(w > 100 && h > 100, "{kind:?} opens at {w}x{h}");
         }
+    }
+
+    #[test]
+    fn a_slug_round_trips_and_an_unknown_one_is_nobody() {
+        for kind in FloatingKind::ALL {
+            assert_eq!(FloatingKind::from_slug(kind.slug()), Some(kind));
+        }
+        // What a layout file from a later build looks like to this one.
+        assert_eq!(FloatingKind::from_slug("timeline"), None);
+        assert_eq!(FloatingKind::from_slug(""), None);
+        assert_eq!(FloatingKind::from_slug("Outliner"), None, "slugs are exact");
     }
 
     #[test]

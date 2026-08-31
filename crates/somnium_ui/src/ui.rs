@@ -3289,10 +3289,7 @@ mod detach_tests {
     fn dock() -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
         let mut ui = UserInterface::new(800.0, 600.0);
         let root = ui.root();
-        let column = ui.add_node(
-            StackPanelBuilder::new(WidgetBuilder::new()).build(),
-            root,
-        );
+        let column = ui.add_node(StackPanelBuilder::new(WidgetBuilder::new()).build(), root);
         let top = ui.add_node(
             BorderBuilder::new(WidgetBuilder::new().with_height(200.0))
                 .with_stroke_thickness(Thickness::ZERO)
@@ -3428,7 +3425,11 @@ mod detach_tests {
 
         ui.detach(top, Vec2::new(360.0, 720.0));
         ui.rehome_popups();
-        assert_ne!(ui.parent(popup), root, "the popup stayed in the main window");
+        assert_ne!(
+            ui.parent(popup),
+            root,
+            "the popup stayed in the main window"
+        );
         assert_eq!(ui.host_for(anchor), ui.parent(popup));
 
         // And back, when the panel returns: a popup left hanging off a host
@@ -3538,10 +3539,7 @@ mod detach_tests {
                 .try_borrow(to_ih(column))
                 .map(|n| n.widget.children.clone())
                 .unwrap();
-            assert_eq!(
-                children, panels,
-                "detached {out:?} then docked {back:?}"
-            );
+            assert_eq!(children, panels, "detached {out:?} then docked {back:?}");
         }
     }
 

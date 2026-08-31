@@ -5,6 +5,9 @@ edition.workspace     = true
 rust-version.workspace = true
 publish = false
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = { workspace = true }
+
 [dependencies]
 # Phase 16-C: attaching a script and routing its forces is game-layer work,
 # so the example names the neutral scripting crate. It does not — and must
