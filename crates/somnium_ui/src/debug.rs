@@ -605,7 +605,9 @@ impl ViewportStats {
         if let Some([x, y, z, yaw, pitch]) = self.camera {
             // One line, in the order the environment variables take, so it can
             // be copied across without rearranging.
-            lines.push(format!("cam {x:.0},{y:.0},{z:.0}  yaw {yaw:.0}  pitch {pitch:.0}"));
+            lines.push(format!(
+                "cam {x:.0},{y:.0},{z:.0}  yaw {yaw:.0}  pitch {pitch:.0}"
+            ));
         }
         lines
     }

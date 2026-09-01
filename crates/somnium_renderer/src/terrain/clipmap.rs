@@ -628,7 +628,7 @@ fn update_ring(ring: &mut ClipmapRing, camera_xz: [f32; 2], force_full: bool) {
         wrap_i(old_origin[0] + dx_tex, size),
         wrap_i(old_origin[1] + dy_tex, size),
     ];
-    for rect in toroidal_dirty_rects(old_origin, ring.origin, size) {
+    for rect in toroidal_dirty_rects(old_origin, [dx_tex, dy_tex], size) {
         for expanded in expand_and_wrap(rect, size, EXTENDED_MARGIN) {
             ring.push_dirty(expanded);
         }
@@ -639,17 +639,18 @@ fn wrap_i(v: i32, size: i32) -> i32 {
     ((v % size) + size) % size
 }
 
-/// Dirty strips when a toroidal origin slides from `old` to `new`.
+/// Dirty strips when a toroidal origin slides by an unwrapped signed delta.
 ///
 /// The region that just entered the window is an L-shape; wrapping can split
 /// each arm into two, so the caller may see up to four rectangles.
-pub fn toroidal_dirty_rects(
-    old_origin: [i32; 2],
-    new_origin: [i32; 2],
-    size: i32,
-) -> Vec<ClipRect> {
-    let dx = wrap_delta(new_origin[0] - old_origin[0], size);
-    let dy = wrap_delta(new_origin[1] - old_origin[1], size);
+///
+/// The delta is part of this interface deliberately. Two wrapped origins do
+/// not preserve it: on a 1024-texel ring, moving +768 and moving -256 produce
+/// the same new origin, but the first exposes 768 new columns and the second
+/// exposes 256. Inferring the shortest wrapped delta left the other columns
+/// holding valid-looking material from the old world position.
+pub fn toroidal_dirty_rects(old_origin: [i32; 2], delta: [i32; 2], size: i32) -> Vec<ClipRect> {
+    let [dx, dy] = delta;
     if dx == 0 && dy == 0 {
         return Vec::new();
     }
@@ -661,12 +662,16 @@ pub fn toroidal_dirty_rects(
             h: size as u32,
         }];
     }
+    let new_origin = [
+        wrap_i(old_origin[0] + dx, size),
+        wrap_i(old_origin[1] + dy, size),
+    ];
     let mut rects = Vec::new();
     // Columns that entered along X. Origin increase means the west edge left
     // and the east edge entered — those new columns live at the previous origin
     // (physical texels that now mean a new world position).
     if dx != 0 {
-        let w = dx.abs() as u32;
+        let w = dx.unsigned_abs();
         let x = if dx > 0 {
             wrap_i(old_origin[0], size) as u32
         } else {
@@ -675,7 +680,7 @@ pub fn toroidal_dirty_rects(
         rects.extend(wrap_span(x, 0, w, size as u32, size as u32));
     }
     if dy != 0 {
-        let h = dy.abs() as u32;
+        let h = dy.unsigned_abs();
         let y = if dy > 0 {
             wrap_i(old_origin[1], size) as u32
         } else {
@@ -684,14 +689,6 @@ pub fn toroidal_dirty_rects(
         rects.extend(wrap_span(0, y, size as u32, h, size as u32));
     }
     rects
-}
-
-fn wrap_delta(d: i32, size: i32) -> i32 {
-    let mut d = ((d % size) + size) % size;
-    if d > size / 2 {
-        d -= size;
-    }
-    d
 }
 
 fn wrap_span(x: u32, y: u32, w: u32, h: u32, size: u32) -> Vec<ClipRect> {
@@ -1058,6 +1055,46 @@ mod tests {
             texels < MAX_GEN_TEXELS / 4,
             "a walking slide should be a small fraction of one frame's budget, got {texels}"
         );
+    }
+
+    /// A displacement is not interchangeable with the shortest delta between
+    /// two wrapped origins. A large one-frame focus change can move a ring 768
+    /// of its 1024 texels. Interpreting that as the shorter -256 wrap refreshes
+    /// the old overlap and leaves the 768 newly-visible columns holding
+    /// valid-looking texels from the old world position. Those stale texels are
+    /// the persistent rectangular terrain patch: source debug reports a ring
+    /// hit because their AO is still non-zero, so the miss-path fix cannot
+    /// catch them.
+    #[test]
+    fn a_slide_larger_than_half_the_ring_refreshes_the_entering_side() {
+        let cases = [
+            ([768.0, 0.0], [100, DETAIL_SIZE / 2], "+X"),
+            ([-768.0, 0.0], [900, DETAIL_SIZE / 2], "-X"),
+            ([0.0, 768.0], [DETAIL_SIZE / 2, 100], "+Y"),
+            ([0.0, -768.0], [DETAIL_SIZE / 2, 900], "-Y"),
+        ];
+
+        for (center, entering_texel, direction) in cases {
+            let mut ring = ClipmapRing::new(1.0, DETAIL_SIZE);
+            update_ring(&mut ring, [0.0, 0.0], true);
+            ring.clear_dirty();
+            ring.ready = true;
+
+            update_ring(&mut ring, center, false);
+
+            let entering_texel_is_dirty =
+                ring.dirty[..ring.dirty_count as usize].iter().any(|rect| {
+                    entering_texel[0] >= rect.x
+                        && entering_texel[0] < rect.x + rect.w
+                        && entering_texel[1] >= rect.y
+                        && entering_texel[1] < rect.y + rect.h
+                });
+            assert!(
+                entering_texel_is_dirty,
+                "the 768 entering texels along {direction} must be regenerated; queued rectangles were {:?}",
+                &ring.dirty[..ring.dirty_count as usize]
+            );
+        }
     }
 
     #[test]

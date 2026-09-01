@@ -338,8 +338,7 @@ fn enable_directives_are_hoisted_to_the_top_of_a_composed_module() {
 #[test]
 fn stochastic_terrain_filtering_reads_the_texture_size() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/shaders/terrain_material.wgsl"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shaders/terrain_material.wgsl"),
     )
     .expect("terrain_material.wgsl");
 

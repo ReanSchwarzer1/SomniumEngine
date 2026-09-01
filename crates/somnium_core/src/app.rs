@@ -10419,7 +10419,12 @@ mod viewport_control_tests {
                 arm.contains("toggle_render_switch"),
                 "{event} does not go through `debug_toggles`, so                  `apply_debug_toggles` will overwrite whatever it set"
             );
-            for direct in ["hex_tiling = !", "lod_morph = !", "enabled = !", "toggle_parallax()"] {
+            for direct in [
+                "hex_tiling = !",
+                "lod_morph = !",
+                "enabled = !",
+                "toggle_parallax()",
+            ] {
                 assert!(
                     !arm.contains(direct),
                     "{event} still writes `{direct}` directly, which is the                      second source of truth this rule removes"
@@ -10451,16 +10456,22 @@ mod viewport_control_tests {
             .split_once("fn submit_terrains")
             .expect("submit_terrains exists")
             .1;
-        let submit = &submit[..submit.find("
-    fn ").unwrap_or(submit.len())];
+        let submit = &submit[..submit
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(submit.len())];
         // Code only. The comment explaining this rule quotes the line the rule
         // forbids, and a test that reads its own explanation is not a test.
         let code: String = submit
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         assert!(
             !code.contains("clipmap.enabled"),
             "the terrain submit loop assigns `clipmap.enabled` again; that field              has one writer, `SomniumRenderer::reconcile_clipmaps`"
@@ -10479,8 +10490,12 @@ mod viewport_control_tests {
             .split_once("fn toggle_render_switch")
             .expect("toggle_render_switch exists")
             .1;
-        let body = &body[..body.find("
-    /// ").unwrap_or(body.len())];
+        let body = &body[..body
+            .find(
+                "
+    /// ",
+            )
+            .unwrap_or(body.len())];
         assert!(
             body.contains("clipmap_owned_by_virtual_texturing"),
             "the clipmap switch does not ask whether virtual texturing owns it,              so turning it off shades the terrain from placeholder arrays"
