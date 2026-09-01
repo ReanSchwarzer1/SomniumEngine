@@ -366,6 +366,13 @@ fn terrain_parallax_shadow(
 /// A private rather than a field on `Surface`: it exists only to be looked at,
 /// and threading it through the shared surface struct would put a debug counter
 /// in the path of every mesh in the scene.
+/// The fragment's pixel coordinate, for anything that needs screen-space noise.
+///
+/// Set once at the top of `fs_main`. Stochastic filtering has to index its
+/// dither by *screen position*, not by surface position: neighbouring pixels
+/// must disagree so the result resolves, and the same pixel must agree with
+/// itself frame to frame while the camera is still, or the surface flickers.
+var<private> terrain_screen_pixel: vec2<u32> = vec2<u32>(0u);
 var<private> terrain_taps: u32 = 0u;
 var<private> terrain_discarded: f32 = 0.0;
 var<private> terrain_selected_rgb: vec3<f32> = vec3<f32>(0.0);
@@ -537,8 +544,25 @@ fn terrain_stochastic_sample(
     let rho = max(length(ddx * size), length(ddy * size));
     let lod = max(log2(max(rho, 1.0)), 0.0);
     let lower = floor(lod);
-    let tile = vec2<i32>(i32(floor(uv.x * 64.0)) & 63, i32(floor(uv.y * 64.0)) & 63);
-    let shifted = vec2<u32>(tile) + vec2<u32>(layer * 17u, layer * 29u);
+    // Indexed by **screen** position, not by `uv`.
+    //
+    // Indexing the dither by texture coordinate was the shimmer. TAA jitters
+    // the sample position by a fraction of a pixel every frame, which moves
+    // `uv`, which moves `floor(uv * 64.0)` across a tile boundary, which flips
+    // the decision -- and a flipped decision here is a whole mip level. A
+    // stationary camera over static terrain therefore changed 1.99% of the
+    // frame every frame, against 0.44% with stochastic filtering off.
+    //
+    // It also gave the technique nothing to resolve against: one 64x64 tile
+    // spread over texture space means every pixel inside a tile shares a
+    // decision, so there is no high-frequency detail for TAA's neighbourhood to
+    // average. Screen indexing makes adjacent pixels disagree, which is the
+    // whole premise of filtering stochastically.
+    //
+    // The per-layer shift stays. It decorrelates the two to four layers blended
+    // at one pixel, and the layer index is a property of the surface, so it
+    // costs no temporal stability.
+    let shifted = terrain_screen_pixel + vec2<u32>(layer * 17u, layer * 29u);
     let index = (shifted.y & 63u) * 64u + (shifted.x & 63u);
     let decision = f32(grain_words[index / 4u][index & 3u] & 255u) / 255.0;
     let chosen = lower + select(0.0, 1.0, decision < fract(lod));

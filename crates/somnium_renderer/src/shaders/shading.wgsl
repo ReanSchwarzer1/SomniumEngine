@@ -1105,6 +1105,9 @@ fn compute_depth_slice(view_depth: f32) -> u32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_coords = vec2<i32>(in.clip_pos.xy);
+    // Published for the terrain material's stochastic filtering, which needs a
+    // screen-space dither index. See `terrain_screen_pixel`.
+    terrain_screen_pixel = vec2<u32>(in.clip_pos.xy);
 
     // Phase DOOM-C: the screen UV is *derived* from the fragment coordinate,
     // not taken from the interpolator.
