@@ -321,3 +321,43 @@ fn enable_directives_are_hoisted_to_the_top_of_a_composed_module() {
         );
     }
 }
+
+/// Stochastic terrain filtering must ask the texture how big it is.
+///
+/// DREAMS-B shipped `max(length(ddx), length(ddy)) * 1024.0` under the comment
+/// "authored terrain banks are 1024² today". They are not:
+/// `choose_runtime_resolutions` loads hero layers 0-15 at 2048 and only drops
+/// them to 1024 when the BC7 budget is exceeded, and the shipped maps log
+/// `0-15 at 2048, 16-31 at 1024`. A hardcoded 1024 halves the footprint of
+/// every hero layer, which is exactly one mip level too sharp, and a single
+/// stochastic tap has no trilinear blend to hide it.
+///
+/// A source check rather than a render check because the symptom is temporal
+/// shimmer at distance, which a still frame cannot show and which a moving
+/// capture measures at the same order as its own noise.
+#[test]
+fn stochastic_terrain_filtering_reads_the_texture_size() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/shaders/terrain_material.wgsl"),
+    )
+    .expect("terrain_material.wgsl");
+
+    let body = source
+        .split_once("fn terrain_stochastic_sample(")
+        .expect("terrain_stochastic_sample exists")
+        .1;
+    let body = &body[..body.find("\n}").unwrap_or(body.len())];
+
+    assert!(
+        body.contains("textureDimensions("),
+        "the LOD must come from the texture, not from an assumed resolution"
+    );
+    for assumed in ["1024.0", "2048.0", "512.0"] {
+        assert!(
+            !body.contains(assumed),
+            "`{assumed}` is a hardcoded bank resolution; hero and extra layers \
+             differ and the budget can change both"
+        );
+    }
+}

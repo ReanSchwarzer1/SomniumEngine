@@ -19,7 +19,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `somnium_ui` | 68,407 | +40,877 | 32.8% | 747 | +532 | 111 | 2 |
-| `somnium_renderer` | 65,118 | +14,912 | 31.2% | 452 | +124 | 94 | 55 |
+| `somnium_renderer` | 65,168 | +14,962 | 31.2% | 453 | +125 | 94 | 55 |
 | `somnium_core` | 36,125 | +16,905 | 17.3% | 404 | +187 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.2% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.5% | 69 | +15 | 9 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **208,712** | +94,820 | | **2124** | +1,179 | | |
+| **Total** | **208,762** | +94,870 | | **2125** | +1,180 | | |
 
 The top three crates are **81.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -68,7 +68,7 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **55 WGSL files, 14,393 lines** (+7 files, +2,314 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,952 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,403 lines** (+7 files, +2,324 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,962 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
@@ -76,7 +76,7 @@ Ten largest, because these are the files a permutation system has to survive:
 |---|---:|
 | `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,080 |
 | `crates/somnium_renderer/src/shaders/water.wgsl` | 1,214 |
-| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,201 |
+| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,211 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
 | `crates/somnium_renderer/src/shaders/atmosphere.wgsl` | 508 |
 | `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 490 |

@@ -511,9 +511,19 @@ fn terrain_stochastic_sample(
     ddy: vec2<f32>,
     layer: u32,
 ) -> vec4<f32> {
-    // Authored terrain banks are 1024² today. The conservative estimate only
-    // chooses a mip; ordinary address/filtering behaviour remains the sampler's.
-    let rho = max(length(ddx), length(ddy)) * 1024.0;
+    // The bank resolution is **not** a constant, and assuming it was is the
+    // defect this line replaced. `choose_runtime_resolutions` loads hero
+    // layers 0-15 at 2048 and extra layers 16-31 at 1024, and drops the hero
+    // set to 1024 only when the BC7 budget is exceeded. On the shipped maps it
+    // logs `0-15 at 2048, 16-31 at 1024`.
+    //
+    // A hardcoded 1024 therefore halves the footprint of every hero layer,
+    // which is exactly **one mip level too sharp**. Trilinear would have
+    // filtered it; a single stochastic tap does not, so the terrain
+    // under-filters and shimmers, worst at distance where the true LOD is
+    // highest. Asking the texture is both correct and free.
+    let size = vec2<f32>(textureDimensions(textures[map], 0));
+    let rho = max(length(ddx * size), length(ddy * size));
     let lod = max(log2(max(rho, 1.0)), 0.0);
     let lower = floor(lod);
     let tile = vec2<i32>(i32(floor(uv.x * 64.0)) & 63, i32(floor(uv.y * 64.0)) & 63);
