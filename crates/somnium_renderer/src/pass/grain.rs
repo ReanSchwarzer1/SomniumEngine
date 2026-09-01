@@ -11,8 +11,13 @@ const SEED: u32 = 0x5eed_b10e;
 
 /// DREAMS features ship on; an explicit `0` remains the deterministic A/B rail.
 #[must_use]
+/// One default, and it is the toggle table's.
+///
+/// This used to be `var(name).as_deref() != Ok("0")`, which made every pass
+/// that called it a second opinion on what ships. See
+/// [`somnium_ui::debug::on_by_default_for_env`].
 pub(crate) fn enabled_by_default(name: &str) -> bool {
-    std::env::var(name).as_deref() != Ok("0")
+    somnium_ui::debug::on_by_default_for_env(name)
 }
 
 #[repr(C)]

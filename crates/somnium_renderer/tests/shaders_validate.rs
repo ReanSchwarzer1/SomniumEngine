@@ -421,3 +421,21 @@ fn the_clipmap_ships_off_in_both_places() {
         "`env_default_enabled` is on by default again"
     );
 }
+
+/// Stochastic mip selection ships off.
+///
+/// It is the one application of stochastic filtering that cannot pay: a
+/// fractional `textureSampleLevel` is trilinear in the sampler at no extra
+/// cost, so picking one of the two mips trades a filtered tap for an
+/// unfiltered one and buys nothing. Measured at 1.99% of pixels moving between
+/// consecutive frames on a stationary camera, against 0.43% for trilinear.
+#[test]
+fn stochastic_mip_selection_ships_off() {
+    unsafe {
+        std::env::remove_var("SOMNIUM_DREAMS_STF");
+    }
+    assert!(
+        !somnium_ui::debug::DebugToggles::from_env().is_on("dreams_stf"),
+        "`dreams_stf` is on by default again; it costs 4.5x the temporal          instability of the hardware trilinear it replaces"
+    );
+}

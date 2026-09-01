@@ -1856,6 +1856,38 @@ impl GameApp for HelloGame {
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
 
+        // Flip a render switch mid-run, the way the Details panel does.
+        //
+        // A switch thrown at frame 200 is not the same experiment as the same
+        // switch set before startup: the second decides how the terrain loads
+        // its textures and starts every cache warm, while the first invalidates
+        // a running cache under a camera that has been moving. The clipmap
+        // artifact was reported on the *toggle*, and until this existed there
+        // was no way to capture that without synthetic mouse input.
+        if std::env::var("SOMNIUM_AUDIT_TOGGLE_FRAME")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(ctx.time.frame_count())
+            && let Ok(id) = std::env::var("SOMNIUM_AUDIT_TOGGLE_SWITCH")
+            && let Some(renderer) = ctx.renderer.as_mut()
+        {
+            // Deliberately the same three statements as
+            // `Engine::toggle_render_switch`, minus the checkbox repaint.
+            let next = !renderer.debug_toggles.is_on(id.trim());
+            match renderer.debug_toggles.set(id.trim(), next) {
+                Ok(()) => {
+                    renderer.apply_debug_toggles();
+                    info!(
+                        frame = ctx.time.frame_count(),
+                        switch = id.trim(),
+                        on = next,
+                        "audit render switch"
+                    );
+                }
+                Err(reason) => tracing::warn!(switch = id.trim(), %reason, "audit toggle refused"),
+            }
+        }
+
         // Deterministic temporal-audit hook. It is inert in ordinary runs and
         // lets the path/reflection capture matrix make a one-frame camera cut
         // without synthetic mouse input or timing-sensitive automation.

@@ -504,10 +504,24 @@ impl DebugToggles {
 /// These reproduce the shipped defaults exactly — several are "on unless the
 /// variable says otherwise", which is why this is a table rather than `false`.
 ///
-/// `terrain_clipmap` is deliberately **not** here. It ships off, matching
-/// `TerrainClipmap::env_default_enabled`, which has said "off until DF-E gates
-/// pass" since the cache was written — the two disagreed, and the toggle won.
-/// `SOMNIUM_TERRAIN_CLIPMAP=1` turns it on, and so does the Clipmap checkbox.
+/// Two are deliberately **not** here.
+///
+/// `terrain_clipmap` ships off, matching `TerrainClipmap::env_default_enabled`,
+/// which has said "off until DF-E gates pass" since the cache was written — the
+/// two disagreed, and the toggle won. Measured with the cache on and serving
+/// every pixel from a detail ring: mean |Laplacian| over the terrain falls from
+/// 7.05 to 0.90, so it discards 87% of the surface detail. The gates it is
+/// waiting on are the ring density, not a bug.
+///
+/// `dreams_stf` ships off because stochastic *mip* selection is the one place
+/// the technique cannot pay. `textureSampleLevel` with a fractional level is
+/// trilinear, performed by the sampler at no extra cost, so choosing one of the
+/// two mips replaces a filtered tap with an unfiltered one and saves nothing.
+/// Measured on a stationary camera over frozen terrain: 1.99% of pixels moving
+/// between consecutive frames against 0.43% for the trilinear it replaces.
+///
+/// `SOMNIUM_TERRAIN_CLIPMAP=1` and `SOMNIUM_DREAMS_STF=1` turn them on, and so
+/// do their checkboxes.
 fn default_for(id: &str) -> bool {
     matches!(
         id,
@@ -521,8 +535,31 @@ fn default_for(id: &str) -> bool {
             | "rt_terrain"
             | "shading_bins"
             | "dreams_grain"
-            | "dreams_stf"
     )
+}
+
+/// The shipped state of the toggle a variable owns, for code that holds the
+/// variable name rather than the toggle id.
+///
+/// Six render passes used to answer this for themselves with
+/// `var(name).as_deref() != Ok("0")` — a second default table, agreeing with
+/// [`default_for`] only by coincidence. It stopped agreeing the moment one
+/// entry changed: `dreams_stf` came out of `default_for` and the passes carried
+/// on constructing themselves enabled, so the shader variant stayed selected
+/// and the switch appeared to do nothing.
+///
+/// Unknown variables keep the old permissive answer rather than silently
+/// disabling a pass, and trip a debug assertion so the mismatch is found in
+/// tests rather than in a frame.
+#[must_use]
+pub fn on_by_default_for_env(env: &str) -> bool {
+    match TOGGLES.iter().find(|toggle| toggle.env == env) {
+        Some(toggle) => DebugToggles::from_env().is_on(toggle.id),
+        None => {
+            debug_assert!(false, "{env} owns no registered toggle");
+            true
+        }
+    }
 }
 
 /// How a variable's text becomes a boolean.
@@ -741,10 +778,18 @@ mod tests {
         assert!(toggles.is_on("occlusion"));
         assert!(toggles.is_on("spd"));
         assert!(toggles.is_on("dreams_grain"));
-        assert!(toggles.is_on("dreams_stf"));
         assert!(!toggles.is_on("aerial"));
         assert!(!toggles.is_on("hex_tiling"));
         assert!(!toggles.is_on("pixel_census"));
+        // Both were on and are now off, each for a measured reason rather than
+        // a preference. `terrain_clipmap` discards 87% of the terrain's detail
+        // when it is serving every pixel (mean |Laplacian| 7.05 -> 0.90), which
+        // is the DF-E gate it has always been waiting on. `dreams_stf` selects
+        // one of two mips where `textureSampleLevel` would have blended them in
+        // the sampler for free, costing 1.99% of pixels moving between frames
+        // on a still camera against 0.43% for the trilinear it replaced.
+        assert!(!toggles.is_on("terrain_clipmap"));
+        assert!(!toggles.is_on("dreams_stf"));
         assert!(toggles.overridden.is_empty());
     }
 
