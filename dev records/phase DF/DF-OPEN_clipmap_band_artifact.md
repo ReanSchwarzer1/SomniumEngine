@@ -1,6 +1,7 @@
 # OPEN — dark band / ribbon artifact with Clipmap on
 
-> **Status (2026-09-01): two mechanisms identified, reproduced, and fixed.**
+> **Status (2026-09-01): two mechanisms identified, reproduced, and fixed;
+> the clipmap now ships off by default.**
 > See `dev records/phase DREAMS/DF-BAND_resolution.md` (the red, miss-path
 > mechanism) and `DF-STALE_resolution.md` (the green, stale-texel mechanism).
 >

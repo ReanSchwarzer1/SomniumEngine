@@ -396,3 +396,28 @@ fn every_registered_debug_view_has_a_branch_in_the_shader() {
         "registered but not branched on in shading.wgsl, so the menu entry          renders the ordinary lit image: {missing:?}"
     );
 }
+
+/// The clipmap ships off, and the two places that decide so must agree.
+///
+/// `somnium_ui` owns the toggle default and `somnium_renderer` owns
+/// `TerrainClipmap::env_default_enabled`. They disagreed: the ring constructor
+/// said "off until DF-E gates pass" while `debug_toggles` said on, and since
+/// `apply_debug_toggles` force-writes the field from the toggle, the toggle
+/// won. Anything that reads one and expects the other is wrong about what
+/// ships.
+#[test]
+fn the_clipmap_ships_off_in_both_places() {
+    // Cleared here because this process may inherit either variable from a
+    // capture run, and the question is what an unset environment does.
+    unsafe {
+        std::env::remove_var("SOMNIUM_TERRAIN_CLIPMAP");
+    }
+    assert!(
+        !somnium_ui::debug::DebugToggles::from_env().is_on("terrain_clipmap"),
+        "the `terrain_clipmap` toggle is on by default again;          `apply_debug_toggles` writes it straight into every ring"
+    );
+    assert!(
+        !somnium_renderer::terrain::clipmap::TerrainClipmap::env_default_enabled(),
+        "`env_default_enabled` is on by default again"
+    );
+}

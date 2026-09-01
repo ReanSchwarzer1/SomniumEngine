@@ -593,12 +593,16 @@ impl TerrainData {
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, 1.0);
-        let layer_textures = TerrainLayerTextures::load_or_generate(
-            device,
-            queue,
-            bc_supported,
-            desc.virtual_texturing,
-        );
+        // Virtual texturing has no way to reach the screen without the
+        // clipmap. In VT mode `load_bc7_layers` registers 4x4 placeholders for
+        // the legacy layer arrays on purpose and only the rings carry the real
+        // pages, so loading VT with the clipmap off would shade the terrain
+        // from eight mean colours. With the clipmap off the resident BC7 path
+        // is loaded instead, which is the arrangement that predates the cache.
+        let virtual_texturing =
+            desc.virtual_texturing && clipmap::TerrainClipmap::env_default_enabled();
+        let layer_textures =
+            TerrainLayerTextures::load_or_generate(device, queue, bc_supported, virtual_texturing);
         let virtual_capacity = layer_textures
             .virtual_texture
             .as_ref()

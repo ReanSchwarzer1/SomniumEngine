@@ -125,3 +125,34 @@ Both mechanisms were found by making the renderer say which path a pixel took,
 not by looking harder at the picture. Debug 34 answered "is this a miss?" with
 *no*, and that negative is what pointed at stale data. A screenshot cannot
 distinguish "no data" from "wrong data": both are a flat patch with a hard edge.
+
+## The clipmap now ships off
+
+Requested after both fixes landed, and the codebase already half-agreed:
+`TerrainClipmap::env_default_enabled` has said *"off until DF-E gates pass"*
+since the cache was written, while `debug_toggles` said on. Two defaults for one
+switch, and since `apply_debug_toggles` force-writes the field from the toggle,
+the toggle won and the ring constructor's opinion never mattered.
+
+`terrain_clipmap` is out of `default_for`. `SOMNIUM_TERRAIN_CLIPMAP=1` turns it
+on, and so does the Clipmap checkbox.
+
+**Virtual texturing had to follow it.** In VT mode `load_bc7_layers` registers
+4x4 placeholders for the legacy layer arrays and only the rings carry the real
+pages, so VT with the clipmap off is terrain shaded from eight mean colours.
+Terrain construction now asks for VT only when the clipmap is on; otherwise it
+loads `load_bc7_resident_layers`, the arrangement that predates the cache:
+
+```
+terrain: projected 213 MiB BC7 (0-15 at 2048, 16-31 at 1024)
+```
+
+Full hero resolution, real arrays. `DF-STALE_default_off.png` is the same
+yaw-jump frame with the new default: detail texture throughout, no band, and
+the dark patch that survived in `DF-STALE_yaw_fixed.png` is gone as well.
+
+`the_clipmap_ships_off_in_both_places` asserts the two defaults agree, so they
+cannot drift apart again.
+
+Both fixes above stay in. They are what makes the cache correct when it is
+switched on, which is now a deliberate act rather than the default.

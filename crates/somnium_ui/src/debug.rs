@@ -503,6 +503,11 @@ impl DebugToggles {
 ///
 /// These reproduce the shipped defaults exactly — several are "on unless the
 /// variable says otherwise", which is why this is a table rather than `false`.
+///
+/// `terrain_clipmap` is deliberately **not** here. It ships off, matching
+/// `TerrainClipmap::env_default_enabled`, which has said "off until DF-E gates
+/// pass" since the cache was written — the two disagreed, and the toggle won.
+/// `SOMNIUM_TERRAIN_CLIPMAP=1` turns it on, and so does the Clipmap checkbox.
 fn default_for(id: &str) -> bool {
     matches!(
         id,
@@ -513,7 +518,6 @@ fn default_for(id: &str) -> bool {
             | "terrain_height_blend"
             | "terrain_macro"
             | "terrain_detail_fade"
-            | "terrain_clipmap"
             | "rt_terrain"
             | "shading_bins"
             | "dreams_grain"
