@@ -499,6 +499,32 @@ fn terrain_sample_virtual(
     return out;
 }
 
+//!if DREAMS_STF
+/// DREAMS-B stochastic mip selection. Trilinear filtering evaluates both
+/// neighbouring mips for every lookup; this chooses one with the same expected
+/// value and lets TAA integrate the noise. The shared Slang-cooked rank atlas
+/// supplies the decision, so terrain does not grow a private hash function.
+fn terrain_stochastic_sample(
+    map: i32,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    layer: u32,
+) -> vec4<f32> {
+    // Authored terrain banks are 1024² today. The conservative estimate only
+    // chooses a mip; ordinary address/filtering behaviour remains the sampler's.
+    let rho = max(length(ddx), length(ddy)) * 1024.0;
+    let lod = max(log2(max(rho, 1.0)), 0.0);
+    let lower = floor(lod);
+    let tile = vec2<i32>(i32(floor(uv.x * 64.0)) & 63, i32(floor(uv.y * 64.0)) & 63);
+    let shifted = vec2<u32>(tile) + vec2<u32>(layer * 17u, layer * 29u);
+    let index = (shifted.y & 63u) * 64u + (shifted.x & 63u);
+    let decision = f32(grain_words[index / 4u][index & 3u] & 255u) / 255.0;
+    let chosen = lower + select(0.0, 1.0, decision < fract(lod));
+    return textureSampleLevel(textures[map], default_sampler, uv, chosen);
+}
+//!endif
+
 /// Sample one layer at `uv`, with `ddx`/`ddy` its screen-space derivatives.
 ///
 /// Phase 25F: albedo and normal go through the hex-tiled path, roughness does
@@ -550,8 +576,18 @@ fn terrain_sample_layer(
         s.normal_ts = hs.normal_ts;
         return s;
     } else {
+//!if DREAMS_STF
+        if (cluster_params.shading_mode & 32u) != 0u {
+            a = terrain_stochastic_sample(albedo_map, uv, ddx, ddy, layer);
+            surf = terrain_stochastic_sample(surface_map, uv, ddx, ddy, layer + 32u);
+        } else {
+            a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
+            surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
+        }
+//!else
         a = textureSampleGrad(textures[albedo_map], default_sampler, uv, ddx, ddy);
         surf = textureSampleGrad(textures[surface_map], default_sampler, uv, ddx, ddy);
+//!endif
     }
 
     s.albedo = a.rgb;

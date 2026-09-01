@@ -54,6 +54,7 @@ struct Reservoir {
 @group(0) @binding(3) var<uniform> params: RestirParams;
 @group(0) @binding(4) var<storage, read>       prev_reservoirs: array<Reservoir>;
 @group(0) @binding(5) var<storage, read_write> curr_reservoirs: array<Reservoir>;
+@group(0) @binding(6) var grain_masks: texture_2d_array<f32>;
 
 fn empty_reservoir() -> Reservoir {
     return Reservoir(vec3<f32>(0.0), 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -182,6 +183,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ray_t_min = max(0.05, footprint * RAY_BIAS_FOOTPRINTS);
 
     var seed = index * 9781u + params.frame * 6271u;
+    if params.history_valid >= 2.0 {
+        let grain = textureLoad(grain_masks, coord & vec2<i32>(63), i32(params.frame & 63u), 0);
+        seed = seed ^ u32(grain.b * 4294967295.0);
+    }
 
     // ── Initial candidates ──────────────────────────────────────────────────
     // Drawn without tracing anything. The p_hat function is the unshadowed
@@ -223,7 +228,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Reprojection is the previous frame's own pixel: the camera-motion case is
     // handled by 24F's history and a full velocity buffer is still outstanding
     // (24AD), so reuse here is conservative rather than wrong.
-    if params.history_valid > 0.5 {
+    if (u32(params.history_valid) & 1u) != 0u {
         let prev = prev_reservoirs[index];
         if prev.m > 0.0 {
             var combined = r;

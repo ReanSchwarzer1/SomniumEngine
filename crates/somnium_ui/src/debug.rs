@@ -307,6 +307,18 @@ pub const TOGGLES: &[Toggle] = &[
         help: "Offset each cloud ray's start by blue noise. Measured both ways \u{2014} see CONTROL-M.",
     },
     Toggle {
+        id: "dreams_grain",
+        label: "DREAMS Shared Grain",
+        env: "SOMNIUM_DREAMS_GRAIN",
+        help: "Share the Slang-cooked temporal masks across GTAO, volumetrics, ReSTIR and TAA.",
+    },
+    Toggle {
+        id: "dreams_stf",
+        label: "DREAMS Terrain STF",
+        env: "SOMNIUM_DREAMS_STF",
+        help: "Use the shared masks for stochastic terrain mip filtering.",
+    },
+    Toggle {
         id: "hex_tiling",
         label: "Hex Tiling",
         env: "SOMNIUM_HEXTILE",
@@ -498,6 +510,8 @@ fn default_for(id: &str) -> bool {
             | "terrain_clipmap"
             | "rt_terrain"
             | "shading_bins"
+            | "dreams_grain"
+            | "dreams_stf"
     )
 }
 
@@ -515,7 +529,9 @@ fn interpret(id: &str, raw: &str) -> bool {
         | "terrain_height_blend"
         | "terrain_macro"
         | "terrain_detail_fade"
-        | "rt_terrain" => raw != "0",
+        | "rt_terrain"
+        | "dreams_grain"
+        | "dreams_stf" => raw != "0",
         _ => set,
     }
 }
@@ -695,6 +711,8 @@ mod tests {
         assert!(toggles.is_on("meshlets"));
         assert!(toggles.is_on("occlusion"));
         assert!(toggles.is_on("spd"));
+        assert!(toggles.is_on("dreams_grain"));
+        assert!(toggles.is_on("dreams_stf"));
         assert!(!toggles.is_on("aerial"));
         assert!(!toggles.is_on("hex_tiling"));
         assert!(!toggles.is_on("pixel_census"));

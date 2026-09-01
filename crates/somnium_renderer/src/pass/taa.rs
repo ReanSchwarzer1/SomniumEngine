@@ -73,6 +73,8 @@ pub struct TaaPass {
     /// Minimum depth advantage before dilation prefers a neighbour, from
     /// `SOMNIUM_TAA_DILATE_EPS`. 0 restores the unguarded behaviour.
     dilation_epsilon: f32,
+    /// DREAMS-B replaces Halton with the shared grain sequence only when armed.
+    grain_enabled: bool,
 }
 
 impl TaaPass {
@@ -191,6 +193,7 @@ impl TaaPass {
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
                 .unwrap_or(4.0),
+            grain_enabled: crate::pass::grain::enabled_by_default("SOMNIUM_DREAMS_GRAIN"),
             debug_mode: std::env::var("SOMNIUM_TAA_DEBUG")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -238,6 +241,14 @@ impl TaaPass {
         self.enabled = enabled;
     }
 
+    /// Select the shared DREAMS projection-jitter sequence at runtime.
+    pub fn set_grain_enabled(&mut self, enabled: bool) {
+        if self.grain_enabled != enabled {
+            self.history_valid = false;
+        }
+        self.grain_enabled = enabled;
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -256,13 +267,18 @@ impl TaaPass {
         if !self.enabled || width == 0 || height == 0 {
             return glam::Vec2::ZERO;
         }
-        // Halton (2,3) — the sequence most published TAA uses, which makes
-        // comparisons against reference implementations meaningful.
-        let i = self.frame_index % JITTER_PERIOD;
-        let x = halton(i + 1, 2) - 0.5;
-        let y = halton(i + 1, 3) - 0.5;
+        let sample = if self.grain_enabled {
+            crate::pass::grain::jitter(self.frame_index)
+        } else {
+            // Halton (2,3) remains the exact default path.
+            let i = self.frame_index % JITTER_PERIOD;
+            glam::Vec2::new(halton(i + 1, 2) - 0.5, halton(i + 1, 3) - 0.5)
+        };
         // One pixel in NDC is 2 / resolution.
-        glam::Vec2::new(x * 2.0 / width as f32, y * 2.0 / height as f32)
+        glam::Vec2::new(
+            sample.x * 2.0 / width as f32,
+            sample.y * 2.0 / height as f32,
+        )
     }
 
     pub fn resize(

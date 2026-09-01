@@ -1,0 +1,14 @@
+{
+  "compiler": {
+    "version": "2026.16.1",
+    "windows_sha256": "0fd3e6a9a5d05ed4cdd000d467f1ffb5d9701b827e83bfb428902a45c37ef8a5"
+  },
+  "modules": [
+    {
+      "source": "crates/somnium_renderer/src/shaders/dreams_grain.slang",
+      "artifact": "crates/somnium_renderer/src/shaders/dreams_grain.spv",
+      "entry": "build_masks",
+      "stage": "compute"
+    }
+  ]
+}

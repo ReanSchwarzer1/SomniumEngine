@@ -112,6 +112,8 @@ pub struct SomniumRenderer {
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
     pub shaders: crate::shaders::Shaders,
+    /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
+    pub grain_masks: crate::pass::grain::GrainMasks,
     /// The visibility buffer render pass.
     pub vis_pass: VisibilityBufferPass,
     /// The final shading pass.
@@ -524,6 +526,14 @@ impl SomniumRenderer {
         self.census_pass.enabled = on("pixel_census");
         self.cloud_pass.jitter = on("cloud_jitter");
         self.classify_pass.enabled = on("shading_bins");
+        let grain = on("dreams_grain");
+        self.grain_masks.set_shared_enabled(grain);
+        self.gtao_pass.set_grain_enabled(grain);
+        self.restir_pass.set_grain_enabled(grain);
+        self.restir_gi_pass.set_grain_enabled(grain);
+        self.taa_pass.set_grain_enabled(grain);
+        self.volumetric_pass.set_grain_enabled(grain);
+        self.grain_masks.set_stf_enabled(on("dreams_stf"));
 
         let hex = on("hex_tiling");
         let morph = on("terrain_lod_morph");
@@ -603,6 +613,7 @@ impl SomniumRenderer {
         // and every pass below composes through it. This replaces the 29-line
         // `MaterialSystem` stub that described Ogre's HLMS and did nothing.
         let shaders = crate::shaders::Shaders::new();
+        let grain_masks = crate::pass::grain::GrainMasks::new(&ctx.device, &ctx.queue, &shaders);
 
         let census_pass =
             crate::pass::census::CensusPass::new(&ctx.device, &shaders, &global_pool.layout);
@@ -635,6 +646,7 @@ impl SomniumRenderer {
             &ctx.device,
             &shaders,
             raytrace_pass.supported(),
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -647,6 +659,7 @@ impl SomniumRenderer {
             &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -702,6 +715,7 @@ impl SomniumRenderer {
         let gtao_pass = crate::pass::gtao::GtaoPass::new(
             &ctx.device,
             &shaders,
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -776,7 +790,8 @@ impl SomniumRenderer {
             ctx.config.height,
             &vis_pass.depth_view,
         );
-        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders);
+        let volumetric_pass =
+            crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders, grain_masks.view());
 
         // Phase CONTROL-M. Built before the shading pass because shading binds
         // its cloud-shadow field, and the field must exist before the bind
@@ -818,6 +833,7 @@ impl SomniumRenderer {
             &cloud_pass.shadow_view,
             &cloud_pass.shadow_params,
             &decal_grid,
+            grain_masks.packed(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -1081,9 +1097,9 @@ impl SomniumRenderer {
 
             water_textures_bind_group,
             water_bodies: Default::default(),
-            // Last, deliberately: the fields above borrow it, and a struct
-            // literal evaluates its fields in written order.
+            // Shader ownership and its DREAMS sampling resource stay together.
             shaders,
+            grain_masks,
         }
     }
 
@@ -2554,6 +2570,7 @@ impl SomniumRenderer {
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+        self.grain_masks.advance_packed(&ctx.queue);
 
         // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
         //
@@ -2703,6 +2720,15 @@ impl SomniumRenderer {
             )
             .unwrap_or(u32::MAX);
             c.tlas_instances = self.raytrace_pass.instance_count();
+            c.dreams_grain_consumers = if self.grain_masks.shared_enabled() {
+                u32::from(self.gtao_pass.enabled)
+                    + u32::from(self.volumetric_pass.enabled)
+                    + u32::from(self.taa_pass.enabled())
+                    + u32::from(self.restir_pass.active())
+                    + u32::from(self.restir_gi_pass.active())
+            } else {
+                0
+            } + u32::from(self.grain_masks.stf_enabled());
         }
 
         // ── MORROWIND-J step 3: one pass per view ────────────────────────────
@@ -3156,6 +3182,9 @@ impl SomniumRenderer {
         let mut shading_mode = self.shading_mode;
         if self.restir_pass.active() && self.raytrace_pass.tlas().is_some() {
             shading_mode |= 16;
+        }
+        if self.grain_masks.stf_enabled() {
+            shading_mode |= 32;
         }
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,

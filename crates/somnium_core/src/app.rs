@@ -2877,13 +2877,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
                 let renderer = SomniumRenderer::new(&render_ctx);
 
-                let ui_manager = UiManager::new(
+                let mut ui_manager = UiManager::new(
                     &render_ctx.device,
                     render_ctx.config.format,
                     1,
                     &render_ctx.queue,
                     Arc::clone(&window),
                 );
+                ui_manager.set_render_toggles(renderer.debug_toggles.clone());
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
@@ -8044,6 +8045,7 @@ impl<G: GameApp> Engine<G> {
                     }
                     Err(reason) => {
                         if let Some(ui) = self.ui_manager.as_mut() {
+                            ui.set_render_toggles(renderer.debug_toggles.clone());
                             ui.push_toast(&reason);
                         }
                     }

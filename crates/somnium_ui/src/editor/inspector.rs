@@ -113,6 +113,10 @@ pub(crate) fn build_inspector(
     let post_census_toggle = check(ui, diagnostics, "Pixel census", font_id);
     let post_bins_toggle = check(ui, diagnostics, "Shade bins", font_id);
 
+    let dreams_section = section(ui, parent, "DREAMS Sampling");
+    let dreams_grain_toggle = check(ui, dreams_section, "Shared grain", font_id);
+    let dreams_stf_toggle = check(ui, dreams_section, "Terrain STF", font_id);
+
     let terrain_section = section(ui, parent, "Terrain Tools");
     let terrain_paint_toggle = check(ui, terrain_section, "Layer paint", font_id);
     let terrain_hex_toggle = check(ui, terrain_section, "Hex anti-tiling", font_id);
@@ -175,6 +179,9 @@ pub(crate) fn build_inspector(
         post_section: diagnostics,
         post_census_toggle,
         post_bins_toggle,
+        dreams_section,
+        dreams_grain_toggle,
+        dreams_stf_toggle,
         terrain_section,
         terrain_paint_toggle,
         terrain_hex_toggle,

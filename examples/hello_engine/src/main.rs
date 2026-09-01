@@ -19,6 +19,8 @@
 //! - Scene save/load (11.5F)
 //! - Editor mode (Play/Pause/Stop) (11.5L)
 
+mod dreams_fixture;
+
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
@@ -611,6 +613,7 @@ impl VoxelTerrain {
 struct HelloGame {
     log_timer: f32,
     camera: EditorCamera,
+    dreams_rail: Option<dreams_fixture::DreamRail>,
     cascade_debug: bool,
     last_simulation_time: f32,
     boat: Option<BoatRuntime>,
@@ -713,6 +716,7 @@ impl HelloGame {
         Self {
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
+            dreams_rail: None,
             cascade_debug: false,
             last_simulation_time: 0.0,
             boat: None,
@@ -950,6 +954,17 @@ impl HelloGame {
                 .and_then(|id| ctx.renderer.as_ref().and_then(|r| r.terrain(id))),
             result.terrain_origin,
         );
+        self.dreams_rail = std::env::var("SOMNIUM_DREAMS_RAIL").ok().and_then(|name| {
+            dreams_fixture::DreamRail::named(
+                name.trim(),
+                dreams_fixture::CameraPose {
+                    position: self.camera.position,
+                    yaw: self.camera.yaw,
+                    pitch: self.camera.pitch,
+                },
+                ctx.time.frame_count(),
+            )
+        });
         let pose = self.camera.to_transform();
         let camera_entity = ctx.world.entities().find(|&e| {
             ctx.world
@@ -1862,6 +1877,12 @@ impl GameApp for HelloGame {
 
         if !play_session(ctx) {
             self.camera.update(dt, ctx.camera_speed);
+        }
+        if let Some(rail) = self.dreams_rail {
+            let pose = rail.pose(ctx.time.frame_count());
+            self.camera.position = pose.position;
+            self.camera.yaw = pose.yaw;
+            self.camera.pitch = pose.pitch;
         }
         self.log_timer += dt;
 

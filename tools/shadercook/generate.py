@@ -30,6 +30,7 @@ a design error worth catching at build time rather than as a startup stall.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SHADERS = ROOT / "crates" / "somnium_renderer" / "src" / "shaders"
 REGISTRY = ROOT / "crates" / "somnium_renderer" / "src" / "shaders.rs"
+SLANG_MANIFEST = ROOT / "tools" / "slangcook" / "manifest.json"
 
 #: Past this, a module's key is too coarse. 64 is the plan's own example of a
 #: module at the edge of reasonable; 128 is where "split it" stops being advice.
@@ -130,8 +132,18 @@ def main() -> int:
             bad.append((name, unknown))
 
     total = sum(r[4] for r in rows)
+    slang = []
+    if SLANG_MANIFEST.exists():
+        slang = json.loads(SLANG_MANIFEST.read_text(encoding="utf-8")).get("modules", [])
+        for module in slang:
+            output = ROOT / module["artifact"]
+            if not output.is_file():
+                bad.append((module["source"], [f"missing artifact {module['artifact']}"]))
     print()
-    print(f"{len(rows)} modules, {total} variants possible in total.")
+    print(
+        f"{len(rows)} WGSL modules + {len(slang)} Slang artifact(s), "
+        f"{total} variants possible in total."
+    )
     print(
         f"Defines registered in shaders.rs: "
         f"{', '.join(f'{n}={b}' for n, b in sorted(known.items())) or '(none)'}"

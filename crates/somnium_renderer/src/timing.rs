@@ -908,6 +908,7 @@ impl TimingRun {
             ("shadow_cascades_rendered", c.shadow_cascades_rendered),
             ("virtual_shadow_pages", c.virtual_shadow_pages),
             ("virtual_shadow_resident", c.virtual_shadow_resident),
+            ("dreams_grain_consumers", c.dreams_grain_consumers),
         ] {
             let _ = writeln!(s, "count\t{name}\t0\t{v}\t0\t{v}\t{v}\t1");
         }

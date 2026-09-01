@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-08-30 against the current working tree.
+Last verified: 2026-09-01 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -33,6 +33,7 @@ The top-level phase status is:
 |---|---|---|
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
+| DREAMS | A and B complete; C active | [`phase_DREAMS.md`](<dev records/phase_DREAMS.md>) |
 | PORTAL-0 | Complete, A through G | [`phase_PORTAL-0.md`](<dev records/phase_PORTAL-0.md>) |
 | PORTAL | Plan only, not started | [`phase_PORTAL.md`](<dev records/phase_PORTAL.md>) |
 | KENSHI | Plan only, not started | [`phase_KENSHI.md`](<dev records/phase_KENSHI.md>) |
@@ -2649,6 +2650,13 @@ reconstructions were written and both reverted. ([MORROWIND-AC follow-up](<dev r
 - Native mod DLLs are not part of the current STALKER design.
 - Proprietary, copyleft, noncommercial, or unclear reference code remains
   pattern-only unless provenance proves an independently safe path.
+- DREAMS shader modules are authored in Slang and cooked to checked-in SPIR-V;
+  existing WGSL modules remain the integration floor. Both kinds register with
+  the one somnium_shader::ShaderSystem, and passthrough always has a portable
+  fallback rather than becoming a required device feature.
+- DREAMS-B Shared Grain and Terrain STF are on by default and live in Details >
+  DREAMS Sampling. `SOMNIUM_DREAMS_GRAIN=0` and `SOMNIUM_DREAMS_STF=0` are the
+  deterministic off rails; an explicit environment value owns the control.
 
 ## Working in this repository
 

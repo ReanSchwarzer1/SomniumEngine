@@ -24,7 +24,7 @@
 //! missing file, a cycle, or a typo in a `//!if` fails here.
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
-use somnium_renderer::shaders::Shaders;
+use somnium_renderer::shaders::{Shaders, define};
 
 // Modules that compose nothing still validate on their own, so their text is
 // still read directly. Everything with dependencies goes through `Shaders`.
@@ -100,6 +100,16 @@ fn every_composed_root_validates() {
     ] {
         check(root, &shaders.source_or_panic(root));
     }
+}
+
+/// Validate the actual shading variant, including DREAMS-B's conditional STF.
+#[test]
+fn the_dreams_stochastic_filter_variant_validates() {
+    let shaders = Shaders::new();
+    let source = shaders
+        .source("shading.wgsl", define::DREAMS_STF)
+        .expect("DREAMS_STF must be a registered variant");
+    check("shading.wgsl+DREAMS_STF", &source);
 }
 
 /// The shading module, kept as its own test because it is the acceptance case.

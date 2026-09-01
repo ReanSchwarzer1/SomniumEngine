@@ -23,7 +23,7 @@ struct GtaoParams {
     intensity: f32,
     frame: u32,
     near: f32,
-    _pad: f32,
+    grain_enabled: u32,
 }
 
 pub struct GtaoPass {
@@ -37,6 +37,8 @@ pub struct GtaoPass {
     denoised_view: wgpu::TextureView,
     trace_bind: Option<wgpu::BindGroup>,
     denoise_bind: Option<wgpu::BindGroup>,
+    grain_view: wgpu::TextureView,
+    grain_enabled: bool,
 
     frame: u32,
     pub enabled: bool,
@@ -49,6 +51,7 @@ impl GtaoPass {
     pub fn new(
         device: &wgpu::Device,
         shaders: &crate::shaders::Shaders,
+        grain_view: &wgpu::TextureView,
         width: u32,
         height: u32,
     ) -> Self {
@@ -93,6 +96,16 @@ impl GtaoPass {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -150,6 +163,8 @@ impl GtaoPass {
             denoised_view,
             trace_bind: None,
             denoise_bind: None,
+            grain_view: grain_view.clone(),
+            grain_enabled: crate::pass::grain::enabled_by_default("SOMNIUM_DREAMS_GRAIN"),
             frame: 0,
             // Overwritten every frame from `PostProcessComponent::gtao_enabled`,
             // which is where the `SOMNIUM_GTAO` switch is seeded — a default
@@ -165,6 +180,11 @@ impl GtaoPass {
             power: 2.0,
             intensity: 1.0,
         }
+    }
+
+    /// Select the shared DREAMS sampling sequence at runtime.
+    pub fn set_grain_enabled(&mut self, enabled: bool) {
+        self.grain_enabled = enabled;
     }
 
     fn make_targets(
@@ -227,6 +247,10 @@ impl GtaoPass {
                     binding: 2,
                     resource: self.params.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&self.grain_view),
+                },
             ],
         }));
         self.denoise_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -275,7 +299,7 @@ impl GtaoPass {
                 intensity: if self.enabled { self.intensity } else { 0.0 },
                 frame: self.frame,
                 near,
-                _pad: 0.0,
+                grain_enabled: u32::from(self.grain_enabled),
             }),
         );
         self.frame = self.frame.wrapping_add(1);

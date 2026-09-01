@@ -25,7 +25,9 @@
 
 use std::sync::Mutex;
 
-use somnium_shader::{Defines, ModuleId, ReloadOutcome, ShaderError, ShaderKey, ShaderSystem};
+use somnium_shader::{
+    Defines, ModuleId, ReloadOutcome, ShaderError, ShaderKey, ShaderSystem, SpirvEntryPoint,
+};
 
 /// Registers every shader module, and gives each a name and a watch path.
 ///
@@ -53,7 +55,7 @@ pub mod define {
     use somnium_shader::Defines;
 
     /// Bit index and name pairs, registered at startup.
-    pub const ALL: &[(u32, &str)] = &[(SKINNED_BIT, "SKINNED")];
+    pub const ALL: &[(u32, &str)] = &[(SKINNED_BIT, "SKINNED"), (DREAMS_STF_BIT, "DREAMS_STF")];
 
     /// Skinned geometry. **Not yet used by any shader** — MORROWIND-U adds the
     /// `//!if SKINNED` blocks. It is registered now because the exit criterion
@@ -63,6 +65,12 @@ pub mod define {
 
     /// [`SKINNED_BIT`] as a set.
     pub const SKINNED: Defines = Defines::bit(SKINNED_BIT);
+
+    /// Include the DREAMS-B terrain stochastic-filter adapter only in shading.
+    pub const DREAMS_STF_BIT: u32 = 1;
+
+    /// [`DREAMS_STF_BIT`] as a set.
+    pub const DREAMS_STF: Defines = Defines::bit(DREAMS_STF_BIT);
 }
 
 /// The renderer's shader system.
@@ -142,6 +150,19 @@ impl Shaders {
             "water_reflection.wgsl",
             "water_spectrum.wgsl",
         );
+        // SAFETY: this is a checked-in Somnium-authored artifact produced by
+        // the pinned Slang compiler. `tools/slangcook/run.py --check` recooks
+        // and byte-compares it; runtime code never accepts external SPIR-V.
+        unsafe {
+            system.register_spirv(
+                "dreams_grain.slang",
+                include_bytes!("shaders/dreams_grain.spv"),
+                // Slang preserves `build_masks` as the source symbol but emits
+                // the selected stage entry as SPIR-V's canonical `main`.
+                &[SpirvEntryPoint::new("main", (8, 8, 1))],
+            )
+        }
+        .expect("checked-in dreams_grain.spv is a valid SPIR-V artifact");
         Self {
             system: Mutex::new(system),
         }
@@ -224,6 +245,18 @@ impl Shaders {
             .module(device, key)
     }
 
+    /// Build a passthrough module from a checked-in Slang/SPIR-V artifact.
+    pub fn slang_module(
+        &self,
+        device: &wgpu::Device,
+        name: &str,
+    ) -> Result<wgpu::ShaderModule, ShaderError> {
+        self.system
+            .lock()
+            .expect("shader system poisoned")
+            .spirv_module(device, name)
+    }
+
     /// Poll watched files and apply what changed. Debug builds only.
     ///
     /// `validate` is handed the root module's name, the composed source for
@@ -286,6 +319,21 @@ mod tests {
                 .source(name, Defines::NONE)
                 .unwrap_or_else(|error| panic!("{name} does not compose: {error}"));
         }
+    }
+
+    #[test]
+    fn slang_and_wgsl_have_one_registry_answer() {
+        let shaders = Shaders::new();
+        let system = shaders.system.lock().unwrap();
+        let names = system.registered_names();
+        assert!(names.contains(&"shading.wgsl"));
+        assert!(names.contains(&"dreams_grain.slang"));
+        assert!(
+            system
+                .spirv_words("dreams_grain.slang")
+                .is_some_and(|words| words.len() > 100),
+            "the Slang module must be a real artifact, not a marker"
+        );
     }
 
     /// `shading.wgsl` composes to the same modules the old `format!` listed.

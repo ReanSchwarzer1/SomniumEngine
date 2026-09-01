@@ -86,8 +86,8 @@ struct VolumetricParams {
     history_valid: f32,
     /// Per-frame offset of the sample position within each step.
     jitter: f32,
-    _pad2: f32,
-    _pad3: f32,
+    frame: u32,
+    grain_enabled: u32,
 }
 
 @group(0) @binding(0) var<uniform> vol: VolumetricParams;
@@ -100,6 +100,7 @@ struct VolumetricParams {
 /// Phase 24U: the previous frame's volume, for temporal reprojection.
 @group(0) @binding(7) var vol_history: texture_3d<f32>;
 @group(0) @binding(8) var vol_history_sampler: sampler;
+@group(0) @binding(9) var grain_masks: texture_2d_array<f32>;
 
 /// Steps taken per slice. Each slice integrates its own segment, so total step
 /// count is this times the slice count.
@@ -191,6 +192,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_origin = vec3<f32>(0.0, GROUND_RADIUS + vol.camera_pos.y * 0.001, 0.0);
 
     let slices = dims.z;
+    let grain_coord = vec2<i32>(i32(gid.x) & 63, i32(gid.y) & 63);
+    let grain_jitter = textureLoad(grain_masks, grain_coord, i32(vol.frame & 63u), 0).g;
+    let sample_jitter = select(vol.jitter, grain_jitter, vol.grain_enabled != 0u);
     var prev_t = 0.0;
     var inscatter = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
@@ -209,7 +213,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Jitter the two ordered strata, never wrap them with fract(). The
             // wrapped form can put step 1 before step 0, making dt negative;
             // negative extinction amplifies light and erases shafts.
-            let frac = (f32(step) + clamp(vol.jitter, 0.001, 0.999))
+            let frac = (f32(step) + clamp(sample_jitter, 0.001, 0.999))
                 / f32(VOL_STEPS_PER_SLICE);
             let t = vol.max_distance * (f32(slice) + frac) / f32(slices);
             let dt = t - prev_t;

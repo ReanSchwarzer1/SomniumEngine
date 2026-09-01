@@ -18,27 +18,27 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 68,353 | +40,823 | 32.9% | 747 | +532 | 111 | 2 |
-| `somnium_renderer` | 64,354 | +14,148 | 31.0% | 447 | +119 | 93 | 55 |
-| `somnium_core` | 36,123 | +16,903 | 17.4% | 404 | +187 | 46 | 0 |
+| `somnium_ui` | 68,407 | +40,877 | 32.8% | 747 | +532 | 111 | 2 |
+| `somnium_renderer` | 65,118 | +14,912 | 31.2% | 452 | +124 | 94 | 55 |
+| `somnium_core` | 36,125 | +16,905 | 17.3% | 404 | +187 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.2% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.5% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.4% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.3% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.1% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.5% | 66 | +66 | 6 | 0 |
-| `somnium_shader` | 2,286 | +2,286 | 1.1% | 40 | +40 | 5 | 0 |
+| `somnium_shader` | 2,517 | +2,517 | 1.2% | 41 | +41 | 6 | 0 |
 | `somnium_i18n` | 1,964 | +1,964 | 0.9% | 57 | +57 | 5 | 0 |
 | `somnium_jobs` | 1,697 | +1,697 | 0.8% | 18 | +18 | 5 | 0 |
 | `somnium_audio` | 1,581 | +1,488 | 0.8% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **207,661** | +93,769 | | **2118** | +1,173 | | |
+| **Total** | **208,712** | +94,820 | | **2124** | +1,179 | | |
 
 The top three crates are **81.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
-`examples/hello_engine` is **3,178 lines** (+532 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
+`examples/hello_engine` is **3,283 lines** (+637 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
 ## 2. Public API surface per crate
 
@@ -50,14 +50,14 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1289 | 262 | 119 | 8 | 14 | 193 | 108 | **1994** |
-| `somnium_renderer` | 665 | 158 | 9 | 1 | 3 | 126 | 89 | **1051** |
+| `somnium_renderer` | 683 | 159 | 9 | 1 | 3 | 128 | 90 | **1073** |
 | `somnium_core` | 335 | 110 | 23 | 4 | 3 | 47 | 41 | **563** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
 | `somnium_asset` | 93 | 49 | 10 | 0 | 0 | 13 | 9 | **174** |
 | `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
-| `somnium_shader` | 53 | 13 | 2 | 0 | 0 | 1 | 3 | **72** |
+| `somnium_shader` | 61 | 15 | 2 | 0 | 0 | 1 | 3 | **82** |
 | `somnium_audio` | 37 | 10 | 2 | 0 | 0 | 8 | 5 | **62** |
 | `somnium_i18n` | 35 | 5 | 4 | 0 | 1 | 0 | 4 | **49** |
 | `somnium_jobs` | 35 | 10 | 3 | 0 | 1 | 0 | 0 | **49** |
@@ -68,18 +68,18 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **55 WGSL files, 14,333 lines** (+7 files, +2,254 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,892 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,393 lines** (+7 files, +2,314 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,952 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
 | Shader | Lines |
 |---|---:|
-| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,079 |
+| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,080 |
 | `crates/somnium_renderer/src/shaders/water.wgsl` | 1,214 |
-| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,165 |
+| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,201 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
 | `crates/somnium_renderer/src/shaders/atmosphere.wgsl` | 508 |
-| `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 481 |
+| `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 490 |
 | `crates/somnium_renderer/src/shaders/taa.wgsl` | 415 |
 | `crates/somnium_renderer/src/shaders/water_reflection.wgsl` | 397 |
 | `crates/somnium_renderer/src/shaders/water_spectrum.wgsl` | 379 |
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 126 (+30 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 130 (+34 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 

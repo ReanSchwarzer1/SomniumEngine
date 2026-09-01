@@ -100,6 +100,7 @@ struct VirtualShadowParams {
 @group(1) @binding(25) var virtual_shadow_sampler: sampler_comparison;
 @group(1) @binding(26) var<storage, read> virtual_shadow_pages: array<u32>;
 @group(1) @binding(27) var<uniform> virtual_shadow: VirtualShadowParams;
+@group(1) @binding(28) var<uniform> grain_words: array<vec4<u32>, 1024>;
 
 /// Sun visibility through the cloud layer at a world position.
 ///

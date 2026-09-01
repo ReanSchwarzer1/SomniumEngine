@@ -19,7 +19,7 @@
 > Experimental rendering without a budget meter is a research demo. This phase
 > takes both halves.
 >
-> **Status:** **ACTIVE. DREAMS-A complete, 2026-08-31.** Drafted against
+> **Status:** **ACTIVE. DREAMS-B complete, amended 2026-09-01; C active.** Drafted against
 > `3ecbda6`; A landed against `3cc321a`. B through E are plan only.
 >
 > **A correction this document already owes.** §4.2 originally listed "any
@@ -53,6 +53,13 @@
 > KENSHI, §13J to STALKER. Several references in §6 are **research code under
 > non-commercial or unstated terms**, and §6.5 states the rule for those
 > specifically: they are read for the idea and never linked.
+
+> **2026-09-01 product-default amendment (supersedes the default-off language
+> below for DREAMS-B only):** Shared Grain and Terrain STF ship on and are
+> authored in Details > DREAMS Sampling. Their explicit `=0` rails remain the
+> matched pre-B control. This was a direct product decision after B's measured
+> off/on evidence, not an accidental switch flip; C through E still use the
+> original default-change gate unless separately decided and recorded.
 
 ---
 
@@ -292,7 +299,7 @@ Four rows, checked per sub-phase, not per commit:
 |---|---|
 | `budget` | A `.somtime` A/B on **both** shipped maps, feature off versus on, back to back, with the standard deviation reported. Off must be within noise of the pre-phase baseline. |
 | `picture` | A golden image with the feature on, and the off/on pair side by side. A technique nobody can see is a technique that is dropped, and the pair is the evidence for that decision either way. |
-| `default` | Every switch this sub-phase added reads *off* in a clean profile, proven by a capture of the default editor. |
+| `default` | The authored product default is named and captured. Normally it is off; DREAMS-B's recorded 2026-09-01 decision is the sole exception and proves default equals explicit on. |
 | `deletable` | The sub-phase names the files that would be removed to undo it, and the count of lines outside those files that would have to change. Over 200 and it is not opt-in, whatever the switch says. |
 
 The `deletable` row is the one that keeps this phase from silently becoming a
@@ -461,11 +468,18 @@ Slang rather than leaving it filed. Its WGSL target cannot compile this engine's
 bindless shaders, its SPIR-V target runs end to end with a verified dispatch,
 and its generics monomorphise to nothing. **Slang is adopted for new shaders on
 the SPIR-V path, alongside the 55 WGSL modules, which are not migrated.** Four
-questions are open for DREAMS-B in §8 of that record, and the honest expectation
-is that B, C and D stay in WGSL and the first real Slang case is PUPPET's
-layered BSDF.
+questions are answered by [DREAMS-B](<phase DREAMS/DREAMS-B.md>). Per the
+project decision made after A2, every new DREAMS shader module is now Slang;
+existing WGSL modules may receive narrow integration edits rather than being
+rewritten for policy's sake.
 
 ### DREAMS-B · GRAIN — sampling and filtering
+
+**Status: complete, with the 2026-09-01 default amendment.** The deterministic THERMOMETER fixture, shared
+spatiotemporal mask resource, five consumer integrations and terrain STF are in
+tree. Collaborative filtering was refused after the temporal STF capture did
+not show the persistent noise that would justify another pass. See
+[DREAMS-B](<phase DREAMS/DREAMS-B.md>).
 
 **Question:** what does the frame look like with a real sampler under it?
 
@@ -487,8 +501,9 @@ failed for exactly the lack of one.
 - **Collaborative texture filtering** on top, using subgroups, if STF's
   magnification noise is as visible here as the paper says.
 
-**Expected shape of the answer:** blue noise is nearly free and lands on. STF is
-a cost/quality trade that lands off with a published number. Collaborative
+**Measured answer:** Shared Grain and STF are default-on product features with
+live Details toggles and explicit off rails. Their timings do not support a
+performance claim; the default is a product decision. Collaborative
 filtering is the interesting unknown, because it depends on the wave width the
 device reports and Somnium's is a uniform 32.
 
@@ -577,7 +592,8 @@ DREAMS-A  (GADGET)      language decision, one module ported
 
 Scheduling against MORROWIND: DREAMS sub-phases are **individually
 interruptible**. Each one closes with its own THERMOMETER rows and leaves the
-tree with a switch that is off. There is no DREAMS state that a MORROWIND
+tree with an authored switch. DREAMS-B is on by the recorded product decision;
+C through E remain off unless separately promoted. There is no DREAMS state that a MORROWIND
 sub-phase has to be aware of, which is the property that lets the two run
 alongside each other.
 
@@ -589,9 +605,9 @@ Everything MORROWIND freezes, unchanged, plus:
 
 - GHOSTFENCE passes, including the shader-budget row. A sub-phase that adds
   shader modules edits the budget in the same commit and says why.
-- The default editor's frame is byte-identical to the pre-phase baseline with
-  every DREAMS switch off. This is stronger than "within noise" and it is
-  checkable by capture.
+- The explicit-off editor frame is byte-identical to the pre-phase baseline.
+  An intentional default promotion additionally proves default equals explicit
+  on and records the editor route that can turn it back off.
 - No new *required* device feature. Every feature added to `capability.rs` is
   detected, reported, and has a path that runs without it.
 - `.somtime`'s existing counters keep their names and meanings.
@@ -673,7 +689,7 @@ by a script. **Writing that script is DREAMS-B's first task**, because B is the
 first sub-phase whose work reaches the GPU and therefore the first whose rows a
 person cannot fill from memory.
 
-**DREAMS-B, to start:**
+**DREAMS-B, complete:**
 
 1. Write the THERMOMETER script beside `tools/ghostfence/run.py`. Do not weaken
    GHOSTFENCE to make room for it.

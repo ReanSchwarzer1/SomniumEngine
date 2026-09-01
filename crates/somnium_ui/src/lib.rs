@@ -277,6 +277,9 @@ struct ToolHandles {
     post_section: NodeHandle,
     post_census_toggle: NodeHandle,
     post_bins_toggle: NodeHandle,
+    dreams_section: NodeHandle,
+    dreams_grain_toggle: NodeHandle,
+    dreams_stf_toggle: NodeHandle,
 
     terrain_section: NodeHandle,
     terrain_paint_toggle: NodeHandle,
@@ -4325,6 +4328,15 @@ impl UiManager {
     /// environment owns it.
     pub fn set_render_toggles(&mut self, toggles: crate::debug::DebugToggles) {
         self.render_toggles = toggles;
+        for (handle, id) in [
+            (self.inspector_handles.dreams_grain_toggle, "dreams_grain"),
+            (self.inspector_handles.dreams_stf_toggle, "dreams_stf"),
+        ] {
+            self.native_ui.send(CheckBoxMessage::set_checked(
+                handle,
+                self.render_toggles.is_on(id),
+            ));
+        }
     }
 
     /// The live pipeline switches.
@@ -8064,6 +8076,20 @@ impl UiManager {
                     }
                     continue;
                 }
+                if msg.destination == self.inspector_handles.dreams_grain_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::ToggleRenderSwitch("dreams_grain"));
+                    }
+                    continue;
+                }
+                if msg.destination == self.inspector_handles.dreams_stf_toggle {
+                    if msg.direction == MessageDirection::FromWidget {
+                        self.editor_events
+                            .push_back(EditorEvent::ToggleRenderSwitch("dreams_stf"));
+                    }
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_morph_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainMorph);
@@ -9537,6 +9563,7 @@ mod must_not_break {
         let handles = &layout.inspector_handles;
         for section in [
             handles.post_section,
+            handles.dreams_section,
             handles.terrain_section,
             handles.foliage_section,
         ] {
@@ -9546,6 +9573,8 @@ mod must_not_break {
         for handle in [
             handles.post_census_toggle,
             handles.post_bins_toggle,
+            handles.dreams_grain_toggle,
+            handles.dreams_stf_toggle,
             handles.terrain_paint_toggle,
             handles.terrain_aerial_dist,
             handles.foliage_kind_button,

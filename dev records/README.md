@@ -68,6 +68,7 @@ its own historical snapshot and revision notes.
 | CONTROL / Northlight | Schema-driven editor reach and world authoring | A through O complete | [`phase_CONTROL.md`](phase_CONTROL.md) |
 | PORTAL-0 / Source | Focused performance and engineering audit | A through G complete | [`phase_PORTAL-0.md`](phase_PORTAL-0.md) |
 | MORROWIND / NetImmerse | Runtime UI, cook, streaming, animation, game framework, rendering gaps | Active and partial | [`phase_MORROWIND.md`](phase_MORROWIND.md) |
+| DREAMS / Media Molecule | Experimental sampling, light transport, geometry and appearance under THERMOMETER | A and B complete; B sampling defaults on with Details controls; C active | [`phase_DREAMS.md`](phase_DREAMS.md) |
 | PORTAL / Source | Engineering health and durable gates | Planned; rebase the 2026-08-18 audit before starting | [`phase_PORTAL.md`](phase_PORTAL.md) |
 | KENSHI / OGRE | Combined-load measurement and published engine limits | Planned | [`phase_KENSHI.md`](phase_KENSHI.md) |
 | STALKER / X-Ray | Player, packages, mods, product UI, living world, release | Planned | [`phase_STALKER.md`](phase_STALKER.md) |
@@ -105,6 +106,7 @@ infer completion only from a filename.
 | [`phase CONTROL/`](phase%20CONTROL/) | Editor-reach sub-phase records and evidence |
 | [`phase PORTAL-0/`](phase%20PORTAL-0/) | Focused audit records and matched measurements |
 | [`phase MORROWIND/`](phase%20MORROWIND/) | Active MORROWIND sub-phase records and audits |
+| [`phase DREAMS/`](phase%20DREAMS/) | DREAMS language decisions, matched timings, captures, and sub-phase records |
 | [`evidence/`](evidence/) | Cross-phase or uncategorized committed evidence |
 
 Planned phases do not receive evidence folders in advance. The first sub-phase

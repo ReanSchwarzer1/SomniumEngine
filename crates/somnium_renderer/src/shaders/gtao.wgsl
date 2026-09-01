@@ -39,7 +39,8 @@ struct GtaoParams {
     frame: u32,
     /// Camera near plane, for linearising depth.
     near: f32,
-    _pad: f32,
+    /// DREAMS-B: sample the shared mask atlas instead of the legacy hash.
+    grain_enabled: u32,
 }
 
 // Two entry points with two pipeline layouts. `main` uses 0-2, `denoise` uses
@@ -52,6 +53,7 @@ struct GtaoParams {
 @group(0) @binding(2) var<uniform> params: GtaoParams;
 @group(0) @binding(3) var gtao_in:   texture_2d<f32>;
 @group(0) @binding(4) var gtao_denoised: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(5) var grain_masks: texture_2d_array<f32>;
 
 /// Slices around the view vector, and steps taken along each.
 ///
@@ -160,7 +162,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         / max(-centre.z, 1e-3) / params.inv_resolution.x * 0.5;
     let step_px = max(radius_px / f32(GTAO_STEPS), 1.0);
 
-    let noise = interleaved_gradient_noise(vec2<f32>(coord), params.frame);
+    let legacy_noise = interleaved_gradient_noise(vec2<f32>(coord), params.frame);
+    let grain_coord = vec2<i32>(coord.x & 63, coord.y & 63);
+    let grain_noise = textureLoad(grain_masks, grain_coord, i32(params.frame & 63u), 0).r;
+    let noise = select(legacy_noise, grain_noise, params.grain_enabled != 0u);
     var occlusion = 0.0;
     var bent = vec3<f32>(0.0);
 
