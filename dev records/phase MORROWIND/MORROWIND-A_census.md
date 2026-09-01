@@ -18,8 +18,8 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 68,420 | +40,890 | 32.7% | 747 | +532 | 111 | 2 |
-| `somnium_renderer` | 65,216 | +15,010 | 31.2% | 453 | +125 | 94 | 55 |
+| `somnium_ui` | 68,430 | +40,900 | 32.7% | 747 | +532 | 111 | 2 |
+| `somnium_renderer` | 65,377 | +15,171 | 31.3% | 455 | +127 | 94 | 55 |
 | `somnium_core` | 36,242 | +17,022 | 17.3% | 407 | +190 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.2% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.5% | 69 | +15 | 9 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **208,940** | +95,048 | | **2128** | +1,183 | | |
+| **Total** | **209,111** | +95,219 | | **2130** | +1,185 | | |
 
 The top three crates are **81.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -50,7 +50,7 @@ panel, which §8 says is not a finished sub-phase.
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
 | `somnium_ui` | 1289 | 262 | 119 | 8 | 14 | 193 | 108 | **1994** |
-| `somnium_renderer` | 685 | 159 | 9 | 1 | 3 | 128 | 90 | **1075** |
+| `somnium_renderer` | 686 | 159 | 9 | 1 | 3 | 128 | 90 | **1076** |
 | `somnium_core` | 335 | 110 | 23 | 4 | 3 | 47 | 41 | **563** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
@@ -68,22 +68,22 @@ panel, which §8 says is not a finished sub-phase.
 
 ## 3. WGSL inventory (plan §4.3)
 
-`somnium_renderer` ships **55 WGSL files, 14,403 lines** (+7 files, +2,324 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,962 lines**.
+`somnium_renderer` ships **55 WGSL files, 14,428 lines** (+7 files, +2,349 lines against the plan). Repository-wide, including `somnium_ui`'s pass shader, the count is **58 files, 14,987 lines**.
 
 Ten largest, because these are the files a permutation system has to survive:
 
 | Shader | Lines |
 |---|---:|
-| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,080 |
+| `crates/somnium_renderer/src/shaders/shading.wgsl` | 2,091 |
+| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,222 |
 | `crates/somnium_renderer/src/shaders/water.wgsl` | 1,214 |
-| `crates/somnium_renderer/src/shaders/terrain_material.wgsl` | 1,211 |
 | `crates/somnium_renderer/src/shaders/clouds.wgsl` | 526 |
 | `crates/somnium_renderer/src/shaders/atmosphere.wgsl` | 508 |
 | `crates/somnium_renderer/src/shaders/restir_gi.wgsl` | 490 |
 | `crates/somnium_renderer/src/shaders/taa.wgsl` | 415 |
 | `crates/somnium_renderer/src/shaders/water_reflection.wgsl` | 397 |
 | `crates/somnium_renderer/src/shaders/water_spectrum.wgsl` | 379 |
-| `crates/somnium_renderer/src/shaders/clipmap_shade.wgsl` | 362 |
+| `crates/somnium_renderer/src/shaders/clipmap_shade.wgsl` | 365 |
 
 ## 4. What is absent, by grep (plan §4.6)
 

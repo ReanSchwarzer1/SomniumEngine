@@ -4144,8 +4144,21 @@ impl SomniumRenderer {
         if !work.is_empty() {
             let mut budget = crate::terrain::clipmap::MAX_GEN_TEXELS;
             for (i, terrain_index) in work {
-                let detail = self.clipmaps[i].take_jobs(true, &mut budget);
-                let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                // Coverage before sharpness. Detail used to take the whole
+                // budget first, and on a cold cache it exhausted it every
+                // frame, so the macro stack -- the only one that covers the
+                // whole view -- was starved for the ten-odd frames the detail
+                // rings took to fill. Everything it would have shaded spent
+                // those frames on the flat macro-map fallback instead.
+                let (detail, macro_jobs) = if self.clipmaps[i].macro_covers_view() {
+                    let detail = self.clipmaps[i].take_jobs(true, &mut budget);
+                    let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                    (detail, macro_jobs)
+                } else {
+                    let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                    let detail = self.clipmaps[i].take_jobs(true, &mut budget);
+                    (detail, macro_jobs)
+                };
                 let mut feedback_jobs = Vec::with_capacity(detail.len() + macro_jobs.len());
                 feedback_jobs.extend_from_slice(&detail);
                 feedback_jobs.extend_from_slice(&macro_jobs);

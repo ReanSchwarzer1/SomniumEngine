@@ -1603,6 +1603,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if dbg > 32.5 && dbg < 33.5 {
         return vec4<f32>(vec3<f32>(terrain_clipmap_ring), 1.0);
     }
+    // 34 = which stage of the clipmap stack produced the pixel. Flat colours,
+    // not a ramp: the question is categorical, and a ramp is what made mode 33
+    // unable to separate the outermost ring from no ring at all.
+    if dbg > 33.5 && dbg < 34.5 {
+        let src = terrain_clipmap_source;
+        if src < -0.5 { return vec4<f32>(0.05, 0.05, 0.05, 1.0); }  // not clipmap
+        if src < 0.5 { return vec4<f32>(0.10, 0.80, 0.25, 1.0); }   // detail ring
+        if src < 1.5 { return vec4<f32>(0.20, 0.45, 1.00, 1.0); }   // macro ring
+        if src < 2.5 { return vec4<f32>(1.00, 0.15, 0.10, 1.0); }   // macro-map fallback
+        return vec4<f32>(1.00, 0.95, 0.10, 1.0);                    // constant colour
+    }
 
     // 13 = terrain chunk LOD. Rust places lod+1 in the instance padding only
     // while this debug view is active; zero means a non-terrain instance.

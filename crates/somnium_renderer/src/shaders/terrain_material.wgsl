@@ -376,6 +376,17 @@ var<private> terrain_dominant_albedo: vec3<f32> = vec3<f32>(0.0);
 var<private> terrain_wet_f0: f32 = 0.0;
 /// Phase DF: which detail ring the clipmap path picked (debug mode 33).
 var<private> terrain_clipmap_ring: f32 = 0.0;
+/// Which stage of the clipmap stack actually produced this pixel (debug 34).
+///
+/// 0 = a detail ring, 1 = a macro ring, 2 = the flat macro-map fallback,
+/// 3 = the constant colour when even the macro map is missing, -1 = the
+/// clipmap path did not run.
+///
+/// `terrain_clipmap_ring` cannot answer this. It reports the outermost detail
+/// ring as 7/7 = 1.0 and "no ring at all" as 1.0 as well, so debug 33 draws the
+/// two in the same white. The band artifact is a question about *which stage*,
+/// and for three investigations the only instrument available could not see it.
+var<private> terrain_clipmap_source: f32 = -1.0;
 /// MORROWIND-AD clipmap-generation-only bindings: albedo atlas, surface atlas,
 /// page table, physical atlas edge. Normal shading leaves the sentinel intact.
 var<private> terrain_virtual_texture: vec4<i32> = vec4<i32>(-1, -1, -1, 0);

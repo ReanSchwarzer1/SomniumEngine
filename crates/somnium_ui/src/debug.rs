@@ -241,6 +241,12 @@ pub const DEBUG_VIEWS: &[DebugView] = &[
         code: 33.0,
         help: "Which clipmap ring a terrain pixel came from; 0 is finest.",
     },
+    DebugView {
+        id: "clipmap_source",
+        label: "Clipmap Source",
+        code: 34.0,
+        help: "Which stage of the clipmap stack shaded the pixel: green a detail                ring, blue a macro ring, RED the flat macro-map fallback, yellow                the constant colour. Red is terrain with no cache data and no                normal, which is what the band artifact looks like.",
+    },
 ];
 
 /// Look up a view by id.
@@ -680,10 +686,14 @@ mod tests {
         codes.dedup();
         assert_eq!(codes.len(), DEBUG_VIEWS.len(), "codes must be unique");
         assert_eq!(codes.first(), Some(&0), "0 is the ordinary lit image");
+        // This crate cannot see the shader, so it can only check the code
+        // space is dense and starts at zero. That every code actually has a
+        // branch is checked in `somnium_renderer`, against `shading.wgsl`
+        // itself, by `every_registered_debug_view_has_a_branch_in_the_shader`.
         assert_eq!(
             codes.last(),
-            Some(&33),
-            "33 is the highest code shading.wgsl branches on"
+            Some(&(DEBUG_VIEWS.len() as i32 - 1)),
+            "the code space must be dense, so the last code is len - 1"
         );
         for (index, code) in codes.iter().enumerate() {
             assert_eq!(*code, index as i32, "the code space must have no gaps");

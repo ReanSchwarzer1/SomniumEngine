@@ -361,3 +361,39 @@ fn stochastic_terrain_filtering_reads_the_texture_size() {
         );
     }
 }
+
+/// Every registered debug view is reachable in the shader.
+///
+/// `somnium_ui` owns the list of views and `somnium_renderer` owns the shader
+/// that branches on their codes, so neither crate could check the two agree.
+/// The guard that stood in for it asserted the highest code was 33 -- a
+/// hard-coded number that says nothing about whether a branch exists, and that
+/// fails on the next view added whether or not the shader was updated.
+///
+/// A view with no branch renders the ordinary lit image, so the menu entry
+/// silently does nothing.
+#[test]
+fn every_registered_debug_view_has_a_branch_in_the_shader() {
+    const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
+    let source = SHADING;
+    // Branches read `dbg > N.5 && dbg < M.5`; M is the code they select.
+    let mut branched: Vec<i32> = Vec::new();
+    for (index, _) in source.match_indices("dbg < ") {
+        let rest = &source[index + "dbg < ".len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if let Ok(value) = rest[..end].parse::<f32>() {
+            branched.push((value - 0.5).round() as i32);
+        }
+    }
+    let missing: Vec<&str> = somnium_ui::debug::DEBUG_VIEWS
+        .iter()
+        .filter(|view| view.code > 0.5 && !branched.contains(&(view.code as i32)))
+        .map(|view| view.id)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "registered but not branched on in shading.wgsl, so the menu entry          renders the ordinary lit image: {missing:?}"
+    );
+}

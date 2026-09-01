@@ -46,6 +46,19 @@ const MAX_TAKE_JOBS: usize = 32;
 /// disk empty for seven hex frames (~1.5 s).
 const DETAIL_GEN_ORDER: [usize; DETAIL_RINGS as usize] = [3, 2, 1, 0, 4, 5, 6, 7];
 const MACRO_GEN_ORDER: [usize; MACRO_RINGS as usize] = [3, 2, 1, 0];
+/// Order for rings that are **not ready**: coverage before sharpness.
+///
+/// A not-ready ring is not being sampled, so nothing on screen improves until
+/// it is finished -- and what the screen needs first is *some* data everywhere,
+/// not perfect data in an 8 m disk. Measured on a cold cache: with the near-
+/// first order above, frame 2 was a small sharp circle of ring 3 surrounded by
+/// 27.8% of the frame on the flat macro-map fallback, which has no detail
+/// normal at all and reads as a smooth, straight-edged patch lying on the
+/// ground. That is the band artifact.
+///
+/// `DETAIL_GEN_ORDER` still governs rings that *are* ready, where near-first is
+/// right: those are the thin slide strips of rings already on screen.
+const DETAIL_COLD_ORDER: [usize; DETAIL_RINGS as usize] = [7, 6, 5, 4, 3, 2, 1, 0];
 
 const CLIPMAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -343,6 +356,15 @@ impl TerrainClipmap {
         jobs_for(&self.macro_rings, false)
     }
 
+    /// Whether the macro stack can shade the whole view.
+    ///
+    /// While this is false there is terrain on screen that no ring can serve,
+    /// and it falls through to the flat macro-map placeholder.
+    #[must_use]
+    pub fn macro_covers_view(&self) -> bool {
+        self.macro_rings.iter().all(|ring| ring.ready)
+    }
+
     pub fn has_dirty(&self) -> bool {
         self.rings.iter().any(|r| r.dirty_count > 0)
             || self.macro_rings.iter().any(|r| r.dirty_count > 0)
@@ -351,11 +373,12 @@ impl TerrainClipmap {
     /// Consume dirty rectangles up to `budget` texels, near-cover ring first.
     /// Leftover stays queued; do not call `clear_dirty` after this.
     pub fn take_jobs(&mut self, is_detail: bool, budget: &mut u32) -> Vec<ClipmapGenJob> {
-        let order: &[usize] = if is_detail {
-            &DETAIL_GEN_ORDER
+        let rings_len = if is_detail {
+            self.rings.len()
         } else {
-            &MACRO_GEN_ORDER
+            self.macro_rings.len()
         };
+        debug_assert_eq!(rings_len, gen_order(is_detail, true).len());
         let rings = if is_detail {
             &mut self.rings[..]
         } else {
@@ -377,6 +400,7 @@ impl TerrainClipmap {
         // slide is the thin strip it always should have been, the ordering is
         // what keeps it safe.
         for ready_pass in [true, false] {
+            let order = gen_order(is_detail, ready_pass);
             for &ring_i in order {
                 if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
                     break;
@@ -774,6 +798,26 @@ pub fn coarsest_detail_radius_metres() -> f32 {
     (DETAIL_SIZE as f32 / tpm) * 0.5
 }
 
+/// The order [`TerrainClipmap::take_jobs`] visits rings in, for one pass.
+///
+/// A **ready** ring is on screen right now and its dirty rectangles are the
+/// thin strip that just slid into view, so near-first is right: that is the
+/// ground the player is standing on.
+///
+/// A **not-ready** ring is skipped by the picker entirely, so nothing on screen
+/// improves until it finishes -- and what the screen needs first is *some* data
+/// everywhere rather than perfect data in an 8 m disk. Coarsest first.
+fn gen_order(is_detail: bool, ready_pass: bool) -> &'static [usize] {
+    match (is_detail, ready_pass) {
+        (true, true) => &DETAIL_GEN_ORDER,
+        (true, false) => &DETAIL_COLD_ORDER,
+        // The macro stack is authored coarsest-first already, so both passes
+        // want the same order. Reversing it here would be the exact mistake
+        // this function exists to avoid.
+        (false, _) => &MACRO_GEN_ORDER,
+    }
+}
+
 fn ready_mask(rings: &[ClipmapRing]) -> u32 {
     let mut bits = 0u32;
     for (i, ring) in rings.iter().enumerate() {
@@ -822,6 +866,49 @@ impl GpuClipmapGen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Coverage before sharpness while the cache is cold.
+    ///
+    /// Measured on the `coastal-flyover` rail with debug view 34 (clipmap
+    /// source). Before: frame 2 was 27.83% of the frame on the flat macro-map
+    /// fallback -- terrain with no cache data and no detail normal, which is
+    /// the smooth straight-edged patch reported as the band artifact. After:
+    /// 0.00%, with the macro stack covering 52.35%. The converged frame 240 is
+    /// unchanged (38 of 921,600 pixels differ by more than 2, peak delta 5).
+    #[test]
+    fn a_cold_cache_paints_coverage_before_sharpness() {
+        // Ready rings are the thin slide strips of ground already on screen.
+        assert_eq!(
+            gen_order(true, true)[0],
+            3,
+            "a ready pass must stay near-first; ring 3 is the 8 m disk underfoot"
+        );
+        // Not-ready rings contribute nothing until they finish, so the widest
+        // one -- the only one that covers the horizon -- has to go first.
+        assert_eq!(
+            gen_order(true, false)[0],
+            DETAIL_RINGS as usize - 1,
+            "a cold pass must be coarsest-first, or the view outside the finest              ring spends the fill on the flat fallback"
+        );
+        assert_eq!(
+            gen_order(false, false)[0],
+            MACRO_RINGS as usize - 1,
+            "the macro stack is authored coarsest-first and must not be reversed"
+        );
+        // Every ring exactly once, in every pass: a permutation, not a filter.
+        for is_detail in [true, false] {
+            let n = if is_detail { DETAIL_RINGS } else { MACRO_RINGS } as usize;
+            for ready_pass in [true, false] {
+                let mut seen = gen_order(is_detail, ready_pass).to_vec();
+                seen.sort_unstable();
+                assert_eq!(
+                    seen,
+                    (0..n).collect::<Vec<_>>(),
+                    "detail={is_detail} ready={ready_pass} is not a permutation"
+                );
+            }
+        }
+    }
 
     #[test]
     fn origin_wrap_stays_inside_the_texture() {
