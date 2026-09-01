@@ -4037,6 +4037,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             resolution: (width, height),
                             resolution_scale: renderer.dynamic_resolution.scale(),
                             vram_bytes: 0,
+                            camera: Some(Self::camera_readout(renderer)),
                         }
                     },
                 )
@@ -7520,6 +7521,69 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Flip one renderer switch, through the state the renderer actually reads.
+    ///
+    /// **The bug this exists for.** The Terrain Tools checkboxes used to write
+    /// straight to the terrain (`t.hex_tiling = !t.hex_tiling`,
+    /// `cm.enabled = !cm.enabled`) while `debug_toggles` — which
+    /// [`SomniumRenderer::apply_debug_toggles`] force-writes every one of those
+    /// same fields from — kept its own, unchanged opinion. Two sources of truth
+    /// for one switch.
+    ///
+    /// Nothing called `apply_debug_toggles` at runtime, so the divergence sat
+    /// there invisibly until DREAMS-B added the first two switches that do
+    /// (`dreams_grain`, `dreams_stf`). After that, unchecking **Clipmap** and
+    /// then toggling either DREAMS switch silently re-enabled the clipmap —
+    /// along with hex tiling, parallax, LOD morph, height blend, macro and
+    /// detail fade, all of them snapped back to whatever `debug_toggles` still
+    /// believed. The reported symptom was terrain artifacts appearing on a
+    /// toggle that has nothing to do with terrain.
+    ///
+    /// Routing every switch through here also gets the environment override
+    /// for free: `set` refuses when a variable owns the switch and says which
+    /// one, which the hand-written clipmap arm had to special-case.
+    fn toggle_render_switch(&mut self, id: &'static str) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let next = !renderer.debug_toggles.is_on(id);
+        match renderer.debug_toggles.set(id, next) {
+            Ok(()) => {
+                renderer.apply_debug_toggles();
+                let states = renderer.debug_toggles.clone();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_render_toggles(states);
+                }
+                info!(switch = id, on = next, "renderer switch");
+            }
+            Err(reason) => {
+                let states = renderer.debug_toggles.clone();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_render_toggles(states);
+                    ui.push_toast(&reason);
+                }
+            }
+        }
+    }
+
+    /// The camera pose, in the units the capture environment variables take.
+    ///
+    /// Derived from the view matrix rather than from the editor camera,
+    /// because the renderer is what this function already has and the two
+    /// agree by construction: `EditorCamera::forward_vector` builds the same
+    /// vector this reads back out.
+    fn camera_readout(renderer: &SomniumRenderer) -> [f32; 5] {
+        let m = renderer.view_matrix;
+        // Row 2 of a world-to-camera matrix is the camera's backward axis, so
+        // forward is its negation. Same derivation  uses.
+        let forward = -glam::Vec3::new(m.x_axis.z, m.y_axis.z, m.z_axis.z);
+        let forward = forward.normalize_or_zero();
+        let pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let yaw = forward.z.atan2(forward.x).to_degrees();
+        let p = renderer.camera_pos;
+        [p.x, p.y, p.z, yaw, pitch]
+    }
+
     /// Route a window event to a floating window, if it belongs to one.
     ///
     /// The main window's handler must not act on a resize that was not its own
@@ -8030,27 +8094,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleRenderSwitch(id) => {
-                let Some(renderer) = self.renderer.as_mut() else {
-                    return;
-                };
-                let next = !renderer.debug_toggles.is_on(id);
-                match renderer.debug_toggles.set(id, next) {
-                    Ok(()) => {
-                        renderer.apply_debug_toggles();
-                        let states = renderer.debug_toggles.clone();
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.set_render_toggles(states);
-                        }
-                    }
-                    Err(reason) => {
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.set_render_toggles(renderer.debug_toggles.clone());
-                            ui.push_toast(&reason);
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleRenderSwitch(id) => self.toggle_render_switch(id),
 
             EditorEvent::ViewPreset(index) => {
                 // A preset frames the selection when there is one and the
@@ -9095,49 +9139,16 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleTerrainHex => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.hex_tiling = !t.hex_tiling;
-                            info!(
-                                "Terrain hex tiling: {}",
-                                if t.hex_tiling { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainHex => self.toggle_render_switch("hex_tiling"),
 
-            EditorEvent::ToggleTerrainParallax => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.toggle_parallax();
-                            info!(
-                                "Terrain parallax: {}",
-                                if t.parallax_scale > 0.0 { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainParallax => self.toggle_render_switch("terrain_parallax"),
 
-            EditorEvent::ToggleTerrainClipmap => {
-                if let Some(tc) = self.selected_terrain() {
-                    if somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off() {
-                        info!("Terrain clipmap: forced off (SOMNIUM_TERRAIN_CLIPMAP=0)");
-                    } else if let Some(r) = &mut self.renderer {
-                        if let Some(cm) = r.clipmaps.get_mut(tc.terrain_id as usize) {
-                            cm.enabled = !cm.enabled;
-                            if cm.enabled {
-                                cm.invalidate();
-                            }
-                            info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
-                        }
-                    }
-                }
-            }
+            // The environment override and the refresh-on-enable that used to
+            // be written out here both live in the shared path now: `set`
+            // refuses when `SOMNIUM_TERRAIN_CLIPMAP` owns the switch, and
+            // `apply_debug_toggles` invalidates the rings on a false-to-true
+            // transition.
+            EditorEvent::ToggleTerrainClipmap => self.toggle_render_switch("terrain_clipmap"),
 
             EditorEvent::SetCpuFrustum(on) => {
                 if SomniumRenderer::cpu_frustum_env_off() {
@@ -9223,19 +9234,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleTerrainMorph => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.lod_morph = !t.lod_morph;
-                            info!(
-                                "Terrain LOD morph: {}",
-                                if t.lod_morph { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainMorph => self.toggle_render_switch("terrain_lod_morph"),
 
             EditorEvent::SetCameraSpeed(normalized) => {
                 self.camera_speed_norm = normalized.clamp(0.0, 1.0);
@@ -10374,6 +10373,49 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
+
+    /// Every renderer switch has one writer, and it is `debug_toggles`.
+    ///
+    /// The defect: the Terrain Tools checkboxes wrote straight to the terrain
+    /// while `apply_debug_toggles` force-wrote the same fields back from
+    /// `debug_toggles`, which never heard about the click. Nothing called
+    /// `apply_debug_toggles` at runtime, so the two stayed out of step
+    /// silently until DREAMS-B added the first switches that do — after which
+    /// unchecking Clipmap and then toggling Shared Grain turned the clipmap
+    /// back on, and the terrain artifacts with it.
+    ///
+    /// A source check because the alternative needs a GPU: `apply_debug_toggles`
+    /// is a method on a renderer that owns device resources, and the rule being
+    /// protected is "this arm does not assign", which reads perfectly well.
+    #[test]
+    fn terrain_switches_are_flipped_through_the_toggle_state() {
+        let source = include_str!("app.rs");
+        for event in [
+            "EditorEvent::ToggleTerrainHex",
+            "EditorEvent::ToggleTerrainParallax",
+            "EditorEvent::ToggleTerrainMorph",
+            "EditorEvent::ToggleTerrainClipmap",
+        ] {
+            let arm = source
+                .split_once(&format!("{event} =>"))
+                .unwrap_or_else(|| panic!("{event} has no match arm"))
+                .1;
+            // The arm ends at the next event, or after a short window for the
+            // one-line arms this rule produces.
+            let arm = &arm[..arm.find("EditorEvent::").unwrap_or(arm.len().min(400))];
+            assert!(
+                arm.contains("toggle_render_switch"),
+                "{event} does not go through `debug_toggles`, so                  `apply_debug_toggles` will overwrite whatever it set"
+            );
+            for direct in ["hex_tiling = !", "lod_morph = !", "enabled = !", "toggle_parallax()"] {
+                assert!(
+                    !arm.contains(direct),
+                    "{event} still writes `{direct}` directly, which is the                      second source of truth this rule removes"
+                );
+            }
+        }
+    }
+
     /// Every submission path asks the same question about `hidden`.
     ///
     /// A source check rather than a render check, and deliberately so: the

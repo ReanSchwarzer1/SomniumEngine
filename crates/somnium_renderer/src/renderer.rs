@@ -555,8 +555,17 @@ impl SomniumRenderer {
             terrain.parallax_scale = if parallax { terrain.parallax_held } else { 0.0 };
             terrain.invalidate_unique_colour();
         }
+        let want_clipmap = on("terrain_clipmap");
         for clipmap in &mut self.clipmaps {
-            clipmap.enabled = on("terrain_clipmap");
+            // Re-enabling has to force a refresh. While it was off the camera
+            // kept moving and the rings kept their old centres, so the first
+            // frame back would shade the ground from a cache of somewhere
+            // else — which is a straight-edged patch of wrong terrain, and is
+            // what the hand-written toggle this replaced was careful to avoid.
+            if want_clipmap && !clipmap.enabled {
+                clipmap.invalidate();
+            }
+            clipmap.enabled = want_clipmap;
         }
     }
 
@@ -1063,7 +1072,14 @@ impl SomniumRenderer {
             underwater_body: None,
             camera_submersion: 0.0,
             terrain_materials,
-            shading_debug: 0.0,
+            // Every other debug lever in this renderer can be set from the
+            // environment; the shading debug view could only be set from the
+            // editor menu, which a headless capture has no way to click. The
+            // codes are `somnium_ui::debug::VIEWS`.
+            shading_debug: std::env::var("SOMNIUM_SHADING_DEBUG")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .unwrap_or(0.0),
             frame_view_state: FrameViewState::default(),
             view_stage,
             view_slot: 0,

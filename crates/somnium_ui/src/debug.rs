@@ -560,6 +560,14 @@ pub struct ViewportStats {
     pub resolution_scale: f32,
     /// Bytes of GPU memory the renderer has allocated, when it can say.
     pub vram_bytes: u64,
+    /// Where the camera is and which way it points.
+    ///
+    /// `(x, y, z, yaw, pitch)`, in the units `SOMNIUM_CAMERA_POS`,
+    /// `SOMNIUM_CAMERA_YAW` and `SOMNIUM_CAMERA_PITCH` take, so a viewpoint
+    /// somebody is looking at can be handed to a capture run verbatim. A bug
+    /// that only appears from one place is otherwise reported as a screenshot
+    /// and reproduced by guesswork, which is exactly as slow as it sounds.
+    pub camera: Option<[f32; 5]>,
 }
 
 impl ViewportStats {
@@ -587,6 +595,11 @@ impl ViewportStats {
         }
         if self.vram_bytes > 0 {
             lines.push(format!("{} VRAM", mebibytes(self.vram_bytes)));
+        }
+        if let Some([x, y, z, yaw, pitch]) = self.camera {
+            // One line, in the order the environment variables take, so it can
+            // be copied across without rearranging.
+            lines.push(format!("cam {x:.0},{y:.0},{z:.0}  yaw {yaw:.0}  pitch {pitch:.0}"));
         }
         lines
     }

@@ -18,9 +18,9 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 68,407 | +40,877 | 32.8% | 747 | +532 | 111 | 2 |
-| `somnium_renderer` | 65,168 | +14,962 | 31.2% | 453 | +125 | 94 | 55 |
-| `somnium_core` | 36,125 | +16,905 | 17.3% | 404 | +187 | 46 | 0 |
+| `somnium_ui` | 68,420 | +40,890 | 32.8% | 747 | +532 | 111 | 2 |
+| `somnium_renderer` | 65,184 | +14,978 | 31.2% | 453 | +125 | 94 | 55 |
+| `somnium_core` | 36,167 | +16,947 | 17.3% | 405 | +188 | 46 | 0 |
 | `somnium_asset` | 6,711 | +5,072 | 3.2% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.5% | 69 | +15 | 9 | 0 |
 | `somnium_script` | 4,969 | +154 | 2.4% | 55 | — | 12 | 0 |
@@ -34,11 +34,11 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **208,762** | +94,870 | | **2125** | +1,180 | | |
+| **Total** | **208,833** | +94,941 | | **2126** | +1,181 | | |
 
 The top three crates are **81.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
-`examples/hello_engine` is **3,283 lines** (+637 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
+`examples/hello_engine` is **3,399 lines** (+753 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
 ## 2. Public API surface per crate
 
@@ -110,7 +110,7 @@ is a system this phase still owes.
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
 - **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
-- **`SOMNIUM_*` variables:** 130 (+34 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
+- **`SOMNIUM_*` variables:** 131 (+35 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)
 
