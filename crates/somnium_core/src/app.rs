@@ -7294,7 +7294,6 @@ impl<G: GameApp> Engine<G> {
         let mut diagnostics = Vec::with_capacity(terrains.len());
         if let Some(r) = self.renderer.as_mut() {
             for (entity, component, model) in terrains {
-                let mut virtual_texturing = false;
                 if let Some(terrain) = r.terrain_mut(component.terrain_id) {
                     terrain.configure_virtual_texture(
                         component.virtual_texturing,
@@ -7302,7 +7301,6 @@ impl<G: GameApp> Engine<G> {
                         component.virtual_texture_uploads_per_frame,
                     );
                     let stats = *terrain.virtual_texture.stats();
-                    virtual_texturing = terrain.virtual_texture_enabled;
                     diagnostics.push((
                         entity,
                         stats,
@@ -7310,16 +7308,15 @@ impl<G: GameApp> Engine<G> {
                         terrain.virtual_texture_cache_mib,
                     ));
                 }
-                if virtual_texturing
-                    && !somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off()
-                    && let Some(clipmap) = r.clipmaps.get_mut(component.terrain_id as usize)
-                    && !clipmap.enabled
-                {
-                    clipmap.enabled = true;
-                    clipmap.invalidate();
-                }
                 r.submit_terrain(component.terrain_id, model);
             }
+            // Virtual texturing needs the clipmap, and this loop used to say so
+            // by assigning `clipmap.enabled = true` itself. That made it the
+            // third writer of one field and, being per-frame, the one that
+            // always won -- so the Clipmap checkbox silently did nothing. The
+            // requirement is unchanged; it is now expressed once, inside the
+            // renderer, against the same `debug_toggles` the checkbox writes.
+            r.reconcile_clipmaps();
         }
         for (entity, stats, enabled, cache_mib) in diagnostics {
             if let Some(component) = self.world.get_mut::<TerrainComponent>(entity) {
@@ -7547,6 +7544,21 @@ impl<G: GameApp> Engine<G> {
             return;
         };
         let next = !renderer.debug_toggles.is_on(id);
+        // Refuse rather than accept-and-revert. Turning the clipmap off under
+        // virtual texturing leaves the terrain shaded from 4x4 placeholder
+        // arrays, so the old per-frame code was right to keep it on -- it was
+        // only wrong to do it silently, which is indistinguishable from a
+        // broken checkbox.
+        if id == "terrain_clipmap" && !next && renderer.clipmap_owned_by_virtual_texturing() {
+            let states = renderer.debug_toggles.clone();
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.set_render_toggles(states);
+                ui.push_toast(
+                    "Clipmap is required while virtual texturing is on: the layer                      arrays are placeholders in VT mode and the rings carry the                      real pages.",
+                );
+            }
+            return;
+        }
         match renderer.debug_toggles.set(id, next) {
             Ok(()) => {
                 renderer.apply_debug_toggles();
@@ -10414,6 +10426,69 @@ mod viewport_control_tests {
                 );
             }
         }
+    }
+
+    /// `somnium_core` does not write `clipmap.enabled`. Nothing outside the
+    /// renderer does.
+    ///
+    /// The bug: the terrain submit loop force-enabled the clipmap for every
+    /// virtual-textured terrain, every frame. It was the third writer of that
+    /// field, and being per-frame it was the one that always won, so on any
+    /// machine taking the BC7 path the Clipmap checkbox had not turned the
+    /// clipmap off since virtual texturing landed -- the click was accepted,
+    /// reverted inside the same frame, and the checkbox re-ticked itself at
+    /// the next inspector refresh. It looked exactly like a checkbox that
+    /// randomly turns itself back on.
+    ///
+    /// The requirement behind it was real: in VT mode the legacy layer arrays
+    /// are placeholders and only the rings carry the real pages. It lives in
+    /// `SomniumRenderer::reconcile_clipmaps` now, next to the `debug_toggles`
+    /// entry it has to agree with.
+    #[test]
+    fn the_frame_loop_does_not_own_whether_the_clipmap_is_on() {
+        let source = include_str!("app.rs");
+        let submit = source
+            .split_once("fn submit_terrains")
+            .expect("submit_terrains exists")
+            .1;
+        let submit = &submit[..submit.find("
+    fn ").unwrap_or(submit.len())];
+        // Code only. The comment explaining this rule quotes the line the rule
+        // forbids, and a test that reads its own explanation is not a test.
+        let code: String = submit
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(
+            !code.contains("clipmap.enabled"),
+            "the terrain submit loop assigns `clipmap.enabled` again; that field              has one writer, `SomniumRenderer::reconcile_clipmaps`"
+        );
+        assert!(
+            submit.contains("reconcile_clipmaps"),
+            "nothing reconciles the clipmap per frame, so a virtual-textured              terrain will shade from placeholder layer arrays"
+        );
+    }
+
+    /// Refusing is not the same as accepting and reverting.
+    #[test]
+    fn the_clipmap_cannot_be_switched_off_out_from_under_virtual_texturing() {
+        let source = include_str!("app.rs");
+        let body = source
+            .split_once("fn toggle_render_switch")
+            .expect("toggle_render_switch exists")
+            .1;
+        let body = &body[..body.find("
+    /// ").unwrap_or(body.len())];
+        assert!(
+            body.contains("clipmap_owned_by_virtual_texturing"),
+            "the clipmap switch does not ask whether virtual texturing owns it,              so turning it off shades the terrain from placeholder arrays"
+        );
+        assert!(
+            body.contains("push_toast"),
+            "a refused switch has to say why; a switch that silently does              nothing is the bug this replaced"
+        );
     }
 
     /// Every submission path asks the same question about `hidden`.

@@ -555,17 +555,49 @@ impl SomniumRenderer {
             terrain.parallax_scale = if parallax { terrain.parallax_held } else { 0.0 };
             terrain.invalidate_unique_colour();
         }
-        let want_clipmap = on("terrain_clipmap");
+        self.reconcile_clipmaps();
+    }
+
+    /// Whether virtual texturing has taken ownership of the clipmap.
+    ///
+    /// In VT mode `TerrainLayerTextures`' legacy layer arrays are 4x4
+    /// placeholders — `load_bc7_layers` registers dummies on purpose — and the
+    /// real BC7 pages only reach shading through the clipmap rings. A VT
+    /// terrain with the clipmap off is therefore not "the clipmap turned off",
+    /// it is terrain shaded from eight mean colours. The clipmap is not
+    /// optional here, and `terrain_clipmap` is not allowed to claim otherwise.
+    #[must_use]
+    pub fn clipmap_owned_by_virtual_texturing(&self) -> bool {
+        self.terrains
+            .iter()
+            .any(|terrain| terrain.virtual_texture_enabled)
+    }
+
+    /// The single writer of [`TerrainClipmap::enabled`].
+    ///
+    /// It used to have three. `apply_debug_toggles` wrote it from
+    /// `debug_toggles`, `EditorEvent::ToggleTerrainClipmap` wrote it straight
+    /// from the checkbox, and the per-frame terrain submit in `somnium_core`
+    /// wrote it back to `true` for every virtual-textured terrain. The
+    /// per-frame one ran last and ran always, so on any machine that takes the
+    /// BC7 path the Clipmap checkbox had not turned the clipmap off since the
+    /// virtual-texturing commit: the click was accepted, reverted within the
+    /// frame, and the checkbox re-ticked itself at the next inspector refresh.
+    ///
+    /// Everything that wants to change it now goes through here.
+    pub fn reconcile_clipmaps(&mut self) {
+        let want = !crate::terrain::clipmap::TerrainClipmap::env_forced_off()
+            && (self.debug_toggles.is_on("terrain_clipmap")
+                || self.clipmap_owned_by_virtual_texturing());
         for clipmap in &mut self.clipmaps {
-            // Re-enabling has to force a refresh. While it was off the camera
-            // kept moving and the rings kept their old centres, so the first
-            // frame back would shade the ground from a cache of somewhere
-            // else — which is a straight-edged patch of wrong terrain, and is
-            // what the hand-written toggle this replaced was careful to avoid.
-            if want_clipmap && !clipmap.enabled {
+            // Coming back on has to force a refresh. While it was off the
+            // camera kept moving and the rings kept their old centres, so the
+            // first frame back shades the ground from a cache of somewhere
+            // else, which is itself a straight-edged patch of wrong terrain.
+            if want && !clipmap.enabled {
                 clipmap.invalidate();
             }
-            clipmap.enabled = want_clipmap;
+            clipmap.enabled = want;
         }
     }
 
