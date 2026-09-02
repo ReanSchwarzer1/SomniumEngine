@@ -68,6 +68,22 @@ impl DreamRail {
             "island-ground" => RailKind::Hold {
                 lateral_metres: 1.0,
             },
+            // Phase TSUSHIMA-A. Both `-ground` rails look at ground inside the
+            // 100 m cascade range, which is the one band where none of that
+            // phase's defects are visible: the shadows are there, the detail
+            // is there, and the terrain looks like terrain. Every capture the
+            // phase argues from is a *vista*, and there was no rail for one.
+            //
+            // Still a `Hold`, because a stationary frame is what makes two
+            // captures comparable, but the sway is smaller — a metre and a
+            // half of lateral drift is nothing at eye level and is a visible
+            // slew across a horizon.
+            "coastal-vista" => RailKind::Hold {
+                lateral_metres: 0.5,
+            },
+            "island-vista" => RailKind::Hold {
+                lateral_metres: 0.5,
+            },
             // Chosen to match what a person actually does to provoke this:
             // the editor's own speed slider reaches into the hundreds, and the
             // reports that prompted the rail were at 121 and 205 m/s.
@@ -184,6 +200,39 @@ mod tests {
         assert!(DreamRail::named("coastal-flyover", anchor(), 7, None).is_some());
         assert!(DreamRail::named("coatsal-ground", anchor(), 7, None).is_none());
         assert!(DreamRail::named("coastal-flyver", anchor(), 7, None).is_none());
+    }
+
+    #[test]
+    fn tsushima_added_vista_rails_without_disturbing_the_dreams_ones() {
+        // The additive property. TSUSHIMA reuses this fixture rather than
+        // building a second one, so every DREAMS capture recipe has to keep
+        // meaning exactly what it meant — a rail that changed behaviour would
+        // silently invalidate an evidence folder nobody thought to re-take.
+        assert!(DreamRail::named("coastal-vista", anchor(), 0, None).is_some());
+        assert!(DreamRail::named("island-vista", anchor(), 0, None).is_some());
+        assert_eq!(
+            DreamRail::named("coastal-ground", anchor(), 0, None)
+                .unwrap()
+                .pose(240),
+            anchor(),
+            "the DREAMS ground rail still settles on its anchor"
+        );
+    }
+
+    #[test]
+    fn a_vista_rail_settles_and_sways_less_than_a_ground_rail() {
+        // A horizon magnifies lateral drift: the same metre and a half that is
+        // invisible at eye level slews the whole skyline.
+        let ground = DreamRail::named("coastal-ground", anchor(), 0, None).unwrap();
+        let vista = DreamRail::named("coastal-vista", anchor(), 0, None).unwrap();
+        let drift = |r: DreamRail| {
+            (0..MOVING_FRAMES)
+                .map(|f| r.pose(f).position.distance(anchor().position))
+                .fold(0.0f32, f32::max)
+        };
+        assert!(drift(vista) < drift(ground));
+        assert_eq!(vista.pose(240), anchor(), "and it still settles");
+        assert!(!vista.moving_at(240));
     }
 
     #[test]

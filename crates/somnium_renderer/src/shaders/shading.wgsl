@@ -1506,6 +1506,71 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         terrain_selected_rgb = terrain.selected_rgb;
         terrain_weight_rgb = terrain.weight_rgb;
         terrain_parallax_shadow_factor = terrain.parallax_shadow;
+
+        // ── Baked terrain visibility (Phases TSUSHIMA-B, TSUSHIMA-C) ────────
+        //
+        // Applied here rather than inside either material function, because
+        // both quantities are properties of the heightfield and not of the
+        // material. Putting them here means the live path, the clipmap path
+        // and the virtual-texture path all get them from one call site
+        // instead of three that would drift.
+        let tm = terrain_materials[tm_idx];
+
+        // B. Folded into the same channel the relief self-shadow uses, so
+        // there is one definition of "how much direct sun reaches here" and
+        // `shadow_factor` below picks up both without knowing about either.
+        //
+        // Cross-faded against the cascades over the last cascade's range
+        // rather than replacing them. Inside 100 m the cascades are strictly
+        // better — they see meshes, and the horizon map only ever sees
+        // terrain, so a rock casting onto the ground exists in one and not
+        // the other. Past it they see nothing at all.
+        let horizon = terrain_horizon_shadow(
+            tm, uv, normalize(light.direction), light.sun_angular_radius);
+        let horizon_takeover = smoothstep(70.0, 100.0, distance(hit_point, view.camera_pos));
+        terrain_parallax_shadow_factor =
+            terrain_parallax_shadow_factor * mix(1.0, horizon, horizon_takeover);
+
+        // C. A **product** against the occlusion already accumulated, not a
+        // `min`.
+        //
+        // The plan called this one either way and said to measure it, so it
+        // was measured. `min` was tried first, on the argument that two
+        // occlusion terms describing the same hemisphere should not both
+        // apply. It is nearly invisible: it can only bite where baked sky
+        // visibility is *lower* than GTAO's answer, which on this terrain is
+        // the floor of a deep valley and 1.4% of visible pixels — a mean
+        // absolute change of 0.17 against a terrain radiance of 1440.
+        //
+        // The product is right because the two terms are very nearly
+        // independent. GTAO searches a few metres and cannot see a ridge line;
+        // the bake sees the ridge line and has no idea a boulder is sitting
+        // next to you. They occlude different parts of the sky, and the
+        // fraction of sky surviving two independent occluders is the product
+        // of the two fractions. `min` is the correct composition only when one
+        // term's occluders are a superset of the other's, which is exactly
+        // what these two are not.
+        let sky_vis = terrain_sky_visibility(tm, uv);
+        surface.occlusion = surface.occlusion * sky_vis;
+        // The landscape-scale bent normal, **composed with** the contact-scale
+        // one GTAO already wrote rather than replacing it. The two see
+        // different occluders — GTAO sees the boulder a metre away and cannot
+        // see the valley wall, the bake sees the valley wall and cannot see
+        // the boulder — so overwriting one with the other throws away half the
+        // answer. Summing two unit directions and renormalising is the cheap
+        // composition of their two visibility cones, and it degrades correctly:
+        // where one is unoccluded it is vertical and contributes nothing but
+        // height.
+        //
+        // `evaluate_ibl_diffuse` already gathers along `surface.bent_normal`
+        // at a 0.75 mix and needs no change at all, which is why this term
+        // costs so little to add. Pulled a quarter of the way back toward the
+        // geometric normal so a deep valley still shades as ground rather than
+        // as a wall.
+        if terrain_sky_bent.y > 0.0 {
+            let composed = normalize(surface.bent_normal + terrain_sky_bent);
+            surface.bent_normal = normalize(mix(composed, geo_normal, 0.25));
+        }
     }
 
 

@@ -68,6 +68,12 @@ struct TerrainMaterial {
     clipmap_macro_size: f32,
     clipmap_detail_ready: u32,
     clipmap_macro_ready: u32,
+    // Phase TSUSHIMA-B/C: baked terrain-space visibility. 2048 bytes total.
+    // Four scalars, appended, so every `array<vec4<_>>` above keeps its offset.
+    horizon_map_a: i32,
+    horizon_map_b: i32,
+    skyvis_map: i32,
+    sky_visibility_strength: f32,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -400,6 +406,122 @@ var<private> terrain_virtual_texture: vec4<i32> = vec4<i32>(-1, -1, -1, 0);
 
 /// Phase 25H: the relief self-shadow term, read by the shading pass.
 var<private> terrain_parallax_shadow_factor: f32 = 1.0;
+
+/// Pi, local to this module.
+///
+/// `brdf.wgsl` also declares `PI`, and this file is composed into two roots
+/// with different dependency sets: `shading.wgsl` pulls in `brdf.wgsl` and
+/// `clipmap_gen.wgsl` does not. Borrowing the name compiles in one root and
+/// fails to parse in the other, which is exactly what the validation test
+/// caught. A distinct name works in both and collides in neither.
+const TERRAIN_PI: f32 = 3.14159265359;
+
+/// Phase TSUSHIMA-C: the landscape-scale bent normal, world space.
+///
+/// Written by `terrain_sky_visibility` and read once, in the shading pass's
+/// terrain branch. Defaults to zero, which the reader treats as "not written"
+/// — a valid bent direction always has a positive Y.
+var<private> terrain_sky_bent: vec3<f32> = vec3<f32>(0.0);
+
+// ── Baked terrain visibility (Phase TSUSHIMA-B and TSUSHIMA-C) ───────────────
+//
+// Both functions read maps baked by `terrain::horizon` and are called from
+// `shading.wgsl`'s terrain branch rather than from `evaluate_terrain_material`.
+// That placement is deliberate: the quantities are properties of the
+// *heightfield*, not of the material, so putting them here would mean writing
+// them twice — once in the live path and once in `evaluate_clipmap_material` —
+// and the clipmap path would inevitably drift.
+//
+// Neither is behind a pipeline override, unlike hex and POM. The reason is
+// cost shape: those gate a multi-step march, where leaving the code resident
+// costs occupancy on every terrain pixel whether or not the march runs. These
+// are two texture fetches and a compare. The CPU unbinds the maps (`-1`) when
+// the feature is off, which is the same sentinel `macro_map` has always used,
+// and the branch is coherent across the whole draw because every pixel of a
+// terrain reads the same material.
+
+/// Terrain self-shadowing from the baked horizon map (TSUSHIMA-B).
+///
+/// Two fetches and a compare, at **any** distance. `SHADOW_DISTANCE` is a
+/// compile-time 100 m and the cascades stop there; this does not stop at all,
+/// which is the entire point — a landscape's structure at range is almost
+/// entirely long shadow, and without it hills read as shapes with paint on
+/// them.
+///
+/// `light_dir` points *toward* the sun, matching `light.direction`.
+fn terrain_horizon_shadow(
+    tm: TerrainMaterial,
+    splat_uv: vec2<f32>,
+    light_dir: vec3<f32>,
+    sun_angular_radius: f32,
+) -> f32 {
+    if tm.horizon_map_a < 0 || tm.horizon_map_b < 0 {
+        return 1.0;
+    }
+    let hxz = light_dir.xz;
+    let horiz = length(hxz);
+    if horiz < 1e-4 {
+        return 1.0;  // sun at the zenith: nothing can occlude it
+    }
+    let sun_elev = atan2(light_dir.y, horiz);
+    if sun_elev <= 0.0 {
+        // Below the horizon. The sun's own illuminance has already gone to
+        // zero through `sun::transmittance`, so returning 0 here is agreeing
+        // with a decision made on the CPU rather than making a new one.
+        return 0.0;
+    }
+
+    // Bearing in [0, 8), matching `horizon::DIRS`: measured from +X toward +Z.
+    //
+    // Both bracketing azimuths are sampled and interpolated. Taking only the
+    // nearest is what makes the shadow edge snap between compass bearings as
+    // the sun turns, and it is the most-reported artifact of this technique.
+    let bearing = atan2(hxz.y, hxz.x) * (4.0 / TERRAIN_PI) + 8.0;
+    let b0 = i32(floor(bearing)) & 7;
+    let b1 = (b0 + 1) & 7;
+    let f = fract(bearing);
+
+    // Bindless *indices* cross the function boundary, never the textures:
+    // pulling a texture out of a binding array and passing it segfaults naga's
+    // SPIR-V backend during pipeline creation, with no diagnostic.
+    let lo = textureSampleLevel(textures[tm.horizon_map_a], default_sampler, splat_uv, 0.0);
+    let hi = textureSampleLevel(textures[tm.horizon_map_b], default_sampler, splat_uv, 0.0);
+    let packed = array<f32, 8>(lo.r, lo.g, lo.b, lo.a, hi.r, hi.g, hi.b, hi.a);
+    let angle = mix(packed[b0], packed[b1], f) * (TERRAIN_PI * 0.5);
+
+    // Softened by the sun's angular radius rather than by a magic constant.
+    // A 0.53-degree disc has a real penumbra, `light.sun_angular_radius`
+    // already carries it, and it is the same value `evaluate_brdf_area` widens
+    // the specular lobe by — so the two agree by construction rather than by
+    // being tuned to match.
+    let softness = max(sun_angular_radius, 0.002);
+    return smoothstep(angle - softness, angle + softness, sun_elev);
+}
+
+/// Baked sky visibility and the landscape-scale bent normal (TSUSHIMA-C).
+///
+/// Returns the cosine-weighted fraction of the sky this point can see, and
+/// leaves the average unoccluded direction in `terrain_sky_bent`.
+///
+/// This is **not** GI. No bounce, no colour bleeding, no ReSTIR interaction.
+/// It is "how much sky can this point see", a fixed geometric property of the
+/// heightfield, and it is the reason valleys are darker than ridges in every
+/// photograph of a landscape ever taken. Nothing in the renderer knew it:
+/// GTAO is screen-space and radius-bounded, the per-layer AO is texture-scale,
+/// and the SH probe volume is 4x4x4 over the whole view.
+fn terrain_sky_visibility(tm: TerrainMaterial, splat_uv: vec2<f32>) -> f32 {
+    if tm.skyvis_map < 0 {
+        return 1.0;
+    }
+    let sv = textureSampleLevel(textures[tm.skyvis_map], default_sampler, splat_uv, 0.0);
+    let bent = sv.rgb * 2.0 - 1.0;
+    if dot(bent, bent) > 1e-4 {
+        terrain_sky_bent = normalize(bent);
+    }
+    // Strength retreats toward fully-open rather than toward black, so 0 is
+    // the exact identity and the slider has a meaningful zero.
+    return mix(1.0, sv.a, clamp(tm.sky_visibility_strength, 0.0, 1.0));
+}
 
 /// The worst case a pixel can pay — four selected layers, two maps each, three
 /// hex taps, plus a biplanar cliff (4 extra). Debug mode 12 scales by this.

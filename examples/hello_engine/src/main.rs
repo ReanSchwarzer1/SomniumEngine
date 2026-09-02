@@ -294,6 +294,19 @@ fn apply_kit_view(
                         h + (1.0 - slope) * 4.0
                     }
                 }
+                // Phase TSUSHIMA-A. Height, and only height: a vista wants the
+                // camera high enough that the frame is mostly ground at a
+                // hundred metres and beyond. `ridge` is the near relative of
+                // this and stands *on* the ridge at eye height; this one
+                // stands well above it, because the whole subject of the
+                // phase is what the ground looks like past the last cascade.
+                "vista" => {
+                    if h <= water + 6.0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        h
+                    }
+                }
                 _ => f32::NEG_INFINITY,
             };
             if score > best.0 {
@@ -312,6 +325,44 @@ fn apply_kit_view(
             camera.position = to_world(lx, h + 1.7, lz);
             camera.yaw = 20.0;
             camera.pitch = -22.0;
+        }
+        "vista" => {
+            // Face whichever bearing has the most land in front of it.
+            //
+            // A fixed yaw works on one map and points at open water on the
+            // other, and a capture of the sea is not a capture of terrain.
+            // Eight bearings, counting above-water samples out to 400 m, is
+            // enough to find the long axis of either map and costs nothing
+            // next to the scoring sweep that just ran.
+            let mut best_yaw = -90.0f32;
+            let mut best_land = -1.0f32;
+            for i in 0..8 {
+                let yaw = i as f32 * 45.0;
+                let r = yaw.to_radians();
+                let (dx, dz) = (r.cos(), r.sin());
+                let mut land = 0.0f32;
+                for step in 1..=40 {
+                    let d = step as f32 * 10.0;
+                    let sx = lx + dx * d;
+                    let sz = lz + dz * d;
+                    if sx < 0.0 || sz < 0.0 || sx >= wx || sz >= wz {
+                        continue;
+                    }
+                    if terrain.world_height_at(sx, sz) > water + 0.5 {
+                        land += 1.0;
+                    }
+                }
+                if land > best_land {
+                    best_land = land;
+                    best_yaw = yaw;
+                }
+            }
+            // Above the summit rather than on it, so the near ground does not
+            // fill the lower half of the frame and steal the shot from the
+            // distance the phase is actually about.
+            camera.position = to_world(lx, h + 22.0, lz);
+            camera.yaw = best_yaw;
+            camera.pitch = -12.0;
         }
         "shore" => {
             camera.position = to_world(lx, h.max(water) + 1.8, lz);
@@ -348,6 +399,42 @@ fn apply_kit_view(
 /// | `coastal-ground` | Coastal | walk / eye height on the terrain |
 /// | `island` | Island | the recipe's own seed, `(0, 28, 115)` |
 /// | `island-ground` | Island | walk / eye height |
+/// Pin the sun's elevation, in degrees above the horizon (Phase TSUSHIMA-A).
+///
+/// Without this the sun comes from the directional light's authored transform
+/// and there is no way to ask for a *low* one, which is the single condition
+/// where TSUSHIMA-B's long shadows, TSUSHIMA-E's grazing relief and
+/// TSUSHIMA-F's specular all show most. It is also what makes a low-sun shot
+/// reproducible six weeks later rather than "whatever the preset happened to
+/// be".
+///
+/// The azimuth is left alone deliberately: the map's authored sun bearing is
+/// what puts shadows where the terrain was built to receive them, so this
+/// rotates the sun in elevation only.
+fn pinned_sun_elevation() -> Option<f32> {
+    let raw = std::env::var("SOMNIUM_SUN_ELEVATION").ok()?;
+    let degrees = raw.trim().parse::<f32>().ok()?;
+    if !degrees.is_finite() {
+        tracing::warn!("SOMNIUM_SUN_ELEVATION={raw} is not a number; ignoring");
+        return None;
+    }
+    Some(degrees.clamp(-90.0, 90.0).to_radians())
+}
+
+/// Re-aim `to_light` at `elevation` while keeping its compass bearing.
+fn sun_at_elevation(to_light: glam::Vec3, elevation: f32) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(to_light.x, to_light.z);
+    // A sun directly overhead has no bearing to keep. Pick one rather than
+    // normalising a zero vector into NaN and blacking out the frame.
+    let bearing = if horizontal.length_squared() < 1e-8 {
+        glam::Vec2::new(1.0, 0.0)
+    } else {
+        horizontal.normalize()
+    };
+    let (sin_e, cos_e) = elevation.sin_cos();
+    glam::Vec3::new(bearing.x * cos_e, sin_e, bearing.y * cos_e).normalize()
+}
+
 fn timing_view() -> Option<String> {
     let raw = std::env::var("SOMNIUM_TIME_VIEW").ok()?;
     let name = raw.trim().to_ascii_lowercase();
@@ -384,6 +471,12 @@ fn apply_capture_camera_overrides(
         if view.ends_with("-ground") || view.ends_with("-walk") {
             match terrain {
                 Some(terrain) => apply_kit_view(camera, terrain, origin, "walk"),
+                None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
+            }
+        } else if view.ends_with("-vista") {
+            // Phase TSUSHIMA-A.
+            match terrain {
+                Some(terrain) => apply_kit_view(camera, terrain, origin, "vista"),
                 None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
             }
         }
@@ -2207,6 +2300,15 @@ impl GameApp for HelloGame {
                                 // and the sky's own moon blending all take the
                                 // light buffer, so there is nowhere for them to
                                 // disagree about whether the sun has set.
+                                // Phase TSUSHIMA-A: the capture harness's sun
+                                // pin. Applied here, before `transmittance`
+                                // reads `to_light.y`, so a pinned low sun
+                                // reddens exactly as an authored one would —
+                                // the reddening is a function of elevation and
+                                // must not be bypassed by overriding the
+                                // direction after it.
+                                let to_light = pinned_sun_elevation()
+                                    .map_or(to_light, |e| sun_at_elevation(to_light, e));
                                 let survives = somnium_core::sun::transmittance(
                                     to_light.y,
                                     transform.translation.y * 0.001,

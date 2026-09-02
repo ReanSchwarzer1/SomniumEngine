@@ -25,6 +25,8 @@ pub mod collider;
 pub mod foliage;
 pub mod foliage_paint;
 pub mod heightmap;
+/// Phase TSUSHIMA-B/C: baked horizon angles and sky visibility.
+pub mod horizon;
 pub mod macro_map;
 pub mod mesh;
 pub mod mips;
@@ -284,6 +286,16 @@ pub struct GpuTerrainMaterial {
     pub clipmap_macro_size: f32,
     pub clipmap_detail_ready: u32,
     pub clipmap_macro_ready: u32,
+    /// Phase TSUSHIMA-B: baked horizon angles, azimuths 0-3. -1 disables.
+    pub horizon_map_a: i32,
+    /// Azimuths 4-7.
+    pub horizon_map_b: i32,
+    /// Phase TSUSHIMA-C: bent direction + sky visibility. -1 disables.
+    pub skyvis_map: i32,
+    /// Scales TSUSHIMA-C's darkening. Four words exactly, so the struct stays
+    /// a multiple of 16 bytes and every `array<vec4<_>>` above it keeps its
+    /// offset.
+    pub sky_visibility_strength: f32,
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -297,6 +309,14 @@ pub struct TerrainTextureIds {
     /// MORROWIND-AD clipmap source: albedo atlas, surface atlas, page table,
     /// and physical atlas edge in texels. Sentinel disables virtual sampling.
     pub virtual_texture: [i32; 4],
+    /// Phase TSUSHIMA-B: baked horizon angles, azimuths 0-3 and 4-7.
+    /// `-1` is the off switch, and it is the *only* off switch — the shader
+    /// gates on it rather than on a pipeline override because the lookup is
+    /// two fetches and a compare, not a march, so leaving it resident costs
+    /// nothing the way POM's would.
+    pub horizon_maps: [i32; 2],
+    /// Phase TSUSHIMA-C: RGB bent direction, A cosine-weighted sky visibility.
+    pub sky_visibility: i32,
 }
 
 impl Default for TerrainTextureIds {
@@ -307,6 +327,8 @@ impl Default for TerrainTextureIds {
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
             virtual_texture: [-1, -1, -1, 0],
+            horizon_maps: [-1, -1],
+            sky_visibility: -1,
         }
     }
 }
@@ -353,6 +375,23 @@ pub struct TerrainData {
     /// changes wholesale, so its bindless index is stable.
     pub macro_texture: wgpu::Texture,
     pub macro_view: wgpu::TextureView,
+    /// Phase TSUSHIMA-B/C: baked horizon angles and sky visibility.
+    ///
+    /// Rewritten in place after a sculpt, like the macro tier, so the three
+    /// bindless indices are registered once and stay valid for the terrain's
+    /// life.
+    pub horizon_gpu: horizon::HorizonGpu,
+    /// Phase TSUSHIMA-B. `SOMNIUM_TERRAIN_HORIZON=0` is the A/B: it unbinds
+    /// the maps, and an unbound map is exactly the pre-phase behaviour.
+    pub horizon_shadow: bool,
+    /// Phase TSUSHIMA-C, gated separately so the two halves of one bake can be
+    /// judged apart.
+    pub sky_visibility: bool,
+    /// How hard baked sky visibility darkens the ambient term. 1.0 is the
+    /// geometric answer; lower is an artistic retreat from it.
+    pub sky_visibility_strength: f32,
+    /// Set when the heightfield changes under a baked map.
+    pub horizon_dirty: bool,
 
     /// Shared LOD index spans in the global index pool, keyed by
     /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
@@ -625,9 +664,32 @@ impl TerrainData {
             ),
         );
 
+        // Baked here for the same reason the macro map is: one registration of
+        // three bindless indices for the terrain's life, with the texels
+        // rewritten in place when the heightfield changes. The bake is a few
+        // tens of milliseconds on a 1 km terrain (multi-resolution march, see
+        // `horizon`), which is load-time work, not frame-time work.
+        let horizon_gpu = horizon::upload(
+            device,
+            queue,
+            &horizon::bake(
+                &heightmap,
+                desc.total_vertices_x(),
+                desc.total_vertices_z(),
+                desc.cell_size,
+                desc.height_scale,
+                horizon::HORIZON_SIZE,
+            ),
+        );
+
         Self {
             macro_texture,
             macro_view,
+            horizon_gpu,
+            horizon_shadow: std::env::var("SOMNIUM_TERRAIN_HORIZON").as_deref() != Ok("0"),
+            sky_visibility: std::env::var("SOMNIUM_TERRAIN_SKYVIS").as_deref() != Ok("0"),
+            sky_visibility_strength: 1.0,
+            horizon_dirty: false,
             desc,
             heightmap,
             chunks,
@@ -980,6 +1042,25 @@ impl TerrainData {
             clipmap_macro_size: 0.0,
             clipmap_detail_ready: 0,
             clipmap_macro_ready: 0,
+            // Unbinding is the off switch. The shader tests `>= 0` and skips
+            // both fetches, so "off" is the pre-phase image exactly rather
+            // than a strength of zero applied to a value nobody wanted.
+            horizon_map_a: if self.horizon_shadow {
+                self.texture_ids.horizon_maps[0]
+            } else {
+                -1
+            },
+            horizon_map_b: if self.horizon_shadow {
+                self.texture_ids.horizon_maps[1]
+            } else {
+                -1
+            },
+            skyvis_map: if self.sky_visibility {
+                self.texture_ids.sky_visibility
+            } else {
+                -1
+            },
+            sky_visibility_strength: self.sky_visibility_strength,
         }
     }
 
@@ -1128,6 +1209,13 @@ impl TerrainData {
     pub fn mark_all_dirty(&mut self) {
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.macro_dirty = true;
+        // Phase TSUSHIMA-B/C. Every caller of this is a *wholesale* heightmap
+        // replacement — a file load, procedural relief, the island generator —
+        // which is exactly when the baked horizon stops describing the ground.
+        // Deliberately not set by the sculpt brush: a 100 ms rebake per stroke
+        // would make the brush unusable, and a slightly stale long shadow
+        // under an active brush is not what anyone is looking at.
+        self.horizon_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }
@@ -1341,6 +1429,52 @@ impl TerrainData {
         pool: &mut crate::geometry::GeometryPool,
         rewritten: &mut Vec<u32>,
     ) {
+        // Phase TSUSHIMA-B/C: rebake before the macro tier, because both read
+        // the heightfield and this is the one that has to be right for the
+        // *first* frame — `TerrainData::new` bakes against the flat heightmap
+        // the terrain is created with, and the relief only lands afterwards.
+        // Baking once at creation and never again is exactly the bug this
+        // fixes: every horizon angle was zero, every sky visibility was fully
+        // open, and the on/off capture pair was byte-identical.
+        if std::mem::take(&mut self.horizon_dirty) {
+            let t = std::time::Instant::now();
+            let maps = horizon::bake(
+                &self.heightmap,
+                self.desc.total_vertices_x(),
+                self.desc.total_vertices_z(),
+                self.desc.cell_size,
+                self.desc.height_scale,
+                horizon::HORIZON_SIZE,
+            );
+            horizon::rewrite(queue, &self.horizon_gpu, &maps);
+            // The distribution, not just the timing. "Sky visibility is on"
+            // and "sky visibility varies across this terrain" are different
+            // claims, and only the second one can change a picture.
+            let (mut lo, mut hi, mut sum) = (255u8, 0u8, 0u64);
+            let (mut h_lo, mut h_hi) = (255u8, 0u8);
+            for texel in maps.sky.chunks(4) {
+                lo = lo.min(texel[3]);
+                hi = hi.max(texel[3]);
+                sum += u64::from(texel[3]);
+            }
+            for texel in maps.angles_a.chunks(4) {
+                for &a in &texel[..4] {
+                    h_lo = h_lo.min(a);
+                    h_hi = h_hi.max(a);
+                }
+            }
+            let n = (maps.sky.len() / 4) as u64;
+            tracing::info!(
+                ms = t.elapsed().as_secs_f64() * 1000.0,
+                size = horizon::HORIZON_SIZE,
+                skyvis_min = lo,
+                skyvis_mean = (sum / n.max(1)) as u8,
+                skyvis_max = hi,
+                horizon_min_deg = f32::from(h_lo) / 255.0 * 90.0,
+                horizon_max_deg = f32::from(h_hi) / 255.0 * 90.0,
+                "terrain: horizon + sky visibility rebaked"
+            );
+        }
         if std::mem::take(&mut self.macro_dirty) {
             let generated = macro_map::from_splat(
                 &self.splatmap.data,
@@ -1585,6 +1719,7 @@ impl TerrainData {
         self.splatmap.data =
             crate::terrain::splat::migrate_sidecar_splat(version, splat_src, texel_count)?;
         self.macro_dirty = true;
+        self.horizon_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }

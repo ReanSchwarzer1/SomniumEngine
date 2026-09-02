@@ -2342,6 +2342,14 @@ impl SomniumRenderer {
             }
         });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
+        // Phase TSUSHIMA-B/C. Registered once, like the macro map: the bake is
+        // rewritten in place after a sculpt, so these three indices are valid
+        // for the terrain's life and no bind group is ever invalidated.
+        ids.horizon_maps = [
+            self.add_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
+            self.add_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
+        ];
+        ids.sky_visibility = self.add_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
         // Virtual mode deliberately leaves every legacy layer id at -1. The
         // 4x4 arrays only keep the struct/fallback shape valid; publishing
