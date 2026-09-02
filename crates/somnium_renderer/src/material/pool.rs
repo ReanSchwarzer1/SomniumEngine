@@ -349,7 +349,7 @@ mod material_flag_tests {
         // visibility, appended so every `array<vec4<_>>` above keeps its
         // offset. 2032 + 16 = 2048.
         use crate::terrain::GpuTerrainMaterial;
-        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 2048);
+        assert_eq!(std::mem::size_of::<GpuTerrainMaterial>(), 2064);
         assert_eq!(std::mem::size_of::<GpuTerrainMaterial>() % 16, 0);
 
         let m = GpuTerrainMaterial::zeroed();

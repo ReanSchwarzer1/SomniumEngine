@@ -30,6 +30,7 @@ pub mod horizon;
 pub mod macro_map;
 pub mod mesh;
 pub mod mips;
+pub mod relief;
 pub mod splat;
 pub mod textures;
 /// MORROWIND-AD source-page feedback and bounded residency.
@@ -292,10 +293,15 @@ pub struct GpuTerrainMaterial {
     pub horizon_map_b: i32,
     /// Phase TSUSHIMA-C: bent direction + sky visibility. -1 disables.
     pub skyvis_map: i32,
-    /// Scales TSUSHIMA-C's darkening. Four words exactly, so the struct stays
-    /// a multiple of 16 bytes and every `array<vec4<_>>` above it keeps its
-    /// offset.
+    /// Scales TSUSHIMA-C's darkening.
     pub sky_visibility_strength: f32,
+    /// Phase TSUSHIMA-E: mip-chained relief normal. -1 disables.
+    pub relief_map: i32,
+    /// Metres at which the baked normal has fully replaced the vertex normal.
+    pub relief_takeover: f32,
+    /// Keeps the struct a multiple of 16 bytes, so every `array<vec4<_>>`
+    /// above it keeps the offset the Rust and WGSL layout tests pin.
+    pub _tsushima_pad: [f32; 2],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -317,6 +323,8 @@ pub struct TerrainTextureIds {
     pub horizon_maps: [i32; 2],
     /// Phase TSUSHIMA-C: RGB bent direction, A cosine-weighted sky visibility.
     pub sky_visibility: i32,
+    /// Phase TSUSHIMA-E: mip-chained relief normal + Toksvig length.
+    pub relief_normal: i32,
 }
 
 impl Default for TerrainTextureIds {
@@ -329,6 +337,7 @@ impl Default for TerrainTextureIds {
             virtual_texture: [-1, -1, -1, 0],
             horizon_maps: [-1, -1],
             sky_visibility: -1,
+            relief_normal: -1,
         }
     }
 }
@@ -392,6 +401,15 @@ pub struct TerrainData {
     pub sky_visibility_strength: f32,
     /// Set when the heightfield changes under a baked map.
     pub horizon_dirty: bool,
+    /// Phase TSUSHIMA-E: the relief normal chain. Rewritten in place with the
+    /// horizon bake, on the same `horizon_dirty` flag — both read the
+    /// heightfield and both go stale for exactly the same reasons.
+    pub relief_gpu: relief::ReliefGpu,
+    /// Phase TSUSHIMA-E. `SOMNIUM_TERRAIN_RELIEF=0` is the A/B rail.
+    pub relief_normal: bool,
+    /// Metres at which the baked relief normal has fully taken over from the
+    /// interpolated vertex normal.
+    pub relief_takeover: f32,
 
     /// Shared LOD index spans in the global index pool, keyed by
     /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
@@ -682,9 +700,28 @@ impl TerrainData {
             ),
         );
 
+        let relief_gpu = relief::upload(
+            device,
+            queue,
+            &relief::bake(
+                &heightmap,
+                desc.total_vertices_x(),
+                desc.total_vertices_z(),
+                desc.cell_size,
+                desc.height_scale,
+                relief::RELIEF_SIZE,
+            ),
+        );
+
         Self {
             macro_texture,
             macro_view,
+            relief_gpu,
+            relief_normal: std::env::var("SOMNIUM_TERRAIN_RELIEF").as_deref() != Ok("0"),
+            // The last cascade's far edge, matching TSUSHIMA-B's cross-fade.
+            // Inside it the mesh is at a fine LOD and its own normals are
+            // already the right answer.
+            relief_takeover: 100.0,
             horizon_gpu,
             horizon_shadow: std::env::var("SOMNIUM_TERRAIN_HORIZON").as_deref() != Ok("0"),
             sky_visibility: std::env::var("SOMNIUM_TERRAIN_SKYVIS").as_deref() != Ok("0"),
@@ -1061,6 +1098,13 @@ impl TerrainData {
                 -1
             },
             sky_visibility_strength: self.sky_visibility_strength,
+            relief_map: if self.relief_normal {
+                self.texture_ids.relief_normal
+            } else {
+                -1
+            },
+            relief_takeover: self.relief_takeover,
+            _tsushima_pad: [0.0; 2],
         }
     }
 
@@ -1447,6 +1491,18 @@ impl TerrainData {
                 horizon::HORIZON_SIZE,
             );
             horizon::rewrite(queue, &self.horizon_gpu, &maps);
+            relief::rewrite(
+                queue,
+                &self.relief_gpu,
+                &relief::bake(
+                    &self.heightmap,
+                    self.desc.total_vertices_x(),
+                    self.desc.total_vertices_z(),
+                    self.desc.cell_size,
+                    self.desc.height_scale,
+                    relief::RELIEF_SIZE,
+                ),
+            );
             // The distribution, not just the timing. "Sky visibility is on"
             // and "sky visibility varies across this terrain" are different
             // claims, and only the second one can change a picture.

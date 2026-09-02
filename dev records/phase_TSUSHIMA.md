@@ -16,7 +16,21 @@
 > default with its cost published", and no technique is dropped for being
 > expensive. If it makes the ground look like ground, it ships on.
 >
-> **Status:** **A, B and C LANDED 2026-09-02.** D through I are plan only.
+> **Status:** **A through F LANDED 2026-09-02.** G, H and I are plan only.
+> Records: `TSUSHIMA-A-B-C.md` and `TSUSHIMA-D-E-F.md`.
+>
+> **§2.3 is settled, and the plan had it backwards.** The ground *does* get
+> aerial perspective — the fog pass is on by default and reaches it (102.12
+> mean abs, 53% of pixels). The defect was that the fog medium was lit by the
+> **sun alone** while the air terms beside it carried a skylight term, and fog
+> outweighs Rayleigh on these maps by roughly fifty to one. So the distance cue
+> was a grey wash and distant ground got darker instead of bluer. One term.
+>
+> **F had to be split into three switches**, because through one switch it
+> darkened terrain 39% — the opposite of what energy compensation does — and a
+> single number could not attribute that. Apart: multiscatter +1.6%, Hammon
+> −9.9%, micro-shadowing −30.6%. The term the prompt was really about is the
+> smallest of the three.
 > Written against `b38ac74` (`dev`). Every file-and-line claim in §2 was read
 > from this tree; every formula in §4 and Appendix A carries a confidence line,
 > because implementing a misremembered formula costs a day and looks like a

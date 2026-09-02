@@ -286,6 +286,17 @@ override enable_clipmap: bool = true;
 /// small over the whole landscape and this term is a function of `N.L`.
 override micro_shadow_opacity: f32 = 1.0;
 
+/// Phase TSUSHIMA-E: screen-space geometric specular antialiasing.
+///
+/// A pipeline override rather than a `shading_mode` bit because, unlike the F
+/// terms, this one is two derivative instructions on a vector — cheap, but
+/// derivatives are the one thing worth being able to compile out entirely.
+override enable_specular_aa: bool = true;
+
+/// Tokuyoshi & Kaplanyan's published constants: sigma^2 = 1/(2*pi), kappa = 0.18.
+const SPEC_AA_SIGMA2: f32 = 0.15915494;
+const SPEC_AA_KAPPA: f32 = 0.18;
+
 /// Occlusion at the scale micro-shadowing is about: GTAO plus the material's
 /// own AO, and deliberately *not* TSUSHIMA-C's landscape-scale sky visibility.
 ///
@@ -1535,6 +1546,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = max(surface.roughness, foliage_roughness_floor);
     }
 
+    // ── Geometric specular antialiasing (TSUSHIMA-E) ─────────────────────────
+    //
+    // Tokuyoshi & Kaplanyan, I3D 2019. The filter kernel comes from the
+    // screen-space derivatives of the shading normal, which is already in
+    // registers, so the whole thing is a handful of ALU and two derivative
+    // instructions.
+    //
+    // KAPPA clamps how far it may go. Without the clamp a silhouette edge —
+    // where the normal derivative is enormous and meaningless — turns the
+    // surface fully rough in a one-pixel band.
+    //
+    // Placed here, after the terrain branch and after every other write to
+    // `surface.normal`, and outside all of them: `dpdx` on a value produced
+    // inside non-uniform control flow is undefined, and the terrain branch is
+    // a storage read the compiler cannot prove uniform. Reading the normal at
+    // a point where every path has already written it is what makes the
+    // derivative well-defined.
+    if enable_specular_aa {
+        let dndx = dpdx(surface.normal);
+        let dndy = dpdy(surface.normal);
+        let variance = SPEC_AA_SIGMA2 * (dot(dndx, dndx) + dot(dndy, dndy));
+        let kernel = min(2.0 * variance, SPEC_AA_KAPPA);
+        let alpha = surface.roughness * surface.roughness;
+        surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
+    }
+
     // Phase TSUSHIMA-F1. The micro-scale occlusion every surface gets:
     // GTAO and the occlusion map, both already applied. Meshes stop here.
     // The terrain branch below overwrites it after folding in the material's
@@ -1592,6 +1629,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         terrain_selected_rgb = terrain.selected_rgb;
         terrain_weight_rgb = terrain.weight_rgb;
         terrain_parallax_shadow_factor = terrain.parallax_shadow;
+
+        // ── The relief normal that survives distance (TSUSHIMA-E) ──────────
+        //
+        // Coarse LODs skip vertices, so past the near field the shading normal
+        // is a *point sample* of the heightfield's normal field every eighth
+        // cell — aliased, not filtered. This replaces it with the properly
+        // averaged normal at the pixel's own footprint, and puts the variance
+        // that averaging discarded back as roughness.
+        //
+        // Cross-faded in over the same range TSUSHIMA-B hands over at, because
+        // it is the same boundary for the same reason: inside it the mesh is
+        // fine enough that its own normals are already the right answer.
+        {
+            let tm_e = terrain_materials[tm_idx];
+            if tm_e.relief_map >= 0 {
+                let splat_ddx = world_ddx * tm_e.inv_world_size;
+                let splat_ddy = world_ddy * tm_e.inv_world_size;
+                let relief = terrain_relief_normal(tm_e, uv, splat_ddx, splat_ddy);
+                let d = distance(hit_point, view.camera_pos);
+                let w = smoothstep(tm_e.relief_takeover * 0.5, tm_e.relief_takeover, d);
+                if w > 0.0 {
+                    // Blend the *shading* normal only. `resolve_surfgrad` has
+                    // already resolved the layer normal maps against
+                    // `geo_normal`, and the geometric normal itself still
+                    // drives shadow bias and the surface-gradient frame — this
+                    // must not disturb either.
+                    surface.normal = normalize(mix(surface.normal, relief.xyz, w));
+                    surface.roughness = mix(
+                        surface.roughness,
+                        widen_roughness_toksvig(surface.roughness, relief.w),
+                        w,
+                    );
+                }
+            }
+        }
 
         // ── Baked terrain visibility (Phases TSUSHIMA-B, TSUSHIMA-C) ────────
         //

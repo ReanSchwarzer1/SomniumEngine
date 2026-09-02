@@ -74,6 +74,9 @@ struct TerrainMaterial {
     horizon_map_b: i32,
     skyvis_map: i32,
     sky_visibility_strength: f32,
+    relief_map: i32,
+    relief_takeover: f32,
+    _tsushima_pad: vec2<f32>,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -496,6 +499,58 @@ fn terrain_horizon_shadow(
     // being tuned to match.
     let softness = max(sun_angular_radius, 0.002);
     return smoothstep(angle - softness, angle + softness, sun_elev);
+}
+
+/// What the baked relief chain says about this pixel (TSUSHIMA-E).
+///
+/// `.xyz` is the filtered heightfield normal in world space, `.w` is the
+/// length of the unnormalised mean that produced it — Toksvig's measure of how
+/// much the normals it averaged disagreed. A `.w` of 1 means they agreed and
+/// the surface really is that smooth; lower means the level threw relief away,
+/// and `widen_roughness_toksvig` puts it back as roughness.
+///
+/// Sampled with explicit gradients: the terrain path uses `textureSampleGrad`
+/// throughout precisely so it can sample inside non-uniform control flow, and
+/// this is called from the same place.
+fn terrain_relief_normal(
+    tm: TerrainMaterial,
+    splat_uv: vec2<f32>,
+    splat_ddx: vec2<f32>,
+    splat_ddy: vec2<f32>,
+) -> vec4<f32> {
+    if tm.relief_map < 0 {
+        return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    }
+    let s = textureSampleGrad(
+        textures[tm.relief_map], default_sampler, splat_uv, splat_ddx, splat_ddy);
+    let xz = s.rg * 2.0 - 1.0;
+    // Y is reconstructed rather than stored. On a heightfield the normal's Y
+    // is always positive, so the sign is never in question and the channel is
+    // free to carry the length instead — which is the channel that matters.
+    let y = sqrt(max(1.0 - dot(xz, xz), 0.0));
+    return vec4<f32>(xz.x, y, xz.y, s.b);
+}
+
+/// Widen roughness by the normal variance a mip level discarded.
+///
+/// From the filtered normal's length, the von Mises-Fisher concentration is
+/// `k = l(3 - l²)/(1 - l²)` and the equivalent added roughness variance is
+/// `1/(2k)`. Alpha adds in *variance* space, not in roughness space, which is
+/// why this squares in and roots out twice.
+///
+/// The double root is not a typo and it is the easiest thing here to get
+/// wrong. `D_GGX` takes **perceptual** roughness `r` and computes `a = r*r`,
+/// `a2 = a*a` — so its `a2` is `r⁴`, the standard `alpha` is `r²`, and
+/// `alpha²` is `r⁴`. Filtering happens in `alpha²`, so recovering `r` is
+/// `pow(alpha2, 0.25)`. Getting it wrong is invisible in a still and obvious
+/// in motion.
+fn widen_roughness_toksvig(roughness: f32, len: f32) -> f32 {
+    let l = clamp(len, 0.0, 0.9999);
+    let l2 = l * l;
+    let kappa = l * (3.0 - l2) / max(1.0 - l2, 1e-4);
+    let variance = 1.0 / max(2.0 * kappa, 1e-4);
+    let alpha = roughness * roughness;
+    return sqrt(sqrt(clamp(alpha * alpha + 2.0 * variance, 0.0, 1.0)));
 }
 
 /// Baked sky visibility and the landscape-scale bent normal (TSUSHIMA-C).
