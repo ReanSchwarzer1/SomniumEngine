@@ -465,3 +465,31 @@ a coloured one.
 - **The roughness floor.** The packed surface maps' roughness channel ranges
   from 0.37 to 0.93; nothing is near the 0.05 floor, so the floor was not
   letting mirrors through.
+
+## Micro-shadowing does not apply to foliage
+
+Reported after the firefly fix: at a low sun the grass reads as a flat, uniform
+orange wash rather than as lit grass.
+
+Micro-shadowing describes relief below the pixel footprint, and it finds it by
+reading the material's AO map. On a solid surface that map is exactly that. On
+foliage it is not — a grass tuft's occlusion map encodes the shade of the
+tuft's own **interior**, at card scale; the shader says so where it samples it,
+and that map is already doing its job on the ambient term. Feeding it to a hard
+cutoff on *direct* light darkens foliage a second time for a reason unrelated
+to micro-relief, and at a grazing sun, where `N.L` is small over everything,
+that removes most of the foliage's direct lighting. What is left is the
+translucency and ambient terms — which is what a flat uniform wash is.
+
+`material.flags & 2u` already identifies foliage; the term now skips it.
+
+**This is the third correction to what this one term is fed**: sky visibility,
+then GTAO, now foliage AO. The pattern does not change — a hard cutoff is only
+as well behaved as the field it thresholds, and every occlusion channel in this
+renderer measures something different. If it is fed a fourth, check what that
+channel actually means before wiring it.
+
+**Not verified here.** The default scene carries no foliage (`mesh px=0`), so
+there is no capture on this machine that can show the change. What *is* verified
+is that terrain is untouched — 3056.6871 against 3056.7 before, and the firefly
+counts are unchanged — so the risk is bounded to foliage.

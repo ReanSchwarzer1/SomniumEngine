@@ -1849,7 +1849,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // that has nothing to do with micro-relief. It is small, it is in the
     // right direction, and separating the two means carrying a second
     // occlusion channel through the whole pass — noted rather than done.
-    if brdf_micro_shadow {
+    // Deliberately **not** on foliage.
+    //
+    // Micro-shadowing describes relief below the pixel footprint, and it reads
+    // the material's AO map to find it. On a solid surface that map is exactly
+    // that. On foliage it is not: a grass tuft's occlusion map encodes the
+    // shade of the tuft's own *interior* at card scale — the shader says so
+    // where it samples it — and it is already doing its job on the ambient
+    // term. Feeding it to a hard cutoff on direct light darkens foliage a
+    // second time for a reason that has nothing to do with micro-relief, and
+    // at a grazing sun, where `N.L` is small over everything, that is most of
+    // the foliage's direct lighting gone. What is left is the translucency and
+    // ambient terms, which is why it reads as a flat uniform wash rather than
+    // as lit grass.
+    //
+    // This is the third correction to what this term is fed — sky visibility,
+    // then GTAO, now foliage AO. The pattern is the same every time: a hard
+    // cutoff is only as well behaved as the field it thresholds, and every
+    // occlusion channel in this renderer measures something different.
+    if brdf_micro_shadow && (material.flags & 2u) == 0u {
         let ms_ndl = saturate(dot(surface.normal, normalize(light.direction)));
         shadow_factor = shadow_factor
             * micro_shadow(ms_ndl, micro_occlusion, micro_shadow_opacity);
