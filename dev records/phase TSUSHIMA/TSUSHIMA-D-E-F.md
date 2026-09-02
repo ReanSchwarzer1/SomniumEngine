@@ -339,3 +339,43 @@ hello_engine, 385 across `somnium_core`. One core test was constructing
 `TerrainTextureIds` field by field and broke on the new fields; it now uses
 `..Default::default()`, because a test about which ids get unbound has no
 opinion about the rest.
+
+---
+
+# The white splotches are albedo, not lighting
+
+Reported after the fixes above, with the bright patches circled on a mid-field
+hillside. **They are not a TSUSHIMA regression.** Three tests, in order of how
+decisive they are:
+
+1. **Bisect.** Present with `SOMNIUM_TERRAIN_BRDF_DIFFUSE=0`, with
+   `SOMNIUM_TERRAIN_BRDF_MS=0`, and with `SOMNIUM_TERRAIN_RELIEF=0`.
+2. **All off.** Present with `SOMNIUM_TERRAIN_BRDF=0 SOMNIUM_TERRAIN_RELIEF=0
+   SOMNIUM_TERRAIN_HORIZON=0 SOMNIUM_TERRAIN_SKYVIS=0` — every feature this
+   phase added, disabled together.
+3. **Debug mode 9, raw albedo.** The patches are *in the albedo*, at full
+   strength, with no lighting applied at all.
+
+So this is content: a near-white layer being placed on ridges and slope breaks.
+The 32-layer table has four candidates — `Snow` (3), `Limestone` (21),
+`Light Dune` (27) and `Hard Snow` (31) — and debug mode 19 confirms the pale
+regions are their own splat selection rather than a blend artifact.
+
+That makes it **TSUSHIMA-H's** problem (colour, calibrated and varied) and the
+pack audit's, not F's. It is worth saying plainly because the natural reading
+of "new artifacts appeared during a lighting phase" is that the lighting phase
+caused them, and here it did not — better lighting simply stopped hiding them.
+The pre-phase captures have the same patches; they were flatter and greyer and
+read as part of the wash.
+
+## What was not reproduced
+
+The **dense field of small bright glints** in the second report image. Not seen
+at `coastal-vista` or `coastal-ground`, at sun elevations 8, 15, 25, 35 or the
+default. Two things about that scene are not in any capture here: it is much
+closer to the ground, and its ground looks wet. Terrain wetness defaults to 0
+(`SOMNIUM_TERRAIN_WETNESS`), and the wetness path lowers roughness
+(`wetness_gloss` 0.55) and raises F0 — which is exactly the configuration that
+turns a rough surface into one that can throw specular fireflies. That is a
+hypothesis, not a finding; it needs the camera and the scene state that
+produced it.
