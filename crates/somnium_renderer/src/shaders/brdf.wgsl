@@ -182,6 +182,42 @@ fn Diffuse_Burley(albedo: vec3<f32>, roughness: f32, n_dot_v: f32, n_dot_l: f32,
     return albedo * (light_scatter * view_scatter * INV_PI);
 }
 
+/// Bound one light's specular lobe to a physically defensible fraction of the
+/// light it is reflecting (Phase TSUSHIMA-H).
+///
+/// A GGX lobe is a point sample of something that should be integrated over the
+/// pixel. Where the lobe is narrower than the pixel — a smooth surface, a
+/// grazing sun, a thin blade of grass — neighbouring pixels straddle the peak
+/// and one of them returns a value the others do not. That is a firefly, and it
+/// is what the shipped maps show: terrain mean 3058, p99.9 8416, and 38 pixels
+/// pinned at the shading pass's own 60,000 output clamp.
+///
+/// Geometric specular antialiasing is the principled fix and it is in place,
+/// but it can only widen the lobe by the *normal* variance it can see. It
+/// cannot see a lobe that is narrow because the surface is genuinely smooth,
+/// and it cannot see sub-pixel geometry at all — which is why grass blades
+/// sparkle even where the terrain does not.
+///
+/// So this is the backstop, and the bound is an energy statement rather than a
+/// tuned number: a dielectric cannot return a quarter of the light falling on
+/// it as *specular*. Its normal-incidence reflectance is around 4%, rising
+/// toward 1 only at grazing where the lobe is also at its widest and least
+/// prone to this. A quarter is therefore several times more headroom than any
+/// real highlight needs, so ordinary specular passes untouched and only values
+/// that could not have been produced by the surface are pulled back.
+///
+/// Scaled by luminance rather than clamped per channel: clamping channels
+/// independently shifts a white highlight toward whichever one did not clip,
+/// which is how a firefly becomes a *coloured* firefly.
+fn clamp_specular_lobe(specular: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+    let lum = dot(specular, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let ceiling = 0.25 * dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if lum <= ceiling || ceiling <= 0.0 {
+        return specular;
+    }
+    return specular * (ceiling / max(lum, 1e-6));
+}
+
 // Final BRDF Evaluation (Simplified for Isotropic)
 /// BRDF for an area light of angular radius `angular_radius` (Phase 24E).
 ///

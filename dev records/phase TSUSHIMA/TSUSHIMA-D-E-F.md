@@ -379,3 +379,89 @@ closer to the ground, and its ground looks wet. Terrain wetness defaults to 0
 turns a rough surface into one that can throw specular fireflies. That is a
 hypothesis, not a finding; it needs the camera and the scene state that
 produced it.
+
+---
+
+# The specular fireflies — found and fixed
+
+Reported on terrain and then, decisively, **on painted foliage as well**. That
+second screenshot is what cracked it: nothing terrain-specific — not the splat,
+not the layer albedo, not the relief normal, not the horizon map — can explain
+glints on grass blades.
+
+## What they actually were, measured
+
+HDR capture (`.somcap`, linear), `coastal-ground`, default sun and **default
+wetness**, over 1,520,748 terrain pixels:
+
+| | before | after |
+|---|---:|---:|
+| mean | 3057.8 | 3056.7 |
+| p99 | 6840.5 | 6840.5 |
+| p99.9 | 8416.4 | 8415.9 |
+| **max** | **60000.0** | **20689.0** |
+| px over 30,000 | 38 | **0** |
+| px over 50,000 | 38 | **0** |
+| isolated peaks (>4x their 8 neighbours) | 25 | **4** |
+
+`60000.0` is not a coincidence: it is the shading pass's own output clamp
+(`shading.wgsl`, `min(result, vec3(60000.0))`). Individual pixels were being
+driven past the HDR ceiling and pinned there, while their neighbours a fraction
+of a degree away returned a few thousand. Their RGB read `(60000, 60000, 29056)`
+— warm and channel-clamped, i.e. **sunlight**, not sky.
+
+## Two fixes, and only one of them was the firefly
+
+### 1. Specular antialiasing was inert on terrain — my bug
+
+TSUSHIMA-E placed the filter **above** the terrain branch. Terrain then
+overwrote `surface.normal` and `surface.roughness` outright, the relief normal
+overwrote them again, and decals again after that. Every terrain pixel computed
+the filter and discarded it.
+
+The comment at the call site said it ran "after the terrain branch and after
+every other write to `surface.normal`". That was the intent. The code did the
+opposite, and the record in this file repeated the claim.
+
+It now runs after terrain, relief, wetness and decals, immediately before `f0`
+is derived. `specular_aa_runs_after_every_normal_and_roughness_writer` is a
+source-order test that fails if any future writer lands below it — a source
+test rather than an image test because a discarded roughness widening looks
+exactly like a surface that never needed one, right up until it aliases in
+motion.
+
+**Credit where it is due: Codex found this one.** It is a real defect and it was
+mine.
+
+### 2. The lobe itself needed a bound — this is what removed the glints
+
+Specular AA is the principled fix and it cannot be the whole one. It widens the
+lobe by the **normal** variance it can see. It cannot see a lobe that is narrow
+because the surface is genuinely smooth, and it cannot see sub-pixel geometry at
+all — which is exactly why grass blades sparkle where terrain does not.
+
+`clamp_specular_lobe` bounds one light's specular response to **a quarter of the
+light arriving**. That is an energy statement, not a tuned number: a dielectric's
+normal-incidence reflectance is around 4%, rising toward 1 only at grazing where
+the lobe is widest and least prone to this. A quarter is several times more
+headroom than any real highlight needs — which the measurements confirm, since
+the mean moved 0.04% and p99 did not move at all.
+
+Applied before the sun's illuminance is multiplied in, so the ceiling is a
+fraction of the light actually arriving rather than an absolute number that
+would mean different things at noon and at dusk. Luminance-scaled, not clamped
+per channel, because clamping channels independently turns a white firefly into
+a coloured one.
+
+## What was ruled out along the way
+
+- **The albedo.** Foliage diffuse textures audited: max 0.553 linear, nothing
+  above 0.6. Clean. The earlier terrain-albedo work (a per-layer p98 knee and a
+  shader roll-off) measured no change at its default and is **not** in tree; it
+  was targeting baked bright texels, and the fireflies were not that.
+- **The environment cube.** A clamp on specular IBL radiance relative to the
+  sky's own mean changed the capture **byte for byte** — so the spike was not
+  arriving through the IBL path. That was worth knowing and cost one build.
+- **The roughness floor.** The packed surface maps' roughness channel ranges
+  from 0.37 to 0.93; nothing is near the 0.05 floor, so the floor was not
+  letting mirrors through.

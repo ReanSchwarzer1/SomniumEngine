@@ -439,3 +439,47 @@ fn stochastic_mip_selection_ships_off() {
         "`dreams_stf` is on by default again; it costs 4.5x the temporal          instability of the hardware trilinear it replaces"
     );
 }
+
+/// Specular antialiasing must run after **everything** that writes the shading
+/// normal or the roughness.
+///
+/// It shipped in TSUSHIMA-E above the terrain branch, which then overwrote both
+/// outright — so every terrain pixel computed the filter and discarded it, and
+/// the relief normal and decals overwrote it again after that. The comment at
+/// the call site claimed it ran last; only the comment did.
+///
+/// A source-order test rather than an image test because the failure is
+/// invisible in a still: a discarded roughness widening looks exactly like a
+/// surface that did not need one, right up until it aliases in motion.
+#[test]
+fn specular_aa_runs_after_every_normal_and_roughness_writer() {
+    let source = composed("shading.wgsl");
+    let aa = source
+        .find("if enable_specular_aa {")
+        .expect("the specular AA block is still there");
+
+    // Every later writer of `surface.normal` / `surface.roughness` in the
+    // fragment path. If a new one is added below the filter, this fails and
+    // the fix is to move the filter, not to delete the line from this list.
+    for writer in [
+        "surface.roughness = terrain.roughness;",
+        "surface.normal = terrain.normal;",
+        "widen_roughness_toksvig(surface.roughness, relief.w)",
+        "apply_decals(&surface, hit_point, decal_froxel);",
+    ] {
+        let at = source
+            .find(writer)
+            .unwrap_or_else(|| panic!("writer moved or was renamed: {writer}"));
+        assert!(
+            at < aa,
+            "`{writer}` runs after specular AA, so the filtered roughness is discarded"
+        );
+    }
+
+    // And before `f0`, which is derived from roughness-adjacent state and is
+    // the first consumer downstream.
+    let f0 = source
+        .find("surface.f0       = mix(vec3<f32>(0.04)")
+        .expect("f0 derivation is still there");
+    assert!(aa < f0, "specular AA must run before f0 is derived");
+}

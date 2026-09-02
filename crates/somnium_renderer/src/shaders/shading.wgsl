@@ -603,13 +603,49 @@ fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32
     return diffuse * surface.occlusion;
 }
 
+/// Bound a specular reflection against the sky it is reflecting.
+///
+/// The environment cube is the atmosphere's own radiance, clamped at 60,000 —
+/// and near the sun it reaches that clamp. A surface whose reflection vector
+/// lands on that spike returns 60,000 from a single pixel, while its
+/// neighbours a fraction of a degree away return a few thousand. That is a
+/// firefly, and it is exactly what the shipped maps show: terrain mean 1421,
+/// p99.9 4277, and **eighteen pixels sitting on 60,000 exactly**.
+///
+/// The sun is *also* added analytically by `evaluate_brdf_area`, with the
+/// area-light treatment that gives it a real angular size. So its appearance
+/// in the reflection cube is a double count as well as an aliasing source, and
+/// bounding it here loses nothing that is not already accounted for.
+///
+/// The bound is relative to the cube's own roughest mip — the average sky
+/// radiance — so it needs no absolute constant and stays correct at dusk, at
+/// night and under cloud, when 60,000 would be meaningless. Headroom opens up
+/// as roughness falls, because a near-mirror legitimately *does* return far
+/// more than the average, and closes on rough ground, which cannot.
+///
+/// Luminance-scaled rather than per-channel clamped: clamping channels
+/// independently shifts the highlight's hue toward whichever one did not clip.
+fn clamp_specular_radiance(radiance: vec3<f32>, sky_mean: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let lum = dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mean = max(dot(sky_mean, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
+    // 8x the sky's mean on rough ground, 256x for a mirror.
+    let headroom = mix(8.0, 256.0, smoothstep(0.30, 0.0, roughness));
+    let ceiling = mean * headroom;
+    if lum <= ceiling {
+        return radiance;
+    }
+    return radiance * (ceiling / max(lum, 1e-4));
+}
+
 fn evaluate_ibl_specular(surface: Surface) -> vec3<f32> {
     let n = surface.normal;
     let v = surface.view_dir;
     let n_dot_v = max(dot(n, v), 1e-4);
     let r = reflect(-v, n);
     let mip = surface.roughness * ENV_MAX_MIP;
-    let prefiltered = textureSampleLevel(env_cube, env_sampler, r, mip).rgb;
+    let sky_mean = textureSampleLevel(env_cube, env_sampler, n, ENV_MAX_MIP).rgb;
+    let prefiltered = clamp_specular_radiance(
+        textureSampleLevel(env_cube, env_sampler, r, mip).rgb, sky_mean, surface.roughness);
     let specular = prefiltered * env_brdf_approx(surface.f0, surface.roughness, n_dot_v);
     let spec_ao  = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
 
@@ -641,8 +677,12 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let k_s = surface.f0 + fr * pow(1.0 - n_dot_v, 5.0);
 
     let r = reflect(-v, n);
-    let radiance = textureSampleLevel(
-        env_cube, env_sampler, r, surface.roughness * ENV_MAX_MIP).rgb;
+    let sky_mean = textureSampleLevel(env_cube, env_sampler, n, ENV_MAX_MIP).rgb;
+    let radiance = clamp_specular_radiance(
+        textureSampleLevel(env_cube, env_sampler, r, surface.roughness * ENV_MAX_MIP).rgb,
+        sky_mean,
+        surface.roughness,
+    );
 
     // The same bent-normal gather and the same traced-diffuse override the
     // single-scatter path used, so TSUSHIMA-C's landscape-scale bent normal
@@ -1560,32 +1600,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = max(surface.roughness, foliage_roughness_floor);
     }
 
-    // ── Geometric specular antialiasing (TSUSHIMA-E) ─────────────────────────
-    //
-    // Tokuyoshi & Kaplanyan, I3D 2019. The filter kernel comes from the
-    // screen-space derivatives of the shading normal, which is already in
-    // registers, so the whole thing is a handful of ALU and two derivative
-    // instructions.
-    //
-    // KAPPA clamps how far it may go. Without the clamp a silhouette edge —
-    // where the normal derivative is enormous and meaningless — turns the
-    // surface fully rough in a one-pixel band.
-    //
-    // Placed here, after the terrain branch and after every other write to
-    // `surface.normal`, and outside all of them: `dpdx` on a value produced
-    // inside non-uniform control flow is undefined, and the terrain branch is
-    // a storage read the compiler cannot prove uniform. Reading the normal at
-    // a point where every path has already written it is what makes the
-    // derivative well-defined.
-    if enable_specular_aa {
-        let dndx = dpdx(surface.normal);
-        let dndy = dpdy(surface.normal);
-        let variance = SPEC_AA_SIGMA2 * (dot(dndx, dndx) + dot(dndy, dndy));
-        let kernel = min(2.0 * variance, SPEC_AA_KAPPA);
-        let alpha = surface.roughness * surface.roughness;
-        surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
-    }
-
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
     //
     // The only material branch terrain needs. Everything above it — decoding
@@ -1751,6 +1765,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             + decal_tile.y * cluster_params.grid_width
             + decal_slice * cluster_params.grid_width * cluster_params.grid_height;
         apply_decals(&surface, hit_point, decal_froxel);
+    }
+
+    // ── Geometric specular antialiasing (TSUSHIMA-E) ─────────────────────────
+    //
+    // Tokuyoshi & Kaplanyan, I3D 2019. The filter kernel comes from the
+    // screen-space derivatives of the shading normal, and turns normal
+    // variance the pixel cannot resolve into roughness it can — which is the
+    // only correct answer to a specular lobe narrower than a pixel.
+    //
+    // KAPPA clamps how far it may go. Without the clamp a silhouette edge —
+    // where the normal derivative is enormous and meaningless — turns the
+    // surface fully rough in a one-pixel band.
+    //
+    // **Position is the whole correctness argument, and the first version got
+    // it wrong.** It sat above the terrain branch, which then overwrote
+    // `surface.normal` and `surface.roughness` outright — so every terrain
+    // pixel computed the filter and threw it away, and the relief normal and
+    // decals overwrote it again after that. The comment there claimed it ran
+    // "after every other write", which was the intent and not the code.
+    //
+    // It now runs after terrain, relief, wetness and decals: the last point
+    // where anything writes the normal or the roughness, and before `f0` is
+    // derived from them. `dpdx` is also well defined here, which it would not
+    // be inside the terrain branch — that is a storage read the compiler
+    // cannot prove uniform, and a derivative taken in non-uniform control flow
+    // is undefined.
+    //
+    // `specular_aa_runs_after_every_normal_and_roughness_writer` pins the
+    // ordering so this cannot silently regress again.
+    if enable_specular_aa {
+        let dndx = dpdx(surface.normal);
+        let dndy = dpdy(surface.normal);
+        let variance = SPEC_AA_SIGMA2 * (dot(dndx, dndx) + dot(dndy, dndy));
+        let kernel = min(2.0 * variance, SPEC_AA_KAPPA);
+        let alpha = surface.roughness * surface.roughness;
+        surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
     }
 
     surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
@@ -2062,8 +2112,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         // Direct sunlight + directional moonlight
-        var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
-            * light_color * shadow_factor + moonlight;
+        // Phase TSUSHIMA-H: the sun's lobe is bounded before it is scaled by
+        // the sun's illuminance, so the ceiling is a fraction of the light
+        // actually arriving rather than an absolute number that would mean
+        // something different at noon and at dusk.
+        var direct_light = clamp_specular_lobe(
+            evaluate_brdf_area(surface, light_dir, light.sun_angular_radius),
+            vec3<f32>(1.0),
+        ) * light_color * shadow_factor + moonlight;
 
         // Transmitted sunlight follows the same atmospheric fade as every
         // other direct term, with no independent elevation threshold.

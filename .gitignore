@@ -182,3 +182,6 @@ assets/.somnium/
 /graphify-out/*
 !/graphify-out/graph.json
 !/graphify-out/GRAPH_REPORT.md
+
+# Codex's scratch diagnostics. Not evidence; not reviewable.
+.codex-debug/
