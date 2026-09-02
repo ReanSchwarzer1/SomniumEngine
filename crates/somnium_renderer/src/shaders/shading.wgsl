@@ -2136,7 +2136,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // something different at noon and at dusk.
         var direct_light = clamp_specular_lobe(
             evaluate_brdf_area(surface, light_dir, light.sun_angular_radius),
-            vec3<f32>(1.0),
+            surface.roughness,
         ) * light_color * shadow_factor + moonlight;
 
         // Transmitted sunlight follows the same atmospheric fade as every
@@ -2270,8 +2270,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // and that is what stops its highlight being a single pixel on
                 // anything polished.
                 let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
-                local_light_contrib +=
-                    evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                local_light_contrib += clamp_specular_lobe(
+                    evaluate_brdf_area(surface, L, angular), surface.roughness,
+                ) * ll.color * atten_val;
             }
         }
 

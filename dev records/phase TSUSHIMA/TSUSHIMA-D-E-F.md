@@ -493,3 +493,45 @@ channel actually means before wiring it.
 there is no capture on this machine that can show the change. What *is* verified
 is that terrain is untouched — 3056.6871 against 3056.7 before, and the firefly
 counts are unchanged — so the risk is bounded to foliage.
+
+### The specular ceiling had to scale with roughness
+
+The first cut used a flat "a quarter of the light arriving". That was enough for
+terrain — isolated peaks 25 to 4 — and nowhere near enough for **foliage**,
+which still speckled at midday. A quarter of 100,000 lux is 25,000, against a
+scene mean near 3,000.
+
+The amplifier is Fresnel. A leaf card seen edge-on has `v_dot_h` near zero, `F`
+goes to 1, and the lobe returns twenty-odd times what the same leaf returns
+face-on. Foliage is nothing but edge-on cards, and they are sub-pixel, so one
+pixel catches the peak and its neighbour does not.
+
+The ceiling now tracks roughness: twice the integrated specular reflectance on
+a rough surface — a lobe peak may exceed its own integral, but not by much on
+something that rough — opening to half of incident light as roughness
+approaches zero, where a real mirror legitimately does return most of what hits
+it.
+
+Two ceilings were measured before settling. At 1× the integrated reflectance
+peaks went to zero but p99 fell 15% and p99.9 22%: that is bounding real
+specular, not just outliers, and it would have cost the terrain the specular
+presence TSUSHIMA-F was partly for. At 2×:
+
+| | original | shipped |
+|---|---:|---:|
+| mean | 3057.8 | 3056.0 |
+| p99 | 6840.5 | 6809.3 |
+| p99.9 | 8416.4 | 8386.9 |
+| **max** | **60000.0** | **10090.7** |
+| isolated peaks | 25 | **0** |
+
+Ordinary shading moves by half a percent, the maximum lands just above p99.9 —
+"no brighter than the brightest ordinary pixel" — and nothing isolated survives.
+
+Local point lights go through the same lobe and were never bounded either; they
+are now.
+
+**Still unverified on foliage.** The default scene has none (`mesh px=0`), so
+every number above is terrain. The reasoning transfers — it is the same lobe,
+and the Fresnel argument is *about* foliage — but the judgement is the
+reporter's.

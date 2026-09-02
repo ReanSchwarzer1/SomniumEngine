@@ -209,9 +209,26 @@ fn Diffuse_Burley(albedo: vec3<f32>, roughness: f32, n_dot_v: f32, n_dot_l: f32,
 /// Scaled by luminance rather than clamped per channel: clamping channels
 /// independently shifts a white highlight toward whichever one did not clip,
 /// which is how a firefly becomes a *coloured* firefly.
-fn clamp_specular_lobe(specular: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+fn clamp_specular_lobe(specular: vec3<f32>, roughness: f32) -> vec3<f32> {
+    // The ceiling **tracks roughness**, which a flat one did not.
+    //
+    // A dielectric's integrated specular reflectance is 3-5% at the
+    // roughnesses ground and leaves actually have. It climbs toward 1 only at
+    // grazing incidence — and grazing is where foliage lives: a leaf card seen
+    // edge-on has `v_dot_h` near zero, Fresnel goes to 1, and the lobe returns
+    // twenty-odd times what the same leaf returns face-on. Sub-pixel leaf
+    // geometry then means one pixel catches that and its neighbour does not.
+    //
+    // A flat quarter-of-incident ceiling was enough for terrain (isolated
+    // peaks 25 -> 4) and nowhere near enough for foliage, where a quarter of
+    // 100,000 lux is still 25,000 against a scene mean near 3,000. So: about
+    // twice the integrated reflectance on a rough surface — a lobe peak may
+    // exceed its own integral, but not by much on something this rough —
+    // opening to half of incident light as
+    // roughness approaches zero where a real mirror legitimately does return
+    // most of what hits it.
     let lum = dot(specular, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let ceiling = 0.25 * dot(radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let ceiling = mix(0.08, 0.5, smoothstep(0.45, 0.0, roughness));
     if lum <= ceiling || ceiling <= 0.0 {
         return specular;
     }
