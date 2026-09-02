@@ -1007,7 +1007,21 @@ Current conservative defaults matter:
 
 - Terrain hex tiling and parallax are off on the shipped maps.
 - The older DF material clipmap path remains off pending its audit and a formal
-  default decision, even though PORTAL-0 measured a large gain.
+  default decision, even though PORTAL-0 measured a large gain. Three separate
+  mechanisms have now produced the same hard-edged dark band on the terrain
+  with it switched on, and the third is the one worth remembering outside the
+  clipmap: `Queue::write_buffer` does not run where it is called. wgpu applies
+  every pending write just before the frame's command buffers, in call order,
+  so a pass whose `record` runs twice in a frame and writes its uniforms at
+  offset 0 both times does not take turns — the second upload wins and *both*
+  render passes read it. The terrain clipmap's generate pass records once per
+  stack, so the detail rings were painted with the macro stack's rectangle and
+  centre. Uniform slots are now handed out by a per-frame cursor
+  (`TerrainClipmapPass::begin_frame`). Every other pass called more than once
+  per frame was checked and is safe: `bloom` allocates a buffer per call,
+  `cull` keeps one buffer per phase, `shadow::record_virtual` writes at a
+  per-page stride, and the two `shadow_pass.record` sites are mutually
+  exclusive match arms. See `dev records/phase DREAMS/DF-SLOT_resolution.md`.
 - Dynamic resolution, tile-binned shading, and the aerial terrain split are
   opt-in. The last two measured slower in their original tests.
 - Weighted OIT is off unless authored.

@@ -4,6 +4,14 @@ Two band mechanisms were found and fixed (`DF-BAND_resolution.md`, the miss
 path; `DF-STALE_resolution.md`, the stale-texel path). Toggling the cache on
 still produced a wrong-looking surface, so this measures what is left.
 
+> **A third band mechanism was found on 2026-09-02** — the generate pass's
+> uniforms, uploaded twice to one slot (`DF-SLOT_resolution.md`). It does not
+> touch anything below. The capture this record is built on was re-taken
+> against the fixed build and is **byte-identical**: 0 of 1,981,440 pixels
+> differ, peak channel delta 0. A held camera almost never collides the two
+> stacks, which is exactly why that defect survived this measurement and had to
+> be found from a moving one.
+
 ## Repro: the checkbox, not the environment variable
 
 A switch thrown at frame 200 is not the same experiment as the same switch set

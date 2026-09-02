@@ -4142,6 +4142,12 @@ impl SomniumRenderer {
             work.push((i, terrain.terrain_index));
         }
         if !work.is_empty() {
+            // Every `record` this frame takes its own slice of the generate
+            // pass's uniform buffer. wgpu applies queue writes in call order
+            // just before the frame's passes, so two calls writing at offset 0
+            // did not take turns -- the detail stack was generated with the
+            // macro stack's rectangle and centre.
+            self.clipmap_pass.begin_frame(&ctx.device, work.len());
             let mut budget = crate::terrain::clipmap::MAX_GEN_TEXELS;
             for (i, terrain_index) in work {
                 // Coverage before sharpness. Detail used to take the whole
@@ -4212,6 +4218,30 @@ impl SomniumRenderer {
                 // have rendered so page arrival cannot leave stale texels.
                 if vt_uploaded {
                     self.clipmaps[i].invalidate();
+                }
+                if clipmap_trace() {
+                    let frame =
+                        CLIPMAP_TRACE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (detail_ready, macro_ready) = self.clipmaps[i].ready_masks();
+                    let vt = self
+                        .terrains
+                        .get(i)
+                        .map(|t| *t.virtual_texture_stats())
+                        .unwrap_or_default();
+                    tracing::info!(
+                        frame,
+                        detail_ready = format!("{detail_ready:08b}"),
+                        macro_ready = format!("{macro_ready:04b}"),
+                        detail_jobs = detail.len(),
+                        macro_jobs = macro_jobs.len(),
+                        queued_texels = self.clipmaps[i].pending_texels(),
+                        vt_resident = vt.resident_pages,
+                        vt_pending = vt.pending_pages,
+                        vt_uploads = vt.uploads,
+                        vt_evictions = vt.evictions,
+                        invalidated = vt_uploaded,
+                        "DF-TRACE"
+                    );
                 }
             }
         }
@@ -5455,6 +5485,21 @@ fn cpu_frustum_env_off() -> bool {
 
 fn cascade_cull_env_off() -> bool {
     std::env::var("SOMNIUM_CASCADE_CULL").as_deref() == Ok("0")
+}
+
+/// Frames counted by the clipmap trace, so a log line can be placed in time.
+static CLIPMAP_TRACE_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `SOMNIUM_CLIPMAP_TRACE=1` — one `DF-TRACE` line per generating frame.
+///
+/// The clipmap's failures are all invisible in a picture: a stack where only
+/// the coarsest ring is ever ready renders as a plausible blur, and debug view
+/// 34 calls it "a detail ring" because it is one. The ready mask, the queued
+/// texel count and the source-page counters are the three numbers that say
+/// which, and none of them had a way out of the renderer.
+fn clipmap_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("SOMNIUM_CLIPMAP_TRACE").as_deref(), Ok("1")))
 }
 
 /// PORTAL-0-D: `packed` is this frame's `terrain_lod_by_vertex`, built by the

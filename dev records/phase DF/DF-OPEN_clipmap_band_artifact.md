@@ -1,9 +1,19 @@
 # OPEN — dark band / ribbon artifact with Clipmap on
 
-> **Status (2026-09-01): two mechanisms identified, reproduced, and fixed;
-> the clipmap now ships off by default.**
+> **Status (2026-09-02): three mechanisms identified, reproduced, and fixed;
+> the clipmap still ships off by default, for the reason in
+> `DF-QUALITY_clipmap_verdict.md` rather than for any of them.**
 > See `dev records/phase DREAMS/DF-BAND_resolution.md` (the red, miss-path
-> mechanism) and `DF-STALE_resolution.md` (the green, stale-texel mechanism).
+> mechanism), `DF-STALE_resolution.md` (the green, stale-texel mechanism), and
+> `DF-SLOT_resolution.md` (green again: the generate pass's uniforms, uploaded
+> twice to one slot, so the detail stack was painted with the macro stack's
+> rectangle).
+>
+> The third one was reported against a build carrying both earlier fixes, and
+> it is the reason this file stayed open. It needs both stacks to hand generate
+> a job in the same frame — 8 of 126 frames in the repro — and each collision
+> is permanent, because what the shader writes on its early-out has alpha 1.0
+> and therefore reads back as data.
 >
 > A **red** Clipmap Source band is the flat macro-map fallback in
 > `evaluate_clipmap_material`, which sets `tap.nxy = vec2(0.0)` and so shades

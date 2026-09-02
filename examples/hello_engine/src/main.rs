@@ -955,15 +955,34 @@ impl HelloGame {
             result.terrain_origin,
         );
         self.dreams_rail = std::env::var("SOMNIUM_DREAMS_RAIL").ok().and_then(|name| {
-            dreams_fixture::DreamRail::named(
+            // A rail is frame-indexed from the frame the map finished loading,
+            // and `SOMNIUM_CAPTURE_FRAME` counts from process start. Those are
+            // two clocks: a slower load moves the capture to a different point
+            // on the rail, and two runs that look like the same recipe are not
+            // the same experiment. Log the offset so a capture pair can be
+            // checked rather than assumed.
+            let start = ctx.time.frame_count();
+            let rail = dreams_fixture::DreamRail::named(
                 name.trim(),
                 dreams_fixture::CameraPose {
                     position: self.camera.position,
                     yaw: self.camera.yaw,
                     pitch: self.camera.pitch,
                 },
-                ctx.time.frame_count(),
-            )
+                start,
+                dreams_fixture::flyover_stop_frames(),
+            );
+            if rail.is_some() {
+                tracing::info!(
+                    rail = name.trim(),
+                    start_frame = start,
+                    anchor = ?self.camera.position,
+                    yaw = self.camera.yaw,
+                    pitch = self.camera.pitch,
+                    "DREAMS rail armed"
+                );
+            }
+            rail
         });
         let pose = self.camera.to_transform();
         let camera_entity = ctx.world.entities().find(|&e| {

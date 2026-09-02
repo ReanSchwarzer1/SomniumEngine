@@ -848,6 +848,16 @@ impl TerrainData {
         self.virtual_texture.stats().pending_pages > 0
     }
 
+    /// Streaming counters for the clipmap's source pages.
+    ///
+    /// Exposed so the clipmap trace can say whether the cache is still moving.
+    /// A converged frame with a non-zero pending count is a cache that will
+    /// never finish, and that is not visible from the picture.
+    #[must_use]
+    pub const fn virtual_texture_stats(&self) -> &virtual_texture::VirtualTextureStats {
+        self.virtual_texture.stats()
+    }
+
     /// Reserve one rewritable vertex span per chunk in the global pool.
     ///
     /// Called once, at creation. A chunk that cannot be placed keeps

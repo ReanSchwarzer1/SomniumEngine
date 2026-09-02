@@ -40,7 +40,12 @@ pub const HEX_MIN_TEXELS_PER_M: f32 = 8.0;
 /// filling the cheap stack in the same frame as a hex ring was 6M texels and
 /// hitchs the editor. Walking L-strips are tens of thousands of texels.
 pub const MAX_GEN_TEXELS: u32 = 1024 * 1024;
-const MAX_TAKE_JOBS: usize = 32;
+/// Dirty rectangles one stack may hand to generate in a single frame.
+///
+/// Public because it is also the size of that stack's slice of the generate
+/// pass's uniform buffer: every job taken here needs its own slot, or two of
+/// them share one and the second wins.
+pub const MAX_TAKE_JOBS: usize = 32;
 /// Ring 3 is 8 m at 64 t/m — the near slope the player actually sees. Paint
 /// it first, then sharpen inward, then distance. Finest-first left that 8 m
 /// disk empty for seven hex frames (~1.5 s).
@@ -444,6 +449,30 @@ impl TerrainClipmap {
             }
         }
         out
+    }
+
+    /// Which detail / macro rings shading may sample this frame.
+    ///
+    /// The bit is the whole question the pictures could not answer: a stack
+    /// where only the coarsest ring is ever ready shades from 4 texels/m and
+    /// still reports "a detail ring" to debug view 34, so the source view
+    /// cannot tell a working stack from a starved one.
+    #[must_use]
+    pub fn ready_masks(&self) -> (u32, u32) {
+        (ready_mask(&self.rings), ready_mask(&self.macro_rings))
+    }
+
+    /// Dirty texels still queued across both stacks.
+    #[must_use]
+    pub fn pending_texels(&self) -> u64 {
+        let sum = |rings: &[ClipmapRing]| -> u64 {
+            rings
+                .iter()
+                .flat_map(|r| r.dirty[..r.dirty_count as usize].iter())
+                .map(|rect| u64::from(rect.w) * u64::from(rect.h))
+                .sum()
+        };
+        sum(&self.rings) + sum(&self.macro_rings)
     }
 
     pub fn clear_dirty(&mut self) {
