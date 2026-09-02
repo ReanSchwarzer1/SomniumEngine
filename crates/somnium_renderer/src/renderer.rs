@@ -175,6 +175,12 @@ pub struct SomniumRenderer {
     /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
     /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
+    /// Phase TSUSHIMA-F: multiple-scattering compensation, direct and IBL.
+    pub brdf_multiscatter: bool,
+    /// Phase TSUSHIMA-F: Hammon's rough diffuse in place of Burley.
+    pub brdf_rough_diffuse: bool,
+    /// Phase TSUSHIMA-F: AO-derived occlusion of direct light.
+    pub brdf_micro_shadow: bool,
     /// What the per-view overrides are overriding, for this frame.
     frame_view_state: FrameViewState,
     /// One slot per view, copied into the view buffer from inside the encoder.
@@ -505,6 +511,19 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
+}
+
+/// One TSUSHIMA-F term's switch: its own variable, or the group switch, or on.
+///
+/// The group switch exists so a single `SOMNIUM_TERRAIN_BRDF=0` still returns
+/// the whole pre-phase response in one go; the per-term variables exist
+/// because measuring three terms through one switch cannot say which of them
+/// moved the picture, and on this content they do not move it equally.
+fn brdf_term_enabled(var_name: &str) -> bool {
+    if let Ok(v) = std::env::var(var_name) {
+        return v != "0";
+    }
+    std::env::var("SOMNIUM_TERRAIN_BRDF").as_deref() != Ok("0")
 }
 
 impl SomniumRenderer {
@@ -955,6 +974,9 @@ impl SomniumRenderer {
             view_proj: glam::Mat4::IDENTITY,
             camera_pos: glam::Vec3::ZERO,
             time: 0.0,
+            brdf_multiscatter: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MS"),
+            brdf_rough_diffuse: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_DIFFUSE"),
+            brdf_micro_shadow: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MICROSHADOW"),
             light_direction: default_dir,
             ibl_intensity: 1.0,
             light_color: default_color,
@@ -3241,6 +3263,28 @@ impl SomniumRenderer {
         }
         if self.grain_masks.stf_enabled() {
             shading_mode |= 32;
+        }
+        // Phase TSUSHIMA-F: the energy terms — multiple-scattering
+        // compensation on both the direct lobe and the IBL, Hammon's rough
+        // diffuse, and micro-shadowing. On by default;
+        // `SOMNIUM_TERRAIN_BRDF=0` is the A/B rail.
+        //
+        // A `shading_mode` bit rather than a pipeline override because these
+        // are a handful of ALU on values already in registers, not a march.
+        // The occupancy argument that put hex and POM behind `override`s does
+        // not apply, and this avoids a tenth entry in `ShadingSpec::constants`
+        // and a new variant in a budget `context.md` tracks.
+        // Three bits, not one: the terms pull in different directions and a
+        // single switch cannot attribute a change to any of them.
+        // `SOMNIUM_TERRAIN_BRDF=0` still turns all three off in one go.
+        if self.brdf_multiscatter {
+            shading_mode |= 64;
+        }
+        if self.brdf_rough_diffuse {
+            shading_mode |= 128;
+        }
+        if self.brdf_micro_shadow {
+            shading_mode |= 256;
         }
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,

@@ -276,6 +276,23 @@ const ENV_MAX_MIP: f32 = 5.0;
 override enable_pcss: bool = true;
 override enable_contact: bool = true;
 override enable_clipmap: bool = true;
+
+/// Phase TSUSHIMA-F1: how hard micro-shadowing is allowed to bite.
+///
+/// Unity HDRP exposes the same control and ships it at zero, leaving artists
+/// to dial it up; the technique is a look, not a law. Measured here at 1.0 it
+/// removed 39% of terrain radiance at an 8-degree sun — most of which was the
+/// wrong AO being fed in, but not all of it, because at a grazing sun `N.L` is
+/// small over the whole landscape and this term is a function of `N.L`.
+override micro_shadow_opacity: f32 = 1.0;
+
+/// Occlusion at the scale micro-shadowing is about: GTAO plus the material's
+/// own AO, and deliberately *not* TSUSHIMA-C's landscape-scale sky visibility.
+///
+/// Reset per pixel in `fs_main`. Non-terrain surfaces never overwrite it with
+/// anything but their own occlusion, so meshes see exactly what they always
+/// did.
+var<private> micro_occlusion: f32 = 1.0;
 override enable_debug: bool = true;
 
 // Phase DOOM-B ablation. 0 = normal; 1 sky, 2 mesh, 3 foliage, 4 terrain shade
@@ -328,11 +345,10 @@ fn vis_barycentric(
 /// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
 /// is a smooth two-parameter function.
 fn env_brdf_approx(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
-    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    // Phase TSUSHIMA-F: the fit itself moved to `brdf.wgsl` as `env_brdf_ab`,
+    // because `ab` is what the multiple-scattering terms need and this
+    // function used to compute it one line before discarding it.
+    let ab = env_brdf_ab(roughness, n_dot_v);
     return f0 * ab.x + ab.y;
 }
 
@@ -577,7 +593,59 @@ fn evaluate_ibl_specular(surface: Surface) -> vec3<f32> {
     return specular * spec_ao;
 }
 
+/// Multiple-scattering IBL, Fdez-Agüera (JCGT 8(1), 2019).
+///
+/// No new LUT and no new parameter: built entirely from the `ab` pair
+/// `env_brdf_ab` already returns. `Ems` is the energy the single-scatter term
+/// failed to account for, `FmsEms` is the geometric series that puts it back,
+/// and `kD` is what is *left* for diffuse once both specular terms have taken
+/// their share.
+///
+/// That coupling is the reason this replaces `evaluate_ibl`'s body rather than
+/// adding a term to it. The old split computed a diffuse lobe and a specular
+/// lobe independently and lost the energy that should have passed between
+/// them; you cannot recover that by adding something to the outside.
+fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
+    let n = surface.normal;
+    let v = surface.view_dir;
+    let n_dot_v = max(dot(n, v), 1e-4);
+    let ab = env_brdf_ab(surface.roughness, n_dot_v);
+
+    // Roughness-dependent Fresnel: a rough surface's grazing response never
+    // reaches the mirror value, and plain Schlick here is what gives rough
+    // dielectrics a bright rim they should not have.
+    let fr = max(vec3<f32>(1.0 - surface.roughness), surface.f0) - surface.f0;
+    let k_s = surface.f0 + fr * pow(1.0 - n_dot_v, 5.0);
+
+    let r = reflect(-v, n);
+    let radiance = textureSampleLevel(
+        env_cube, env_sampler, r, surface.roughness * ENV_MAX_MIP).rgb;
+
+    // The same bent-normal gather and the same traced-diffuse override the
+    // single-scatter path used, so TSUSHIMA-C's landscape-scale bent normal
+    // and Phase 24L's ReSTIR result both still reach this.
+    let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
+    var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
+    if traced_diffuse.a > 0.5 {
+        irradiance = traced_diffuse.rgb;
+    }
+
+    let fss_ess = k_s * ab.x + ab.y;
+    let ems = 1.0 - (ab.x + ab.y);
+    let f_avg = surface.f0 + (vec3<f32>(1.0) - surface.f0) / 21.0;
+    let fms_ems = ems * fss_ess * f_avg / (vec3<f32>(1.0) - f_avg * ems);
+    let k_d = surface.albedo * (vec3<f32>(1.0) - fss_ess - fms_ems)
+        * (1.0 - surface.metallic);
+
+    let spec_ao = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
+    return fss_ess * radiance * spec_ao
+        + (fms_ems + k_d) * irradiance * surface.occlusion;
+}
+
 fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
+    if brdf_multiscatter {
+        return evaluate_ibl_ms(surface, traced_diffuse) * light.ibl_intensity;
+    }
     // Occlusion applies to indirect light only. The sun already has shadow
     // maps, and multiplying it by AO as well double-darkens lit surfaces.
     return (evaluate_ibl_diffuse(surface, traced_diffuse)
@@ -1108,6 +1176,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Published for the terrain material's stochastic filtering, which needs a
     // screen-space dither index. See `terrain_screen_pixel`.
     terrain_screen_pixel = vec2<u32>(in.clip_pos.xy);
+    micro_occlusion = 1.0;
+    // Phase TSUSHIMA-F. Set once per pixel, read by `brdf.wgsl`, which cannot
+    // reach `cluster_params` itself because it is composed into roots that do
+    // not bind the cluster grid.
+    brdf_multiscatter = (cluster_params.shading_mode & 64u) != 0u;
+    brdf_rough_diffuse = (cluster_params.shading_mode & 128u) != 0u;
+    brdf_micro_shadow = (cluster_params.shading_mode & 256u) != 0u;
 
     // Phase DOOM-C: the screen UV is *derived* from the fragment coordinate,
     // not taken from the interpolator.
@@ -1460,6 +1535,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = max(surface.roughness, foliage_roughness_floor);
     }
 
+    // Phase TSUSHIMA-F1. The micro-scale occlusion every surface gets:
+    // GTAO and the occlusion map, both already applied. Meshes stop here.
+    // The terrain branch below overwrites it after folding in the material's
+    // own AO and *before* folding in TSUSHIMA-C's landscape-scale sky
+    // visibility, which is a different question and must not reach this term.
+    //
+    // Written before the branch rather than after it precisely so the branch
+    // can overwrite it. A `min` after the branch looks equivalent and is not:
+    // it re-picks the post-sky-visibility value and cancels the whole point.
+    micro_occlusion = surface.occlusion;
+
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
     //
     // The only material branch terrain needs. Everything above it — decoding
@@ -1551,6 +1637,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // term's occluders are a superset of the other's, which is exactly
         // what these two are not.
         let sky_vis = terrain_sky_visibility(tm, uv);
+        // Snapshot the *micro*-scale occlusion first. TSUSHIMA-F1's
+        // micro-shadowing must not see the landscape-scale term: sky
+        // visibility says what fraction of the sky a valley floor can reach,
+        // and micro-shadowing asks what sub-pixel relief shadows itself.
+        // Feeding it the product answered a question nobody asked and cut
+        // direct sun by 39% at a grazing sun. See `micro_occlusion`.
+        micro_occlusion = surface.occlusion;
         surface.occlusion = surface.occlusion * sky_vis;
         // The landscape-scale bent normal, **composed with** the contact-scale
         // one GTAO already wrote rather than replacing it. The two see
@@ -1622,6 +1715,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow_factor = sample_shadow(hit_point, shadow_normal, view_depth, in.clip_pos.xy)
             * terrain_parallax_shadow_factor;
     }
+    // Phase TSUSHIMA-F1: micro-shadowing. Folded in here for the same reason
+    // the relief self-shadow is — one definition of how much direct light
+    // reaches this point, which every direct term below then reads without
+    // having to know what went into it.
+    //
+    // Uses `surface.occlusion`, which by this point carries GTAO, the
+    // material's own AO and (on terrain) TSUSHIMA-C's sky visibility. That
+    // last one is arguably wrong: sky visibility is a landscape-scale
+    // quantity and micro-shadowing is about relief below the pixel footprint,
+    // so a valley floor now gets a little direct-light occlusion for a reason
+    // that has nothing to do with micro-relief. It is small, it is in the
+    // right direction, and separating the two means carrying a second
+    // occlusion channel through the whole pass — noted rather than done.
+    if brdf_micro_shadow {
+        let ms_ndl = saturate(dot(surface.normal, normalize(light.direction)));
+        shadow_factor = shadow_factor
+            * micro_shadow(ms_ndl, micro_occlusion, micro_shadow_opacity);
+    }
+
     // CONTROL-M. Folded into `shadow_factor` rather than applied separately,
     // so every consumer of the sun's visibility — direct, transmitted and the
     // cel path — picks it up from one place and none of them can be missed.

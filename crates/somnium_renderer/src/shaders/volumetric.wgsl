@@ -281,7 +281,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if fog > 0.0 {
                 // Fog scatters greyly: a water-droplet medium is not
                 // wavelength-selective the way Rayleigh is.
-                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance;
+                //
+                // Phase TSUSHIMA-D: but it is *lit* by the whole sky, not only
+                // by the sun, and until this line it was lit by the sun alone.
+                // The air terms two lines up have carried a `multiscatter`
+                // skylight term since they were written; the fog medium never
+                // did, and on the shipped maps the fog is the dominant
+                // scatterer by roughly fifty to one — its optical depth over a
+                // few hundred metres is ~0.24 against Rayleigh's ~0.004.
+                //
+                // So the whole distance cue was a sun-lit grey wash. Distant
+                // ground desaturated toward grey and got *darker*, when the
+                // thing everyone recognises as aerial perspective is ground
+                // going *blue and lighter* as it recedes. A grey scatterer lit
+                // by blue skylight scatters blue; that is the entire fix, and
+                // it is the same term the air already uses, so the two media
+                // now agree about what is illuminating them.
+                step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance
+                    + vec3<f32>(fog) * multiscatter;
                 extinction += vec3<f32>(fog);
             }
 
