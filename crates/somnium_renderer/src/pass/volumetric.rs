@@ -101,7 +101,14 @@ impl Default for FogSettings {
             // A thin haze by default: enough that a kilometre of air reads as
             // distance, far short of weather. Aerial perspective from the
             // atmosphere itself is always present regardless.
-            density: 0.0008,
+            //
+            // Retuned in TSUSHIMA-D from 8e-4, and see `PostProcessSettings::
+            // fog_density` for why: the old value was chosen against a fog
+            // medium lit only by the sun, and once it was also lit by the sky
+            // it delivered 60% of terrain radiance on a vista. Kept in step
+            // with the core default deliberately — two defaults that disagree
+            // is how a scene loads looking different from a fresh one.
+            density: 0.0002,
             asymmetry: 0.6,
             height_falloff: 120.0,
             base_height: 0.0,

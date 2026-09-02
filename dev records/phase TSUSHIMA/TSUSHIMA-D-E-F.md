@@ -227,3 +227,115 @@ TSUSHIMA-B, caught before it compiled this time.
   struct change plus authoring; F5 is a drop-in worth measuring on its own.
 - **Island still barely moves** on B/C, and D/E/F have not been A/B'd on it
   separately — only sanity-checked (terrain radiance 1079.25, no artifacts).
+
+---
+
+# Artifact report and fixes — 2026-09-02, same day
+
+Reported from a live editor session: blotches, triangular facets, a regular
+scale-like ripple, a washed grey cast, and possible jitter. Bisected with the
+per-feature rails at `coastal-vista`, default sun.
+
+## 1. Micro-shadowing was the blotches and the facets
+
+Turning micro-shadowing off alone removed them; turning the horizon map, sky
+visibility or the relief normal off changed nothing. So it was F1, and the
+cause was the input, not the term.
+
+`micro_shadow` is a **hard cutoff** — `saturate(N.L + 2*ao^2 - 1)`. It was being
+fed `surface.occlusion`, which by then carried **GTAO**. Feeding a screen-space
+estimate into a hard cutoff turns every wobble in that estimate into a visible
+edge *in direct sunlight*; feeding it an interpolated vertex normal makes the
+cutoff trace the mesh triangulation. Between them that is exactly the reported
+pair: blotches following GTAO, triangular facets following the mesh, both worst
+on open sunlit hillsides where there is no micro-relief to justify either.
+
+It now reads the **material's own AO map and nothing else** — the terrain layer
+AO, or a mesh's occlusion map. That is what the term was designed against: a
+texture-scale record of relief below the pixel footprint. GTAO belongs to the
+ambient term, where it already is.
+
+This is the *second* correction to this input. The first took sky visibility
+out. The through-line is the same both times: a hard cutoff is only as
+well-behaved as the field it thresholds.
+
+## 2. The grey wash was D over-delivering, and the fog default was the cause
+
+Measured at `coastal-vista`, default sun: fog off 2515.70, fog on **6521.35**.
+The fog was contributing 60% of terrain radiance — a glow, not a distance cue.
+
+The D term itself is right. The density was not: 8e-4 /m was chosen against a
+fog medium lit *only by the sun*, which was much too dark for its density.
+Lighting it by the sky as well exposed how much fog that number actually asks
+for. It was always too high; the sun-only lighting was hiding it.
+
+Retuned to 2e-4 in both `PostProcessSettings::default` and
+`FogSettings::default`, kept in step deliberately: two defaults that disagree is
+how a loaded scene ends up looking different from a fresh one. Terrain radiance
+is now 3741.63 against 2515.70 fog-off — a third of the frame, which reads as
+distance.
+
+This was listed as "flagged, not fixed" an hour earlier. It is now fixed
+because a measurement said it had to be, which is the right reason.
+
+## 3. The ripple was a real bug in the horizon bake, in two parts
+
+Both found by writing a test that a perfectly uniform slope's uphill horizon
+angle must equal its slope angle, everywhere.
+
+**Part one: two samplings of one field.** Level 0 of the occluder pyramid was a
+*max* over the heightfield cells a texel covers, while the ground was a
+*bilinear* centre. On any slope the max sits above the centre, so every texel
+saw its neighbours as taller than they are. Both are now the same bilinear
+field; the max survives only in the pyramid's *reduction*, from mip 1 outward,
+which is where it was actually needed — that is what stops a thin ridge
+averaging away and ceasing to cast.
+
+**Part two, and the larger one: the cell's max was credited with the wrong
+distance.** A mip-`m` cell spans `2^m` texels and stores the tallest point
+anywhere in it, which may be most of a cell further away than the march's
+current position. Dividing that height by the near position's distance
+overstates the angle, by an amount that cycles with `s mod 2^m` — a ripple with
+a period of exactly the cell size, which is what a scale pattern is.
+
+Fixed by attributing the height to the cell's **far edge**. Two reasons that is
+the right edge: it is *exact* wherever the ground is locally linear (a monotonic
+slope puts its cell maximum at the far edge, so height over distance is just the
+slope, at every mip), and where it is wrong it **under**-shadows. A missing
+sliver of shadow at three hundred metres is invisible; a ripple of false shadow
+is what got reported. The cell centre was tried first and still left a spread.
+
+Measured on a uniform 26.6 degree slope, uphill horizon (true answer 75/255):
+
+| attribution | reading |
+|---|---|
+| as shipped | 75..90 |
+| cell centre | 75..79 |
+| **cell far edge** | **75..75** |
+
+Unit-stride marching also went from 8 texels to 16. The near field is where a
+wrong horizon angle is a *visible* wrong shadow, and the whole march is still
+around fifty samples.
+
+### The test was wrong before it was right
+
+`a_smooth_slope_does_not_ripple` first read azimuth 4 — **downhill** — got 0
+everywhere, and passed its spread check trivially while measuring nothing. It
+now reads azimuth 0 and asserts the value against the true slope angle as well
+as the spread, so it cannot pass by looking at flat data again.
+
+## 4. Not reproduced
+
+**Jitter.** Not seen in any still capture, and the reported session was flying
+at 175 m/s where motion blur and TAA are both in play. Candidates if it
+persists: specular AA reading screen-space derivatives that move with TAA's
+sub-pixel jitter, and the relief normal crossing a mip boundary. Both are
+testable with a held camera and a frame-to-frame diff; neither has been.
+
+## Test count
+
+450 renderer lib (9 in `horizon`, one new), 21 shader validation, 11
+hello_engine, 385 across `somnium_core`. One core test was constructing
+`TerrainTextureIds` field by field and broke on the new fields; it now uses
+`..Default::default()`, because a test about which ids get unbound has no
+opinion about the rest.

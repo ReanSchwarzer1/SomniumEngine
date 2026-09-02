@@ -327,12 +327,17 @@ mod tests {
 
     #[test]
     fn hero_bank_unbind_matches_the_island_gpu_budget() {
+        // `..Default::default()` on purpose. This test is about which ids
+        // `unbind_extra_bank` clears, and spelling out every field means a
+        // new one — TSUSHIMA added three — breaks a test that has no opinion
+        // about it.
         let mut ids = somnium_renderer::terrain::TerrainTextureIds {
             splat_maps: [1, 2, 3, 4, 5, 6, 7, 8],
             macro_map: 0,
             albedo: [1; 32],
             surface: [1; 32],
             virtual_texture: [-1, -1, -1, 0],
+            ..Default::default()
         };
         ids.unbind_extra_bank();
         assert!(ids.splat_maps[4..].iter().all(|&id| id < 0));

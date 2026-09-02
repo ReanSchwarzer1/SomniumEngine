@@ -297,12 +297,24 @@ override enable_specular_aa: bool = true;
 const SPEC_AA_SIGMA2: f32 = 0.15915494;
 const SPEC_AA_KAPPA: f32 = 0.18;
 
-/// Occlusion at the scale micro-shadowing is about: GTAO plus the material's
-/// own AO, and deliberately *not* TSUSHIMA-C's landscape-scale sky visibility.
+/// Occlusion at the scale micro-shadowing is actually about: **the material's
+/// own AO map, and nothing else.**
 ///
-/// Reset per pixel in `fs_main`. Non-terrain surfaces never overwrite it with
-/// anything but their own occlusion, so meshes see exactly what they always
-/// did.
+/// Not GTAO, and not TSUSHIMA-C's sky visibility. This took two goes to get
+/// right and the second failure is the instructive one.
+///
+/// `micro_shadow` is a **hard cutoff** — `saturate(N.L + 2ao^2 - 1)`. Feeding a
+/// hard cutoff a screen-space quantity means every wobble in GTAO's estimate
+/// becomes a *visible edge in direct sunlight*, and feeding it an interpolated
+/// vertex normal means the cutoff traces the mesh triangulation. Together they
+/// produced exactly that: dark blotches following GTAO, and triangular facets
+/// following the mesh, both worst on open sunlit hillsides where there is no
+/// micro-relief to justify either.
+///
+/// The material AO is the right input because it is what the term was designed
+/// against: a texture-scale record of relief below the pixel footprint, which
+/// is the only thing "micro-shadowing" is meant to describe. GTAO belongs to
+/// the ambient term, where it already is.
 var<private> micro_occlusion: f32 = 1.0;
 override enable_debug: bool = true;
 
@@ -1467,6 +1479,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface.occlusion = textureSample(
                 textures[material.occlusion_map], default_sampler, uv).r;
         }
+        // Phase TSUSHIMA-F1: the *material-scale* half, kept separately.
+        micro_occlusion = surface.occlusion;
     }
 
     var normal_variance = 0.0;
@@ -1572,17 +1586,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
     }
 
-    // Phase TSUSHIMA-F1. The micro-scale occlusion every surface gets:
-    // GTAO and the occlusion map, both already applied. Meshes stop here.
-    // The terrain branch below overwrites it after folding in the material's
-    // own AO and *before* folding in TSUSHIMA-C's landscape-scale sky
-    // visibility, which is a different question and must not reach this term.
-    //
-    // Written before the branch rather than after it precisely so the branch
-    // can overwrite it. A `min` after the branch looks equivalent and is not:
-    // it re-picks the post-sky-visibility value and cancels the whole point.
-    micro_occlusion = surface.occlusion;
-
     // ── Terrain (Phase 25A-2) ────────────────────────────────────────────────
     //
     // The only material branch terrain needs. Everything above it — decoding
@@ -1624,6 +1627,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // term the same way a glTF occlusion map is — the two know different
         // things, and GTAO cannot see detail below a pixel.
         surface.occlusion = surface.occlusion * terrain.occlusion;
+        // Phase TSUSHIMA-F1: the terrain material's own AO, on its own. See
+        // `micro_occlusion` for why GTAO must not be in here.
+        micro_occlusion = terrain.occlusion;
         terrain_taps = terrain.taps;
         terrain_discarded = terrain.discarded;
         terrain_selected_rgb = terrain.selected_rgb;
@@ -1709,13 +1715,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // term's occluders are a superset of the other's, which is exactly
         // what these two are not.
         let sky_vis = terrain_sky_visibility(tm, uv);
-        // Snapshot the *micro*-scale occlusion first. TSUSHIMA-F1's
-        // micro-shadowing must not see the landscape-scale term: sky
-        // visibility says what fraction of the sky a valley floor can reach,
-        // and micro-shadowing asks what sub-pixel relief shadows itself.
-        // Feeding it the product answered a question nobody asked and cut
-        // direct sun by 39% at a grazing sun. See `micro_occlusion`.
-        micro_occlusion = surface.occlusion;
         surface.occlusion = surface.occlusion * sky_vis;
         // The landscape-scale bent normal, **composed with** the contact-scale
         // one GTAO already wrote rather than replacing it. The two see

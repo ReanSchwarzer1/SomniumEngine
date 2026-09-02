@@ -265,34 +265,38 @@ pub fn bake(
     let to_height_coord = |i: usize, n: usize, total: u32| -> f32 {
         (i as f32 + 0.5) / n as f32 * (total - 1) as f32
     };
-    let mut ground = vec![0.0f32; count];
-    let mut occluder = vec![0.0f32; count];
-    for z in 0..n {
-        let hz = to_height_coord(z, n, total_z);
-        for x in 0..n {
-            let hx = to_height_coord(x, n, total_x);
-            let g = height_bilinear(heights, total_x, total_z, hx, hz) * height_scale;
-            ground[z * n + x] = g;
-            // The max over the heightfield samples this texel covers. When the
-            // output is finer than the heightfield this is just the bilinear
-            // value; when it is coarser it is what stops ridges disappearing.
-            let sx0 = (hx - 0.5 * (total_x - 1) as f32 / n as f32).floor().max(0.0) as usize;
-            let sx1 = ((hx + 0.5 * (total_x - 1) as f32 / n as f32).ceil() as usize)
-                .min(total_x as usize - 1);
-            let sz0 = (hz - 0.5 * (total_z - 1) as f32 / n as f32).floor().max(0.0) as usize;
-            let sz1 = ((hz + 0.5 * (total_z - 1) as f32 / n as f32).ceil() as usize)
-                .min(total_z as usize - 1);
-            let mut m = f32::NEG_INFINITY;
-            for sz in sz0..=sz1 {
-                for sx in sx0..=sx1 {
-                    m = m.max(heights[sz * total_x as usize + sx]);
-                }
-            }
-            occluder[z * n + x] = m * height_scale;
-        }
-    }
+    // **One field, sampled one way.** Level 0 of the occluder pyramid is the
+    // *same* bilinear height as the ground, not a max over the heightfield
+    // cells the texel covers.
+    //
+    // Using a max here was a real bug and it shipped. On any slope, the max
+    // over the two-by-two cells a texel spans sits above that texel's bilinear
+    // centre — by up to half a cell of rise, which on a 30-degree slope at one
+    // texel per metre is ~0.3 m. Every texel therefore saw its immediate
+    // neighbours as taller than they are, by an amount that varied with
+    // sub-texel phase, and the result was a regular scale-like ripple of
+    // false self-shadowing at exactly the map's texel frequency.
+    //
+    // The max still happens, in `MaxPyramid`'s *reduction*: from mip 1 outward
+    // a cell really does stand for many, and keeping its tallest point is what
+    // stops a thin ridge averaging away and ceasing to cast. That is where the
+    // property was needed and it is the only place it belongs. Near steps read
+    // mip 0, where both fields now agree and the only thing separating a texel
+    // from its neighbour is the terrain.
+    let ground: Vec<f32> = (0..count)
+        .map(|i| {
+            let (x, z) = (i % n, i / n);
+            height_bilinear(
+                heights,
+                total_x,
+                total_z,
+                to_height_coord(x, n, total_x),
+                to_height_coord(z, n, total_z),
+            ) * height_scale
+        })
+        .collect();
 
-    let pyramid = MaxPyramid::build(occluder, n);
+    let pyramid = MaxPyramid::build(ground.clone(), n);
     let max_mip = pyramid.max_mip();
 
     // Per-azimuth step length in metres, for the tangent's denominator.
@@ -329,20 +333,54 @@ pub fn bake(
                         }
                         // Unit steps while the caster is close and its exact
                         // height matters; doubling once it is far enough that
-                        // a coarser cell is smaller than the sun's penumbra
-                        // at that range.
-                        let mip = if s < 8 {
+                        // a coarser cell is smaller than the sun's penumbra at
+                        // that range.
+                        //
+                        // Sixteen texels of unit stride, not eight. The near
+                        // field is where a wrong horizon angle is a *visible*
+                        // wrong shadow, and it is cheap: the whole march is
+                        // still around fifty samples.
+                        let mip = if s < 16 {
                             0
                         } else {
-                            ((63 - s.leading_zeros()) as u32).saturating_sub(2).min(max_mip)
+                            ((63 - s.leading_zeros()) as u32).saturating_sub(3).min(max_mip)
                         };
                         let h = pyramid.sample(mip, sx, sz);
                         let dh = h - g;
                         if dh > 0.0 {
-                            let dist = s as f32 * step_len[a];
-                            if dist > 1e-4 {
-                                best_tan = best_tan.max(dh / dist);
-                            }
+                            // **Distance to the cell's centre, not to the
+                            // level-0 texel the march happens to be standing
+                            // on.** A mip-`m` cell spans 2^m texels and its
+                            // stored height is the tallest point *anywhere* in
+                            // it, which may be most of a cell further away
+                            // than `s`. Dividing that height by `s`'s distance
+                            // credits a far occluder with a near one's
+                            // distance and overstates the angle — by an amount
+                            // that cycles with `s mod 2^m`, which is a ripple
+                            // with a period of exactly the cell size.
+                            //
+                            // On a uniform 26.6-degree slope that showed as an
+                            // uphill horizon reading 75..90 where every texel
+                            // should read 75. `a_smooth_slope_does_not_ripple`
+                            // is the regression test.
+                            //
+                            // The **far** edge, not the centre. An occluder
+                            // could be anywhere in the cell, so the near edge
+                            // is the most-shadowing attribution and the far
+                            // edge the least. Two reasons to take the far one:
+                            // it is *exact* wherever the ground is locally
+                            // linear (a monotonic slope puts its cell maximum
+                            // at the far edge, and height over distance is
+                            // then just the slope, at every mip), and where it
+                            // is wrong it under-shadows. A missing sliver of
+                            // shadow at three hundred metres is invisible; a
+                            // ripple of false shadow is what got reported.
+                            // The centre split the difference and still left
+                            // 75..79.
+                            let cell = 1i64 << mip;
+                            let far = ((s / cell) * cell + cell - 1) as f32;
+                            let dist = far.max(1.0) * step_len[a];
+                            best_tan = best_tan.max(dh / dist);
                         }
                         s += 1i64 << mip;
                     }
@@ -595,6 +633,55 @@ mod tests {
         assert!(
             maps.angles_b[idx + 1] > 0,
             "a 600 m spike must be visible from the far corner"
+        );
+    }
+
+    #[test]
+    fn a_smooth_slope_does_not_ripple() {
+        // The regression test for the artifact that shipped in the first cut.
+        //
+        // On a perfectly uniform slope the uphill horizon angle is the slope
+        // angle, everywhere, with no texel-to-texel variation. Sampling the
+        // occluder as a *max* over covered cells while sampling the ground as
+        // a *bilinear* centre broke exactly that: the two disagreed by an
+        // amount that varied with sub-texel phase, so adjacent texels
+        // disagreed about their own horizon and the terrain grew a regular
+        // scale-like ripple of false self-shadowing.
+        //
+        // A neighbour-to-neighbour spread is what catches it. A mean would
+        // not: the bias is systematic, so the average was plausible while
+        // every individual texel was wrong.
+        let total = 129u32;
+        let mut h = vec![0.0f32; (total * total) as usize];
+        for z in 0..total as usize {
+            for x in 0..total as usize {
+                h[z * total as usize + x] = x as f32 * 0.5; // ~26.6 degrees
+            }
+        }
+        let n = 128u32;
+        let maps = bake(&h, total, total, 1.0, 1.0, n);
+        // Height rises with +X, so **azimuth 0** (+X, in `angles_a`) is
+        // uphill. The first version of this test read azimuth 4 — downhill —
+        // got 0 everywhere, and passed its spread check trivially while
+        // measuring nothing.
+        let uphill = |x: usize, z: usize| maps.angles_a[(z * n as usize + x) * 4];
+        let row = 64usize;
+        let mut lo = u8::MAX;
+        let mut hi = u8::MIN;
+        for x in 16..112usize {
+            let a = uphill(x, row);
+            lo = lo.min(a);
+            hi = hi.max(a);
+        }
+        // atan(0.5) = 26.57 degrees, packed as 26.57/90*255 = 75.
+        let expected = (0.5f32.atan() / std::f32::consts::FRAC_PI_2 * 255.0).round() as u8;
+        assert!(
+            hi - lo <= 1,
+            "a uniform slope must not ripple: uphill horizon spans {lo}..{hi}"
+        );
+        assert!(
+            lo.abs_diff(expected) <= 3 && hi.abs_diff(expected) <= 3,
+            "uphill horizon {lo}..{hi} should be the slope angle {expected}"
         );
     }
 
