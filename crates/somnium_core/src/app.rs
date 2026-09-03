@@ -574,8 +574,93 @@ pub struct FoliageEntry {
     pub min_layer_weight: f32,
     /// Largest lean from vertical, degrees. Zero for anything that grew.
     pub max_tilt_deg: f32,
+    /// Steepest ground this entry may be placed on, degrees. A cliff face is
+    /// the whole reason this is per-entry: the brush's 40° default is right for
+    /// grass and refuses to put a rock wall anywhere a rock wall belongs.
+    pub max_slope_deg: f32,
     pub scale_min: f32,
     pub scale_max: f32,
+}
+
+impl FoliageEntry {
+    /// Ground cover: a spread brush, upright, on any ground that is not a
+    /// cliff. Grass grew toward the light, so it does not lean.
+    const fn cover(name: &'static str, path: &'static str, density: f32, lo: f32, hi: f32) -> Self {
+        Self {
+            name,
+            path,
+            single: false,
+            density,
+            layer: 0,
+            min_layer_weight: 0.0,
+            max_tilt_deg: 0.0,
+            max_slope_deg: 40.0,
+            scale_min: lo,
+            scale_max: hi,
+        }
+    }
+
+    /// Ground cover that only belongs on one material — moss on mossy rock,
+    /// nettles on mud. Same shape as [`Self::cover`] with the layer test on.
+    const fn cover_on(
+        name: &'static str,
+        path: &'static str,
+        density: f32,
+        layer: u8,
+        min_weight: f32,
+        lo: f32,
+        hi: f32,
+    ) -> Self {
+        Self {
+            layer,
+            min_layer_weight: min_weight,
+            ..Self::cover(name, path, density, lo, hi)
+        }
+    }
+
+    /// A prop placed one at a time where the cursor is: trees, boulders, cliff
+    /// faces. Density is meaningless for these and `single` is why.
+    const fn prop(
+        name: &'static str,
+        path: &'static str,
+        layer: u8,
+        min_weight: f32,
+        max_slope_deg: f32,
+        lo: f32,
+        hi: f32,
+    ) -> Self {
+        Self {
+            single: true,
+            layer,
+            min_layer_weight: min_weight,
+            max_slope_deg,
+            ..Self::cover(name, path, 1.0, lo, hi)
+        }
+    }
+
+    /// Debris: a spread brush that leans, and that refuses ground made of
+    /// something else. The lean is the whole difference between a scatter that
+    /// reads as fallen and one that reads as placed.
+    const fn debris(
+        name: &'static str,
+        path: &'static str,
+        density: f32,
+        layer: u8,
+        min_weight: f32,
+        max_tilt_deg: f32,
+        lo: f32,
+        hi: f32,
+    ) -> Self {
+        Self {
+            layer,
+            min_layer_weight: min_weight,
+            max_tilt_deg,
+            // Debris settles on ground a plant would refuse — scree is steep by
+            // definition.
+            max_slope_deg: 55.0,
+            ..Self::cover(name, path, density, lo, hi)
+        }
+    }
 }
 
 /// The foliage palette: what the brush can paint (Phase 17F, extended by
@@ -585,88 +670,257 @@ pub struct FoliageEntry {
 /// project has imported, which is why the brush stores a palette *index* rather
 /// than anything about the mesh itself.
 ///
-/// All six are CC0 from Poly Haven — see ATTRIBUTION.md. The two debris entries
-/// are **not committed to the repository**; `tools/fetch_foliage_rocks.sh` puts
-/// them where these paths expect them. Until it is run the brush warns once and
-/// places nothing, which is what `ensure_palette_mesh` already does for any
-/// entry that is not installed.
-pub const FOLIAGE_PALETTE: [FoliageEntry; 6] = [
-    FoliageEntry {
-        name: "Grass Medium",
-        path: "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
-        single: false,
-        density: 2.0,
-        layer: 0,
-        min_layer_weight: 0.0,
-        max_tilt_deg: 0.0,
-        scale_min: 0.8,
-        scale_max: 1.3,
-    },
-    FoliageEntry {
-        name: "Grass Bermuda",
-        path: "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
-        single: false,
-        density: 2.0,
-        layer: 0,
-        min_layer_weight: 0.0,
-        max_tilt_deg: 0.0,
-        scale_min: 0.8,
-        scale_max: 1.3,
-    },
-    FoliageEntry {
-        name: "Fir Sapling",
-        path: "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
-        single: true,
-        density: 2.0,
-        layer: 0,
-        min_layer_weight: 0.0,
-        max_tilt_deg: 0.0,
-        scale_min: 0.8,
-        scale_max: 1.3,
-    },
-    FoliageEntry {
-        name: "Island Tree",
-        path: "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
-        single: true,
-        density: 2.0,
-        layer: 0,
-        min_layer_weight: 0.0,
-        max_tilt_deg: 0.0,
-        scale_min: 0.8,
-        scale_max: 1.3,
-    },
-    // TSUSHIMA-I, the contact scale: between the texture underfoot and the
-    // tree on the ridge this world has nothing at all, and ground with nothing
-    // on it reads as a surface rather than as a place.
-    FoliageEntry {
-        name: "Pebbles",
-        path: "assets/foliage/namaqualand_stones_01/namaqualand_stones_01_2k.gltf",
-        single: false,
-        // Denser than grass, and much smaller. Pebbles read as a *field*; a
+/// All CC0 from Poly Haven — see ATTRIBUTION.md. `tools/fetch_foliage.sh`
+/// downloads every one of them and verifies it against the publisher's MD5;
+/// until it has run, an entry whose file is missing warns once and places
+/// nothing, which is what `ensure_palette_mesh` already does.
+///
+/// Layer indices are `terrain::textures::LAYER_NAMES`: 0 Grass, 1 Forest Floor,
+/// 2 Rock, 5 Mud, 7 Gravel, 13 Mossy Rock, 14 Cliff, 15 Talus, 26 Gray Talus.
+pub const FOLIAGE_PALETTE: [FoliageEntry; 25] = [
+    // ── Grass, flowers and ground cover ─────────────────────────────────────
+    FoliageEntry::cover(
+        "Grass Medium",
+        "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
+        2.0,
+        0.8,
+        1.3,
+    ),
+    FoliageEntry::cover(
+        "Grass Bermuda",
+        "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
+        2.5,
+        0.8,
+        1.3,
+    ),
+    FoliageEntry::cover(
+        "Grass Tall",
+        "assets/foliage/grass_medium_02/grass_medium_02_2k.gltf",
+        1.8,
+        0.8,
+        1.4,
+    ),
+    FoliageEntry::cover(
+        "Dandelions",
+        "assets/foliage/dandelion_01/dandelion_01_2k.gltf",
+        1.5,
+        0.8,
+        1.2,
+    ),
+    FoliageEntry::cover(
+        "Shrub Low",
+        "assets/foliage/shrub_03/shrub_03_2k.gltf",
+        0.5,
+        0.8,
+        1.4,
+    ),
+    FoliageEntry::cover(
+        "Shrub Broadleaf",
+        "assets/foliage/shrub_02/shrub_02_2k.gltf",
+        0.35,
+        0.8,
+        1.5,
+    ),
+    // Moss wants the layer it is named after; a moss patch on open sand is the
+    // artifact the layer test exists to prevent.
+    FoliageEntry::cover_on(
+        "Moss",
+        "assets/foliage/moss_01/moss_01_2k.gltf",
+        3.0,
+        13,
+        0.25,
+        0.7,
+        1.4,
+    ),
+    FoliageEntry::cover_on(
+        "Fern",
+        "assets/foliage/fern_02/fern_02_2k.gltf",
+        0.8,
+        1,
+        0.2,
+        0.7,
+        1.3,
+    ),
+    FoliageEntry::cover_on(
+        "Nettles",
+        "assets/foliage/nettle_plant/nettle_plant_2k.gltf",
+        1.2,
+        5,
+        0.15,
+        0.8,
+        1.2,
+    ),
+    // ── Trees ───────────────────────────────────────────────────────────────
+    FoliageEntry::prop(
+        "Fir Sapling",
+        "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
+        0,
+        0.0,
+        35.0,
+        0.8,
+        1.3,
+    ),
+    FoliageEntry::prop(
+        "Island Tree",
+        "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
+        0,
+        0.0,
+        30.0,
+        0.8,
+        1.3,
+    ),
+    FoliageEntry::prop(
+        "Quiver Tree",
+        "assets/foliage/quiver_tree_01/quiver_tree_01_2k.gltf",
+        0,
+        0.0,
+        30.0,
+        0.8,
+        1.3,
+    ),
+    // ── Deadwood ────────────────────────────────────────────────────────────
+    FoliageEntry::prop(
+        "Tree Stump",
+        "assets/foliage/tree_stump_01/tree_stump_01_2k.gltf",
+        1,
+        0.15,
+        35.0,
+        0.7,
+        1.3,
+    ),
+    FoliageEntry::prop(
+        "Fallen Trunk",
+        "assets/foliage/dead_tree_trunk/dead_tree_trunk_2k.gltf",
+        1,
+        0.15,
+        35.0,
+        0.8,
+        1.4,
+    ),
+    FoliageEntry::debris(
+        "Dry Branches",
+        "assets/foliage/dry_branches_medium_01/dry_branches_medium_01_2k.gltf",
+        0.6,
+        1,
+        0.1,
+        25.0,
+        0.6,
+        1.2,
+    ),
+    // ── Debris and rocks, pebble scale upward ───────────────────────────────
+    //
+    // TSUSHIMA-I, the contact scale: between the texture underfoot and the tree
+    // on the ridge this world had nothing at all, and ground with nothing on it
+    // reads as a surface rather than as a place.
+    FoliageEntry::debris(
+        // Denser than grass and much smaller. Pebbles read as a *field*; a
         // sparse scatter of them reads as litter someone dropped.
-        density: 6.0,
-        layer: 7, // Gravel
+        "Pebbles",
+        "assets/foliage/namaqualand_stones_01/namaqualand_stones_01_2k.gltf",
+        6.0,
+        7,
         // Half the texel has to be gravel. Lower and the fringe wanders out
         // into whatever is painted beside it; higher and a boundary that is
         // genuinely half gravel gets nothing at all.
-        min_layer_weight: 0.5,
-        max_tilt_deg: 35.0,
-        scale_min: 0.35,
-        scale_max: 0.9,
-    },
-    FoliageEntry {
-        name: "Scree Rocks",
-        path: "assets/foliage/rock_moss_set_01/rock_moss_set_01_2k.gltf",
-        single: false,
-        density: 0.4,
-        layer: 15, // Talus
-        min_layer_weight: 0.35,
+        0.5,
+        35.0,
+        0.35,
+        0.9,
+    ),
+    FoliageEntry::debris(
+        "Scree Rocks",
+        "assets/foliage/rock_moss_set_01/rock_moss_set_01_2k.gltf",
+        0.4,
+        15,
+        0.35,
         // Less lean than the pebbles: a rock this size has usually settled onto
         // a face rather than come to rest propped against something.
-        max_tilt_deg: 18.0,
-        scale_min: 0.6,
-        scale_max: 1.6,
-    },
+        18.0,
+        0.6,
+        1.6,
+    ),
+    FoliageEntry::debris(
+        "Mossy Rocks",
+        "assets/foliage/rock_moss_set_02/rock_moss_set_02_2k.gltf",
+        0.35,
+        13,
+        0.3,
+        15.0,
+        0.6,
+        1.6,
+    ),
+    FoliageEntry::debris(
+        "Rock Small",
+        "assets/foliage/rock_07/rock_07_2k.gltf",
+        0.5,
+        2,
+        0.25,
+        22.0,
+        0.5,
+        1.2,
+    ),
+    FoliageEntry::debris(
+        "Rock Medium",
+        "assets/foliage/rock_09/rock_09_2k.gltf",
+        0.25,
+        2,
+        0.25,
+        15.0,
+        0.7,
+        1.5,
+    ),
+    FoliageEntry::debris(
+        "Stone",
+        "assets/foliage/stone_01/stone_01_2k.gltf",
+        0.3,
+        26,
+        0.25,
+        20.0,
+        0.6,
+        1.4,
+    ),
+    FoliageEntry::prop(
+        "Boulder",
+        "assets/foliage/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
+        2,
+        0.2,
+        50.0,
+        0.7,
+        2.0,
+    ),
+    // ── Cliff faces ─────────────────────────────────────────────────────────
+    //
+    // No layer requirement and a slope limit that admits a wall. These are
+    // placed against terrain, not on it — an author drops one where the
+    // heightfield's own silhouette needs help, and refusing steep ground would
+    // refuse every place one belongs.
+    FoliageEntry::prop(
+        "Cliff Face",
+        "assets/foliage/rock_face_01/rock_face_01_2k.gltf",
+        14,
+        0.0,
+        90.0,
+        0.8,
+        2.5,
+    ),
+    FoliageEntry::prop(
+        "Cliff Face Tall",
+        "assets/foliage/rock_face_02/rock_face_02_2k.gltf",
+        14,
+        0.0,
+        90.0,
+        0.8,
+        2.5,
+    ),
+    FoliageEntry::prop(
+        "Desert Cliff",
+        "assets/foliage/namaqualand_cliff_01/namaqualand_cliff_01_2k.gltf",
+        14,
+        0.0,
+        90.0,
+        0.8,
+        2.5,
+    ),
 ];
 
 /// One drawable piece of a palette entry.
@@ -3810,9 +4064,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             .world
             .entities()
             .filter(|entity| !crate::is_hidden(&self.world, *entity))
-            .filter_map(|entity| self.world.get::<WaterComponent>(entity).copied())
-            .filter(|water| water.enabled && water.water_id != u32::MAX && water.preset != 0)
-            .map(WaterComponent::descriptor)
+            .filter_map(|entity| {
+                let water = self.world.get::<WaterComponent>(entity).copied()?;
+                (water.enabled && water.water_id != u32::MAX && water.preset != 0)
+                    .then(|| self.water_descriptor(entity, water))
+            })
             .collect();
         if let (Some(renderer), Some(render_ctx)) = (&mut self.renderer, &self.render_ctx) {
             let active: std::collections::HashSet<u32> = water_descriptors
@@ -3972,6 +4228,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         .unwrap_or(false),
                     lod_morph: t.lod_morph,
                     morph_start: t.lod_morph_start,
+                    horizon_shadow_on: t.horizon_shadow,
+                    sky_visibility_on: t.sky_visibility,
+                    relief_normal_on: t.relief_normal,
+                    sky_visibility: t.sky_visibility_strength,
+                    relief_takeover: t.relief_takeover,
+                    splat_noise: t.weight_noise_strength,
+                    splat_noise_scale: t.weight_noise_scale,
+                    macro_octaves: t.macro_octave_scale,
+                    damp_tint: t.skyvis_tint,
                 })
             });
             let brush = self.foliage_brush;
@@ -5321,6 +5586,63 @@ impl<G: GameApp> Engine<G> {
     fn selected_terrain(&self) -> Option<TerrainComponent> {
         let entity = self.selection.primary?;
         self.world.get::<TerrainComponent>(entity).copied()
+    }
+
+    /// One water body descriptor, with a channel body given its centreline.
+    ///
+    /// `WaterComponent::descriptor` cannot do this on its own: the path lives
+    /// on a *sibling* `SplineComponent`, and the component only sees itself.
+    /// Running it every frame is what makes a river editable — see
+    /// `landscape::channel_descriptor` for why that needs no dirty flag.
+    fn water_descriptor(
+        &self,
+        entity: somnium_ecs::Entity,
+        water: WaterComponent,
+    ) -> somnium_renderer::water_body::WaterBodyDescriptor {
+        if water.preset != somnium_renderer::water_body::WATER_PRESET_CHANNEL {
+            return water.descriptor();
+        }
+        let Some(spline) = self.world.get::<crate::SplineComponent>(entity) else {
+            return water.descriptor();
+        };
+        // Spline points are entity-local and the bake works in terrain-local
+        // metres, so the entity transform is the bridge.
+        //
+        // That transform is terrain-local either way: the landscape preset
+        // parents its water to the terrain, and `Create -> River` places its
+        // body *at* the terrain's translation without parenting it. Both put
+        // the entity in the same frame, which is the property this relies on
+        // and the reason the create handler matches the transform rather than
+        // leaving the body at the origin.
+        let model = self
+            .world
+            .get::<Transform>(entity)
+            .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+        crate::landscape::channel_descriptor(water, spline, model)
+    }
+
+    /// Flip one of TSUSHIMA's baked-map enables on the selected terrain.
+    ///
+    /// One helper and a field accessor rather than three near-identical event
+    /// arms: the three differ only in which `bool` they reach, and writing that
+    /// out three times is how the third one ends up missing the dirty flag the
+    /// first two set.
+    fn toggle_terrain_baked_map(
+        &mut self,
+        field: impl Fn(&mut somnium_renderer::terrain::TerrainData) -> &mut bool,
+    ) {
+        let Some(component) = self.selected_terrain() else {
+            return;
+        };
+        let Some(terrain) = self
+            .renderer
+            .as_mut()
+            .and_then(|renderer| renderer.terrain_mut(component.terrain_id))
+        else {
+            return;
+        };
+        let slot = field(terrain);
+        *slot = !*slot;
     }
 
     /// Model matrix of the selected terrain entity.
@@ -7006,9 +7328,11 @@ impl<G: GameApp> Engine<G> {
 
     /// Point the brush at the selected entry's own defaults.
     ///
-    /// Only the fields the palette has an opinion about. Radius and slope stay
-    /// where the author put them, because those are about how they are working
-    /// and not about what they are placing.
+    /// Only the fields the palette has an opinion about. Radius stays where the
+    /// author put it, because that is about how they are working rather than
+    /// about what they are placing. Slope is not: a cliff face has to be
+    /// allowed onto ground the grass default refuses, and that is a fact about
+    /// the cliff.
     fn apply_foliage_palette_defaults(&mut self) {
         let Some(entry) = FOLIAGE_PALETTE.get(self.foliage_brush.kind as usize) else {
             return;
@@ -7019,6 +7343,7 @@ impl<G: GameApp> Engine<G> {
         b.layer = entry.layer;
         b.min_layer_weight = entry.min_layer_weight;
         b.max_tilt_deg = entry.max_tilt_deg;
+        b.max_slope_deg = entry.max_slope_deg;
         b.scale_min = entry.scale_min;
         b.scale_max = entry.scale_max;
     }
@@ -8529,6 +8854,101 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
+            EditorEvent::CreateEntity(
+                kind @ (CreateKind::Lake
+                | CreateKind::Ocean
+                | CreateKind::Sea
+                | CreateKind::River),
+            ) => {
+                use crate::WaterBodyKind as K;
+                let body = match kind {
+                    CreateKind::Ocean => K::Ocean,
+                    CreateKind::Sea => K::Sea,
+                    CreateKind::River => K::River,
+                    _ => K::Lake,
+                };
+                // A body of water is defined against a terrain: its bounds are
+                // terrain-local, and the shader reads that terrain's depth to
+                // find the shoreline. Without one there is nothing to be the
+                // water *of*.
+                let Some((terrain_entity, terrain)) = self
+                    .selected_terrain()
+                    .map(|component| (self.selection.primary, component))
+                    .or_else(|| {
+                        self.world.entities().find_map(|entity| {
+                            let component = self.world.get::<TerrainComponent>(entity).copied()?;
+                            Some((Some(entity), component))
+                        })
+                    })
+                else {
+                    warn!("Create {}: the scene has no terrain to place it on", body.label());
+                    return;
+                };
+                // Placed in the terrain's own frame rather than parented to it.
+                // `respawn` sets a `Parent` component but does not push into the
+                // parent's `Children`, and the one place that does — the
+                // landscape command — cleans both up on undo. Matching the
+                // terrain's transform gets the same local space with none of
+                // that bookkeeping to get wrong.
+                let placement = terrain_entity
+                    .and_then(|entity| self.world.get::<Transform>(entity))
+                    .map_or(glam::Vec3::ZERO, |transform| transform.translation);
+
+                let Some((renderer, render_ctx)) =
+                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
+                else {
+                    return;
+                };
+                let width = terrain.grid_x as f32 * terrain.chunk_cells as f32 * terrain.cell_size;
+                let depth = terrain.grid_z as f32 * terrain.chunk_cells as f32 * terrain.cell_size;
+                // A river is given a reach across the middle of the terrain
+                // rather than the whole of it; the other three fill it, because
+                // that is what "the sea" means when you place one.
+                let bounds = if body == K::River {
+                    [width * 0.25, depth * 0.25, width * 0.75, depth * 0.75]
+                } else {
+                    [0.0, 0.0, width, depth]
+                };
+                match crate::landscape::create_water_body(
+                    renderer,
+                    render_ctx,
+                    body,
+                    terrain.terrain_id,
+                    bounds,
+                ) {
+                    Ok(mut snapshot) => {
+                        snapshot.transform = Some(Transform::from_translation(placement));
+                        self.undo_stack.push(
+                            Box::new(CreateEntityCmd::new(snapshot)),
+                            &mut self.world,
+                            &mut self.selection.primary,
+                        );
+                        info!("Created {} on terrain {}", body.label(), terrain.terrain_id);
+                    }
+                    Err(error) => warn!("Create {}: {error}", body.label()),
+                }
+            }
+
+            EditorEvent::CreateEntity(CreateKind::EmptyTerrain) => {
+                // Like the Terrain arm above, this has to happen in the engine
+                // layer: the terrain's GPU resources are allocated before the
+                // entity exists, and the id it hands back is what the component
+                // carries.
+                let Some((renderer, render_ctx)) =
+                    self.renderer.as_mut().zip(self.render_ctx.as_ref())
+                else {
+                    return;
+                };
+                let snapshot = crate::landscape::create_empty_terrain(renderer, render_ctx);
+                let [wx, wz] = somnium_renderer::terrain::TerrainDescriptor::default().world_size();
+                self.undo_stack.push(
+                    Box::new(CreateEntityCmd::new(snapshot)),
+                    &mut self.world,
+                    &mut self.selection.primary,
+                );
+                info!("Created empty terrain ({wx:.0}x{wz:.0} m, flat, layer 0)");
+            }
+
             EditorEvent::CreateEntity(kind) => {
                 let name_str = kind.label();
                 let light = match kind {
@@ -9006,7 +9426,13 @@ impl<G: GameApp> Engine<G> {
                     | TT::Relief
                     | TT::Wetness
                     | TT::MacroStrength
-                    | TT::MorphStart => {
+                    | TT::MorphStart
+                    | TT::SkyVisibility
+                    | TT::ReliefTakeover
+                    | TT::SplatNoise
+                    | TT::SplatNoiseScale
+                    | TT::MacroOctaves
+                    | TT::DampTint => {
                         let Some(component) = self.world.get::<TerrainComponent>(entity).copied()
                         else {
                             return;
@@ -9035,6 +9461,41 @@ impl<G: GameApp> Engine<G> {
                             TT::Wetness => terrain.wetness = value.clamp(0.0, 1.0),
                             TT::MacroStrength => terrain.macro_strength = value.clamp(0.0, 1.0),
                             TT::MorphStart => terrain.lod_morph_start = value.clamp(0.0, 1.0),
+                            // Phase TSUSHIMA. Every one of these is a strength
+                            // whose zero is an exact identity in the shader, so
+                            // dragging a slider to its left end gives the
+                            // pre-phase image rather than a faint version of the
+                            // new one. The upper bounds are the point past which
+                            // the term stops describing ground and starts
+                            // describing a filter.
+                            TT::SkyVisibility => {
+                                terrain.sky_visibility_strength = value.clamp(0.0, 1.0);
+                            }
+                            // Below the near cascade's range there is nothing for
+                            // the baked normal to improve on, and past a few
+                            // hundred metres the mesh normal it replaces is long
+                            // gone anyway.
+                            TT::ReliefTakeover => {
+                                terrain.relief_takeover = value.clamp(10.0, 600.0);
+                            }
+                            // Past 1.0 the `4*w*(1-w)` envelope can carry a
+                            // weight the whole way across its band, which stops
+                            // being an interlocked boundary and becomes a
+                            // different boundary.
+                            TT::SplatNoise => {
+                                terrain.weight_noise_strength = value.clamp(0.0, 1.0);
+                            }
+                            // Cycles per metre. The upper end is a boundary that
+                            // breaks up below the size of one splat texel, which
+                            // the splat map cannot resolve and the mip chain
+                            // averages away.
+                            TT::SplatNoiseScale => {
+                                terrain.weight_noise_scale = value.clamp(0.02, 2.0);
+                            }
+                            TT::MacroOctaves => {
+                                terrain.macro_octave_scale = value.clamp(0.0, 4.0);
+                            }
+                            TT::DampTint => terrain.skyvis_tint = value.clamp(0.0, 4.0),
                             _ => unreachable!(),
                         }
                     }
@@ -9278,6 +9739,21 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::ToggleTerrainHex => self.toggle_render_switch("hex_tiling"),
 
             EditorEvent::ToggleTerrainParallax => self.toggle_render_switch("terrain_parallax"),
+
+            // Phase TSUSHIMA-B/C/E. These three are enabled by their baked map
+            // being *bound* rather than by a strength, so they are checkboxes
+            // and not sliders: unbinding is the exact pre-phase behaviour,
+            // where a strength of zero would still be a texture fetch and a
+            // multiply by one.
+            EditorEvent::ToggleTerrainHorizonShadow => {
+                self.toggle_terrain_baked_map(|t| &mut t.horizon_shadow);
+            }
+            EditorEvent::ToggleTerrainSkyVisibility => {
+                self.toggle_terrain_baked_map(|t| &mut t.sky_visibility);
+            }
+            EditorEvent::ToggleTerrainReliefNormal => {
+                self.toggle_terrain_baked_map(|t| &mut t.relief_normal);
+            }
 
             // The environment override and the refresh-on-enable that used to
             // be written out here both live in the shared path now: `set`
@@ -11061,5 +11537,117 @@ mod viewport_control_tests {
             ),
             Some(0.0)
         );
+    }
+
+    use super::FOLIAGE_PALETTE;
+
+    /// Every palette entry's mesh is one the fetch script knows how to get.
+    ///
+    /// The failure mode this pins is quiet: a typo in a path, or an entry added
+    /// without adding it to the script, gives a brush that warns "not
+    /// installed" forever, and nobody can tell from that whether the download
+    /// was never run or the name is wrong.
+    #[test]
+    fn the_palette_matches_the_fetch_script() {
+        let script = include_str!("../../../tools/fetch_foliage.sh");
+        let listed: Vec<&str> = script
+            .split("ALL=(")
+            .nth(1)
+            .expect("the script still declares ALL=(")
+            .split(')')
+            .next()
+            .expect("ALL=( is still closed")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+
+        for entry in FOLIAGE_PALETTE {
+            // `assets/foliage/<slug>/<slug>_2k.gltf`
+            let slug = entry
+                .path
+                .strip_prefix("assets/foliage/")
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_else(|| panic!("{} is not under assets/foliage", entry.name));
+            assert!(
+                listed.contains(&slug),
+                "palette entry {} wants {slug}, which tools/fetch_foliage.sh does not fetch",
+                entry.name
+            );
+            assert!(
+                entry.path.ends_with(&format!("/{slug}_2k.gltf")),
+                "{} does not follow <slug>/<slug>_2k.gltf, which is the layout                  the fetch script writes",
+                entry.name
+            );
+        }
+
+        for slug in listed {
+            assert!(
+                FOLIAGE_PALETTE.iter().any(|e| e.path.contains(slug)),
+                "the fetch script downloads {slug}, which no palette entry uses"
+            );
+        }
+    }
+
+    /// The combo box lists exactly what the palette holds, in order.
+    ///
+    /// `somnium_ui` sits below `somnium_core` in the dependency graph, so it
+    /// cannot read `FOLIAGE_PALETTE` and keeps its own display list. That is a
+    /// duplicate, and this is what stops it drifting — a mislabelled entry
+    /// paints something other than what it says.
+    #[test]
+    fn the_combo_box_lists_the_palette() {
+        assert_eq!(
+            somnium_ui::FOLIAGE_KIND_NAMES.len(),
+            FOLIAGE_PALETTE.len(),
+            "the palette and the UI's name list are different lengths"
+        );
+        for (index, entry) in FOLIAGE_PALETTE.iter().enumerate() {
+            assert_eq!(
+                somnium_ui::FOLIAGE_KIND_NAMES[index], entry.name,
+                "palette index {index} disagrees about its name"
+            );
+        }
+    }
+
+    /// Every entry's brush defaults have to be usable, not merely present.
+    ///
+    /// A scale range the wrong way round, a density of zero on a spread brush
+    /// or a layer index past the table are all silent: the brush simply places
+    /// nothing and the author concludes the mesh is broken.
+    #[test]
+    fn every_palette_entry_can_actually_paint() {
+        let layers = somnium_renderer::terrain::textures::TERRAIN_LAYER_COUNT;
+        for entry in FOLIAGE_PALETTE {
+            assert!(
+                entry.scale_min > 0.0 && entry.scale_min <= entry.scale_max,
+                "{}: scale range {}..{} is empty or inverted",
+                entry.name,
+                entry.scale_min,
+                entry.scale_max
+            );
+            assert!(
+                entry.single || entry.density > 0.0,
+                "{}: a spread brush at zero density places nothing",
+                entry.name
+            );
+            assert!(
+                u32::from(entry.layer) < layers,
+                "{}: layer {} is past the {layers}-layer table",
+                entry.name,
+                entry.layer
+            );
+            assert!(
+                (0.0..=1.0).contains(&entry.min_layer_weight),
+                "{}: a layer threshold above 1 can never be met",
+                entry.name
+            );
+            assert!(
+                (0.0..=90.0).contains(&entry.max_tilt_deg)
+                    && (0.0..=90.0).contains(&entry.max_slope_deg),
+                "{}: angles are degrees from vertical and horizontal, 0..=90",
+                entry.name
+            );
+        }
     }
 }

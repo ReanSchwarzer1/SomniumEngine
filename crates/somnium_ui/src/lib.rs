@@ -299,6 +299,16 @@ struct ToolHandles {
     terrain_relief: NodeHandle,
     terrain_wetness: NodeHandle,
     terrain_macro: NodeHandle,
+    // Phase TSUSHIMA: three enables and six strengths.
+    terrain_horizon_toggle: NodeHandle,
+    terrain_skyvis_toggle: NodeHandle,
+    terrain_relief_map_toggle: NodeHandle,
+    terrain_skyvis: NodeHandle,
+    terrain_relief_takeover: NodeHandle,
+    terrain_splat_noise: NodeHandle,
+    terrain_splat_noise_scale: NodeHandle,
+    terrain_macro_octaves: NodeHandle,
+    terrain_damp_tint: NodeHandle,
     terrain_debug: NodeHandle,
 
     foliage_section: NodeHandle,
@@ -394,6 +404,17 @@ pub struct TerrainInspectorState {
     pub clipmap: bool,
     pub lod_morph: bool,
     pub morph_start: f32,
+    // Phase TSUSHIMA. `..._on` are the three baked maps, which are enabled by
+    // being *bound* rather than by a strength, so they stay booleans.
+    pub horizon_shadow_on: bool,
+    pub sky_visibility_on: bool,
+    pub relief_normal_on: bool,
+    pub sky_visibility: f32,
+    pub relief_takeover: f32,
+    pub splat_noise: f32,
+    pub splat_noise_scale: f32,
+    pub macro_octaves: f32,
+    pub damp_tint: f32,
 }
 
 /// One line of the profiler overlay (Phase 29).
@@ -430,11 +451,32 @@ const CONTENT_GAP: f32 = 10.0;
 /// does not depend on the engine, so the picker sends back an index and the
 /// engine decides what that means — which is also what lets a content drawer
 /// replace the list later without touching this code.
-pub const FOLIAGE_KIND_NAMES: [&str; 4] = [
+pub const FOLIAGE_KIND_NAMES: [&str; 25] = [
     "Grass Medium",
     "Grass Bermuda",
+    "Grass Tall",
+    "Dandelions",
+    "Shrub Low",
+    "Shrub Broadleaf",
+    "Moss",
+    "Fern",
+    "Nettles",
     "Fir Sapling",
     "Island Tree",
+    "Quiver Tree",
+    "Tree Stump",
+    "Fallen Trunk",
+    "Dry Branches",
+    "Pebbles",
+    "Scree Rocks",
+    "Mossy Rocks",
+    "Rock Small",
+    "Rock Medium",
+    "Stone",
+    "Boulder",
+    "Cliff Face",
+    "Cliff Face Tall",
+    "Desert Cliff",
 ];
 
 /// The table entry closest to a value, so a settings file holding `0.3` shows
@@ -6713,6 +6755,25 @@ impl UiManager {
                     .send(NumericFieldMessage::set_value(macro_s, v.macro_strength));
                 self.native_ui
                     .send(NumericFieldMessage::set_value(debug, v.debug_view));
+                for (handle, value) in [
+                    (h.terrain_skyvis, v.sky_visibility),
+                    (h.terrain_relief_takeover, v.relief_takeover),
+                    (h.terrain_splat_noise, v.splat_noise),
+                    (h.terrain_splat_noise_scale, v.splat_noise_scale),
+                    (h.terrain_macro_octaves, v.macro_octaves),
+                    (h.terrain_damp_tint, v.damp_tint),
+                ] {
+                    self.native_ui
+                        .send(NumericFieldMessage::set_value(handle, value));
+                }
+                for (handle, on) in [
+                    (h.terrain_horizon_toggle, v.horizon_shadow_on),
+                    (h.terrain_skyvis_toggle, v.sky_visibility_on),
+                    (h.terrain_relief_map_toggle, v.relief_normal_on),
+                ] {
+                    self.native_ui
+                        .send(CheckBoxMessage::set_checked(handle, on));
+                }
                 self.native_ui.send(NumericFieldMessage::set_value(
                     h.terrain_morph_start,
                     v.morph_start,
@@ -7130,6 +7191,32 @@ impl UiManager {
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
+    /// The Phase TSUSHIMA baked-map enables, as a table.
+    ///
+    /// Two separate message pumps dispatch inspector checkboxes, and each is a
+    /// chain of `if destination == handle` blocks that has to be kept in step
+    /// with the other by hand. Three more blocks each is where that stops
+    /// happening, so these three are looked up once and both sites call it.
+    fn tsushima_toggle(&self, destination: NodeHandle) -> Option<EditorEvent> {
+        let h = &self.inspector_handles;
+        [
+            (
+                h.terrain_horizon_toggle,
+                EditorEvent::ToggleTerrainHorizonShadow,
+            ),
+            (
+                h.terrain_skyvis_toggle,
+                EditorEvent::ToggleTerrainSkyVisibility,
+            ),
+            (
+                h.terrain_relief_map_toggle,
+                EditorEvent::ToggleTerrainReliefNormal,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(handle, event)| (destination == handle).then_some(event))
+    }
+
     fn process_outgoing(&mut self, msgs: Vec<UiMessage>) {
         let h = &self.inspector_handles;
         let terrain_numeric = [
@@ -7141,6 +7228,12 @@ impl UiManager {
             (h.terrain_macro, TerrainToolField::MacroStrength),
             (h.terrain_debug, TerrainToolField::DebugView),
             (h.terrain_morph_start, TerrainToolField::MorphStart),
+            (h.terrain_skyvis, TerrainToolField::SkyVisibility),
+            (h.terrain_relief_takeover, TerrainToolField::ReliefTakeover),
+            (h.terrain_splat_noise, TerrainToolField::SplatNoise),
+            (h.terrain_splat_noise_scale, TerrainToolField::SplatNoiseScale),
+            (h.terrain_macro_octaves, TerrainToolField::MacroOctaves),
+            (h.terrain_damp_tint, TerrainToolField::DampTint),
         ];
         let foliage_numeric = [
             (h.foliage_density, FoliageBrushField::Density),
@@ -7667,6 +7760,10 @@ impl UiManager {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
                     continue;
                 }
+                if let Some(event) = self.tsushima_toggle(msg.destination) {
+                    self.editor_events.push_back(event);
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.terrain_parallax_toggle {
                     self.editor_events
                         .push_back(EditorEvent::ToggleTerrainParallax);
@@ -8037,6 +8134,10 @@ impl UiManager {
                 }
                 if msg.destination == self.inspector_handles.terrain_hex_toggle {
                     self.editor_events.push_back(EditorEvent::ToggleTerrainHex);
+                    continue;
+                }
+                if let Some(event) = self.tsushima_toggle(msg.destination) {
+                    self.editor_events.push_back(event);
                     continue;
                 }
                 if msg.destination == self.inspector_handles.terrain_parallax_toggle {
@@ -9440,7 +9541,12 @@ mod must_not_break {
             CreateKind::SpotLight,
             CreateKind::Particle,
             CreateKind::Terrain,
+            CreateKind::EmptyTerrain,
             CreateKind::VoxelTerrain,
+            CreateKind::Lake,
+            CreateKind::Ocean,
+            CreateKind::Sea,
+            CreateKind::River,
             CreateKind::UiCanvas,
         ] {
             let command = crate::commands::registry()
