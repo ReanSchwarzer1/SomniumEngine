@@ -851,7 +851,8 @@ In tree:
 - Cascaded shadow maps with PCSS and contact shadows.
 - Sparse virtual shadow maps as an authored alternative. CSM remains the
   measured default on the current small scenes.
-- ReSTIR direct and global illumination on ray-query hardware.
+- ReSTIR direct and global illumination on ray-query hardware. **Currently
+  unavailable on NVIDIA + Vulkan** — see the note below the shadow diagram.
 - Portable SDF-traced DDGI with a budgeted 4 by 4 by 4 SH volume.
 - Global IBL with multiple-scattering compensation, Hillaire atmosphere LUTs,
   analytic sun position, and a five-track day cycle.
@@ -889,6 +890,19 @@ flowchart TB
 Four sources fold into that one `shadow_factor`: the cascades, cloud shadow,
 terrain's own horizon shadow, and micro-shadowing. Terrain, water and meshes
 then read a single number instead of four that can disagree.
+
+**That `FILTER` branch is not currently a choice on NVIDIA + Vulkan.** Hardware
+ray tracing is disabled there (`ray_query_compiler_is_safe`, below), so
+`restir_sun` is always false and the right-hand path is the only one that runs.
+Two things that had never executed a frame on such a machine therefore began to:
+the PCSS blocker search, and the screen-space contact march. The contact march
+is off by default as a result — `SOMNIUM_CONTACT_SHADOWS=1` re-enables it — and
+the reasoning is under *Why things are the way they are*.
+
+The consequence worth holding on to is that **the raster fallbacks are load
+bearing again**. They were written, then covered by traced visibility before
+anyone looked hard at them, and they are the whole shadow story on this hardware
+until ray tracing comes back.
 
 The horizon shadow exists because `SHADOW_DISTANCE` is a compile-time 100 m.
 Past it, hills were fully lit, and read as shapes with paint on them.
@@ -1863,6 +1877,37 @@ Still outstanding:
 
 ## Planned work that has not started
 
+### Restoring hardware ray tracing
+
+Status: not started. The immediate cause is understood and documented under
+*Why things are the way they are*; the fix is not.
+
+`ray_query_compiler_is_safe` currently declines ray queries on NVIDIA + Vulkan
+because that driver's shader compiler exhausts system memory building one of
+Somnium's ray-query pipelines. The guard is correct as a way to keep the editor
+startable and wrong as a permanent answer: it costs ReSTIR DI, ReSTIR GI and
+traced water reflections on the most common hardware this engine runs on, and it
+promotes two never-exercised raster paths into the critical one.
+
+Directions, none of them yet investigated:
+
+- Find what in the composed ray-query source the compiler chokes on. Two
+  attempts have already failed to isolate it — moving the terrain weight-noise
+  call site, then splitting `terrain_splat_core.wgsl` out so the ray roots stop
+  composing the raster material at all — and both left the runaway intact. That
+  the second one failed is the useful result: the trigger is not simply module
+  size.
+- Establish whether a newer NVIDIA driver fixes it, and gate on the version
+  rather than the vendor.
+- Ship DXIL alongside SPIR-V for the precompiled Slang modules, which is what
+  currently makes DX12 fail at `create_shader_module_passthrough` independently
+  of its missing `RAY_QUERY`.
+- Failing all of that, tune the fallbacks properly: the contact march needs a
+  resolution-aware step budget before it can be on by default again.
+
+Whoever picks this up should read the measured DX12 result first rather than
+re-deriving it.
+
 ### PORTAL
 
 Status: plan only. No PORTAL sub-phase has started. PORTAL-0 is a separate,
@@ -2605,6 +2650,41 @@ fixed distance ahead does not survive a camera 150 m up, where ten metres ahead
 is empty air and the top view renders black on correct arithmetic. Their extent
 comes from the primary's projection, so they frame what it frames.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Hardware ray tracing is off on NVIDIA + Vulkan, and DX12 is not the way
+out.** NVIDIA's Vulkan shader compiler (driver 32.0.16.1656) consumed more than
+47 GB compiling ReSTIR-GI's `initial_and_temporal` ray-query pipeline and never
+finished; the editor could not start. Guarding that one pipeline only moved the
+explosion to the next ray-query root. The feature is optional, so
+`ray_query_compiler_is_safe` declines to request it on that pair and the raster
+fallbacks carry the frame.
+
+DX12 was the obvious escape and was measured, not assumed: wgpu reports 3 of 13
+features there against Vulkan's larger set, `RAY_QUERY` among the missing — so
+it loses ray tracing anyway — and startup then fails outright in
+`create_shader_module_passthrough`, because the precompiled Slang modules carry
+SPIR-V and no DXIL. `SOMNIUM_BACKEND` exists so that question can be asked
+again rather than argued about.
+
+**The screen-space contact march is off by default because it had never run.**
+`contact` is gated on `!restir_sun`, so on any machine where ReSTIR owned sun
+visibility it executed zero frames — it switched on for the first time when ray
+tracing was disabled above. What it produced was a dense field of dark
+directional dashes across the terrain that got *worse the lower the render
+resolution went*, which is the signature of an untuned screen-space march: it is
+a `min()`, so it can only ever darken, and its step budget is measured in
+pixels. Defaulting it off restores the image every ReSTIR machine has always
+had. Tuning it is deferred work, not finished work, and `SOMNIUM_CONTACT_SHADOWS=1`
+is how whoever picks that up turns it back on.
+
+**A fallback nobody has looked at is not a fallback.** Both paths that woke up
+here — PCSS and the contact march — were reachable in principle for years and
+exercised on this hardware never, because traced visibility answered first.
+Disabling one optional feature promoted two untested paths into the critical
+one, and the first thing either did was produce a visible artifact. The lesson
+is not about ray tracing: it is that `!some_better_path` is a branch that needs
+its own evidence, and a capability gate is also a decision to ship whatever sits
+behind it.
 
 **Temporal history is keyed to one camera.** TAA, FSR and ReSTIR reproject the
 last frame through the view that built it, so a second viewport reusing that
