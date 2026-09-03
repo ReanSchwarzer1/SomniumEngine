@@ -600,7 +600,10 @@ mod tests {
     fn tilt_is_varied_bounded_and_off_by_default() {
         let mut upright = Vec::new();
         paint(&mut upright, &brush(), [0.0, 0.0], 1, flat);
-        assert!(upright.iter().all(|p| p.tilt == 0.0), "default brush leaned");
+        assert!(
+            upright.iter().all(|p| p.tilt == 0.0),
+            "default brush leaned"
+        );
 
         let b = FoliageBrush {
             max_tilt_deg: 30.0,

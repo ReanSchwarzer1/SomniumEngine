@@ -17,77 +17,7 @@
 // - bevy_triplanar_splatting (example_repo/bevy-plugins/) — array-texture splat
 //   sampling + triplanar weight blending.
 
-// Mirrors `terrain::GpuTerrainMaterial` (2032 bytes, Phase DF). Every vec4 sits
-// on a 16-byte offset; see the Rust struct for why that is load-bearing.
-struct TerrainMaterial {
-    layer_tiling: array<vec4<f32>, 8>,
-    brush: vec4<f32>,
-    albedo_maps: array<vec4<i32>, 8>,
-    surface_maps: array<vec4<i32>, 8>,
-    terrain_origin: vec2<f32>,
-    inv_world_size: vec2<f32>,
-    splat_maps: array<vec4<i32>, 2>,
-    cliff_layer: u32,
-    hex_tiling: u32,
-    height_blend: u32,
-    macro_map: i32,
-    layer_height_scale: array<vec4<f32>, 8>,
-    layer_blend_width: array<vec4<f32>, 8>,
-    layer_weight_clamp: array<vec4<f32>, 8>,
-    layer_parallax: array<vec4<f32>, 8>,
-    macro_mode: u32,
-    macro_strength: f32,
-    detail_fade_start: f32,
-    detail_fade_end: f32,
-    layer_albedo: array<vec4<f32>, 32>,
-    parallax_steps: u32,
-    parallax_shadow_steps: u32,
-    projection_sharpness: f32,
-    projection_mode: u32,
-    layer_moisture: array<vec4<f32>, 8>,
-    wetness: f32,
-    wetness_darken: f32,
-    wetness_gloss: f32,
-    wetness_f0: f32,
-    // Phase DF: nested material clipmaps. 2032 bytes total.
-    clipmap_enabled: u32,
-    clipmap_rings: u32,
-    clipmap_size: f32,
-    clipmap_debug: u32,
-    clipmap_albedo: array<vec4<i32>, 2>,
-    clipmap_surface: array<vec4<i32>, 2>,
-    clipmap_center: array<vec4<f32>, 4>,
-    clipmap_origin: array<vec4<f32>, 4>,
-    clipmap_tpm: array<vec4<f32>, 2>,
-    clipmap_macro_albedo: vec4<i32>,
-    clipmap_macro_normal: vec4<i32>,
-    clipmap_macro_center: array<vec4<f32>, 2>,
-    clipmap_macro_origin: array<vec4<f32>, 2>,
-    clipmap_macro_tpm: vec4<f32>,
-    clipmap_macro_rings: u32,
-    clipmap_macro_size: f32,
-    clipmap_detail_ready: u32,
-    clipmap_macro_ready: u32,
-    // Phase TSUSHIMA-B/C: baked terrain-space visibility. 2048 bytes total.
-    // Four scalars, appended, so every `array<vec4<_>>` above keeps its offset.
-    horizon_map_a: i32,
-    horizon_map_b: i32,
-    skyvis_map: i32,
-    sky_visibility_strength: f32,
-    relief_map: i32,
-    relief_takeover: f32,
-    // Phase TSUSHIMA-G: splat-weight noise. These two land in the pad B/C left
-    // behind, so the struct keeps its 2064-byte size and every
-    // `array<vec4<_>>` above keeps its offset.
-    weight_noise_strength: f32,
-    weight_noise_scale: f32,
-    // Phase TSUSHIMA-H: macro octave strengths at ~1 km, ~100 m and ~10 m, and
-    // in `w` the strength of the sky-visibility-driven tint. 2080 bytes total.
-    macro_octave_strength: vec4<f32>,
-}
-
-/// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
-const TERRAIN_LAYERS: u32 = 32u;
+//!include "terrain_splat_core.wgsl"
 
 // Pipeline overrides. Defaults keep the full path (clipmap generate, naga).
 // The shading PSO sets these so unused hex/POM code is deleted — runtime
@@ -95,7 +25,6 @@ const TERRAIN_LAYERS: u32 = 32u;
 // never moved Shading ms.
 override enable_hex: bool = true;
 override enable_pom: bool = true;
-override terrain_scan: u32 = 32u;
 /// False when every terrain queued this frame shades through the clipmap
 /// (Phase DF). The cache already holds strongest-four + hex + height-blend, so
 /// `evaluate_terrain_material` becomes unreachable and the backend drops it —
@@ -106,10 +35,6 @@ override terrain_scan: u32 = 32u;
 /// `TerrainClipmap::fill_gpu` writes into `clipmap_enabled`, or a terrain will
 /// find neither path.
 override enable_live_terrain: bool = true;
-
-fn terrain_splat_groups() -> u32 {
-    return (min(terrain_scan, TERRAIN_LAYERS) + 3u) / 4u;
-}
 
 /// Below this weight a layer cannot change the result, so it is not sampled.
 ///
@@ -150,10 +75,6 @@ fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
 
 fn terrain_parallax_depth(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_parallax[layer / 4u][layer % 4u];
-}
-
-fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
-    return tm.layer_moisture[layer / 4u][layer % 4u];
 }
 
 /// Value noise on the integer lattice, smoothstep-interpolated.
@@ -262,79 +183,40 @@ fn terrain_perturb_weights(
     }
 }
 
-/// Splat samples to normalised per-layer weights.
+/// The same weights with TSUSHIMA-G's boundary perturbation applied.
 ///
-/// Takes the material and the terrain-local position because TSUSHIMA-G's
-/// perturbation belongs here rather than at the two call sites: "what the
-/// weights are" is one question with one answer, and the invariant this
-/// function establishes — they sum to one — is the invariant the perturbation
-/// has to preserve.
-fn terrain_unpack_splats(
+/// # Why this is a separate function and not a flag
+///
+/// `terrain_perturb_weights` is a `terrain_scan`-iteration loop containing two
+/// value-noise evaluations, and `terrain_scan` is an `override` — a
+/// compile-time constant. A backend can therefore fully unroll it: 32
+/// iterations times two octaves times four lattice hashes permits 256 inlined
+/// hash bodies in whatever calls this.
+///
+/// In the raster shading pass that is affordable and was measured to be.
+/// Inlined into a **ray-query** pipeline it is not: `rt_hit.wgsl` is composed
+/// into `restir_gi.wgsl`, `lighting_extra.wgsl` and `water_reflection.wgsl`, and
+/// NVIDIA's Vulkan driver compiling ReSTIR-GI's `initial_and_temporal` with
+/// this in the hit path reached **47 GB of private memory** and never finished
+/// startup. Guarding one pipeline just moved the explosion to the next
+/// ray-query root that composes this file.
+///
+/// So the split is not stylistic. The traced paths call the plain unpack. This
+/// can make a painted boundary slightly less irregular in secondary lighting,
+/// but the raster path keeps the authored perturbation and startup compilation
+/// remains bounded.
+fn terrain_unpack_splats_painted(
     s: array<vec4<f32>, 8>,
     tm: TerrainMaterial,
     local_xz: vec2<f32>,
 ) -> array<f32, 32> {
-    var w = array<f32, 32>();
-    var total = 0.0;
-    for (var g = 0u; g < terrain_splat_groups(); g = g + 1u) {
-        let v = s[g];
-        let base = g * 4u;
-        w[base + 0u] = v.x;
-        w[base + 1u] = v.y;
-        w[base + 2u] = v.z;
-        w[base + 3u] = v.w;
-        total += v.x + v.y + v.z + v.w;
-    }
-    total = max(total, 0.0001);
-    for (var i = 0u; i < terrain_scan; i = i + 1u) {
-        w[i] = w[i] / total;
-    }
+    var w = terrain_unpack_splats(s);
     // Strength 0 is the exact identity — not "noise scaled to nothing", the
     // original weights untouched and two loops not run.
     if tm.weight_noise_strength > 0.0 {
         terrain_perturb_weights(tm, &w, local_xz);
     }
     return w;
-}
-
-/// Deterministic strongest-four. Lower index wins ties.
-///
-/// One pass with the running top four held in scalars, not four passes over a
-/// dynamically indexed `array<bool, 32>` companion. The old shape cost 4×32
-/// iterations, a 128-byte by-value copy of `weight` at the call, and a second
-/// 32-entry array that no GPU keeps in registers — every terrain pixel paid
-/// scratch-memory traffic for a selection sort of at most four winners.
-///
-/// The tie break is unchanged: comparisons are strict, so an equal weight
-/// arriving at a higher index never displaces the one already held.
-fn terrain_strongest_four(weight: ptr<function, array<f32, 32>>) -> array<u32, 4> {
-    var b0 = -1.0;
-    var b1 = -1.0;
-    var b2 = -1.0;
-    var b3 = -1.0;
-    var i0 = 0u;
-    var i1 = 0u;
-    var i2 = 0u;
-    var i3 = 0u;
-    for (var i = 0u; i < terrain_scan; i = i + 1u) {
-        let w = (*weight)[i];
-        if w > b0 {
-            b3 = b2; i3 = i2;
-            b2 = b1; i2 = i1;
-            b1 = b0; i1 = i0;
-            b0 = w;  i0 = i;
-        } else if w > b1 {
-            b3 = b2; i3 = i2;
-            b2 = b1; i2 = i1;
-            b1 = w;  i1 = i;
-        } else if w > b2 {
-            b3 = b2; i3 = i2;
-            b2 = w;  i2 = i;
-        } else if w > b3 {
-            b3 = w;  i3 = i;
-        }
-    }
-    return array<u32, 4>(i0, i1, i2, i3);
 }
 
 fn ts_to_surfgrad(n_ts: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>) -> vec3<f32> {
@@ -559,8 +441,6 @@ fn terrain_parallax_shadow(
     }
     return saturate(1.0 - occlusion);
 }
-
-@group(0) @binding(11) var<storage, read> terrain_materials: array<TerrainMaterial>;
 
 /// Layer texture reads the current fragment issued, for debug mode 12.
 ///
@@ -1352,7 +1232,7 @@ fn terrain_generate_texel(
     let splat_ddy = world_ddy * tm.inv_world_size;
     let local_xz = world_xz - tm.terrain_origin;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
-    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
+    var weight = terrain_unpack_splats_painted(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {
@@ -1466,7 +1346,7 @@ fn evaluate_terrain_material(
     // world position and runs inside it.
     let local_xz = world_pos.xz - tm.terrain_origin;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
-    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
+    var weight = terrain_unpack_splats_painted(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {

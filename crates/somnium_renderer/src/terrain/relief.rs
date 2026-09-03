@@ -124,19 +124,14 @@ pub fn bake(
     // Level 0, in float, so the mip reduction can work on unnormalised sums
     // rather than on quantised bytes.
     let mut level: Vec<[f32; 3]> = vec![[0.0; 3]; n * n];
-    level
-        .par_chunks_mut(n)
-        .enumerate()
-        .for_each(|(z, row)| {
-            for (x, texel) in row.iter_mut().enumerate() {
-                // Terrain-space texel centre mapped onto heightfield samples.
-                let hx = ((x as f32 + 0.5) / n as f32 * (total_x - 1) as f32).round() as i64;
-                let hz = ((z as f32 + 0.5) / n as f32 * (total_z - 1) as f32).round() as i64;
-                *texel = heightfield_normal(
-                    heights, total_x, total_z, hx, hz, cell_size, height_scale,
-                );
-            }
-        });
+    level.par_chunks_mut(n).enumerate().for_each(|(z, row)| {
+        for (x, texel) in row.iter_mut().enumerate() {
+            // Terrain-space texel centre mapped onto heightfield samples.
+            let hx = ((x as f32 + 0.5) / n as f32 * (total_x - 1) as f32).round() as i64;
+            let hz = ((z as f32 + 0.5) / n as f32 * (total_z - 1) as f32).round() as i64;
+            *texel = heightfield_normal(heights, total_x, total_z, hx, hz, cell_size, height_scale);
+        }
+    });
 
     let mut levels = Vec::new();
     let mut edge = n;
@@ -254,7 +249,14 @@ mod tests {
     #[test]
     fn flat_ground_is_up_with_no_variance_at_every_mip() {
         let total = 65u32;
-        let maps = bake(&vec![0.0; (total * total) as usize], total, total, 1.0, 1.0, 32);
+        let maps = bake(
+            &vec![0.0; (total * total) as usize],
+            total,
+            total,
+            1.0,
+            1.0,
+            32,
+        );
         for (mip, level) in maps.levels.iter().enumerate() {
             for texel in level.chunks(4) {
                 let (xz, len) = decode(texel);
@@ -267,7 +269,14 @@ mod tests {
     #[test]
     fn the_chain_reaches_one_texel() {
         let total = 65u32;
-        let maps = bake(&vec![0.0; (total * total) as usize], total, total, 1.0, 1.0, 64);
+        let maps = bake(
+            &vec![0.0; (total * total) as usize],
+            total,
+            total,
+            1.0,
+            1.0,
+            64,
+        );
         assert_eq!(maps.mip_count(), 7, "64 -> 1 is seven levels");
         assert_eq!(maps.levels.last().unwrap().len(), 4);
     }
@@ -299,7 +308,10 @@ mod tests {
         let (_, fine) = decode(&maps.levels[0][..4]);
         let coarse_level = &maps.levels[3];
         let (_, coarse) = decode(&coarse_level[..4]);
-        assert!(fine > 0.99, "level 0 is a single normal and cannot disagree");
+        assert!(
+            fine > 0.99,
+            "level 0 is a single normal and cannot disagree"
+        );
         assert!(
             coarse < 0.9,
             "averaging a sawtooth must shorten the mean, got {coarse}"

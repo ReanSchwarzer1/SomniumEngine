@@ -7250,8 +7250,7 @@ impl<G: GameApp> Engine<G> {
                 // random direction.
                 let placement = glam::Mat4::from_scale_rotation_translation(
                     glam::Vec3::splat(scale),
-                    glam::Quat::from_rotation_y(inst.yaw)
-                        * glam::Quat::from_rotation_x(inst.tilt),
+                    glam::Quat::from_rotation_y(inst.yaw) * glam::Quat::from_rotation_x(inst.tilt),
                     inst.position,
                 );
                 // Horizontal, like the draw cull above and for the same
@@ -8855,10 +8854,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::CreateEntity(
-                kind @ (CreateKind::Lake
-                | CreateKind::Ocean
-                | CreateKind::Sea
-                | CreateKind::River),
+                kind @ (CreateKind::Lake | CreateKind::Ocean | CreateKind::Sea | CreateKind::River),
             ) => {
                 use crate::WaterBodyKind as K;
                 let body = match kind {
@@ -8881,7 +8877,10 @@ impl<G: GameApp> Engine<G> {
                         })
                     })
                 else {
-                    warn!("Create {}: the scene has no terrain to place it on", body.label());
+                    warn!(
+                        "Create {}: the scene has no terrain to place it on",
+                        body.label()
+                    );
                     return;
                 };
                 // Placed in the terrain's own frame rather than parented to it.
@@ -11604,7 +11603,8 @@ mod viewport_control_tests {
         );
         for (index, entry) in FOLIAGE_PALETTE.iter().enumerate() {
             assert_eq!(
-                somnium_ui::FOLIAGE_KIND_NAMES[index], entry.name,
+                somnium_ui::FOLIAGE_KIND_NAMES[index],
+                entry.name,
                 "palette index {index} disagrees about its name"
             );
         }

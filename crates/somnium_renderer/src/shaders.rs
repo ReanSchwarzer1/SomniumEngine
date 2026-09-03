@@ -141,6 +141,7 @@ impl Shaders {
             "spd.wgsl",
             "taa.wgsl",
             "terrain_material.wgsl",
+            "terrain_splat_core.wgsl",
             "transparent.wgsl",
             "underwater.wgsl",
             "velocity.wgsl",
@@ -336,7 +337,7 @@ mod tests {
         );
     }
 
-    /// `shading.wgsl` composes to the same modules the old `format!` listed.
+    /// `shading.wgsl` composes the former modules plus the extracted terrain core.
     ///
     /// The acceptance case from the plan, asserted rather than assumed. The
     /// order in the resolved text is dependencies-first, which the shipped
@@ -344,7 +345,7 @@ mod tests {
     /// *first* and its dependencies after, so WGSL module-scope forward
     /// references were already in use before this change.
     #[test]
-    fn shading_composes_the_eight_modules_it_used_to_concatenate() {
+    fn shading_composes_the_raster_terrain_modules() {
         let shaders = Shaders::new();
         let mut expected = vec![
             "global_pool.wgsl",
@@ -353,6 +354,7 @@ mod tests {
             "atmosphere.wgsl",
             "hextile.wgsl",
             "terrain_material.wgsl",
+            "terrain_splat_core.wgsl",
             "clipmap_shade.wgsl",
             "shading.wgsl",
         ];
@@ -360,7 +362,7 @@ mod tests {
         assert_eq!(
             shaders.dependency_names("shading.wgsl", Defines::NONE),
             expected,
-            "the composed set must be exactly the eight the old `format!` listed"
+            "raster shading must keep the full terrain material and its shared core"
         );
         assert!(
             shaders.source_or_panic("shading.wgsl").len() > 100_000,
@@ -368,15 +370,13 @@ mod tests {
         );
     }
 
-    /// The three roots that used to be concatenated root-first still compose
-    /// the same modules.
+    /// Terrain-aware ray-query roots compose only the bounded terrain core.
     ///
-    /// `restir_gi.rs`, `lighting_extra.rs` and `water_reflection.rs` each put
-    /// their root *before* its dependencies so `enable wgpu_ray_query;` would
-    /// land first. The resolver hoists `enable` instead, so the order changed
-    /// and the set must not have.
+    /// The full raster material contains weight noise, hex tiling, and
+    /// parallax. Letting that module into a ray-query root caused NVIDIA's
+    /// Vulkan compiler to consume tens of gigabytes during startup.
     #[test]
-    fn the_ray_query_roots_compose_the_same_modules_they_used_to() {
+    fn ray_query_roots_compose_only_the_bounded_terrain_core() {
         let shaders = Shaders::new();
         let mut gi = vec![
             "restir_gi.wgsl",
@@ -385,8 +385,7 @@ mod tests {
             "brdf.wgsl",
             "sampling.wgsl",
             "atmosphere.wgsl",
-            "hextile.wgsl",
-            "terrain_material.wgsl",
+            "terrain_splat_core.wgsl",
         ];
         gi.sort_unstable();
         assert_eq!(
@@ -394,13 +393,27 @@ mod tests {
             gi
         );
 
+        let mut extra = vec![
+            "lighting_extra.wgsl",
+            "rt_hit.wgsl",
+            "global_pool.wgsl",
+            "brdf.wgsl",
+            "sampling.wgsl",
+            "atmosphere.wgsl",
+            "terrain_splat_core.wgsl",
+        ];
+        extra.sort_unstable();
+        assert_eq!(
+            shaders.dependency_names("lighting_extra.wgsl", Defines::NONE),
+            extra
+        );
+
         let mut water = vec![
             "water_reflection.wgsl",
             "rt_hit.wgsl",
             "global_pool.wgsl",
             "brdf.wgsl",
-            "hextile.wgsl",
-            "terrain_material.wgsl",
+            "terrain_splat_core.wgsl",
         ];
         water.sort_unstable();
         assert_eq!(

@@ -74,9 +74,15 @@ const DIRS: [(i32, i32); AZIMUTHS] = [
 /// Unit XZ of each bearing, for the bent-direction accumulation.
 const DIR_UNIT: [(f32, f32); AZIMUTHS] = [
     (1.0, 0.0),
-    (std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2),
+    (
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
     (0.0, 1.0),
-    (-std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2),
+    (
+        -std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
     (-1.0, 0.0),
     (
         -std::f32::consts::FRAC_1_SQRT_2,
@@ -343,7 +349,9 @@ pub fn bake(
                         let mip = if s < 16 {
                             0
                         } else {
-                            ((63 - s.leading_zeros()) as u32).saturating_sub(3).min(max_mip)
+                            ((63 - s.leading_zeros()) as u32)
+                                .saturating_sub(3)
+                                .min(max_mip)
                         };
                         let h = pyramid.sample(mip, sx, sz);
                         let dh = h - g;

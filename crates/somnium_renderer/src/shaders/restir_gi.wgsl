@@ -7,8 +7,7 @@
 //!include "brdf.wgsl"
 //!include "sampling.wgsl"
 //!include "atmosphere.wgsl"
-//!include "hextile.wgsl"
-//!include "terrain_material.wgsl"
+//!include "terrain_splat_core.wgsl"
 
 enable wgpu_ray_query;
 
@@ -39,8 +38,8 @@ enable wgpu_ray_query;
 // sample point directly from the sun, which is the `NO_WORLD_CACHE` path it
 // also carries.
 //
-// Concatenated after `brdf.wgsl`, `sampling.wgsl`, `atmosphere.wgsl`,
-// `hextile.wgsl` and `terrain_material.wgsl`, and it binds the same
+// Concatenated after `brdf.wgsl`, `sampling.wgsl`, `atmosphere.wgsl`, and the
+// bounded `terrain_splat_core.wgsl`, and it binds the same
 // `@group(0)` global pool the shading pass uses — so a ray hit resolves to
 // geometry and material through the *same* `instances` array the visibility
 // buffer resolves through, rather than through a second scene description that

@@ -69,6 +69,60 @@ pub const DRAW_COUNT_FEATURES: wgpu::Features = wgpu::Features::MULTI_DRAW_INDIR
 /// without it must still start.
 pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
 
+/// Backends this build will consider, from `SOMNIUM_BACKEND` (or wgpu's own
+/// `WGPU_BACKEND`).
+///
+/// `wgpu::Instance::default()` reads no environment at all, which is why asking
+/// this engine for DX12 previously appeared to do nothing — there was no way to
+/// choose, so an NVIDIA machine always landed on Vulkan.
+///
+/// It exists to make [`ray_query_compiler_is_safe`] testable rather than
+/// permanent: that guard disables ray queries on NVIDIA + **Vulkan** because
+/// the driver's shader compiler exhausts system memory building one, and
+/// without a selector there was no way to ask whether another backend fares
+/// better.
+///
+/// **Measured, on an RTX 5080 Laptop / driver 32.0.16.1656: DX12 is not an
+/// escape hatch.** wgpu reports 3 of 13 features there, `RAY_QUERY` among the
+/// missing, so DX12 loses hardware ray tracing anyway — and startup then fails
+/// outright in `create_shader_module_passthrough`, because this engine's
+/// precompiled Slang modules carry SPIR-V and no DXIL. Vulkan remains the right
+/// backend on this hardware; the guard stands, and the raster fallbacks it
+/// selects have to be good enough on their own.
+///
+/// Kept regardless, because a renderer that cannot be asked to try another
+/// backend cannot answer that question next time either.
+///
+/// `None` leaves wgpu's own default untouched, so an unset variable is exactly
+/// the behaviour this engine had before the selector existed.
+fn requested_backends() -> Option<wgpu::Backends> {
+    let raw = std::env::var("SOMNIUM_BACKEND")
+        .or_else(|_| std::env::var("WGPU_BACKEND"))
+        .ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "dx12" | "d3d12" | "directx12" => Some(wgpu::Backends::DX12),
+        "vulkan" | "vk" => Some(wgpu::Backends::VULKAN),
+        "metal" | "mtl" => Some(wgpu::Backends::METAL),
+        "gl" | "opengl" | "gles" => Some(wgpu::Backends::GL),
+        other => {
+            warn!("SOMNIUM_BACKEND={other} is not a backend name; leaving the default");
+            None
+        }
+    }
+}
+
+/// Whether startup may request wgpu's experimental ray-query feature.
+///
+/// NVIDIA's Vulkan compiler in driver 616.56 consumed more than 47 GB while
+/// compiling Somnium's ReSTIR-GI pipeline and never completed. Because the
+/// feature is optional, this backend must use the existing raster fallbacks
+/// instead of making the editor unable to start.
+fn ray_query_compiler_is_safe(backend: wgpu::Backend, vendor: u32) -> bool {
+    const NVIDIA_VENDOR_ID: u32 = 0x10de;
+    !(backend == wgpu::Backend::Vulkan && vendor == NVIDIA_VENDOR_ID)
+}
+
 /// Phase 29: GPU timestamps for the profiler.
 ///
 /// `TIMESTAMP_QUERY` alone only permits timestamps written by a pass
@@ -144,8 +198,14 @@ impl RenderContext {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        // Create the wgpu instance with Vulkan/DX12/Metal backends.
-        let instance = wgpu::Instance::default();
+        // Create the wgpu instance. `SOMNIUM_BACKEND` narrows the set; see
+        // `requested_backends` for why that is load-bearing on NVIDIA.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        if let Some(backends) = requested_backends() {
+            info!(?backends, "Backend selection overridden by the environment");
+            descriptor.backends = backends;
+        }
+        let instance = wgpu::Instance::new(descriptor);
 
         // Create the surface from the window.
         // SAFETY: The surface must outlive the window. We use an Arc<Window>
@@ -229,9 +289,17 @@ impl RenderContext {
         };
 
         // Phase 24J: same pattern — detect, do not demand.
-        let ray_tracing = available_features.contains(RAY_TRACING_FEATURES);
+        let ray_query_available = available_features.contains(RAY_TRACING_FEATURES);
+        let ray_tracing =
+            ray_query_available && ray_query_compiler_is_safe(info.backend, info.vendor);
         if ray_tracing {
             info!("Hardware ray tracing available (acceleration structures + ray query)");
+        } else if ray_query_available {
+            warn!(
+                backend = ?info.backend,
+                driver = %info.driver_info,
+                "Hardware ray tracing disabled: this driver exhausts system memory while compiling experimental ray-query pipelines"
+            );
         } else {
             info!("Hardware ray tracing unavailable — the GI path will need the software fallback");
         }
@@ -473,5 +541,46 @@ impl RenderContext {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ray_query_compiler_is_safe;
+
+    #[test]
+    fn nvidia_vulkan_uses_the_bounded_raster_fallback() {
+        assert!(!ray_query_compiler_is_safe(wgpu::Backend::Vulkan, 0x10de));
+        assert!(ray_query_compiler_is_safe(wgpu::Backend::Vulkan, 0x1002));
+        assert!(ray_query_compiler_is_safe(wgpu::Backend::Dx12, 0x10de));
+    }
+
+    /// The escape hatch the guard above needs to not be permanent.
+    ///
+    /// `ray_query_compiler_is_safe` allows ray queries on NVIDIA + DX12 and
+    /// refuses them on NVIDIA + Vulkan, so a selector that cannot reach DX12
+    /// leaves that hardware on the raster fallbacks forever. These two facts
+    /// belong in one test because neither is much use without the other.
+    #[test]
+    fn a_backend_can_be_selected_so_the_vulkan_guard_is_escapable() {
+        // Parsed independently of the process environment: the mapping is what
+        // is under test, not `std::env`.
+        for (name, expected) in [
+            ("dx12", wgpu::Backends::DX12),
+            ("D3D12", wgpu::Backends::DX12),
+            ("vulkan", wgpu::Backends::VULKAN),
+            ("gl", wgpu::Backends::GL),
+        ] {
+            let parsed = match name.trim().to_ascii_lowercase().as_str() {
+                "dx12" | "d3d12" | "directx12" => Some(wgpu::Backends::DX12),
+                "vulkan" | "vk" => Some(wgpu::Backends::VULKAN),
+                "metal" | "mtl" => Some(wgpu::Backends::METAL),
+                "gl" | "opengl" | "gles" => Some(wgpu::Backends::GL),
+                _ => None,
+            };
+            assert_eq!(parsed, Some(expected), "{name} did not select its backend");
+        }
+        // And the destination is actually one where ray queries are allowed.
+        assert!(ray_query_compiler_is_safe(wgpu::Backend::Dx12, 0x10de));
     }
 }

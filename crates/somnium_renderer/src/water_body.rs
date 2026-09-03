@@ -516,20 +516,19 @@ impl WaterBodyData {
             .collect();
         // Make `surface_level` mean something. Preset 2 is a wet rectangle with
         // no baked shoreline to move, so it is exempt.
-        let (mask, depth_metres, shore_distance_cells) = if descriptor.preset
-            == WATER_PRESET_LAKE_BAKE
-        {
-            reproject_to_datum(
-                size,
-                mask,
-                depth_metres,
-                shore_distance_cells,
-                descriptor.surface_level,
-                descriptor.max_depth,
-            )
-        } else {
-            (mask, depth_metres, shore_distance_cells)
-        };
+        let (mask, depth_metres, shore_distance_cells) =
+            if descriptor.preset == WATER_PRESET_LAKE_BAKE {
+                reproject_to_datum(
+                    size,
+                    mask,
+                    depth_metres,
+                    shore_distance_cells,
+                    descriptor.surface_level,
+                    descriptor.max_depth,
+                )
+            } else {
+                (mask, depth_metres, shore_distance_cells)
+            };
         let (mask_texture, mask_view) = upload_r8(ctx, "Water body mask", size, &mask);
         let (depth_texture, depth_view) =
             upload_r32_float(ctx, "Water body depth", size, &depth_metres);

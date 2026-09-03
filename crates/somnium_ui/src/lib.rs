@@ -7231,7 +7231,10 @@ impl UiManager {
             (h.terrain_skyvis, TerrainToolField::SkyVisibility),
             (h.terrain_relief_takeover, TerrainToolField::ReliefTakeover),
             (h.terrain_splat_noise, TerrainToolField::SplatNoise),
-            (h.terrain_splat_noise_scale, TerrainToolField::SplatNoiseScale),
+            (
+                h.terrain_splat_noise_scale,
+                TerrainToolField::SplatNoiseScale,
+            ),
             (h.terrain_macro_octaves, TerrainToolField::MacroOctaves),
             (h.terrain_damp_tint, TerrainToolField::DampTint),
         ];
