@@ -62,6 +62,21 @@ pub struct TerrainDescriptor {
     pub virtual_texturing: bool,
 }
 
+/// A `SOMNIUM_TERRAIN_*` strength rail: `=0` disables, anything else replaces
+/// the default, and anything unparseable is ignored rather than treated as 0.
+///
+/// Phases B, C and E each spelled their rail as a bool beside a separate
+/// strength, which meant two things the editor and the environment could
+/// disagree about for one dial. Every TSUSHIMA-G/H/I rail is a single float
+/// whose zero is an exact identity in the shader.
+fn env_strength(name: &str, default: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(default)
+}
+
 impl Default for TerrainDescriptor {
     fn default() -> Self {
         Self {
@@ -421,18 +436,29 @@ pub struct TerrainData {
     /// Metres at which the baked relief normal has fully taken over from the
     /// interpolated vertex normal.
     pub relief_takeover: f32,
-    /// Phase TSUSHIMA-G. `SOMNIUM_TERRAIN_WEIGHT_NOISE=0` is the A/B rail.
-    pub weight_noise: bool,
-    /// How far the noise displaces a weight at the centre of a transition
-    /// band. The `4*w*(1-w)` envelope means this is the peak displacement and
-    /// nothing outside the band moves at all.
+    /// Phase TSUSHIMA-G: how far the noise displaces a weight at the centre of
+    /// a transition band. The `4*w*(1-w)` envelope means this is the peak
+    /// displacement and nothing outside the band moves at all.
+    ///
+    /// One float rather than a bool beside a float. `SOMNIUM_TERRAIN_WEIGHT_NOISE=0`
+    /// is still the A/B rail; any other value is the strength. Zero is the
+    /// exact identity in the shader — the perturbation loops do not run — so
+    /// there is nothing a separate enable flag could express that this cannot,
+    /// and a second field is a second thing for the editor slider and the
+    /// environment to disagree about.
     pub weight_noise_strength: f32,
     /// Cycles per metre of the coarse octave. 0.35 puts it near a three-metre
     /// period, which is under the smallest brush anyone paints a boundary with
     /// and is the point: the brush cannot make this shape.
     pub weight_noise_scale: f32,
-    /// Phase TSUSHIMA-H. `SOMNIUM_TERRAIN_MACRO_OCTAVES=0` is the A/B rail.
-    pub macro_octaves: bool,
+    /// Phase TSUSHIMA-H1: a single multiplier on `macro_octave_strength`'s
+    /// three bands, which is what the editor's one slider drives.
+    ///
+    /// `SOMNIUM_TERRAIN_MACRO_OCTAVES=0` is the A/B rail; any other value
+    /// scales all three. Three separate sliders would let an author build a
+    /// spectrum no ground has, and the relative fall-off across the bands is a
+    /// property of how terrain varies rather than something to tune per map.
+    pub macro_octave_scale: f32,
     /// Phase TSUSHIMA-H2, on its own rail: `SOMNIUM_TERRAIN_SKYVIS_TINT`.
     ///
     /// Two switches and not one, because the two halves of H pull in opposite
@@ -772,20 +798,15 @@ impl TerrainData {
             horizon_shadow: std::env::var("SOMNIUM_TERRAIN_HORIZON").as_deref() != Ok("0"),
             sky_visibility: std::env::var("SOMNIUM_TERRAIN_SKYVIS").as_deref() != Ok("0"),
             sky_visibility_strength: 1.0,
-            weight_noise: std::env::var("SOMNIUM_TERRAIN_WEIGHT_NOISE").as_deref() != Ok("0"),
-            weight_noise_strength: 0.25,
+            weight_noise_strength: env_strength("SOMNIUM_TERRAIN_WEIGHT_NOISE", 0.25),
             weight_noise_scale: 0.35,
-            macro_octaves: std::env::var("SOMNIUM_TERRAIN_MACRO_OCTAVES").as_deref() != Ok("0"),
-            skyvis_tint: std::env::var("SOMNIUM_TERRAIN_SKYVIS_TINT")
-                .ok()
-                .and_then(|v| v.trim().parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
-                // At full shelter this blends the tint 0.6 of the way in:
-                // (0.93, 0.98, 0.87) against white — a damp green cast you
-                // would notice on a valley floor, and nowhere near a repaint.
-                // The number is what the effect should *look* like at its
-                // strongest, not what makes a diff move.
-                .unwrap_or(0.6),
+            macro_octave_scale: env_strength("SOMNIUM_TERRAIN_MACRO_OCTAVES", 1.0),
+            // At full shelter 0.6 blends the tint that far in: (0.93, 0.98,
+            // 0.87) against white — a damp green cast you would notice on a
+            // valley floor, and nowhere near a repaint. The number is what the
+            // effect should *look* like at its strongest, not what makes a
+            // diff move.
+            skyvis_tint: env_strength("SOMNIUM_TERRAIN_SKYVIS_TINT", 0.6),
             macro_octave_strength: [0.18, 0.13, 0.09, 0.35],
             horizon_dirty: false,
             desc,
@@ -1169,27 +1190,20 @@ impl TerrainData {
             // rather than an unbound texture: there is no texture, and the
             // shader's identity at zero is exact — the perturbation loops do
             // not run and the octave product is 1.
-            weight_noise_strength: if self.weight_noise {
-                self.weight_noise_strength
-            } else {
-                0.0
-            },
+            weight_noise_strength: self.weight_noise_strength.max(0.0),
             weight_noise_scale: self.weight_noise_scale,
             macro_octave_strength: {
-                // `w` is the sky-visibility tint and rides its own switch; the
-                // three octave strengths ride `macro_octaves`. Both are exact
+                // `xyz` are the three bands scaled by the one editor dial; `w`
+                // is the sky-visibility tint, which has its own. Both are exact
                 // identities at zero, so "off" is the pre-phase image and not a
                 // weak version of the new one.
-                let mut v = if self.macro_octaves {
-                    self.macro_octave_strength
-                } else {
-                    [0.0; 4]
-                };
-                // The tint's own strength, not the octaves'. `macro_octave_strength[3]`
-                // is where the shader reads it from and is kept in step for the
-                // layout's sake; `skyvis_tint` is the value that means anything.
-                v[3] = self.skyvis_tint.max(0.0);
-                v
+                let k = self.macro_octave_scale.max(0.0);
+                [
+                    self.macro_octave_strength[0] * k,
+                    self.macro_octave_strength[1] * k,
+                    self.macro_octave_strength[2] * k,
+                    self.skyvis_tint.max(0.0),
+                ]
             },
         }
     }
@@ -1994,6 +2008,7 @@ mod tests {
             wave_length_b: 11.0,
             wave_speed: 1.0,
             wave_steepness: 0.95,
+            ..Default::default()
         };
         let chunk = |grid_pos, min_y, max_y| TerrainChunk {
             grid_pos,
