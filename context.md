@@ -525,6 +525,7 @@ name is a mnemonic, not a claim of similarity.
 | Northlight (CONTROL) | Remedy | Editor reach: making authored state authorable |
 | NetImmerse (MORROWIND) | Gamebryo | Everything that is not the renderer |
 | Source (PORTAL-0) | Valve | Engineering health, and distrusting your own memory |
+| Ghost of Tsushima (TSUSHIMA) | Sucker Punch | Ground that has to read as photographed, at every distance |
 
 ## Repository map
 
@@ -852,8 +853,12 @@ In tree:
   measured default on the current small scenes.
 - ReSTIR direct and global illumination on ray-query hardware.
 - Portable SDF-traced DDGI with a budgeted 4 by 4 by 4 SH volume.
-- Global IBL, Hillaire atmosphere LUTs, analytic sun position, and a five-track
-  day cycle.
+- Global IBL with multiple-scattering compensation, Hillaire atmosphere LUTs,
+  analytic sun position, and a five-track day cycle.
+- Baked terrain sky visibility and long-range sun shadow from a heightfield
+  horizon bake, both reaching past the 100 m cascade limit.
+- Hammon rough diffuse, micro-shadowing, geometric specular antialiasing, and a
+  roughness-scaled bound on every specular lobe.
 - Volumetric clouds, cloud shadows, precipitation, wetness, wind, and water
   ripples.
 - Clustered local lights and decals using the same volume-binning seam.
@@ -881,8 +886,56 @@ flowchart TB
     CLOUD["cloud shadow, world XZ"] --> OUT
 ```
 
-Cloud shadows fold into the same `shadow_factor`, so terrain, water and meshes
-read one value rather than three sources that can disagree.
+Four sources fold into that one `shadow_factor`: the cascades, cloud shadow,
+terrain's own horizon shadow, and micro-shadowing. Terrain, water and meshes
+then read a single number instead of four that can disagree.
+
+The horizon shadow exists because `SHADOW_DISTANCE` is a compile-time 100 m.
+Past it, hills were fully lit, and read as shapes with paint on them.
+TSUSHIMA-B bakes a horizon map from the heightfield and cross-fades it in over
+the range the last cascade fades out at. Inside 100 m the cascades still win:
+they see meshes, and the horizon map only ever sees terrain.
+
+Four occlusion channels now exist and they measure different things. Confusing
+them has caused three separate visual bugs, all in the same term:
+
+```mermaid
+flowchart TB
+    GTAO["GTAO<br/>screen-space, radius-bounded<br/>metres"] --> AMB["ambient only"]
+    MAT["material AO map<br/>texture-scale<br/>below the pixel"] --> AMB
+    MAT --> MICRO["micro-shadowing<br/>direct light"]
+    SKY["baked sky visibility<br/>landscape-scale<br/>hundreds of metres"] --> AMB
+    SKY --> BENT["bent normal<br/>composed with GTAO's"]
+    HORIZON["baked horizon angle<br/>per azimuth"] --> DIRECT["shadow_factor"]
+    MICRO --> DIRECT
+```
+
+Micro-shadowing takes the material AO map and nothing else. It is a hard
+cutoff, `saturate(N·L + 2·ao² − 1)`, and a hard cutoff is only as well behaved
+as the field it thresholds. Three bugs came from feeding it something else:
+
+- GTAO turned every wobble in a screen-space estimate into a visible edge in
+  direct sunlight.
+- Sky visibility answered a question about valleys with an answer about grain.
+- A foliage occlusion map darkened grass twice. That map encodes a tuft's own
+  interior shade at card scale and is already doing its job on the ambient
+  term, so micro-shadowing skips foliage entirely.
+
+Specular also has a bound. A GGX lobe is a point sample of something that
+should be integrated over the pixel; where the lobe is narrower than the pixel,
+neighbouring pixels straddle the peak and one of them fires.
+
+Geometric specular antialiasing widens the lobe by the normal variance it can
+see. It cannot see a lobe that is narrow because the surface is smooth, and it
+cannot see sub-pixel geometry at all, which is why grass sparkled where terrain
+did not. `clamp_specular_lobe` bounds the response to twice the integrated
+specular reflectance on a rough surface, opening to half of incident light as
+roughness approaches zero.
+
+Ordering matters as much as the filter. Specular AA must run after every writer
+of the shading normal and roughness. It shipped once above the terrain branch,
+where every terrain pixel computed it and threw it away;
+`specular_aa_runs_after_every_normal_and_roughness_writer` now pins it.
 
 The conventional CSM atlas is persistent and cached per quadrant (DOOM-D).
 `CascadeShadowCache` is a pure policy module: it resolves the matrices first,
@@ -913,6 +966,9 @@ In tree:
 - Nested terrain material clipmaps.
 - Terrain virtual texturing that streams paired BC7 source pages into a fixed
   64 MiB atlas.
+- Three heightfield bakes: horizon angles in eight azimuths, cosine-weighted
+  sky visibility with a bent direction, and a mip-chained relief normal that
+  carries its own discarded variance.
 - Heightmap terrain with chunk LOD, stitching, sculpting, texture painting, and
   foliage painting.
 - Finite water bodies backed by mask, depth, shoreline SDF, and a shared CPU/GPU
@@ -966,8 +1022,31 @@ flowchart TB
     LAYERS --> OUT["surface: albedo, normal, roughness"]
     CLIP --> OUT
     VT --> OUT
-    OUT --> SHADE["shading pass"]
+    OUT --> RELIEF["relief normal<br/>past 50-100 m, plus its variance<br/>as roughness"]
+    RELIEF --> SHADE["shading pass"]
+    HZ["horizon bake<br/>8 azimuths"] --> SHADE
+    SV["sky visibility<br/>+ bent direction"] --> SHADE
 ```
+
+The three bakes are terrain-space textures rewritten in place when the
+heightfield changes wholesale, so their bindless indices are registered once and
+live as long as the terrain. They are applied in the shading pass rather than
+inside `evaluate_terrain_material`, because they are properties of the
+heightfield and not of the material: one call site then covers the live, clipmap
+and virtual-texture paths instead of three that would drift.
+
+Three details of those bakes are load-bearing:
+
+- The horizon march reads a max-downsampled pyramid. A thin ridge that averaged
+  away would stop casting.
+- It credits a cell's stored height to the cell's far edge, which is exact
+  wherever the ground is locally linear. Crediting it to the marching position
+  overstates the angle by an amount that cycles with the cell size, and that
+  cycle is a visible ripple.
+- The relief chain's mips are built on the CPU. What has to survive
+  downsampling is the unnormalised sum, and a hardware mip of an
+  already-normalised normal map discards it. That length is the only thing the
+  roughness widening has to work from.
 
 Phase 25A is why the visibility buffer is in that chain at all. Terrain used to
 shade in its own pass afterwards, which meant it missed GTAO, contact shadows and
@@ -1706,6 +1785,49 @@ MORROWIND-AC still owes a deterministic visual fixture. Its initial AA and OIT
 image comparisons moved no more than their control runs, so the code is in tree
 without a valid visual-effect claim.
 
+### TSUSHIMA
+
+Terrain photorealism, planned as nine sub-phases in
+[`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). A through F are in tree
+and ship on. H is half done: its artifact work landed, its macro octaves have
+not. G and I are not started.
+
+The phase opened from a question about the BRDF. The audit put the BRDF fifth.
+
+Ahead of it: no sun shadow past 100 m, no landscape-scale occlusion, aerial
+perspective that reached the ground as a sun-lit grey wash, and a shading
+normal that coarse LODs aliased rather than filtered. All four are transport or
+geometry rather than material, which is why B through E came before F.
+
+| Sub-phase | What landed |
+|---|---|
+| A / GUIDING WIND | Vista rails, `SOMNIUM_SUN_ELEVATION`, and the two captures that settled what B and D were |
+| B / KAGE | Heightfield horizon shadow, at any distance |
+| C / SUMI-E | Baked sky visibility and a landscape-scale bent normal, from B's bake |
+| D / KIRI | The fog medium lit by the sky rather than by the sun alone |
+| E / WHETSTONE | Mip-chained relief normal with Toksvig variance, and geometric specular AA |
+| F / FORGE | Multiple-scattering compensation, Hammon diffuse, micro-shadowing |
+| H / INK, first half | The specular fireflies: an inert AA filter, an unbounded lobe, and micro-shadowing on foliage |
+
+Every one has an environment-variable A/B rail, and the records carry the
+measurement each landed on. Three corrected the plan rather than following it:
+
+- D's premise was wrong. The ground did get aerial perspective; it was just grey.
+- C's prescribed `min` composition measured 38x weaker than the product it
+  should have been.
+- F had to be split into three switches, because one number could not say which
+  of its terms moved the picture.
+
+Still outstanding:
+
+- The fog range holds its last froxel slice past 1,200 m.
+- `micro_shadow_opacity` is untuned at 1.0.
+- Island's low relief means the second shipped map is not much of a check on B
+  or C.
+- H's macro octaves, and the white splotches in the source packs' albedo, which
+  are content work rather than shading work.
+- G / WEAVE and I / GRAVEL have not started.
+
 ## Planned work that has not started
 
 ### PORTAL
@@ -1990,6 +2112,32 @@ flattens the march, and the Details checkbox appears to work while the samples
 still run. The aerial cut and the toggle both zero those uniforms on the CPU
 instead. Do not reintroduce a close/far sample-path mix: warps pay the union of
 both paths, and walking measured slower. ([XV-Zeta](<dev records/phase XV/XV-Zeta_plan.md>), [DOOM](<dev records/phase_DOOM.md>))
+
+**Terrain shading had no long-range shadow and no landscape-scale occlusion,
+and neither was a material problem.** `SHADOW_DISTANCE` is a compile-time 100 m,
+so hills past it were fully lit; GTAO is screen-space and radius-bounded and the
+SH probe volume is 4x4x4, so nothing knew a valley sees less sky than the ridge
+above it. One heightfield bake answers both, because sky visibility is the
+integral of the horizon over azimuth. Measured on the coastal vista at an 8
+degree sun, the horizon term alone changed 13.5% of terrain pixels. (TSUSHIMA-B,
+TSUSHIMA-C)
+
+**An A/B whose two sides agree exactly is a plumbing bug, not a technique that
+does nothing.** The first horizon capture pair was byte-identical, because
+`TerrainData::new` bakes against the flat heightmap a terrain is created with
+and the relief lands afterwards. The macro tier had already solved this, in a
+comment three lines above where the bake was added.
+
+The same signature appeared again in F, where a `min` placed after the terrain
+branch silently cancelled a fix that the same call before the branch would have
+made. (TSUSHIMA-B, TSUSHIMA-F)
+
+**Coarse LODs skip vertices, so the shading normal past the near field was
+aliased rather than filtered.** `build_lod_indices` strides `1 << lod`, so at
+LOD 3 the surface is shaded by point samples every eighth cell: the relief
+between them is gone, and what is left flickers. `terrain/relief.rs` bakes the
+averaged normal at every scale and hands the discarded variance to roughness,
+which is what `water.wgsl` has always done to its own slope field. (TSUSHIMA-E)
 
 **The terrain material's 32-entry weight array is scratch memory, and shrinking
 the work around it is the win.** An earlier version ran four passes of 32

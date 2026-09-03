@@ -2579,3 +2579,65 @@ this section is extended with whatever that answer vendors, if anything.
 Slang's WGSL target was measured and found unable to express this engine's
 bindless global pool (`NonUniformResourceIndex` is refused for the WGSL target),
 which is why the WGSL half of `somnium_shader` is unaffected by this decision.
+
+---
+
+## 13L. Phase TSUSHIMA — Sucker Punch (terrain photorealism, 2026-09-02/03)
+
+Opened by **TSUSHIMA-A**. §13E and §13F belong to Phase 27, §13G to CONTROL,
+§13H to MORROWIND, §13I to KENSHI, §13J to STALKER and §13K to DREAMS; **this
+phase edits none of them**.
+
+The rule for this phase is MORROWIND's, one notch stricter where research code
+is involved: **read for the idea, never linked, never vendored, never adapted
+line by line.** Published equations are reimplemented in WGSL from the paper.
+Nothing below contributed source, identifiers, constants-as-data, layouts or
+comments to this repository except where a formula is explicitly named as
+transcribed, and in those cases the formula is the whole of what was taken.
+
+### 13L.1 Techniques implemented from published work
+
+| Source | Licence / terms | What was taken |
+|---|---|---|
+| Tokuyoshi, Y. & Kaplanyan, A., "Improved Geometric Specular Antialiasing", I3D 2019 | Paper; equations reimplemented | The screen-space NDF filter and its two published constants, `σ² = 1/(2π)` and `κ = 0.18`. `enable_specular_aa` in `shading.wgsl`. |
+| Toksvig, M., "Mipmapping Normal Maps", *JGT* 2005 | Paper; equations reimplemented | Normal-length as a variance measure, and the von Mises-Fisher conversion into a roughness widening. `widen_roughness_toksvig` in `terrain_material.wgsl`; the bake is `terrain/relief.rs`. |
+| Fdez-Agüera, C., "A Multiple-Scattering Microfacet Model for Real-Time Image-Based Lighting", *JCGT* 8(1), 2019 | JCGT; listing reimplemented | `FssEss` / `Ems` / `F_avg` / `FmsEms` / `kD` and their combination, as `evaluate_ibl_ms` in `shading.wgsl`. The listing was read from <https://bruop.github.io/ibl/> rather than retyped from the PDF. |
+| Google **Filament** documentation, `energyCompensation` | Apache-2.0 | The single-line direct-lobe compensation `1 + F0·(1/dfg.y − 1)`, as `energy_compensation` in `brdf.wgsl`. Cross-read against the local **Bevy** copy (`bevy_pbr/src/render/pbr_lighting.wgsl`, MIT/Apache-2.0), which implements the same term and cites Filament. No code was copied from either. |
+| Hammon, E. Jr., "PBR Diffuse Lighting for GGX+Smith Microsurfaces", GDC 2017 | Conference deck; equations transcribed | The diffuse model from slide 113 and its constants, with `1.05 = 21/(20π)` derived on slide 108. `diffuse_hammon` in `brdf.wgsl`. |
+| Brinck, W. & Maximov, A., "The Technical Art of Uncharted 4", GDC 2016 | Conference deck; formula transcribed | Micro-shadowing, `saturate(N·L + 2·ao² − 1)` with an opacity control. Transcribed from **Unity HDRP**'s `ComputeMicroShadowing` (`com.unity.render-pipelines.core`, Unity Companion License), which implements it and carries the Uncharted 4 attribution in its own comment. No Unity code was copied; the formula is three lines of arithmetic and is reimplemented. |
+| Max, N. (1988); Sloan, P.-P. & Cohen, M., "Interactive Horizon Mapping" (2000) | Papers; technique reimplemented | Per-texel horizon angles in *k* azimuths as a shadow test. `terrain/horizon.rs`. |
+| da Silva, G., "Fun With Horizon Maps" (2020), <https://dasilvagf.github.io/> | Public blog post; layout idea only | The concrete packing choice of eight compass azimuths across two RGBA8 textures. No code was read from the linked demo. |
+| Patry, J., "Real-Time Samurai Cinema", SIGGRAPH 2021 *Advances in Real-Time Rendering* | Conference deck; idea only | That **sky visibility** can be baked as a geometric property and multiplied by the live sky at runtime, so time of day relights for free. Somnium bakes it into a terrain-space texture rather than Sucker Punch's SH probe grid, and does not implement their SH or deringing path. |
+
+### 13L.2 Read and deliberately not implemented
+
+Recorded because the phase plan cites them and a later reader will otherwise
+look for them in the tree.
+
+| Source | Status |
+|---|---|
+| Portsmouth, J., Kutz, P. & Hill, S., "EON: A Practical Energy-Preserving Rough Diffuse BRDF", *JCGT* 14(1), 2025 (arXiv:2410.18026) | **Not in tree.** Listing 1 and Appendix A were read and transcribed into the phase plan's appendix as reference. Hammon shipped instead; EON remains the upgrade path. |
+| Timonen, V. & Westerholm, J., "Scalable Height Field Self-Shadowing", Eurographics 2010; Snyder, J. & Nowrouzezahrai, D., EGSR 2008 | **Not in tree.** The sweep-line horizon accumulation was read as the scalable alternative. `terrain/horizon.rs` uses a max-downsampled pyramid march instead. |
+| Heitz, E. & Neyret, F., HPG 2018; Deliot, T. & Heitz, E., *GPU Zen 2*, 2019 | **Not in tree.** Variance-preserving blending informs the phase's reasoning about contrast loss; TSUSHIMA-G is not started. |
+| Heitz, E. et al., "The SGGX Microflake Distribution", SIGGRAPH 2015 | **Not in tree.** Considered for the relief bake; Toksvig's single length channel shipped instead. |
+| Werle & Martinez, GDC 2017; "Terrain Rendering in Far Cry 5", GDC 2018 | **Not in tree.** Background for the phase's blending survey. |
+| van Muijden, J., "GPU-Based Run-Time Procedural Placement in Horizon Zero Dawn", GDC 2017 | **Not in tree.** Background for TSUSHIMA-I, which is not started. |
+| Kulla & Conty, SIGGRAPH 2017; Turquin, E., 2019 | **Not in tree** directly. The general treatment behind the compensation term Filament's one-liner approximates. |
+
+### 13L.3 Reference engine trees
+
+Read for pattern only, under the same terms MORROWIND established at §13H.0.
+None contributed source to this repository.
+
+| Tree | Licence | Read for |
+|---|---|---|
+| `bevy` (`bevy_pbr`) | MIT / Apache-2.0 | A WGSL-shaped reading of Filament's compensation term. |
+| `godot-4.7.1-stable` | MIT | `integrate_dfg.glsl`, for the split-sum LUT form. |
+| `o3de-development` | Apache-2.0 / MIT | Already cited in tree for `terrain_append_height` and the macro/detail split; unchanged by this phase. |
+
+### 13L.4 Content
+
+No new assets. The phase audited the existing CC0 Poly Haven terrain and
+foliage packs already recorded elsewhere in this file, and changed none of them.
+The audit's findings are in
+`dev records/phase TSUSHIMA/TSUSHIMA-D-E-F.md`.
