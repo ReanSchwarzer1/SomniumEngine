@@ -413,35 +413,6 @@ pub fn apply_paint(
     Some((x0, z0, x1, z1))
 }
 
-/// Paint every texel with one layer at full weight.
-///
-/// What a terrain created from scratch starts as. An all-zero splatmap is not
-/// the same thing: the shader normalises the weights, finds nothing to
-/// normalise, and falls back to the layer mean albedo — a flat grey plate that
-/// reads as a bug rather than as ground waiting to be painted.
-///
-/// Clears the paint lock as `auto_splat` does, because this *is* the initial
-/// splat for a terrain that never had one, and a locked texel would refuse the
-/// first biome the author applies.
-pub fn fill_layer(terrain: &mut TerrainData, layer: u8) {
-    let layer = (layer as usize).min(super::textures::TERRAIN_LAYER_COUNT as usize - 1);
-    let (sw, sh) = (terrain.splatmap.width, terrain.splatmap.height);
-    if sw == 0 || sh == 0 {
-        return;
-    }
-    for texel in terrain.splatmap.data.iter_mut() {
-        *texel = [0; super::textures::TERRAIN_LAYER_COUNT as usize];
-        texel[layer] = u8::MAX;
-    }
-    for lock in terrain.splat_lock.iter_mut() {
-        *lock = 0;
-    }
-    terrain.splatmap.mark_dirty(0, 0, sw - 1, sh - 1);
-    // Foliage is scattered against layer weights, so this moves what a brush
-    // would place.
-    terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
-}
-
 /// Procedural initial splat. Delegates to the XV-G biome preset.
 pub fn auto_splat(terrain: &mut TerrainData, snow_height: f32) {
     super::biome::apply_biome(

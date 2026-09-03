@@ -6,28 +6,12 @@ pub const GREAT_LAKES_MASK: &str = "assets/terrain/great_lakes/water_mask.png";
 pub const GREAT_LAKES_DEPTH: &str = "assets/terrain/great_lakes/water_depth.png";
 pub const GREAT_LAKES_SHORE_SDF: &str = "assets/terrain/great_lakes/shore_sdf.png";
 
-/// Coverage rules a body can be baked with. The *shape* of the water, which is
-/// separate from what it is made of — that is `WaterComponent::body_kind`.
-pub const WATER_PRESET_LAKE_BAKE: u32 = 1;
-pub const WATER_PRESET_OPEN: u32 = 2;
-/// Phase TSUSHIMA-I: a ribbon swept along an authored centreline.
-pub const WATER_PRESET_CHANNEL: u32 = 3;
-
-/// Control points a channel centreline may carry.
-///
-/// Fixed rather than a `Vec` because the descriptor is `Copy` and its equality
-/// is what triggers a rebake: `ensure_water_body` compares the stored
-/// descriptor with the incoming one, so a spline the author drags reaches the
-/// GPU by being *different*, with no dirty flag to forget to set. A `Vec` would
-/// cost that property, and sixteen control points is a long river reach.
-pub const WATER_PATH_POINTS: usize = 16;
-
 /// Stable, serializable description mirrored by `somnium_core::WaterComponent`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterBodyDescriptor {
     pub water_id: u32,
     pub terrain_id: u32,
-    /// One of the `WATER_PRESET_*` constants above.
+    /// 1 = Great Lakes lake preset. 2 = full-coverage ocean (procedural mask).
     pub preset: u32,
     pub surface_level: f32,
     pub max_depth: f32,
@@ -40,134 +24,6 @@ pub struct WaterBodyDescriptor {
     pub wave_length_b: f32,
     pub wave_speed: f32,
     pub wave_steepness: f32,
-    /// Channel centreline in terrain-local XZ, `path_len` points used.
-    pub path: [[f32; 2]; WATER_PATH_POINTS],
-    pub path_len: u32,
-    /// Half-width of the swept channel, metres. Ignored by other presets.
-    pub half_width: f32,
-}
-
-impl Default for WaterBodyDescriptor {
-    /// An unbound body with no coverage.
-    ///
-    /// Exists so test fixtures and future callers can write the handful of
-    /// fields they care about and spread the rest. A `somnium_core` test that
-    /// built `TerrainTextureIds` field by field broke on TSUSHIMA-B for exactly
-    /// this reason, and the fix there was the same: a test about which ids get
-    /// unbound has no opinion about the rest.
-    fn default() -> Self {
-        Self {
-            water_id: u32::MAX,
-            terrain_id: u32::MAX,
-            preset: 0,
-            surface_level: 0.0,
-            max_depth: 0.0,
-            bounds: [0.0; 4],
-            amplitude: 1.0,
-            wave_dir_a: [1.0, 0.0],
-            wave_dir_b: [0.0, 1.0],
-            wave_length_a: 18.0,
-            wave_length_b: 11.0,
-            wave_speed: 1.0,
-            wave_steepness: 0.35,
-            path: [[0.0; 2]; WATER_PATH_POINTS],
-            path_len: 0,
-            half_width: 3.0,
-        }
-    }
-}
-
-impl WaterBodyDescriptor {
-    /// The centreline actually in use.
-    #[must_use]
-    pub fn path_points(&self) -> &[[f32; 2]] {
-        &self.path[..(self.path_len as usize).min(WATER_PATH_POINTS)]
-    }
-}
-
-/// Shortest distance from `p` to the polyline through `points`, in the same
-/// units as the points.
-///
-/// Segment-wise rather than point-wise: the nearest *vertex* to a point beside
-/// a long straight reach can be tens of metres away while the river itself is
-/// two metres away, and a mask built from vertex distance is a string of beads.
-fn distance_to_polyline(points: &[[f32; 2]], p: [f32; 2]) -> f32 {
-    if points.is_empty() {
-        return f32::INFINITY;
-    }
-    if points.len() == 1 {
-        return ((p[0] - points[0][0]).powi(2) + (p[1] - points[0][1]).powi(2)).sqrt();
-    }
-    let mut best = f32::INFINITY;
-    for pair in points.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
-        let len_sq = dx * dx + dz * dz;
-        // A repeated control point is a zero-length segment; clamping `t` to 0
-        // makes it degenerate to the vertex rather than divide by zero.
-        let t = if len_sq > 1e-9 {
-            (((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / len_sq).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let (cx, cz) = (a[0] + dx * t, a[1] + dz * t);
-        best = best.min(((p[0] - cx).powi(2) + (p[1] - cz).powi(2)).sqrt());
-    }
-    best
-}
-
-/// Rasterise a channel's coverage, bed depth and shore distance.
-///
-/// Returns the same four arrays the baked lake loads from PNGs, so everything
-/// downstream — the datum reprojection, the mask decimation, `finite_mesh` —
-/// works on a river without knowing one exists.
-fn bake_channel(descriptor: WaterBodyDescriptor) -> ([u32; 2], Vec<u8>, Vec<u16>, Vec<u16>) {
-    const SIZE: u32 = 256;
-    let size = [SIZE, SIZE];
-    let n = (SIZE * SIZE) as usize;
-    let points = descriptor.path_points();
-    let [min_x, min_z, max_x, max_z] = descriptor.bounds;
-    let span_x = (max_x - min_x).max(1.0);
-    let span_z = (max_z - min_z).max(1.0);
-    let half_width = descriptor.half_width.max(0.5);
-    // The shore SDF is stored in *cells*, and a cell here is one texel of this
-    // grid rather than one metro of world. Converting once keeps the two
-    // presets' SDFs comparable, which is what lets the shader use one contour.
-    let metres_per_cell = (span_x / SIZE as f32).max(span_z / SIZE as f32);
-
-    let mut mask = vec![0u8; n];
-    let mut depth = vec![0u16; n];
-    let mut sdf = vec![0u16; n];
-    if points.len() < 2 {
-        // No path is an empty body, not a full one. A river whose spline was
-        // deleted should vanish rather than flood the bounds.
-        return (size, mask, depth, sdf);
-    }
-
-    for z in 0..SIZE {
-        for x in 0..SIZE {
-            let idx = (z * SIZE + x) as usize;
-            let world = [
-                min_x + (x as f32 + 0.5) / SIZE as f32 * span_x,
-                min_z + (z as f32 + 0.5) / SIZE as f32 * span_z,
-            ];
-            let distance = distance_to_polyline(points, world);
-            let across = (distance / half_width).clamp(0.0, 1.0);
-            if distance <= half_width {
-                mask[idx] = u8::MAX;
-                // A rounded bed: deepest along the centreline, meeting the bank
-                // tangentially. A flat-bottomed channel puts a step at the
-                // waterline that the shore fade then has to hide.
-                let profile = (1.0 - across * across).max(0.0).sqrt();
-                depth[idx] = (profile * u16::MAX as f32) as u16;
-            }
-            // Signed, positive inside, in cells, encoded the way the baked
-            // lake's PNG is: 32768 is the shoreline.
-            let signed_cells = ((half_width - distance) / metres_per_cell).clamp(-128.0, 128.0);
-            sdf[idx] = (((signed_cells / 128.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
-        }
-    }
-    (size, mask, depth, sdf)
 }
 
 /// CPU result matching the deterministic Gerstner displacement used by WGSL.
@@ -197,10 +53,7 @@ pub struct WaterBodyData {
 fn load_assets(
     descriptor: WaterBodyDescriptor,
 ) -> Result<([u32; 2], Vec<u8>, Vec<u16>, Vec<u16>), String> {
-    if descriptor.preset == WATER_PRESET_CHANNEL {
-        return Ok(bake_channel(descriptor));
-    }
-    if descriptor.preset == WATER_PRESET_OPEN {
+    if descriptor.preset == 2 {
         // Open ocean: fully wet rectangle. Terrain depth owns the island shore
         // (water.wgsl under-terrain guard). Same optical/Gerstner numbers live
         // on the ECS component; this is only coverage.
@@ -208,7 +61,7 @@ fn load_assets(
         let n = (size[0] * size[1]) as usize;
         return Ok((size, vec![255u8; n], vec![u16::MAX; n], vec![u16::MAX; n]));
     }
-    if descriptor.preset != WATER_PRESET_LAKE_BAKE {
+    if descriptor.preset != 1 {
         return Err(format!("unsupported water preset {}", descriptor.preset));
     }
     let resolve = |path: &str| {
@@ -516,9 +369,7 @@ impl WaterBodyData {
             .collect();
         // Make `surface_level` mean something. Preset 2 is a wet rectangle with
         // no baked shoreline to move, so it is exempt.
-        let (mask, depth_metres, shore_distance_cells) = if descriptor.preset
-            == WATER_PRESET_LAKE_BAKE
-        {
+        let (mask, depth_metres, shore_distance_cells) = if descriptor.preset == 1 {
             reproject_to_datum(
                 size,
                 mask,
@@ -903,7 +754,6 @@ mod tests {
             wave_length_b: 7.0,
             wave_speed: 1.0,
             wave_steepness: 0.45,
-            ..Default::default()
         };
         let (size, mask, depth, sdf) = load_assets(descriptor).expect("baked assets");
         assert_eq!(size, [2048, 2048]);
@@ -930,7 +780,6 @@ mod tests {
             wave_length_b: 7.0,
             wave_speed: 0.85,
             wave_steepness: 0.42,
-            ..Default::default()
         };
         let (size, mask, depth, sdf) = load_assets(descriptor).expect("ocean assets");
         assert_eq!(size, [256, 256]);
@@ -956,7 +805,6 @@ mod tests {
             wave_length_b: 7.0,
             wave_speed: 1.0,
             wave_steepness: 0.45,
-            ..Default::default()
         };
         let (displacement, normal, velocity) =
             gerstner(descriptor, glam::Vec2::new(123.0, 456.0), 3.0);
@@ -1143,117 +991,5 @@ mod datum_tests {
         // One cell either side of the boundary is one cell from it.
         assert!((sdf[3] - 1.0).abs() < 1.0e-3, "sdf = {sdf:?}");
         assert!((sdf[2] + 1.0).abs() < 1.0e-3, "sdf = {sdf:?}");
-    }
-}
-
-#[cfg(test)]
-mod channel_tests {
-    use super::*;
-
-    fn descriptor(points: &[[f32; 2]], half_width: f32) -> WaterBodyDescriptor {
-        let mut d = WaterBodyDescriptor {
-            preset: WATER_PRESET_CHANNEL,
-            max_depth: 2.0,
-            bounds: [0.0, 0.0, 100.0, 100.0],
-            half_width,
-            ..Default::default()
-        };
-        for (slot, point) in points.iter().enumerate() {
-            d.path[slot] = *point;
-        }
-        d.path_len = points.len() as u32;
-        d
-    }
-
-    fn texel(size: [u32; 2], bounds: [f32; 4], world: [f32; 2]) -> usize {
-        let x = ((world[0] - bounds[0]) / (bounds[2] - bounds[0]) * size[0] as f32) as u32;
-        let z = ((world[1] - bounds[1]) / (bounds[3] - bounds[1]) * size[1] as f32) as u32;
-        (z.min(size[1] - 1) * size[0] + x.min(size[0] - 1)) as usize
-    }
-
-    /// Distance is to the *segments*, not to the control points.
-    ///
-    /// A point beside the middle of a long straight reach is metres from the
-    /// river and hundreds of metres from either vertex. Measuring to vertices
-    /// builds a mask that is a string of beads with dry gaps between them.
-    #[test]
-    fn distance_is_measured_to_the_segments() {
-        let line = [[0.0, 0.0], [100.0, 0.0]];
-        // Beside the middle: 5 m from the segment, ~50 m from both ends.
-        let beside = distance_to_polyline(&line, [50.0, 5.0]);
-        assert!((beside - 5.0).abs() < 1e-3, "got {beside}");
-        // Past the end clamps to the endpoint rather than running off the line.
-        let past = distance_to_polyline(&line, [130.0, 0.0]);
-        assert!((past - 30.0).abs() < 1e-3, "got {past}");
-    }
-
-    /// A repeated control point is a zero-length segment. Dividing by its
-    /// length would put NaN through the whole mask.
-    #[test]
-    fn a_repeated_control_point_does_not_divide_by_zero() {
-        let line = [[10.0, 10.0], [10.0, 10.0], [20.0, 10.0]];
-        let d = distance_to_polyline(&line, [15.0, 13.0]);
-        assert!(d.is_finite(), "distance went non-finite: {d}");
-        assert!((d - 3.0).abs() < 1e-3, "got {d}");
-    }
-
-    /// The ribbon is wet along the line and dry away from it.
-    #[test]
-    fn the_channel_is_wet_along_its_path_and_dry_beside_it() {
-        let d = descriptor(&[[20.0, 50.0], [80.0, 50.0]], 6.0);
-        let (size, mask, depth, _) = bake_channel(d);
-
-        let on = texel(size, d.bounds, [50.0, 50.0]);
-        assert_eq!(mask[on], u8::MAX, "the centreline is dry");
-        assert!(depth[on] > 0, "the centreline has no depth");
-
-        // Well outside the half-width, and past the end of the reach.
-        for dry in [[50.0, 75.0], [5.0, 50.0], [95.0, 50.0]] {
-            let i = texel(size, d.bounds, dry);
-            assert_eq!(mask[i], 0, "{dry:?} is wet and should not be");
-        }
-    }
-
-    /// Deepest at the centreline, meeting the bank tangentially.
-    ///
-    /// A flat-bottomed channel puts a step at the waterline, and the shore fade
-    /// then has to hide a discontinuity rather than describe one.
-    #[test]
-    fn the_bed_is_deepest_in_the_middle() {
-        let d = descriptor(&[[20.0, 50.0], [80.0, 50.0]], 10.0);
-        let (size, _, depth, _) = bake_channel(d);
-        let centre = depth[texel(size, d.bounds, [50.0, 50.0])];
-        let midway = depth[texel(size, d.bounds, [50.0, 55.0])];
-        let bank = depth[texel(size, d.bounds, [50.0, 59.5])];
-        assert!(
-            centre > midway && midway > bank,
-            "bed profile is not monotonic: {centre} {midway} {bank}"
-        );
-    }
-
-    /// A channel whose spline was deleted vanishes rather than flooding.
-    ///
-    /// The opposite is the dangerous default: a body with no path whose mask
-    /// defaults to "wet everywhere" fills its whole bounding rectangle, which
-    /// on a river-sized body is a lake nobody asked for.
-    #[test]
-    fn a_channel_without_a_path_is_empty() {
-        for points in [&[][..], &[[50.0, 50.0]][..]] {
-            let (_, mask, _, _) = bake_channel(descriptor(points, 6.0));
-            assert!(mask.iter().all(|&m| m == 0), "an empty path flooded");
-        }
-    }
-
-    /// Inside the ribbon the shore distance is positive, outside it negative,
-    /// encoded the way the baked lake PNG is so one shader contour serves both.
-    #[test]
-    fn the_shore_distance_changes_sign_at_the_bank() {
-        let d = descriptor(&[[20.0, 50.0], [80.0, 50.0]], 8.0);
-        let (size, _, _, sdf) = bake_channel(d);
-        let decode = |raw: u16| (raw as f32 / u16::MAX as f32 * 2.0 - 1.0) * 128.0;
-        let inside = decode(sdf[texel(size, d.bounds, [50.0, 50.0])]);
-        let outside = decode(sdf[texel(size, d.bounds, [50.0, 70.0])]);
-        assert!(inside > 0.0, "inside the ribbon read {inside}");
-        assert!(outside < 0.0, "outside the ribbon read {outside}");
     }
 }

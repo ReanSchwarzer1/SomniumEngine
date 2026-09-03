@@ -2297,58 +2297,6 @@ pub fn simulate_particles(
 
 // ── Water Component ─────────────────────────────────────────────────────────
 
-/// What a body of water *is*, as distinct from what shape it covers.
-///
-/// Phase 13 shipped one water look and Phase IV added a second by hand. The
-/// distinction that actually matters is optical and dynamic, not geometric: an
-/// ocean is deep, blue, and carries swell built over a thousand kilometres of
-/// fetch; a river is shallow, turbid, and its surface is disturbed by its own
-/// bed rather than by wind. Those are different absorption and scattering
-/// coefficients and different Gerstner wavelengths, and neither follows from
-/// the coverage mask.
-///
-/// Coverage is `WaterBodyDescriptor::preset`, and the two are deliberately
-/// separate: a lake and a sea can share a coverage rule and still look nothing
-/// alike, and a channel ribbon serves a river and an irrigation ditch equally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum WaterBodyKind {
-    /// Inland, short fetch, clear enough to see the bed near the shore.
-    Lake = 0,
-    /// Deep open water: long swell, strong red absorption, low scattering.
-    Ocean = 1,
-    /// Shelf and coastal water. Greener and more turbid than open ocean, from
-    /// river outflow and stirred sediment, with a shorter and choppier sea
-    /// state because the fetch is bounded by land.
-    Sea = 2,
-    /// A channel with a current. Shallow, brown-green with suspended load, and
-    /// almost flat: what texture a river surface has comes from its bed and its
-    /// banks rather than from wind, so its wavelengths are metres.
-    River = 3,
-}
-
-impl WaterBodyKind {
-    #[must_use]
-    pub fn from_u32(raw: u32) -> Self {
-        match raw {
-            1 => Self::Ocean,
-            2 => Self::Sea,
-            3 => Self::River,
-            _ => Self::Lake,
-        }
-    }
-
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Lake => "Lake",
-            Self::Ocean => "Ocean",
-            Self::Sea => "Sea",
-            Self::River => "River",
-        }
-    }
-}
-
 /// Configuration for the procedural water shader (Phase 13).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterComponent {
@@ -2426,8 +2374,6 @@ pub struct WaterComponent {
     pub caustic_strength: f32,
     /// Whether this body participates in the underwater medium pass.
     pub underwater_enabled: bool,
-    /// Half-width of a channel body, metres. Ignored by every other kind.
-    pub half_width: f32,
 }
 
 impl Default for WaterComponent {
@@ -2469,10 +2415,6 @@ impl Default for WaterComponent {
             foam_threshold: 0.08,
             caustic_strength: 1.0,
             underwater_enabled: true,
-            // Three metres either side is a stream you can wade. It is
-            // a sane default for the one kind that reads it and inert
-            // for the other three.
-            half_width: 3.0,
         }
     }
 }
@@ -2550,83 +2492,6 @@ impl WaterComponent {
         }
     }
 
-    /// Coastal and shelf water filling `bounds`.
-    ///
-    /// Between the lake and the open ocean, and closer to the lake than people
-    /// expect: shelf water carries river outflow and stirred sediment, so it
-    /// scatters green strongly and absorbs red less than clear ocean does. The
-    /// sea state is choppier and shorter than an ocean because the fetch is
-    /// bounded by land on at least one side.
-    #[must_use]
-    pub fn sea(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
-        Self {
-            body_kind: WaterBodyKind::Sea as u32,
-            // Shorter, steeper, more of it. A shelf sea is rarely glassy.
-            wave_length_a: 12.0,
-            wave_length_b: 7.5,
-            wave_steepness: 0.5,
-            amplitude: 0.85,
-            wind_speed: 9.0,
-            // Green-dominant: less red absorption than open ocean, and roughly
-            // triple the scattering.
-            absorption: [0.30, 0.09, 0.06],
-            scattering: [0.030, 0.070, 0.060],
-            deep_color: [0.012, 0.055, 0.070, 0.9],
-            shallow_color: [0.08, 0.30, 0.34, 0.5],
-            clarity: 0.7,
-            spectrum_blend: 0.8,
-            foam_decay: 3.0,
-            foam_threshold: 0.42,
-            ..Self::ocean(water_id, terrain_id, bounds)
-        }
-    }
-
-    /// A channel swept along an authored centreline.
-    ///
-    /// `bounds` is the rectangle the ribbon is rasterised into; the shape
-    /// inside it comes from the entity own `SplineComponent`, which is why this
-    /// takes no path. `App` fills it from the spline every frame, so dragging a
-    /// control point rebakes the body with no dirty flag anyone has to remember
-    /// to set.
-    ///
-    /// Almost flat, deliberately. A river surface texture comes from its bed
-    /// and its banks, not from wind over open water, and Gerstner swell on a
-    /// six-metre channel reads as a bath being filled.
-    #[must_use]
-    pub fn river(water_id: u32, terrain_id: u32, bounds: [f32; 4]) -> Self {
-        Self {
-            preset: somnium_renderer::water_body::WATER_PRESET_CHANNEL,
-            body_kind: WaterBodyKind::River as u32,
-            // Shallow. The channel bake rounded bed scales against this, so it
-            // is the depth at the centreline and not an optical fudge.
-            max_depth: 2.4,
-            amplitude: 0.12,
-            wave_length_a: 3.5,
-            wave_length_b: 2.0,
-            wave_steepness: 0.16,
-            wave_speed: 1.4,
-            wind_speed: 3.0,
-            // Suspended load: strong blue and red absorption, heavy scattering.
-            // Fresh water carrying silt is brown-green rather than blue, and
-            // the difference is mostly the scattering term.
-            absorption: [0.42, 0.22, 0.55],
-            scattering: [0.090, 0.110, 0.060],
-            deep_color: [0.045, 0.070, 0.045, 0.9],
-            shallow_color: [0.16, 0.24, 0.16, 0.5],
-            clarity: 0.35,
-            roughness: 0.12,
-            // The spectral cascade models wind-driven open water and has
-            // nothing to say about a channel, so the deterministic Gerstner
-            // layer carries this alone. That is also the layer buoyancy
-            // samples, so a boat on a river floats on what it can see.
-            spectrum_blend: 0.0,
-            foam_decay: 1.2,
-            foam_threshold: 0.3,
-            caustic_strength: 1.1,
-            ..Self::great_lakes(water_id, terrain_id, bounds)
-        }
-    }
-
     /// Renderer-facing descriptor; large textures and query arrays stay out of ECS.
     pub fn descriptor(self) -> somnium_renderer::water_body::WaterBodyDescriptor {
         somnium_renderer::water_body::WaterBodyDescriptor {
@@ -2643,19 +2508,7 @@ impl WaterComponent {
             wave_length_b: self.wave_length_b,
             wave_speed: self.wave_speed,
             wave_steepness: self.wave_steepness,
-            // A body with no spline has no path. `App::water_descriptor` fills
-            // these for the entities that carry one, because the spline is a
-            // sibling component and this function only sees the water.
-            path: [[0.0; 2]; somnium_renderer::water_body::WATER_PATH_POINTS],
-            path_len: 0,
-            half_width: self.half_width,
         }
-    }
-
-    /// What this body is, decoded from the stored discriminant.
-    #[must_use]
-    pub fn kind(self) -> WaterBodyKind {
-        WaterBodyKind::from_u32(self.body_kind)
     }
 }
 

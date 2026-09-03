@@ -389,7 +389,6 @@ export type SomniumWater = {
 	foam_threshold: number,
 	caustic_strength: number,
 	underwater_enabled: boolean,
-	half_width: number,
 }
 
 --- `somnium.Weather` (schema version 1).

@@ -825,10 +825,6 @@ fn water_schema() -> ComponentSchema {
             foam_threshold { min: 0.0 },
             caustic_strength { min: 0.0 },
             underwater_enabled,
-            // Phase TSUSHIMA-I. Registered, or a river saves and reloads at the
-            // default width — the schema is what serialises, and a field
-            // missing from it is a field that silently does not persist.
-            half_width { min: 0.1, soft_max: 40.0, unit: "m" },
         }
     }
 }

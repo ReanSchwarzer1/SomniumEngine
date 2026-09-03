@@ -971,13 +971,6 @@ In tree:
   carries its own discarded variance.
 - Heightmap terrain with chunk LOD, stitching, sculpting, texture painting, and
   foliage painting.
-- Four body kinds — lake, ocean, sea, river — separated by optics and sea state
-  rather than by shape. Coverage is a *different* field, because a lake and a
-  sea share a coverage rule and look nothing alike.
-- A river is a ribbon swept along an authored spline. Its centreline rides in
-  the body descriptor, and `ensure_water_body` already rebakes on descriptor
-  inequality, so dragging a control point reshapes the water with no dirty flag
-  to forget.
 - Finite water bodies backed by mask, depth, shoreline SDF, and a shared CPU/GPU
   surface query.
 - The authored water datum follows the shoreline bake, and depth/contact fading
@@ -1818,7 +1811,6 @@ geometry rather than material, which is why B through E came before F.
 | G / WEAVE | Splat weights perturbed by world-indexed noise **before** strongest-four selection, so the noise picks the winners |
 | H / INK, second half | Three macro octaves at 1 km / 100 m / 10 m, and a hue shift driven by C's baked sky visibility |
 | I / GRAVEL | Parallax on cliffs, in the projection's own frame; layer-weight rejection and tilt in the foliage funnel |
-| I, editor pass | 25-entry foliage palette, nine Details controls, `Create -> Terrain (Empty)`, and four kinds of water |
 
 Every one has an environment-variable A/B rail, and the records carry the
 measurement each landed on. Three corrected the plan rather than following it:
@@ -1839,14 +1831,6 @@ measurement each landed on. Three corrected the plan rather than following it:
 - I's plan says the foliage funnel "already does slope, layer-weight, radius and
   distance culling". It did not do layer-weight: `surface_sample` computed the
   weight and `ground_sample` threw it away.
-- The asset fetch script destroyed the four committed Phase 17E foliage models
-  before anyone read its log. Python emits CRLF on Windows, `read` left the CR
-  on the last field, the last field was the MD5, so every hash compared unequal
-  and every fresh download was deleted as corrupt. `git checkout` got them back.
-  The fix is not a `tr` — a fix spelled with a backslash escape breaks the same
-  way the next time someone edits it — but three plain lines per record written
-  in binary, plus a download that lands in `.part` and is moved into place only
-  once its hash agrees.
 
 Still outstanding:
 
@@ -1858,7 +1842,9 @@ Still outstanding:
   than shading work.
 - H's third item: `terrain_detail_fade` still solves aliasing by removing signal
   rather than re-injecting contrast against E's filtered normal.
-- I's cliff parallax has no capture.
+- I's cliff parallax has no capture, and the two CC0 debris meshes the palette's
+  last two entries point at are fetched by `tools/fetch_foliage_rocks.sh` rather
+  than committed — so nothing has been seen with a pebble on it.
 - The projected parallax has no self-shadow, where the heightfield march does.
 
 ## Planned work that has not started

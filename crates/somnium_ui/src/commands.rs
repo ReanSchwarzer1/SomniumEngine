@@ -1344,61 +1344,11 @@ fn declarations() -> Vec<Command> {
         ),
         command!(
             "editor.create.terrain",
-            "Create Landscape",
+            "Create Terrain",
             "Create",
             None,
-            "Create the coastline preset: relief, an altitude splat, and a lake.",
+            "Create a terrain entity.",
             A::CreateEntity(C::Terrain),
-            CREATE,
-            always
-        ),
-        command!(
-            "editor.create.empty_terrain",
-            "Create Terrain (Empty)",
-            "Create",
-            None,
-            "Create a flat terrain with one material and no water, to sculpt and paint from scratch.",
-            A::CreateEntity(C::EmptyTerrain),
-            CREATE,
-            always
-        ),
-        command!(
-            "editor.create.lake",
-            "Create Lake",
-            "Create",
-            None,
-            "Create inland water: short fetch, clear enough to see the bed near the shore.",
-            A::CreateEntity(C::Lake),
-            CREATE,
-            always
-        ),
-        command!(
-            "editor.create.ocean",
-            "Create Ocean",
-            "Create",
-            None,
-            "Create deep open water: long swell, strong red absorption, low scattering.",
-            A::CreateEntity(C::Ocean),
-            CREATE,
-            always
-        ),
-        command!(
-            "editor.create.sea",
-            "Create Sea",
-            "Create",
-            None,
-            "Create coastal shelf water: greener and choppier than open ocean.",
-            A::CreateEntity(C::Sea),
-            CREATE,
-            always
-        ),
-        command!(
-            "editor.create.river",
-            "Create River",
-            "Create",
-            None,
-            "Create a channel swept along a spline. Drag its control points to reshape it.",
-            A::CreateEntity(C::River),
             CREATE,
             always
         ),

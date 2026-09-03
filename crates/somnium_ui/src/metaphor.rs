@@ -271,9 +271,8 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         AudioEmitter | ShorelineAudio => IconId::Audio,
         Spline => IconId::Mesh,
         Particle => IconId::Particle,
-        Terrain | EmptyTerrain => IconId::Terrain,
+        Terrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
-        Lake | Ocean | Sea | River => IconId::Vessel,
         UiCanvas => IconId::Window,
         // CONTROL-L: the environment is the sun, so it takes the sun icon.
         Environment => IconId::DirectionalLight,
