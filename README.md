@@ -157,7 +157,7 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | CONTROL | Northlight | **Editor reach** — property seam, asset database, drag-and-drop, viewport control, preferences, scene lifecycle, curves, time of day, clouds, weather, decals | **A–O complete** |
 | MORROWIND | NetImmerse | The engine's non-renderer half — see below | **In progress** |
 | PORTAL-0 | Source | Performance audit and engineering health | **Complete** |
-| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, and the BRDF's energy terms | **A–F in tree**, G–I open |
+| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, and parallax on cliffs | **A–I in tree**, H's contrast-with-distance open |
 
 ### Phase MORROWIND, by track
 

@@ -1788,9 +1788,9 @@ without a valid visual-effect claim.
 ### TSUSHIMA
 
 Terrain photorealism, planned as nine sub-phases in
-[`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). A through F are in tree
-and ship on. H is half done: its artifact work landed, its macro octaves have
-not. G and I are not started.
+[`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). **All nine are in tree
+and ship on.** The one item of the plan not done is H's third, re-injecting
+contrast with distance instead of fading detail out.
 
 The phase opened from a question about the BRDF. The audit put the BRDF fifth.
 
@@ -1808,6 +1808,9 @@ geometry rather than material, which is why B through E came before F.
 | E / WHETSTONE | Mip-chained relief normal with Toksvig variance, and geometric specular AA |
 | F / FORGE | Multiple-scattering compensation, Hammon diffuse, micro-shadowing |
 | H / INK, first half | The specular fireflies: an inert AA filter, an unbounded lobe, and micro-shadowing on foliage |
+| G / WEAVE | Splat weights perturbed by world-indexed noise **before** strongest-four selection, so the noise picks the winners |
+| H / INK, second half | Three macro octaves at 1 km / 100 m / 10 m, and a hue shift driven by C's baked sky visibility |
+| I / GRAVEL | Parallax on cliffs, in the projection's own frame; layer-weight rejection and tilt in the foliage funnel |
 
 Every one has an environment-variable A/B rail, and the records carry the
 measurement each landed on. Three corrected the plan rather than following it:
@@ -1816,7 +1819,18 @@ measurement each landed on. Three corrected the plan rather than following it:
 - C's prescribed `min` composition measured 38x weaker than the product it
   should have been.
 - F had to be split into three switches, because one number could not say which
-  of its terms moved the picture.
+  of its terms moved the picture. **H repeated this**: its octaves brighten and
+  its sky-visibility tint darkens, so measured through one switch they partly
+  cancelled and the net said nothing about either. Two rails, added after the
+  first measurement showed the same shape.
+- H's sky-visibility tint was aimed at TSUSHIMA-C's *range* (0.47 to 1.00) when
+  it should have been aimed at C's *distribution* (mean 0.93, with almost every
+  visible pixel within a few hundredths of 1.0). The first version moved 1,604
+  of 705,355 terrain pixels. The fix was the remap, not the gain — a strength
+  sweep showed the term was linear and simply small.
+- I's plan says the foliage funnel "already does slope, layer-weight, radius and
+  distance culling". It did not do layer-weight: `surface_sample` computed the
+  weight and `ground_sample` threw it away.
 
 Still outstanding:
 
@@ -1824,9 +1838,14 @@ Still outstanding:
 - `micro_shadow_opacity` is untuned at 1.0.
 - Island's low relief means the second shipped map is not much of a check on B
   or C.
-- H's macro octaves, and the white splotches in the source packs' albedo, which
-  are content work rather than shading work.
-- G / WEAVE and I / GRAVEL have not started.
+- The white splotches in the source packs' albedo, which are content work rather
+  than shading work.
+- H's third item: `terrain_detail_fade` still solves aliasing by removing signal
+  rather than re-injecting contrast against E's filtered normal.
+- I's cliff parallax has no capture, and the two CC0 debris meshes the palette's
+  last two entries point at are fetched by `tools/fetch_foliage_rocks.sh` rather
+  than committed — so nothing has been seen with a pebble on it.
+- The projected parallax has no self-shadow, where the heightfield march does.
 
 ## Planned work that has not started
 
