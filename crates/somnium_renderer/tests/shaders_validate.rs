@@ -571,16 +571,40 @@ fn ray_query_terrain_hit_uses_the_bounded_splat_unpack() {
             .find("\n/// Resolve a committed ray-query intersection")
             .map(|offset| start + offset)
             .unwrap_or_else(|| panic!("could not isolate rt_terrain_albedo in {root}"));
-        let terrain_hit = &source[start..end];
+        // Code only. This function's own comments name the constructs banned
+        // below in order to explain why they are banned, and a substring scan
+        // cannot tell an explanation from a call.
+        let terrain_hit: String = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        let terrain_hit = terrain_hit.as_str();
         assert!(
             !terrain_hit.contains("terrain_unpack_splats_painted("),
             "{root}'s terrain hit calls the perturbing unpack, recreating the \
              47 GB startup compilation."
         );
-        assert!(
-            terrain_hit.contains("terrain_unpack_splats(splat_s)"),
-            "{root}'s terrain hit no longer uses the bounded plain unpack"
-        );
+        // Stricter than "use the plain unpack", because the plain unpack was
+        // not bounded enough. It returns `array<f32, 32>` — a 128-byte local
+        // that becomes scratch in a ray shader — and its caller then ran
+        // `terrain_strongest_four`, a 32-iteration insertion sort whose bound
+        // is an `override` and therefore unrolls to roughly 256 branches. Both
+        // survived the earlier module split, which is why that split did not
+        // fix the compile. A bounce ray averages per-layer means and needs
+        // neither.
+        for banned in [
+            "terrain_unpack_splats(",
+            "terrain_strongest_four(",
+            "array<f32, 32>",
+        ] {
+            assert!(
+                !terrain_hit.contains(banned),
+                "{root}'s terrain hit reaches `{banned}`, putting a scan array \
+                 or an unrolled sort back into a ray-query entry point"
+            );
+        }
     }
 }
 

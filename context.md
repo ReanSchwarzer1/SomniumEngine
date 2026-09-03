@@ -851,8 +851,7 @@ In tree:
 - Cascaded shadow maps with PCSS and contact shadows.
 - Sparse virtual shadow maps as an authored alternative. CSM remains the
   measured default on the current small scenes.
-- ReSTIR direct and global illumination on ray-query hardware. **Currently
-  unavailable on NVIDIA + Vulkan** — see the note below the shadow diagram.
+- ReSTIR direct and global illumination on ray-query hardware.
 - Portable SDF-traced DDGI with a budgeted 4 by 4 by 4 SH volume.
 - Global IBL with multiple-scattering compensation, Hillaire atmosphere LUTs,
   analytic sun position, and a five-track day cycle.
@@ -891,18 +890,18 @@ Four sources fold into that one `shadow_factor`: the cascades, cloud shadow,
 terrain's own horizon shadow, and micro-shadowing. Terrain, water and meshes
 then read a single number instead of four that can disagree.
 
-**That `FILTER` branch is not currently a choice on NVIDIA + Vulkan.** Hardware
-ray tracing is disabled there (`ray_query_compiler_is_safe`, below), so
-`restir_sun` is always false and the right-hand path is the only one that runs.
-Two things that had never executed a frame on such a machine therefore began to:
-the PCSS blocker search, and the screen-space contact march. The contact march
-is off by default as a result — `SOMNIUM_CONTACT_SHADOWS=1` re-enables it — and
-the reasoning is under *Why things are the way they are*.
+**That `FILTER` branch decides more than which filter runs.** When ray tracing
+was disabled for one driver release, `restir_sun` went false everywhere and two
+paths that had never executed a frame on that machine began to: the PCSS blocker
+search, and the screen-space contact march. The contact march produced a dense
+field of dark directional dashes that got worse as render resolution fell, and
+is off by default as a result — `SOMNIUM_CONTACT_SHADOWS=1` re-enables it. The
+reasoning is under *Why things are the way they are*.
 
-The consequence worth holding on to is that **the raster fallbacks are load
-bearing again**. They were written, then covered by traced visibility before
-anyone looked hard at them, and they are the whole shadow story on this hardware
-until ray tracing comes back.
+The consequence worth holding on to is that **a fallback nobody has looked at is
+not a fallback**. These were written, then covered by traced visibility before
+anyone examined them, and the first frame they ever rendered had a visible
+artifact in it.
 
 The horizon shadow exists because `SHADOW_DISTANCE` is a compile-time 100 m.
 Past it, hills were fully lit, and read as shapes with paint on them.
@@ -1879,34 +1878,71 @@ Still outstanding:
 
 ### Restoring hardware ray tracing
 
-Status: not started. The immediate cause is understood and documented under
-*Why things are the way they are*; the fix is not.
+Status: **resolved for the driver that caused it.** Hardware ray tracing is on
+again; the guard that disabled it is now version-specific rather than
+vendor-wide.
 
-`ray_query_compiler_is_safe` currently declines ray queries on NVIDIA + Vulkan
-because that driver's shader compiler exhausts system memory building one of
-Somnium's ray-query pipelines. The guard is correct as a way to keep the editor
-startable and wrong as a permanent answer: it costs ReSTIR DI, ReSTIR GI and
-traced water reflections on the most common hardware this engine runs on, and it
-promotes two never-exercised raster paths into the critical one.
+The cause was GeForce **616.56** (2026-08-26), whose Vulkan shader compiler
+allocated past 47 GB building ReSTIR-GI's `initial_and_temporal` and never
+finished. Rolling back to the previous driver restored ray tracing on
+**completely unchanged engine code**, which is the cleanest possible proof that
+nothing in this renderer was at fault.
 
-Directions, none of them yet investigated:
+### What was tried first, and why none of it worked
 
-- Find what in the composed ray-query source the compiler chokes on. Two
-  attempts have already failed to isolate it — moving the terrain weight-noise
-  call site, then splitting `terrain_splat_core.wgsl` out so the ray roots stop
-  composing the raster material at all — and both left the runaway intact. That
-  the second one failed is the useful result: the trigger is not simply module
-  size.
-- Establish whether a newer NVIDIA driver fixes it, and gate on the version
-  rather than the vendor.
-- Ship DXIL alongside SPIR-V for the precompiled Slang modules, which is what
-  currently makes DX12 fail at `create_shader_module_passthrough` independently
-  of its missing `RAY_QUERY`.
-- Failing all of that, tune the fallbacks properly: the contact march needs a
-  resolution-aware step budget before it can be on by default again.
+Four hypotheses, each a build plus one capped probe
+(`tools/probe_ray_query.ps1`), all of them variations on "make the ray shader
+smaller":
 
-Whoever picks this up should read the measured DX12 result first rather than
-re-deriving it.
+| Attempt | What it removed from the ray path | Peak private bytes |
+|---|---|---:|
+| Weight-noise call site out of `rt_hit` | a 256-hash unrolled noise loop | ~4.1 GB |
+| `terrain_splat_core.wgsl` split | the whole raster terrain material | 4.27 GB |
+| Drop the scan array and the sort | a 128-byte local, ~256 unrolled branches | 3.95 GB |
+| `rt_trace` hop loop 4 to 1 | **three quarters of the entire hit shader** | 3.79 GB |
+
+**Removing 75% of the ray hit shader moved peak memory by 4%.** That was the
+result that mattered: an allocation independent of what the shader contains is
+not a shader problem, and every one of those four attempts was the same idea
+wearing a different hat. The table is kept so nobody spends a fifth build
+proving it again.
+
+The general lesson is worth more than the specific bug. Four hypotheses in a row
+were plausible, targeted the code we owned, and were wrong, because all four
+shared an unexamined premise — that the fault was ours. The measurement that
+broke the deadlock was not a cleverer fix, it was noticing that the *magnitude
+did not respond* to the variable being changed.
+
+### What is in place now
+
+- `ray_query_compiler_is_safe` names the one broken release
+  (`RAY_QUERY_BROKEN_NVIDIA_DRIVERS`) instead of the vendor. Unknown versions are
+  allowed, because failing closed would restore the blanket ban through the back
+  door on every unparseable string.
+- `nvidia_driver_version` decodes both shapes wgpu reports. Neither is the number
+  NVIDIA publishes, which is why the log line was hard to connect to the public
+  reports: Windows/DX12 gives an INF version like `32.0.16.1656`, whose last five
+  digits are the marketing version (`61656` -> 616.56); Vulkan gives `616.56`
+  directly.
+- `SOMNIUM_NO_RAY_QUERY=1` disables the feature with no rebuild, and beats
+  `SOMNIUM_FORCE_RAY_QUERY=1` deliberately. The real failure here was not a bad
+  driver, it was that recovering from one required editing source.
+- `tools/probe_ray_query.ps1` forces the feature on under a memory ceiling and
+  kills the process at it. Re-testing a driver is now a two-minute job.
+- `SOMNIUM_BACKEND` selects a backend, which is how the DX12 question was closed:
+  it loses `RAY_QUERY` on this adapter *and* fails at
+  `create_shader_module_passthrough` for want of DXIL.
+
+### Still open
+
+- Ship DXIL alongside SPIR-V for the precompiled Slang modules, so DX12 is a real
+  fallback rather than a startup panic.
+- The contact march still needs a resolution-aware step budget before it can be
+  on by default again. It is off (`SOMNIUM_CONTACT_SHADOWS=1` re-enables) and now
+  compiles out entirely wherever ray tracing runs, so this only matters for
+  machines without it.
+- If a future driver repeats this, add its version to
+  `RAY_QUERY_BROKEN_NVIDIA_DRIVERS` rather than widening the guard.
 
 ### PORTAL
 
@@ -2659,6 +2695,14 @@ explosion to the next ray-query root. The feature is optional, so
 `ray_query_compiler_is_safe` declines to request it on that pair and the raster
 fallbacks carry the frame.
 
+This is a driver regression, not a standing limitation: the same shaders
+compiled and ran with ray tracing on this machine before it was updated to
+`32.0.16.1656`, which was the newest available. So the usual advice is
+backwards here — there is nothing newer to upgrade to, and rolling back is the
+cheap experiment. `SOMNIUM_FORCE_RAY_QUERY=1` and `tools/probe_ray_query.ps1`
+exist so re-testing a driver costs two minutes and a capped process rather than
+the desktop.
+
 DX12 was the obvious escape and was measured, not assumed: wgpu reports 3 of 13
 features there against Vulkan's larger set, `RAY_QUERY` among the missing — so
 it loses ray tracing anyway — and startup then fails outright in
@@ -2674,8 +2718,18 @@ directional dashes across the terrain that got *worse the lower the render
 resolution went*, which is the signature of an untuned screen-space march: it is
 a `min()`, so it can only ever darken, and its step budget is measured in
 pixels. Defaulting it off restores the image every ReSTIR machine has always
-had. Tuning it is deferred work, not finished work, and `SOMNIUM_CONTACT_SHADOWS=1`
+had, and **that is confirmed, not inferred**: the dashes were gone on the next
+run. Tuning it is deferred work, not finished work, and `SOMNIUM_CONTACT_SHADOWS=1`
 is how whoever picks that up turns it back on.
+
+Getting there took two wrong answers first, both cheap to test and both worth
+recording so they are not re-tested. The splat weight noise was ruled out with a
+live slider — the terrain uniform is rebuilt every frame, so a control that
+changes nothing is real evidence and not a broken control. And `Debug view = 9`
+(Albedo) proved useless for the question: albedo is 0..1, auto-exposure is scaled
+to scene radiance in the thousands, so the view clips to white and answers
+nothing. **What actually identified it was that the artifact scaled with render
+resolution** — screen-space, therefore not a material property at all.
 
 **A fallback nobody has looked at is not a fallback.** Both paths that woke up
 here — PCSS and the contact march — were reachable in principle for years and

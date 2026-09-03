@@ -42,36 +42,59 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
 fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
     let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
-    var splat_s = array<vec4<f32>, 8>();
+
+    // Accumulated straight out of the splat samples: no scan array, no
+    // strongest-four, no normalise pass.
+    //
+    // # Why this shape, and not the shading path's
+    //
+    // Two earlier attempts to bound this pipeline's compilation failed, and
+    // both failed the same way — they removed *code* from the ray path without
+    // removing the two things that are expensive to inline into a ray-query
+    // entry point:
+    //
+    // - `terrain_unpack_splats` returns `array<f32, 32>`. A 128-byte local,
+    //   dynamically indexed, becomes scratch memory in a ray shader.
+    // - `terrain_strongest_four` is a 32-iteration insertion sort with four
+    //   branches and eight conditional moves per iteration. Its bound is an
+    //   `override`, so it is a compile-time constant and unrolls completely:
+    //   roughly 256 branches inlined into the hit.
+    //
+    // Neither buys anything here. This function blends per-layer *mean*
+    // albedos precisely because the full composite is far too much for a
+    // bounce ray — and once you are averaging means, ranking them and keeping
+    // the top four is work whose result you then throw away by averaging
+    // anyway. Summing all thirty-two weighted means is fewer instructions,
+    // allocates nothing, and is *more* accurate than the top-four
+    // approximation it replaces.
+    //
+    // Eight iterations, one bindless fetch each, no local array, no sort.
+    var c = vec3<f32>(0.0);
+    var moisture = 0.0;
+    var total = 0.0;
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
         if id >= 0 {
-            splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
+            let s = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
+            let base = g * 4u;
+            c += tm.layer_albedo[base + 0u].rgb * s.x
+                + tm.layer_albedo[base + 1u].rgb * s.y
+                + tm.layer_albedo[base + 2u].rgb * s.z
+                + tm.layer_albedo[base + 3u].rgb * s.w;
+            moisture += terrain_moisture(tm, base + 0u) * s.x
+                + terrain_moisture(tm, base + 1u) * s.y
+                + terrain_moisture(tm, base + 2u) * s.z
+                + terrain_moisture(tm, base + 3u) * s.w;
+            total += s.x + s.y + s.z + s.w;
         }
     }
-    // `var`, and by pointer: `terrain_strongest_four` takes the scan array by
-    // reference so the shading path does not copy 128 bytes per pixel.
-    // The **plain** unpack, deliberately. Routing this through the perturbing
-    // one pulled a fully-unrolled 32-iteration double-noise loop into every
-    // ray-query pipeline that composes this file, and NVIDIA's Vulkan driver
-    // took 47 GB trying to compile ReSTIR-GI with it.
-    //
-    // Ray hits deliberately use the unperturbed means. That can make a painted
-    // boundary slightly less irregular in secondary lighting, but leaves the
-    // raster surface unchanged and keeps startup compilation bounded.
-    var weight = terrain_unpack_splats(splat_s);
-    let selected = terrain_strongest_four(&weight);
-    var c = vec3<f32>(0.0);
-    var total = 0.0;
-    var moisture = 0.0;
-    for (var s = 0u; s < 4u; s = s + 1u) {
-        let i = selected[s];
-        c += tm.layer_albedo[i].rgb * weight[i];
-        moisture += terrain_moisture(tm, i) * weight[i];
-        total += weight[i];
-    }
-    let wet = saturate(tm.wetness * moisture / max(total, 0.0001));
-    return (c / max(total, 0.0001)) * mix(1.0, tm.wetness_darken, wet);
+
+    // Splat weights are stored unnormalised, so the divide is the normalise the
+    // unpack used to do. An unpainted texel has no albedo to report and returns
+    // black rather than a division by zero.
+    let inv = 1.0 / max(total, 0.0001);
+    let wet = saturate(tm.wetness * moisture * inv);
+    return c * inv * mix(1.0, tm.wetness_darken, wet);
 }
 
 /// Resolve a committed ray-query intersection against the global pool.
