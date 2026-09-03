@@ -241,6 +241,12 @@ pub const DEBUG_VIEWS: &[DebugView] = &[
         code: 33.0,
         help: "Which clipmap ring a terrain pixel came from; 0 is finest.",
     },
+    DebugView {
+        id: "clipmap_source",
+        label: "Clipmap Source",
+        code: 34.0,
+        help: "Which stage of the clipmap stack shaded the pixel: green a detail                ring, blue a macro ring, RED the flat macro-map fallback, yellow                the constant colour. Red is terrain with no cache data and no                normal, which is what the band artifact looks like.",
+    },
 ];
 
 /// Look up a view by id.
@@ -305,6 +311,18 @@ pub const TOGGLES: &[Toggle] = &[
         label: "Cloud Ray Jitter",
         env: "SOMNIUM_CLOUD_JITTER",
         help: "Offset each cloud ray's start by blue noise. Measured both ways \u{2014} see CONTROL-M.",
+    },
+    Toggle {
+        id: "dreams_grain",
+        label: "DREAMS Shared Grain",
+        env: "SOMNIUM_DREAMS_GRAIN",
+        help: "Share the Slang-cooked temporal masks across GTAO, volumetrics, ReSTIR and TAA.",
+    },
+    Toggle {
+        id: "dreams_stf",
+        label: "DREAMS Terrain STF",
+        env: "SOMNIUM_DREAMS_STF",
+        help: "Use the shared masks for stochastic terrain mip filtering.",
     },
     Toggle {
         id: "hex_tiling",
@@ -485,6 +503,25 @@ impl DebugToggles {
 ///
 /// These reproduce the shipped defaults exactly — several are "on unless the
 /// variable says otherwise", which is why this is a table rather than `false`.
+///
+/// Two are deliberately **not** here.
+///
+/// `terrain_clipmap` ships off, matching `TerrainClipmap::env_default_enabled`,
+/// which has said "off until DF-E gates pass" since the cache was written — the
+/// two disagreed, and the toggle won. Measured with the cache on and serving
+/// every pixel from a detail ring: mean |Laplacian| over the terrain falls from
+/// 7.05 to 0.90, so it discards 87% of the surface detail. The gates it is
+/// waiting on are the ring density, not a bug.
+///
+/// `dreams_stf` ships off because stochastic *mip* selection is the one place
+/// the technique cannot pay. `textureSampleLevel` with a fractional level is
+/// trilinear, performed by the sampler at no extra cost, so choosing one of the
+/// two mips replaces a filtered tap with an unfiltered one and saves nothing.
+/// Measured on a stationary camera over frozen terrain: 1.99% of pixels moving
+/// between consecutive frames against 0.43% for the trilinear it replaces.
+///
+/// `SOMNIUM_TERRAIN_CLIPMAP=1` and `SOMNIUM_DREAMS_STF=1` turn them on, and so
+/// do their checkboxes.
 fn default_for(id: &str) -> bool {
     matches!(
         id,
@@ -495,10 +532,34 @@ fn default_for(id: &str) -> bool {
             | "terrain_height_blend"
             | "terrain_macro"
             | "terrain_detail_fade"
-            | "terrain_clipmap"
             | "rt_terrain"
             | "shading_bins"
+            | "dreams_grain"
     )
+}
+
+/// The shipped state of the toggle a variable owns, for code that holds the
+/// variable name rather than the toggle id.
+///
+/// Six render passes used to answer this for themselves with
+/// `var(name).as_deref() != Ok("0")` — a second default table, agreeing with
+/// [`default_for`] only by coincidence. It stopped agreeing the moment one
+/// entry changed: `dreams_stf` came out of `default_for` and the passes carried
+/// on constructing themselves enabled, so the shader variant stayed selected
+/// and the switch appeared to do nothing.
+///
+/// Unknown variables keep the old permissive answer rather than silently
+/// disabling a pass, and trip a debug assertion so the mismatch is found in
+/// tests rather than in a frame.
+#[must_use]
+pub fn on_by_default_for_env(env: &str) -> bool {
+    match TOGGLES.iter().find(|toggle| toggle.env == env) {
+        Some(toggle) => DebugToggles::from_env().is_on(toggle.id),
+        None => {
+            debug_assert!(false, "{env} owns no registered toggle");
+            true
+        }
+    }
 }
 
 /// How a variable's text becomes a boolean.
@@ -515,7 +576,9 @@ fn interpret(id: &str, raw: &str) -> bool {
         | "terrain_height_blend"
         | "terrain_macro"
         | "terrain_detail_fade"
-        | "rt_terrain" => raw != "0",
+        | "rt_terrain"
+        | "dreams_grain"
+        | "dreams_stf" => raw != "0",
         _ => set,
     }
 }
@@ -544,6 +607,14 @@ pub struct ViewportStats {
     pub resolution_scale: f32,
     /// Bytes of GPU memory the renderer has allocated, when it can say.
     pub vram_bytes: u64,
+    /// Where the camera is and which way it points.
+    ///
+    /// `(x, y, z, yaw, pitch)`, in the units `SOMNIUM_CAMERA_POS`,
+    /// `SOMNIUM_CAMERA_YAW` and `SOMNIUM_CAMERA_PITCH` take, so a viewpoint
+    /// somebody is looking at can be handed to a capture run verbatim. A bug
+    /// that only appears from one place is otherwise reported as a screenshot
+    /// and reproduced by guesswork, which is exactly as slow as it sounds.
+    pub camera: Option<[f32; 5]>,
 }
 
 impl ViewportStats {
@@ -571,6 +642,13 @@ impl ViewportStats {
         }
         if self.vram_bytes > 0 {
             lines.push(format!("{} VRAM", mebibytes(self.vram_bytes)));
+        }
+        if let Some([x, y, z, yaw, pitch]) = self.camera {
+            // One line, in the order the environment variables take, so it can
+            // be copied across without rearranging.
+            lines.push(format!(
+                "cam {x:.0},{y:.0},{z:.0}  yaw {yaw:.0}  pitch {pitch:.0}"
+            ));
         }
         lines
     }
@@ -651,10 +729,14 @@ mod tests {
         codes.dedup();
         assert_eq!(codes.len(), DEBUG_VIEWS.len(), "codes must be unique");
         assert_eq!(codes.first(), Some(&0), "0 is the ordinary lit image");
+        // This crate cannot see the shader, so it can only check the code
+        // space is dense and starts at zero. That every code actually has a
+        // branch is checked in `somnium_renderer`, against `shading.wgsl`
+        // itself, by `every_registered_debug_view_has_a_branch_in_the_shader`.
         assert_eq!(
             codes.last(),
-            Some(&33),
-            "33 is the highest code shading.wgsl branches on"
+            Some(&(DEBUG_VIEWS.len() as i32 - 1)),
+            "the code space must be dense, so the last code is len - 1"
         );
         for (index, code) in codes.iter().enumerate() {
             assert_eq!(*code, index as i32, "the code space must have no gaps");
@@ -695,9 +777,19 @@ mod tests {
         assert!(toggles.is_on("meshlets"));
         assert!(toggles.is_on("occlusion"));
         assert!(toggles.is_on("spd"));
+        assert!(toggles.is_on("dreams_grain"));
         assert!(!toggles.is_on("aerial"));
         assert!(!toggles.is_on("hex_tiling"));
         assert!(!toggles.is_on("pixel_census"));
+        // Both were on and are now off, each for a measured reason rather than
+        // a preference. `terrain_clipmap` discards 87% of the terrain's detail
+        // when it is serving every pixel (mean |Laplacian| 7.05 -> 0.90), which
+        // is the DF-E gate it has always been waiting on. `dreams_stf` selects
+        // one of two mips where `textureSampleLevel` would have blended them in
+        // the sampler for free, costing 1.99% of pixels moving between frames
+        // on a still camera against 0.43% for the trilinear it replaced.
+        assert!(!toggles.is_on("terrain_clipmap"));
+        assert!(!toggles.is_on("dreams_stf"));
         assert!(toggles.overridden.is_empty());
     }
 

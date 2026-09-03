@@ -1162,6 +1162,14 @@ pub struct PostProcessComponent {
     /// Shadow-test the fog per froxel, which is what draws light shafts.
     pub light_shafts: bool,
     /// Fog extinction per metre. ~1e-3 is a visible haze.
+    ///
+    /// **Retuned in TSUSHIMA-D, and the retune is a consequence of a fix.**
+    /// Until then the fog medium was lit by the sun alone, so 8e-4 was chosen
+    /// against a medium that was much too dark for its density. Once the fog
+    /// was also lit by the sky — which is what makes distant ground go blue
+    /// rather than grey — the same number delivered 60% of terrain radiance on
+    /// a vista, which is a glow rather than a distance cue. The density was
+    /// always high; the sun-only lighting was hiding it.
     pub fog_density: f32,
     /// Metres over which fog density falls to 1/e, so it pools in valleys.
     pub fog_height_falloff: f32,
@@ -1330,7 +1338,7 @@ impl Default for PostProcessComponent {
             restir_gi_intensity: 1.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: std::env::var("SOMNIUM_LIGHT_SHAFTS").as_deref() != Ok("0"),
-            fog_density: 0.0008,
+            fog_density: 0.0002,
             fog_height_falloff: 120.0,
             fog_asymmetry: 0.6,
             // Mirrors `GtaoPass::new`; the component overwrites the pass every

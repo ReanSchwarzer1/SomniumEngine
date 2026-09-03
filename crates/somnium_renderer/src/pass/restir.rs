@@ -32,6 +32,8 @@ pub struct RestirPass {
     /// single buffer cannot be read and written in the same dispatch.
     reservoirs: Vec<wgpu::Buffer>,
     binds: Vec<wgpu::BindGroup>,
+    grain_view: wgpu::TextureView,
+    grain_enabled: bool,
     vis_view: Option<wgpu::TextureView>,
     vis_tex: Option<wgpu::Texture>,
     /// Set once the pass has written the target, so a disabled pass knows it
@@ -49,6 +51,7 @@ impl RestirPass {
         device: &wgpu::Device,
         shaders: &crate::shaders::Shaders,
         supported: bool,
+        grain_view: &wgpu::TextureView,
         width: u32,
         height: u32,
     ) -> Self {
@@ -63,6 +66,8 @@ impl RestirPass {
                 params: None,
                 reservoirs: Vec::new(),
                 binds: Vec::new(),
+                grain_view: grain_view.clone(),
+                grain_enabled: false,
                 vis_view: None,
                 vis_tex: None,
                 vis_dirty: false,
@@ -135,6 +140,16 @@ impl RestirPass {
                 },
                 storage(4, true),
                 storage(5, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -164,6 +179,8 @@ impl RestirPass {
             })),
             reservoirs: Vec::new(),
             binds: Vec::new(),
+            grain_view: grain_view.clone(),
+            grain_enabled: crate::pass::grain::enabled_by_default("SOMNIUM_DREAMS_GRAIN"),
             vis_view: None,
             vis_tex: None,
             vis_dirty: false,
@@ -175,6 +192,14 @@ impl RestirPass {
         };
         pass.resize(device, width, height);
         pass
+    }
+
+    /// Select the shared DREAMS sampling sequence at runtime.
+    pub fn set_grain_enabled(&mut self, enabled: bool) {
+        if self.grain_enabled != enabled {
+            self.history_valid = false;
+        }
+        self.grain_enabled = enabled;
     }
 
     pub fn supported(&self) -> bool {
@@ -293,6 +318,10 @@ impl RestirPass {
                             binding: 5,
                             resource: self.reservoirs[write].as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.grain_view),
+                        },
                     ],
                 }));
         }
@@ -372,7 +401,10 @@ impl RestirPass {
                 sun_angular_radius,
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
                 frame: self.frame,
-                history_valid: f32::from(u8::from(self.history_valid)),
+                // Bit 0 = history, bit 1 = DREAMS grain. Packed into the
+                // existing scalar to keep the uniform layout stable.
+                history_valid: f32::from(u8::from(self.history_valid))
+                    + 2.0 * f32::from(u8::from(self.grain_enabled)),
             }),
         );
 

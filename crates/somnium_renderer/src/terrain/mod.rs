@@ -25,9 +25,12 @@ pub mod collider;
 pub mod foliage;
 pub mod foliage_paint;
 pub mod heightmap;
+/// Phase TSUSHIMA-B/C: baked horizon angles and sky visibility.
+pub mod horizon;
 pub mod macro_map;
 pub mod mesh;
 pub mod mips;
+pub mod relief;
 pub mod splat;
 pub mod textures;
 /// MORROWIND-AD source-page feedback and bounded residency.
@@ -284,6 +287,32 @@ pub struct GpuTerrainMaterial {
     pub clipmap_macro_size: f32,
     pub clipmap_detail_ready: u32,
     pub clipmap_macro_ready: u32,
+    /// Phase TSUSHIMA-B: baked horizon angles, azimuths 0-3. -1 disables.
+    pub horizon_map_a: i32,
+    /// Azimuths 4-7.
+    pub horizon_map_b: i32,
+    /// Phase TSUSHIMA-C: bent direction + sky visibility. -1 disables.
+    pub skyvis_map: i32,
+    /// Scales TSUSHIMA-C's darkening.
+    pub sky_visibility_strength: f32,
+    /// Phase TSUSHIMA-E: mip-chained relief normal. -1 disables.
+    pub relief_map: i32,
+    /// Metres at which the baked normal has fully replaced the vertex normal.
+    pub relief_takeover: f32,
+    /// Phase TSUSHIMA-G: how far splat weights are displaced in the transition
+    /// band. 0 is the exact identity. These two land in the pad TSUSHIMA-B/C
+    /// left behind, so the struct keeps its size and every `[f32; 16]` above
+    /// keeps the offset the layout tests pin.
+    pub weight_noise_strength: f32,
+    /// Cycles per metre of the coarse octave; the fine one is 5.43x it.
+    pub weight_noise_scale: f32,
+    /// Phase TSUSHIMA-H: macro octave strengths at ~1 km, ~100 m and ~10 m,
+    /// and in `[3]` the strength of the sky-visibility-driven tint.
+    ///
+    /// Keeps the struct a multiple of 16 bytes on its own, which is why it is
+    /// a `vec4` and not the three scalars the shader actually reads plus one
+    /// more pad word.
+    pub macro_octave_strength: [f32; 4],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -297,6 +326,16 @@ pub struct TerrainTextureIds {
     /// MORROWIND-AD clipmap source: albedo atlas, surface atlas, page table,
     /// and physical atlas edge in texels. Sentinel disables virtual sampling.
     pub virtual_texture: [i32; 4],
+    /// Phase TSUSHIMA-B: baked horizon angles, azimuths 0-3 and 4-7.
+    /// `-1` is the off switch, and it is the *only* off switch — the shader
+    /// gates on it rather than on a pipeline override because the lookup is
+    /// two fetches and a compare, not a march, so leaving it resident costs
+    /// nothing the way POM's would.
+    pub horizon_maps: [i32; 2],
+    /// Phase TSUSHIMA-C: RGB bent direction, A cosine-weighted sky visibility.
+    pub sky_visibility: i32,
+    /// Phase TSUSHIMA-E: mip-chained relief normal + Toksvig length.
+    pub relief_normal: i32,
 }
 
 impl Default for TerrainTextureIds {
@@ -307,6 +346,9 @@ impl Default for TerrainTextureIds {
             albedo: [-1; TERRAIN_LAYER_COUNT as usize],
             surface: [-1; TERRAIN_LAYER_COUNT as usize],
             virtual_texture: [-1, -1, -1, 0],
+            horizon_maps: [-1, -1],
+            sky_visibility: -1,
+            relief_normal: -1,
         }
     }
 }
@@ -353,6 +395,67 @@ pub struct TerrainData {
     /// changes wholesale, so its bindless index is stable.
     pub macro_texture: wgpu::Texture,
     pub macro_view: wgpu::TextureView,
+    /// Phase TSUSHIMA-B/C: baked horizon angles and sky visibility.
+    ///
+    /// Rewritten in place after a sculpt, like the macro tier, so the three
+    /// bindless indices are registered once and stay valid for the terrain's
+    /// life.
+    pub horizon_gpu: horizon::HorizonGpu,
+    /// Phase TSUSHIMA-B. `SOMNIUM_TERRAIN_HORIZON=0` is the A/B: it unbinds
+    /// the maps, and an unbound map is exactly the pre-phase behaviour.
+    pub horizon_shadow: bool,
+    /// Phase TSUSHIMA-C, gated separately so the two halves of one bake can be
+    /// judged apart.
+    pub sky_visibility: bool,
+    /// How hard baked sky visibility darkens the ambient term. 1.0 is the
+    /// geometric answer; lower is an artistic retreat from it.
+    pub sky_visibility_strength: f32,
+    /// Set when the heightfield changes under a baked map.
+    pub horizon_dirty: bool,
+    /// Phase TSUSHIMA-E: the relief normal chain. Rewritten in place with the
+    /// horizon bake, on the same `horizon_dirty` flag — both read the
+    /// heightfield and both go stale for exactly the same reasons.
+    pub relief_gpu: relief::ReliefGpu,
+    /// Phase TSUSHIMA-E. `SOMNIUM_TERRAIN_RELIEF=0` is the A/B rail.
+    pub relief_normal: bool,
+    /// Metres at which the baked relief normal has fully taken over from the
+    /// interpolated vertex normal.
+    pub relief_takeover: f32,
+    /// Phase TSUSHIMA-G. `SOMNIUM_TERRAIN_WEIGHT_NOISE=0` is the A/B rail.
+    pub weight_noise: bool,
+    /// How far the noise displaces a weight at the centre of a transition
+    /// band. The `4*w*(1-w)` envelope means this is the peak displacement and
+    /// nothing outside the band moves at all.
+    pub weight_noise_strength: f32,
+    /// Cycles per metre of the coarse octave. 0.35 puts it near a three-metre
+    /// period, which is under the smallest brush anyone paints a boundary with
+    /// and is the point: the brush cannot make this shape.
+    pub weight_noise_scale: f32,
+    /// Phase TSUSHIMA-H. `SOMNIUM_TERRAIN_MACRO_OCTAVES=0` is the A/B rail.
+    pub macro_octaves: bool,
+    /// Phase TSUSHIMA-H2, on its own rail: `SOMNIUM_TERRAIN_SKYVIS_TINT`.
+    ///
+    /// Two switches and not one, because the two halves of H pull in opposite
+    /// directions — the octaves brighten (a symmetric perturbation centred on
+    /// 1.0, squared back to linear, has a mean above 1) and the tint darkens
+    /// sheltered ground. Measured together they partly cancel, and a single
+    /// number cannot say which did what. TSUSHIMA-F learned this the expensive
+    /// way: one BRDF switch reported a 39% darkening that turned out to be
+    /// three terms, one of which was brightening.
+    ///
+    /// A **float**, not a flag: `=0` is the A/B off, and any other value
+    /// replaces the default strength. Sky visibility on the shipped maps has
+    /// very little dynamic range in a typical frame — TSUSHIMA-C measured a
+    /// mean of 0.93 against a minimum of 0.47 — so the useful question about
+    /// this term is not whether it is on but how hard it has to push before it
+    /// says anything, and that question should not cost a rebuild to ask.
+    pub skyvis_tint: f32,
+    /// Strengths at ~1 km, ~100 m, ~10 m, then the sky-visibility tint.
+    ///
+    /// Falling with frequency because that is how ground actually varies —
+    /// a whole hillside differs from the next hillside more than one square
+    /// metre differs from the one beside it.
+    pub macro_octave_strength: [f32; 4],
 
     /// Shared LOD index spans in the global index pool, keyed by
     /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
@@ -593,12 +696,16 @@ impl TerrainData {
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, 1.0);
-        let layer_textures = TerrainLayerTextures::load_or_generate(
-            device,
-            queue,
-            bc_supported,
-            desc.virtual_texturing,
-        );
+        // Virtual texturing has no way to reach the screen without the
+        // clipmap. In VT mode `load_bc7_layers` registers 4x4 placeholders for
+        // the legacy layer arrays on purpose and only the rings carry the real
+        // pages, so loading VT with the clipmap off would shade the terrain
+        // from eight mean colours. With the clipmap off the resident BC7 path
+        // is loaded instead, which is the arrangement that predates the cache.
+        let virtual_texturing =
+            desc.virtual_texturing && clipmap::TerrainClipmap::env_default_enabled();
+        let layer_textures =
+            TerrainLayerTextures::load_or_generate(device, queue, bc_supported, virtual_texturing);
         let virtual_capacity = layer_textures
             .virtual_texture
             .as_ref()
@@ -621,9 +728,66 @@ impl TerrainData {
             ),
         );
 
+        // Baked here for the same reason the macro map is: one registration of
+        // three bindless indices for the terrain's life, with the texels
+        // rewritten in place when the heightfield changes. The bake is a few
+        // tens of milliseconds on a 1 km terrain (multi-resolution march, see
+        // `horizon`), which is load-time work, not frame-time work.
+        let horizon_gpu = horizon::upload(
+            device,
+            queue,
+            &horizon::bake(
+                &heightmap,
+                desc.total_vertices_x(),
+                desc.total_vertices_z(),
+                desc.cell_size,
+                desc.height_scale,
+                horizon::HORIZON_SIZE,
+            ),
+        );
+
+        let relief_gpu = relief::upload(
+            device,
+            queue,
+            &relief::bake(
+                &heightmap,
+                desc.total_vertices_x(),
+                desc.total_vertices_z(),
+                desc.cell_size,
+                desc.height_scale,
+                relief::RELIEF_SIZE,
+            ),
+        );
+
         Self {
             macro_texture,
             macro_view,
+            relief_gpu,
+            relief_normal: std::env::var("SOMNIUM_TERRAIN_RELIEF").as_deref() != Ok("0"),
+            // The last cascade's far edge, matching TSUSHIMA-B's cross-fade.
+            // Inside it the mesh is at a fine LOD and its own normals are
+            // already the right answer.
+            relief_takeover: 100.0,
+            horizon_gpu,
+            horizon_shadow: std::env::var("SOMNIUM_TERRAIN_HORIZON").as_deref() != Ok("0"),
+            sky_visibility: std::env::var("SOMNIUM_TERRAIN_SKYVIS").as_deref() != Ok("0"),
+            sky_visibility_strength: 1.0,
+            weight_noise: std::env::var("SOMNIUM_TERRAIN_WEIGHT_NOISE").as_deref() != Ok("0"),
+            weight_noise_strength: 0.25,
+            weight_noise_scale: 0.35,
+            macro_octaves: std::env::var("SOMNIUM_TERRAIN_MACRO_OCTAVES").as_deref() != Ok("0"),
+            skyvis_tint: std::env::var("SOMNIUM_TERRAIN_SKYVIS_TINT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                // At full shelter this blends the tint 0.6 of the way in:
+                // (0.93, 0.98, 0.87) against white — a damp green cast you
+                // would notice on a valley floor, and nowhere near a repaint.
+                // The number is what the effect should *look* like at its
+                // strongest, not what makes a diff move.
+                .unwrap_or(0.6),
+            macro_octave_strength: [0.18, 0.13, 0.09, 0.35],
+            horizon_dirty: false,
             desc,
             heightmap,
             chunks,
@@ -844,6 +1008,16 @@ impl TerrainData {
         self.virtual_texture.stats().pending_pages > 0
     }
 
+    /// Streaming counters for the clipmap's source pages.
+    ///
+    /// Exposed so the clipmap trace can say whether the cache is still moving.
+    /// A converged frame with a non-zero pending count is a cache that will
+    /// never finish, and that is not visible from the picture.
+    #[must_use]
+    pub const fn virtual_texture_stats(&self) -> &virtual_texture::VirtualTextureStats {
+        self.virtual_texture.stats()
+    }
+
     /// Reserve one rewritable vertex span per chunk in the global pool.
     ///
     /// Called once, at creation. A chunk that cannot be placed keeps
@@ -966,6 +1140,57 @@ impl TerrainData {
             clipmap_macro_size: 0.0,
             clipmap_detail_ready: 0,
             clipmap_macro_ready: 0,
+            // Unbinding is the off switch. The shader tests `>= 0` and skips
+            // both fetches, so "off" is the pre-phase image exactly rather
+            // than a strength of zero applied to a value nobody wanted.
+            horizon_map_a: if self.horizon_shadow {
+                self.texture_ids.horizon_maps[0]
+            } else {
+                -1
+            },
+            horizon_map_b: if self.horizon_shadow {
+                self.texture_ids.horizon_maps[1]
+            } else {
+                -1
+            },
+            skyvis_map: if self.sky_visibility {
+                self.texture_ids.sky_visibility
+            } else {
+                -1
+            },
+            sky_visibility_strength: self.sky_visibility_strength,
+            relief_map: if self.relief_normal {
+                self.texture_ids.relief_normal
+            } else {
+                -1
+            },
+            relief_takeover: self.relief_takeover,
+            // Unlike the baked maps above, "off" here is a strength of zero
+            // rather than an unbound texture: there is no texture, and the
+            // shader's identity at zero is exact — the perturbation loops do
+            // not run and the octave product is 1.
+            weight_noise_strength: if self.weight_noise {
+                self.weight_noise_strength
+            } else {
+                0.0
+            },
+            weight_noise_scale: self.weight_noise_scale,
+            macro_octave_strength: {
+                // `w` is the sky-visibility tint and rides its own switch; the
+                // three octave strengths ride `macro_octaves`. Both are exact
+                // identities at zero, so "off" is the pre-phase image and not a
+                // weak version of the new one.
+                let mut v = if self.macro_octaves {
+                    self.macro_octave_strength
+                } else {
+                    [0.0; 4]
+                };
+                // The tint's own strength, not the octaves'. `macro_octave_strength[3]`
+                // is where the shader reads it from and is kept in step for the
+                // layout's sake; `skyvis_tint` is the value that means anything.
+                v[3] = self.skyvis_tint.max(0.0);
+                v
+            },
         }
     }
 
@@ -1114,6 +1339,13 @@ impl TerrainData {
     pub fn mark_all_dirty(&mut self) {
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.macro_dirty = true;
+        // Phase TSUSHIMA-B/C. Every caller of this is a *wholesale* heightmap
+        // replacement — a file load, procedural relief, the island generator —
+        // which is exactly when the baked horizon stops describing the ground.
+        // Deliberately not set by the sculpt brush: a 100 ms rebake per stroke
+        // would make the brush unusable, and a slightly stale long shadow
+        // under an active brush is not what anyone is looking at.
+        self.horizon_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }
@@ -1141,11 +1373,21 @@ impl TerrainData {
     }
 
     /// Ground query for the foliage brush (Phase 17F).
-    pub fn ground_sample(&self, local_x: f32, local_z: f32) -> foliage_paint::GroundSample {
-        let s = self.surface_sample(local_x, local_z, 0);
+    /// `layer` is the splat layer the caller's brush cares about; its weight
+    /// comes back so the brush can refuse ground made of something else
+    /// (Phase TSUSHIMA-I). `surface_sample` has always computed it — this used
+    /// to sample layer 0 and then discard the answer.
+    pub fn ground_sample(
+        &self,
+        local_x: f32,
+        local_z: f32,
+        layer: u8,
+    ) -> foliage_paint::GroundSample {
+        let s = self.surface_sample(local_x, local_z, layer);
         foliage_paint::GroundSample {
             height: s.height,
             slope_cos: s.slope_cos,
+            layer_weight: s.layer_weight,
         }
     }
 
@@ -1327,6 +1569,64 @@ impl TerrainData {
         pool: &mut crate::geometry::GeometryPool,
         rewritten: &mut Vec<u32>,
     ) {
+        // Phase TSUSHIMA-B/C: rebake before the macro tier, because both read
+        // the heightfield and this is the one that has to be right for the
+        // *first* frame — `TerrainData::new` bakes against the flat heightmap
+        // the terrain is created with, and the relief only lands afterwards.
+        // Baking once at creation and never again is exactly the bug this
+        // fixes: every horizon angle was zero, every sky visibility was fully
+        // open, and the on/off capture pair was byte-identical.
+        if std::mem::take(&mut self.horizon_dirty) {
+            let t = std::time::Instant::now();
+            let maps = horizon::bake(
+                &self.heightmap,
+                self.desc.total_vertices_x(),
+                self.desc.total_vertices_z(),
+                self.desc.cell_size,
+                self.desc.height_scale,
+                horizon::HORIZON_SIZE,
+            );
+            horizon::rewrite(queue, &self.horizon_gpu, &maps);
+            relief::rewrite(
+                queue,
+                &self.relief_gpu,
+                &relief::bake(
+                    &self.heightmap,
+                    self.desc.total_vertices_x(),
+                    self.desc.total_vertices_z(),
+                    self.desc.cell_size,
+                    self.desc.height_scale,
+                    relief::RELIEF_SIZE,
+                ),
+            );
+            // The distribution, not just the timing. "Sky visibility is on"
+            // and "sky visibility varies across this terrain" are different
+            // claims, and only the second one can change a picture.
+            let (mut lo, mut hi, mut sum) = (255u8, 0u8, 0u64);
+            let (mut h_lo, mut h_hi) = (255u8, 0u8);
+            for texel in maps.sky.chunks(4) {
+                lo = lo.min(texel[3]);
+                hi = hi.max(texel[3]);
+                sum += u64::from(texel[3]);
+            }
+            for texel in maps.angles_a.chunks(4) {
+                for &a in &texel[..4] {
+                    h_lo = h_lo.min(a);
+                    h_hi = h_hi.max(a);
+                }
+            }
+            let n = (maps.sky.len() / 4) as u64;
+            tracing::info!(
+                ms = t.elapsed().as_secs_f64() * 1000.0,
+                size = horizon::HORIZON_SIZE,
+                skyvis_min = lo,
+                skyvis_mean = (sum / n.max(1)) as u8,
+                skyvis_max = hi,
+                horizon_min_deg = f32::from(h_lo) / 255.0 * 90.0,
+                horizon_max_deg = f32::from(h_hi) / 255.0 * 90.0,
+                "terrain: horizon + sky visibility rebaked"
+            );
+        }
         if std::mem::take(&mut self.macro_dirty) {
             let generated = macro_map::from_splat(
                 &self.splatmap.data,
@@ -1571,6 +1871,7 @@ impl TerrainData {
         self.splatmap.data =
             crate::terrain::splat::migrate_sidecar_splat(version, splat_src, texel_count)?;
         self.macro_dirty = true;
+        self.horizon_dirty = true;
         for chunk in &mut self.chunks {
             chunk.dirty = true;
         }

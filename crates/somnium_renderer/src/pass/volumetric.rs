@@ -55,8 +55,8 @@ struct VolumetricParams {
     prev_view_proj: [[f32; 4]; 4],
     history_valid: f32,
     jitter: f32,
-    _pad2: f32,
-    _pad3: f32,
+    frame: u32,
+    grain_enabled: u32,
 }
 
 #[cfg(test)]
@@ -101,7 +101,14 @@ impl Default for FogSettings {
             // A thin haze by default: enough that a kilometre of air reads as
             // distance, far short of weather. Aerial perspective from the
             // atmosphere itself is always present regardless.
-            density: 0.0008,
+            //
+            // Retuned in TSUSHIMA-D from 8e-4, and see `PostProcessSettings::
+            // fog_density` for why: the old value was chosen against a fog
+            // medium lit only by the sun, and once it was also lit by the sky
+            // it delivered 60% of terrain radiance on a vista. Kept in step
+            // with the core default deliberately — two defaults that disagree
+            // is how a scene loads looking different from a fresh one.
+            density: 0.0002,
             asymmetry: 0.6,
             height_falloff: 120.0,
             base_height: 0.0,
@@ -124,6 +131,8 @@ pub struct VolumetricPass {
     texture: wgpu::Texture,
     history: wgpu::Texture,
     history_view: wgpu::TextureView,
+    grain_view: wgpu::TextureView,
+    grain_enabled: bool,
     prev_view_proj: glam::Mat4,
     history_valid: bool,
     frame: u32,
@@ -134,7 +143,11 @@ pub struct VolumetricPass {
 }
 
 impl VolumetricPass {
-    pub fn new(device: &wgpu::Device, shaders: &crate::shaders::Shaders) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        grain_view: &wgpu::TextureView,
+    ) -> Self {
         // MORROWIND-C: composition is declared in `volumetric.wgsl` and
         // resolved by `somnium_shader`; this site no longer knows the order.
         let source = shaders.source_or_panic("volumetric.wgsl");
@@ -221,6 +234,16 @@ impl VolumetricPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -291,6 +314,8 @@ impl VolumetricPass {
             texture,
             history,
             history_view,
+            grain_view: grain_view.clone(),
+            grain_enabled: crate::pass::grain::enabled_by_default("SOMNIUM_DREAMS_GRAIN"),
             prev_view_proj: glam::Mat4::IDENTITY,
             history_valid: false,
             frame: 0,
@@ -301,6 +326,14 @@ impl VolumetricPass {
             fog: FogSettings::default(),
             max_distance: DEFAULT_MAX_DISTANCE,
         }
+    }
+
+    /// Select the shared DREAMS froxel-jitter sequence at runtime.
+    pub fn set_grain_enabled(&mut self, enabled: bool) {
+        if self.grain_enabled != enabled {
+            self.history_valid = false;
+        }
+        self.grain_enabled = enabled;
     }
 
     /// Bind the atmosphere LUTs and shadow atlas. Cheap to call every frame;
@@ -357,6 +390,10 @@ impl VolumetricPass {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&self.grain_view),
                 },
             ],
         }));
@@ -430,8 +467,8 @@ impl VolumetricPass {
                 // step, and a random sequence clumps. The golden ratio is the
                 // cheapest generator with that property.
                 jitter: (self.frame as f32 * 0.618_034).fract(),
-                _pad2: 0.0,
-                _pad3: 0.0,
+                frame: self.frame,
+                grain_enabled: u32::from(self.grain_enabled),
             }),
         );
 

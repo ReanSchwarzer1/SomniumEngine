@@ -26,7 +26,7 @@ fn system() -> ShaderSystem {
 }
 
 /// A validator that accepts everything, for tests not about failure.
-fn accept(_module: &str, _source: &str) -> Result<(), String> {
+fn accept(_module: &str, _source: &str, _map: &crate::SourceMap) -> Result<(), String> {
     Ok(())
 }
 
@@ -112,7 +112,7 @@ fn a_broken_reload_reports_naga_and_keeps_the_old_source() {
 
     let outcome = s.apply_reload(
         vec![(brdf, "fn brdf( -> f32 { retunr 1.0 }\n".to_string())],
-        |_module, source| {
+        |_module, source, _map| {
             if source.contains("retunr") {
                 // Standing in for naga, with the shape of message that matters:
                 // a location and a reason.

@@ -551,30 +551,122 @@ enum LifecycleState {
     ShuttingDown,
 }
 
-/// The foliage palette: what the brush can paint (Phase 17F).
+/// One palette entry: a mesh, and how the brush should behave when it is
+/// selected.
+///
+/// The brush hints live here rather than in `FoliageBrush::default` because
+/// they are properties of the *thing*, not of the tool: a tree is placed one at
+/// a time because it is a tree, and a pebble leans because it is a pebble.
+/// Phase 17F expressed the first of those as `single = kind >= 2` at the
+/// selection site, which was true of a four-entry palette and stopped being
+/// true the moment TSUSHIMA-I added a fifth.
+#[derive(Clone, Copy)]
+pub struct FoliageEntry {
+    pub name: &'static str,
+    pub path: &'static str,
+    /// One instance per click, at the cursor, ignoring density.
+    pub single: bool,
+    /// Instances per square metre for a spread brush.
+    pub density: f32,
+    /// Terrain layer this entry wants underneath it. `min_layer_weight` of 0
+    /// means the entry does not care and the test is skipped entirely.
+    pub layer: u8,
+    pub min_layer_weight: f32,
+    /// Largest lean from vertical, degrees. Zero for anything that grew.
+    pub max_tilt_deg: f32,
+    pub scale_min: f32,
+    pub scale_max: f32,
+}
+
+/// The foliage palette: what the brush can paint (Phase 17F, extended by
+/// TSUSHIMA-I).
 ///
 /// Fixed for now. Once there is a content drawer this becomes whatever the
 /// project has imported, which is why the brush stores a palette *index* rather
 /// than anything about the mesh itself.
 ///
-/// All four are CC0 from Poly Haven — see ATTRIBUTION.md.
-pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
-    (
-        "Grass Medium",
-        "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
-    ),
-    (
-        "Grass Bermuda",
-        "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
-    ),
-    (
-        "Fir Sapling",
-        "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
-    ),
-    (
-        "Island Tree",
-        "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
-    ),
+/// All six are CC0 from Poly Haven — see ATTRIBUTION.md. The two debris entries
+/// are **not committed to the repository**; `tools/fetch_foliage_rocks.sh` puts
+/// them where these paths expect them. Until it is run the brush warns once and
+/// places nothing, which is what `ensure_palette_mesh` already does for any
+/// entry that is not installed.
+pub const FOLIAGE_PALETTE: [FoliageEntry; 6] = [
+    FoliageEntry {
+        name: "Grass Medium",
+        path: "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
+        single: false,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Grass Bermuda",
+        path: "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
+        single: false,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Fir Sapling",
+        path: "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
+        single: true,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Island Tree",
+        path: "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
+        single: true,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    // TSUSHIMA-I, the contact scale: between the texture underfoot and the
+    // tree on the ridge this world has nothing at all, and ground with nothing
+    // on it reads as a surface rather than as a place.
+    FoliageEntry {
+        name: "Pebbles",
+        path: "assets/foliage/namaqualand_stones_01/namaqualand_stones_01_2k.gltf",
+        single: false,
+        // Denser than grass, and much smaller. Pebbles read as a *field*; a
+        // sparse scatter of them reads as litter someone dropped.
+        density: 6.0,
+        layer: 7, // Gravel
+        // Half the texel has to be gravel. Lower and the fringe wanders out
+        // into whatever is painted beside it; higher and a boundary that is
+        // genuinely half gravel gets nothing at all.
+        min_layer_weight: 0.5,
+        max_tilt_deg: 35.0,
+        scale_min: 0.35,
+        scale_max: 0.9,
+    },
+    FoliageEntry {
+        name: "Scree Rocks",
+        path: "assets/foliage/rock_moss_set_01/rock_moss_set_01_2k.gltf",
+        single: false,
+        density: 0.4,
+        layer: 15, // Talus
+        min_layer_weight: 0.35,
+        // Less lean than the pebbles: a rock this size has usually settled onto
+        // a face rather than come to rest propped against something.
+        max_tilt_deg: 18.0,
+        scale_min: 0.6,
+        scale_max: 1.6,
+    },
 ];
 
 /// One drawable piece of a palette entry.
@@ -2877,13 +2969,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
                 let renderer = SomniumRenderer::new(&render_ctx);
 
-                let ui_manager = UiManager::new(
+                let mut ui_manager = UiManager::new(
                     &render_ctx.device,
                     render_ctx.config.format,
                     1,
                     &render_ctx.queue,
                     Arc::clone(&window),
                 );
+                ui_manager.set_render_toggles(renderer.debug_toggles.clone());
                 self.render_ctx = Some(render_ctx);
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
@@ -4036,6 +4129,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             resolution: (width, height),
                             resolution_scale: renderer.dynamic_resolution.scale(),
                             vram_bytes: 0,
+                            camera: Some(Self::camera_readout(renderer)),
                         }
                     },
                 )
@@ -6826,9 +6920,16 @@ impl<G: GameApp> Engine<G> {
                 if scale <= 0.0 {
                     continue;
                 }
+                // Yaw then lean. `Ry · Rx` and not the other way round: the
+                // lean has to happen in the frame the yaw already chose, or
+                // every instance leans due east and the field reads as though
+                // one wind flattened it. TSUSHIMA-I stores a single tilt angle
+                // for exactly this reason — the random yaw is what makes the
+                // random direction.
                 let placement = glam::Mat4::from_scale_rotation_translation(
                     glam::Vec3::splat(scale),
-                    glam::Quat::from_rotation_y(inst.yaw),
+                    glam::Quat::from_rotation_y(inst.yaw)
+                        * glam::Quat::from_rotation_x(inst.tilt),
                     inst.position,
                 );
                 // Horizontal, like the draw cull above and for the same
@@ -6903,6 +7004,25 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Point the brush at the selected entry's own defaults.
+    ///
+    /// Only the fields the palette has an opinion about. Radius and slope stay
+    /// where the author put them, because those are about how they are working
+    /// and not about what they are placing.
+    fn apply_foliage_palette_defaults(&mut self) {
+        let Some(entry) = FOLIAGE_PALETTE.get(self.foliage_brush.kind as usize) else {
+            return;
+        };
+        let b = &mut self.foliage_brush;
+        b.single = entry.single;
+        b.density = entry.density;
+        b.layer = entry.layer;
+        b.min_layer_weight = entry.min_layer_weight;
+        b.max_tilt_deg = entry.max_tilt_deg;
+        b.scale_min = entry.scale_min;
+        b.scale_max = entry.scale_max;
+    }
+
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
         let idx = kind as usize;
@@ -6912,7 +7032,7 @@ impl<G: GameApp> Engine<G> {
         {
             return;
         }
-        let (name, path) = FOLIAGE_PALETTE[idx];
+        let FoliageEntry { name, path, .. } = FOLIAGE_PALETTE[idx];
         if !std::path::Path::new(path).exists() {
             warn!("Foliage: {name} is not installed at {path}");
             return;
@@ -7088,13 +7208,13 @@ impl<G: GameApp> Engine<G> {
             &brush,
             center,
             seed,
-            |x, z| terrain.ground_sample(x, z),
+            |x, z| terrain.ground_sample(x, z, brush.layer),
         );
         terrain.painted_foliage = painted;
         if added > 0 {
             info!(
                 "Foliage: painted {added} of {} (total {})",
-                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].0,
+                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].name,
                 terrain.painted_foliage.len(),
             );
         }
@@ -7292,7 +7412,6 @@ impl<G: GameApp> Engine<G> {
         let mut diagnostics = Vec::with_capacity(terrains.len());
         if let Some(r) = self.renderer.as_mut() {
             for (entity, component, model) in terrains {
-                let mut virtual_texturing = false;
                 if let Some(terrain) = r.terrain_mut(component.terrain_id) {
                     terrain.configure_virtual_texture(
                         component.virtual_texturing,
@@ -7300,7 +7419,6 @@ impl<G: GameApp> Engine<G> {
                         component.virtual_texture_uploads_per_frame,
                     );
                     let stats = *terrain.virtual_texture.stats();
-                    virtual_texturing = terrain.virtual_texture_enabled;
                     diagnostics.push((
                         entity,
                         stats,
@@ -7308,16 +7426,15 @@ impl<G: GameApp> Engine<G> {
                         terrain.virtual_texture_cache_mib,
                     ));
                 }
-                if virtual_texturing
-                    && !somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off()
-                    && let Some(clipmap) = r.clipmaps.get_mut(component.terrain_id as usize)
-                    && !clipmap.enabled
-                {
-                    clipmap.enabled = true;
-                    clipmap.invalidate();
-                }
                 r.submit_terrain(component.terrain_id, model);
             }
+            // Virtual texturing needs the clipmap, and this loop used to say so
+            // by assigning `clipmap.enabled = true` itself. That made it the
+            // third writer of one field and, being per-frame, the one that
+            // always won -- so the Clipmap checkbox silently did nothing. The
+            // requirement is unchanged; it is now expressed once, inside the
+            // renderer, against the same `debug_toggles` the checkbox writes.
+            r.reconcile_clipmaps();
         }
         for (entity, stats, enabled, cache_mib) in diagnostics {
             if let Some(component) = self.world.get_mut::<TerrainComponent>(entity) {
@@ -7517,6 +7634,84 @@ impl<G: GameApp> Engine<G> {
             // The scene comes back to this window, and it is a different size.
             self.resize_scene_targets();
         }
+    }
+
+    /// Flip one renderer switch, through the state the renderer actually reads.
+    ///
+    /// **The bug this exists for.** The Terrain Tools checkboxes used to write
+    /// straight to the terrain (`t.hex_tiling = !t.hex_tiling`,
+    /// `cm.enabled = !cm.enabled`) while `debug_toggles` — which
+    /// [`SomniumRenderer::apply_debug_toggles`] force-writes every one of those
+    /// same fields from — kept its own, unchanged opinion. Two sources of truth
+    /// for one switch.
+    ///
+    /// Nothing called `apply_debug_toggles` at runtime, so the divergence sat
+    /// there invisibly until DREAMS-B added the first two switches that do
+    /// (`dreams_grain`, `dreams_stf`). After that, unchecking **Clipmap** and
+    /// then toggling either DREAMS switch silently re-enabled the clipmap —
+    /// along with hex tiling, parallax, LOD morph, height blend, macro and
+    /// detail fade, all of them snapped back to whatever `debug_toggles` still
+    /// believed. The reported symptom was terrain artifacts appearing on a
+    /// toggle that has nothing to do with terrain.
+    ///
+    /// Routing every switch through here also gets the environment override
+    /// for free: `set` refuses when a variable owns the switch and says which
+    /// one, which the hand-written clipmap arm had to special-case.
+    fn toggle_render_switch(&mut self, id: &'static str) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let next = !renderer.debug_toggles.is_on(id);
+        // Refuse rather than accept-and-revert. Turning the clipmap off under
+        // virtual texturing leaves the terrain shaded from 4x4 placeholder
+        // arrays, so the old per-frame code was right to keep it on -- it was
+        // only wrong to do it silently, which is indistinguishable from a
+        // broken checkbox.
+        if id == "terrain_clipmap" && !next && renderer.clipmap_owned_by_virtual_texturing() {
+            let states = renderer.debug_toggles.clone();
+            if let Some(ui) = self.ui_manager.as_mut() {
+                ui.set_render_toggles(states);
+                ui.push_toast(
+                    "Clipmap is required while virtual texturing is on: the layer                      arrays are placeholders in VT mode and the rings carry the                      real pages.",
+                );
+            }
+            return;
+        }
+        match renderer.debug_toggles.set(id, next) {
+            Ok(()) => {
+                renderer.apply_debug_toggles();
+                let states = renderer.debug_toggles.clone();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_render_toggles(states);
+                }
+                info!(switch = id, on = next, "renderer switch");
+            }
+            Err(reason) => {
+                let states = renderer.debug_toggles.clone();
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.set_render_toggles(states);
+                    ui.push_toast(&reason);
+                }
+            }
+        }
+    }
+
+    /// The camera pose, in the units the capture environment variables take.
+    ///
+    /// Derived from the view matrix rather than from the editor camera,
+    /// because the renderer is what this function already has and the two
+    /// agree by construction: `EditorCamera::forward_vector` builds the same
+    /// vector this reads back out.
+    fn camera_readout(renderer: &SomniumRenderer) -> [f32; 5] {
+        let m = renderer.view_matrix;
+        // Row 2 of a world-to-camera matrix is the camera's backward axis, so
+        // forward is its negation. Same derivation  uses.
+        let forward = -glam::Vec3::new(m.x_axis.z, m.y_axis.z, m.z_axis.z);
+        let forward = forward.normalize_or_zero();
+        let pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let yaw = forward.z.atan2(forward.x).to_degrees();
+        let p = renderer.camera_pos;
+        [p.x, p.y, p.z, yaw, pitch]
     }
 
     /// Route a window event to a floating window, if it belongs to one.
@@ -8029,26 +8224,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleRenderSwitch(id) => {
-                let Some(renderer) = self.renderer.as_mut() else {
-                    return;
-                };
-                let next = !renderer.debug_toggles.is_on(id);
-                match renderer.debug_toggles.set(id, next) {
-                    Ok(()) => {
-                        renderer.apply_debug_toggles();
-                        let states = renderer.debug_toggles.clone();
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.set_render_toggles(states);
-                        }
-                    }
-                    Err(reason) => {
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.push_toast(&reason);
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleRenderSwitch(id) => self.toggle_render_switch(id),
 
             EditorEvent::ViewPreset(index) => {
                 // A preset frames the selection when there is one and the
@@ -8878,7 +9054,13 @@ impl<G: GameApp> Engine<G> {
                     FB::MaxSlope => brush.max_slope_deg = value.clamp(0.0, 90.0),
                     FB::Kind => {
                         brush.kind =
-                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8
+                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                        // The same entry defaults `SelectFoliageKind` applies.
+                        // Two ways to change one field that behave differently
+                        // is how a slider ends up painting pebbles with a
+                        // tree's brush.
+                        self.apply_foliage_palette_defaults();
+                        return;
                     }
                     FB::ScaleMin => brush.scale_min = value.max(0.01),
                     FB::ScaleMax => brush.scale_max = value.max(0.01),
@@ -9093,49 +9275,16 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleTerrainHex => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.hex_tiling = !t.hex_tiling;
-                            info!(
-                                "Terrain hex tiling: {}",
-                                if t.hex_tiling { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainHex => self.toggle_render_switch("hex_tiling"),
 
-            EditorEvent::ToggleTerrainParallax => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.toggle_parallax();
-                            info!(
-                                "Terrain parallax: {}",
-                                if t.parallax_scale > 0.0 { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainParallax => self.toggle_render_switch("terrain_parallax"),
 
-            EditorEvent::ToggleTerrainClipmap => {
-                if let Some(tc) = self.selected_terrain() {
-                    if somnium_renderer::terrain::clipmap::TerrainClipmap::env_forced_off() {
-                        info!("Terrain clipmap: forced off (SOMNIUM_TERRAIN_CLIPMAP=0)");
-                    } else if let Some(r) = &mut self.renderer {
-                        if let Some(cm) = r.clipmaps.get_mut(tc.terrain_id as usize) {
-                            cm.enabled = !cm.enabled;
-                            if cm.enabled {
-                                cm.invalidate();
-                            }
-                            info!("Terrain clipmap: {}", if cm.enabled { "on" } else { "off" });
-                        }
-                    }
-                }
-            }
+            // The environment override and the refresh-on-enable that used to
+            // be written out here both live in the shared path now: `set`
+            // refuses when `SOMNIUM_TERRAIN_CLIPMAP` owns the switch, and
+            // `apply_debug_toggles` invalidates the rings on a false-to-true
+            // transition.
+            EditorEvent::ToggleTerrainClipmap => self.toggle_render_switch("terrain_clipmap"),
 
             EditorEvent::SetCpuFrustum(on) => {
                 if SomniumRenderer::cpu_frustum_env_off() {
@@ -9221,19 +9370,7 @@ impl<G: GameApp> Engine<G> {
                 }
             }
 
-            EditorEvent::ToggleTerrainMorph => {
-                if let Some(tc) = self.selected_terrain() {
-                    if let Some(r) = &mut self.renderer {
-                        if let Some(t) = r.terrain_mut(tc.terrain_id) {
-                            t.lod_morph = !t.lod_morph;
-                            info!(
-                                "Terrain LOD morph: {}",
-                                if t.lod_morph { "on" } else { "off" }
-                            );
-                        }
-                    }
-                }
-            }
+            EditorEvent::ToggleTerrainMorph => self.toggle_render_switch("terrain_lod_morph"),
 
             EditorEvent::SetCameraSpeed(normalized) => {
                 self.camera_speed_norm = normalized.clamp(0.0, 1.0);
@@ -9708,11 +9845,16 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::SelectFoliageKind(kind) => {
                 self.foliage_brush.kind = (kind as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
-                let (name, _) = FOLIAGE_PALETTE[self.foliage_brush.kind as usize];
-                // Trees want one-per-click; ground cover wants a spread. Setting
-                // the obvious default saves a second click almost every time.
-                self.foliage_brush.single = self.foliage_brush.kind >= 2;
-                info!("Foliage brush: {name}");
+                // Trees want one-per-click, ground cover wants a spread, and
+                // debris wants a layer test and a lean. Setting the obvious
+                // default saves a second click almost every time — and reading
+                // it from the entry rather than from the index means adding a
+                // seventh entry cannot silently give it a sapling's behaviour.
+                self.apply_foliage_palette_defaults();
+                info!(
+                    "Foliage brush: {}",
+                    FOLIAGE_PALETTE[self.foliage_brush.kind as usize].name
+                );
             }
 
             EditorEvent::CycleTonemapper => {
@@ -10372,6 +10514,127 @@ fn ray_aabb_distance(
 
 #[cfg(test)]
 mod viewport_control_tests {
+
+    /// Every renderer switch has one writer, and it is `debug_toggles`.
+    ///
+    /// The defect: the Terrain Tools checkboxes wrote straight to the terrain
+    /// while `apply_debug_toggles` force-wrote the same fields back from
+    /// `debug_toggles`, which never heard about the click. Nothing called
+    /// `apply_debug_toggles` at runtime, so the two stayed out of step
+    /// silently until DREAMS-B added the first switches that do — after which
+    /// unchecking Clipmap and then toggling Shared Grain turned the clipmap
+    /// back on, and the terrain artifacts with it.
+    ///
+    /// A source check because the alternative needs a GPU: `apply_debug_toggles`
+    /// is a method on a renderer that owns device resources, and the rule being
+    /// protected is "this arm does not assign", which reads perfectly well.
+    #[test]
+    fn terrain_switches_are_flipped_through_the_toggle_state() {
+        let source = include_str!("app.rs");
+        for event in [
+            "EditorEvent::ToggleTerrainHex",
+            "EditorEvent::ToggleTerrainParallax",
+            "EditorEvent::ToggleTerrainMorph",
+            "EditorEvent::ToggleTerrainClipmap",
+        ] {
+            let arm = source
+                .split_once(&format!("{event} =>"))
+                .unwrap_or_else(|| panic!("{event} has no match arm"))
+                .1;
+            // The arm ends at the next event, or after a short window for the
+            // one-line arms this rule produces.
+            let arm = &arm[..arm.find("EditorEvent::").unwrap_or(arm.len().min(400))];
+            assert!(
+                arm.contains("toggle_render_switch"),
+                "{event} does not go through `debug_toggles`, so                  `apply_debug_toggles` will overwrite whatever it set"
+            );
+            for direct in [
+                "hex_tiling = !",
+                "lod_morph = !",
+                "enabled = !",
+                "toggle_parallax()",
+            ] {
+                assert!(
+                    !arm.contains(direct),
+                    "{event} still writes `{direct}` directly, which is the                      second source of truth this rule removes"
+                );
+            }
+        }
+    }
+
+    /// `somnium_core` does not write `clipmap.enabled`. Nothing outside the
+    /// renderer does.
+    ///
+    /// The bug: the terrain submit loop force-enabled the clipmap for every
+    /// virtual-textured terrain, every frame. It was the third writer of that
+    /// field, and being per-frame it was the one that always won, so on any
+    /// machine taking the BC7 path the Clipmap checkbox had not turned the
+    /// clipmap off since virtual texturing landed -- the click was accepted,
+    /// reverted inside the same frame, and the checkbox re-ticked itself at
+    /// the next inspector refresh. It looked exactly like a checkbox that
+    /// randomly turns itself back on.
+    ///
+    /// The requirement behind it was real: in VT mode the legacy layer arrays
+    /// are placeholders and only the rings carry the real pages. It lives in
+    /// `SomniumRenderer::reconcile_clipmaps` now, next to the `debug_toggles`
+    /// entry it has to agree with.
+    #[test]
+    fn the_frame_loop_does_not_own_whether_the_clipmap_is_on() {
+        let source = include_str!("app.rs");
+        let submit = source
+            .split_once("fn submit_terrains")
+            .expect("submit_terrains exists")
+            .1;
+        let submit = &submit[..submit
+            .find(
+                "
+    fn ",
+            )
+            .unwrap_or(submit.len())];
+        // Code only. The comment explaining this rule quotes the line the rule
+        // forbids, and a test that reads its own explanation is not a test.
+        let code: String = submit
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            !code.contains("clipmap.enabled"),
+            "the terrain submit loop assigns `clipmap.enabled` again; that field              has one writer, `SomniumRenderer::reconcile_clipmaps`"
+        );
+        assert!(
+            submit.contains("reconcile_clipmaps"),
+            "nothing reconciles the clipmap per frame, so a virtual-textured              terrain will shade from placeholder layer arrays"
+        );
+    }
+
+    /// Refusing is not the same as accepting and reverting.
+    #[test]
+    fn the_clipmap_cannot_be_switched_off_out_from_under_virtual_texturing() {
+        let source = include_str!("app.rs");
+        let body = source
+            .split_once("fn toggle_render_switch")
+            .expect("toggle_render_switch exists")
+            .1;
+        let body = &body[..body
+            .find(
+                "
+    /// ",
+            )
+            .unwrap_or(body.len())];
+        assert!(
+            body.contains("clipmap_owned_by_virtual_texturing"),
+            "the clipmap switch does not ask whether virtual texturing owns it,              so turning it off shades the terrain from placeholder arrays"
+        );
+        assert!(
+            body.contains("push_toast"),
+            "a refused switch has to say why; a switch that silently does              nothing is the bug this replaced"
+        );
+    }
+
     /// Every submission path asks the same question about `hidden`.
     ///
     /// A source check rather than a render check, and deliberately so: the

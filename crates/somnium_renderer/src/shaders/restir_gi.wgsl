@@ -98,6 +98,7 @@ struct GiReservoir {
 // rather than borrowed from the shading pass's group 1: this module is
 // concatenated without `shading.wgsl`, and the pool it *does* share is group 0.
 @group(1) @binding(7) var default_sampler: sampler;
+@group(1) @binding(8) var grain_masks: texture_2d_array<f32>;
 
 @group(1) @binding(5) var<storage, read_write> gi_a: array<GiReservoir>;
 @group(1) @binding(6) var<storage, read_write> gi_b: array<GiReservoir>;
@@ -332,6 +333,10 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var seed = index * 9781u + gi.frame * 6271u + 17u;
+    if gi.history_valid >= 2.0 {
+        let grain = textureLoad(grain_masks, vec2<i32>(coord & vec2<i32>(63)), i32(gi.frame & 63u), 0);
+        seed = seed ^ u32(grain.a * 4294967295.0);
+    }
 
     let surface = gi_primary_surface(coord, dims);
     if !surface.valid {
@@ -377,7 +382,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // rather than wrong. The similarity test is the sample point's distance
     // from the shading point, which rejects history that has slid onto
     // different geometry.
-    if gi.history_valid > 0.5 {
+    if (u32(gi.history_valid) & 1u) != 0u {
         var prev = gi_a[index];
         if prev.m > 0.0 {
             prev.m = min(prev.m, GI_M_CAP);
@@ -411,6 +416,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var seed = index * 26699u + gi.frame * 15487u + 91u;
+    if gi.history_valid >= 2.0 {
+        let grain = textureLoad(grain_masks, vec2<i32>(coord & vec2<i32>(63)), i32(gi.frame & 63u), 0);
+        seed = seed ^ u32(grain.r * 4294967295.0);
+    }
 
     let surface = gi_primary_surface(coord, dims);
     if !surface.valid {

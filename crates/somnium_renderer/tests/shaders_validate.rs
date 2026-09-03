@@ -24,7 +24,7 @@
 //! missing file, a cycle, or a typo in a `//!if` fails here.
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
-use somnium_renderer::shaders::Shaders;
+use somnium_renderer::shaders::{Shaders, define};
 
 // Modules that compose nothing still validate on their own, so their text is
 // still read directly. Everything with dependencies goes through `Shaders`.
@@ -100,6 +100,16 @@ fn every_composed_root_validates() {
     ] {
         check(root, &shaders.source_or_panic(root));
     }
+}
+
+/// Validate the actual shading variant, including DREAMS-B's conditional STF.
+#[test]
+fn the_dreams_stochastic_filter_variant_validates() {
+    let shaders = Shaders::new();
+    let source = shaders
+        .source("shading.wgsl", define::DREAMS_STF)
+        .expect("DREAMS_STF must be a registered variant");
+    check("shading.wgsl+DREAMS_STF", &source);
 }
 
 /// The shading module, kept as its own test because it is the acceptance case.
@@ -240,7 +250,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 2032, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 2080, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -278,6 +288,10 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("clipmap_center"), 1744);
     assert_eq!(offset("clipmap_tpm"), 1872);
     assert_eq!(offset("clipmap_macro_rings"), 2016);
+    // TSUSHIMA-G lands in the two words TSUSHIMA-B/C padded, and TSUSHIMA-H's
+    // vec4 has to be 16-byte aligned or every `array<vec4<_>>` above it moves.
+    assert_eq!(offset("weight_noise_strength"), 2056);
+    assert_eq!(offset("macro_octave_strength"), 2064);
 }
 
 /// The `enable` directives survive composition and end up first.
@@ -308,6 +322,321 @@ fn enable_directives_are_hoisted_to_the_top_of_a_composed_module() {
             source.matches("enable wgpu_ray_query;").count(),
             1,
             "{root}: a duplicated `enable` is a parse error"
+        );
+    }
+}
+
+/// Stochastic terrain filtering must ask the texture how big it is.
+///
+/// DREAMS-B shipped `max(length(ddx), length(ddy)) * 1024.0` under the comment
+/// "authored terrain banks are 1024² today". They are not:
+/// `choose_runtime_resolutions` loads hero layers 0-15 at 2048 and only drops
+/// them to 1024 when the BC7 budget is exceeded, and the shipped maps log
+/// `0-15 at 2048, 16-31 at 1024`. A hardcoded 1024 halves the footprint of
+/// every hero layer, which is exactly one mip level too sharp, and a single
+/// stochastic tap has no trilinear blend to hide it.
+///
+/// A source check rather than a render check because the symptom is temporal
+/// shimmer at distance, which a still frame cannot show and which a moving
+/// capture measures at the same order as its own noise.
+#[test]
+fn stochastic_terrain_filtering_reads_the_texture_size() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shaders/terrain_material.wgsl"),
+    )
+    .expect("terrain_material.wgsl");
+
+    let body = source
+        .split_once("fn terrain_stochastic_sample(")
+        .expect("terrain_stochastic_sample exists")
+        .1;
+    let body = &body[..body.find("\n}").unwrap_or(body.len())];
+
+    assert!(
+        body.contains("textureDimensions("),
+        "the LOD must come from the texture, not from an assumed resolution"
+    );
+    for assumed in ["1024.0", "2048.0", "512.0"] {
+        assert!(
+            !body.contains(assumed),
+            "`{assumed}` is a hardcoded bank resolution; hero and extra layers \
+             differ and the budget can change both"
+        );
+    }
+}
+
+/// Every registered debug view is reachable in the shader.
+///
+/// `somnium_ui` owns the list of views and `somnium_renderer` owns the shader
+/// that branches on their codes, so neither crate could check the two agree.
+/// The guard that stood in for it asserted the highest code was 33 -- a
+/// hard-coded number that says nothing about whether a branch exists, and that
+/// fails on the next view added whether or not the shader was updated.
+///
+/// A view with no branch renders the ordinary lit image, so the menu entry
+/// silently does nothing.
+#[test]
+fn every_registered_debug_view_has_a_branch_in_the_shader() {
+    const SHADING: &str = include_str!("../src/shaders/shading.wgsl");
+    let source = SHADING;
+    // Branches read `dbg > N.5 && dbg < M.5`; M is the code they select.
+    let mut branched: Vec<i32> = Vec::new();
+    for (index, _) in source.match_indices("dbg < ") {
+        let rest = &source[index + "dbg < ".len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if let Ok(value) = rest[..end].parse::<f32>() {
+            branched.push((value - 0.5).round() as i32);
+        }
+    }
+    let missing: Vec<&str> = somnium_ui::debug::DEBUG_VIEWS
+        .iter()
+        .filter(|view| view.code > 0.5 && !branched.contains(&(view.code as i32)))
+        .map(|view| view.id)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "registered but not branched on in shading.wgsl, so the menu entry          renders the ordinary lit image: {missing:?}"
+    );
+}
+
+/// The clipmap ships off, and the two places that decide so must agree.
+///
+/// `somnium_ui` owns the toggle default and `somnium_renderer` owns
+/// `TerrainClipmap::env_default_enabled`. They disagreed: the ring constructor
+/// said "off until DF-E gates pass" while `debug_toggles` said on, and since
+/// `apply_debug_toggles` force-writes the field from the toggle, the toggle
+/// won. Anything that reads one and expects the other is wrong about what
+/// ships.
+#[test]
+fn the_clipmap_ships_off_in_both_places() {
+    // Cleared here because this process may inherit either variable from a
+    // capture run, and the question is what an unset environment does.
+    unsafe {
+        std::env::remove_var("SOMNIUM_TERRAIN_CLIPMAP");
+    }
+    assert!(
+        !somnium_ui::debug::DebugToggles::from_env().is_on("terrain_clipmap"),
+        "the `terrain_clipmap` toggle is on by default again;          `apply_debug_toggles` writes it straight into every ring"
+    );
+    assert!(
+        !somnium_renderer::terrain::clipmap::TerrainClipmap::env_default_enabled(),
+        "`env_default_enabled` is on by default again"
+    );
+}
+
+/// Stochastic mip selection ships off.
+///
+/// It is the one application of stochastic filtering that cannot pay: a
+/// fractional `textureSampleLevel` is trilinear in the sampler at no extra
+/// cost, so picking one of the two mips trades a filtered tap for an
+/// unfiltered one and buys nothing. Measured at 1.99% of pixels moving between
+/// consecutive frames on a stationary camera, against 0.43% for trilinear.
+#[test]
+fn stochastic_mip_selection_ships_off() {
+    unsafe {
+        std::env::remove_var("SOMNIUM_DREAMS_STF");
+    }
+    assert!(
+        !somnium_ui::debug::DebugToggles::from_env().is_on("dreams_stf"),
+        "`dreams_stf` is on by default again; it costs 4.5x the temporal          instability of the hardware trilinear it replaces"
+    );
+}
+
+/// Specular antialiasing must run after **everything** that writes the shading
+/// normal or the roughness.
+///
+/// It shipped in TSUSHIMA-E above the terrain branch, which then overwrote both
+/// outright — so every terrain pixel computed the filter and discarded it, and
+/// the relief normal and decals overwrote it again after that. The comment at
+/// the call site claimed it ran last; only the comment did.
+///
+/// A source-order test rather than an image test because the failure is
+/// invisible in a still: a discarded roughness widening looks exactly like a
+/// surface that did not need one, right up until it aliases in motion.
+#[test]
+fn specular_aa_runs_after_every_normal_and_roughness_writer() {
+    let source = composed("shading.wgsl");
+    let aa = source
+        .find("if enable_specular_aa {")
+        .expect("the specular AA block is still there");
+
+    // Every later writer of `surface.normal` / `surface.roughness` in the
+    // fragment path. If a new one is added below the filter, this fails and
+    // the fix is to move the filter, not to delete the line from this list.
+    for writer in [
+        "surface.roughness = terrain.roughness;",
+        "surface.normal = terrain.normal;",
+        "widen_roughness_toksvig(surface.roughness, relief.w)",
+        "apply_decals(&surface, hit_point, decal_froxel);",
+    ] {
+        let at = source
+            .find(writer)
+            .unwrap_or_else(|| panic!("writer moved or was renamed: {writer}"));
+        assert!(
+            at < aa,
+            "`{writer}` runs after specular AA, so the filtered roughness is discarded"
+        );
+    }
+
+    // And before `f0`, which is derived from roughness-adjacent state and is
+    // the first consumer downstream.
+    let f0 = source
+        .find("surface.f0       = mix(vec3<f32>(0.04)")
+        .expect("f0 derivation is still there");
+    assert!(aa < f0, "specular AA must run before f0 is derived");
+}
+
+/// TSUSHIMA-G's perturbation is worth nothing unless it runs before selection.
+///
+/// A perturbation applied after `terrain_strongest_four` can only wobble an
+/// edge the four winners have already drawn. Applied before, it can change
+/// *which* four win, which is what turns an oval into an interlocked boundary.
+/// Both are one line apart in the source and produce pictures that differ only
+/// in ways nobody notices until the terrain is in front of them — which is the
+/// exact shape of the specular-AA bug this file also pins.
+#[test]
+fn weight_noise_is_applied_before_strongest_four() {
+    let source = composed("shading.wgsl");
+
+    // Inside the unpack, not at the call sites: three call sites means three
+    // chances for one to be missed, and the ray-traced path was already
+    // missed once.
+    let unpack = source
+        .find("fn terrain_unpack_splats(")
+        .expect("terrain_unpack_splats is still there");
+    let perturb = source
+        .find("terrain_perturb_weights(tm, &w, local_xz);")
+        .expect("the perturbation call is still inside the unpack");
+    let unpack_end = source[unpack..]
+        .find("\n}")
+        .expect("terrain_unpack_splats has a closing brace")
+        + unpack;
+    assert!(
+        perturb > unpack && perturb < unpack_end,
+        "the perturbation left `terrain_unpack_splats`, so a call site can now miss it"
+    );
+
+    // And every caller unpacks before it selects.
+    let mut sites = 0usize;
+    for (at, _) in source.match_indices("terrain_unpack_splats(splat_s, tm, local_xz)") {
+        let select = source[at..]
+            .find("terrain_strongest_four(&weight)")
+            .map(|o| o + at)
+            .expect("a call site that unpacks but never selects");
+        assert!(at < select, "weights are selected before they are perturbed");
+        sites += 1;
+    }
+    assert_eq!(
+        sites, 2,
+        "shading.wgsl composes the live and clipmap-generate paths; \
+         a third or a missing one means a path changed shape"
+    );
+}
+
+/// TSUSHIMA-H's octaves compose with the macro blend only in its own space.
+///
+/// `terrain_macro_blend`'s overlay and linear-light modes are defined against a
+/// perceptual operand, and the albedo is squared back to linear immediately
+/// after. An octave multiply that landed below the squaring would be a second,
+/// independent gain on linear radiance fighting the blend instead of composing
+/// with it — and it would look almost right, which is the problem.
+#[test]
+fn macro_octaves_land_between_the_macro_blend_and_the_squaring() {
+    let source = composed("shading.wgsl");
+    let mut found = 0usize;
+    for (blend, _) in source.match_indices("albedo = terrain_macro_blend(") {
+        let rest = &source[blend..];
+        let octaves = rest
+            .find("terrain_macro_octaves(local_xz, tm.macro_octave_strength.xyz)")
+            .expect("the macro blend is no longer followed by the octaves");
+        let square = rest
+            .find("albedo = albedo * albedo;")
+            .expect("the macro blend is no longer followed by the squaring");
+        assert!(
+            octaves < square,
+            "the octaves are applied to linear albedo, not to the perceptual value \
+             `terrain_macro_blend` works in"
+        );
+        found += 1;
+    }
+    assert_eq!(
+        found, 2,
+        "the live and clipmap-generate paths each blend a macro map; \
+         a terrain shades through whichever the distance picks and they must agree"
+    );
+}
+
+/// TSUSHIMA-I's cliff parallax must actually reach the sampler.
+///
+/// The failure this pins has happened twice in this phase already: a filter
+/// that is computed into a local and then not used, with a comment above it
+/// saying it is. Here it would be an offset added to a `uv_*` that the sample
+/// call below does not read, and the picture would be the pre-TSUSHIMA cliff —
+/// correct-looking, flat, and indistinguishable from a cliff that was never
+/// meant to have parallax.
+#[test]
+fn cliff_parallax_reaches_the_projected_sampler() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("fn terrain_projected_pbr(")
+        .expect("terrain_projected_pbr is still there");
+    let end = source[start..]
+        .find("\n}")
+        .expect("terrain_projected_pbr has a closing brace")
+        + start;
+    let body = &source[start..end];
+
+    // One plane per world axis, each marching in its own coordinate and each
+    // sampling the coordinate it marched.
+    for plane in ["uv_x", "uv_y", "uv_z"] {
+        let offset = body
+            .find(&format!("{plane} += terrain_projected_offset("))
+            .unwrap_or_else(|| panic!("{plane} no longer takes a parallax offset"));
+        let sampled = body
+            .find(&format!("tm, layer, {plane},"))
+            .unwrap_or_else(|| panic!("{plane} is no longer what the maps are sampled at"));
+        assert!(
+            offset < sampled,
+            "{plane} is sampled before it is displaced, so the march is discarded"
+        );
+    }
+
+    // And the heightfield march it replaces is still excluded on cliffs — two
+    // parallax solutions applied to one pixel would displace it twice.
+    assert!(
+        source.contains("let allow_pom = cliff_blend < 0.05;"),
+        "the UV-space march is no longer excluded on cliffs"
+    );
+}
+
+/// Both parallax paths share one march.
+///
+/// The steep-parallax loop and its single-lookup refinement are the subtle
+/// part, and the refinement is the half nobody re-reads. Two copies is two
+/// chances for one of them to keep a bug the other lost.
+#[test]
+fn one_parallax_march_serves_both_frames() {
+    let source = composed("shading.wgsl");
+    assert_eq!(
+        source.matches("fn terrain_parallax_march(").count(),
+        1,
+        "the march is declared more than once"
+    );
+    for caller in ["terrain_parallax_offset", "terrain_projected_offset"] {
+        let start = source
+            .find(&format!("fn {caller}("))
+            .unwrap_or_else(|| panic!("{caller} is gone"));
+        let end = source[start..].find("\n}").unwrap() + start;
+        let body = &source[start..end];
+        assert!(
+            body.contains("terrain_parallax_march("),
+            "{caller} no longer delegates to the shared march"
+        );
+        assert!(
+            !body.contains("loop {"),
+            "{caller} grew a march of its own"
         );
     }
 }

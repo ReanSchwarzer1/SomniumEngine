@@ -12,6 +12,7 @@ pub mod dof;
 pub mod fsr;
 pub mod fxaa;
 pub mod gizmo;
+pub mod grain;
 pub mod grid;
 pub mod gtao;
 pub mod hiz;

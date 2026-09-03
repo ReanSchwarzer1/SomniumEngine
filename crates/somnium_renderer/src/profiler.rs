@@ -135,6 +135,8 @@ pub struct FrameCounters {
     /// Physical VSM tiles rasterised this frame and total resident tiles.
     pub virtual_shadow_pages: u32,
     pub virtual_shadow_resident: u32,
+    /// DREAMS-B passes consuming the shared grain atlas this frame.
+    pub dreams_grain_consumers: u32,
 }
 
 /// A scope opened this frame, before its timestamps have been read back.

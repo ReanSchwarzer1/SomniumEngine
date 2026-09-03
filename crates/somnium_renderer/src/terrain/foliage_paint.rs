@@ -33,6 +33,20 @@ pub struct PaintedFoliage {
     pub position: Vec3,
     /// Rotation about Y, radians.
     pub yaw: f32,
+    /// Lean away from vertical, radians, applied **after** `yaw` (Phase
+    /// TSUSHIMA-I).
+    ///
+    /// One float rather than two, because `Ry(yaw) · Rx(tilt)` with a uniform
+    /// yaw already leans in a uniformly random horizontal direction — the yaw
+    /// that stops a mesh reading as a grid of clones is the same yaw that picks
+    /// which way the lean points, and there is nothing left for a second angle
+    /// to say.
+    ///
+    /// Zero for anything that grows: grass and trees are upright because they
+    /// grew toward the light. A pebble has no such excuse, and a scatter of
+    /// pebbles all sitting perfectly flat reads as placed rather than fallen —
+    /// which is the whole failure this exists to fix.
+    pub tilt: f32,
     pub scale: f32,
 }
 
@@ -52,6 +66,21 @@ pub struct FoliageBrush {
     pub scale_max: f32,
     /// Reject ground steeper than this, in degrees.
     pub max_slope_deg: f32,
+    /// Terrain layer this brush wants underneath it (Phase TSUSHIMA-I).
+    pub layer: u8,
+    /// Reject ground where `layer` is painted more weakly than this.
+    ///
+    /// **0 disables the test entirely**, which is what every pre-TSUSHIMA
+    /// brush gets, so nothing that used to place now refuses to.
+    ///
+    /// This is the funnel's missing rejection. Slope keeps grass off a cliff
+    /// and radius keeps it under the cursor, but nothing until now asked what
+    /// the ground was *made of* — and it is the whole question for debris:
+    /// pebbles belong on scree and gravel and nowhere else, and a scatter that
+    /// ignores the splat puts them in the middle of a painted lawn.
+    pub min_layer_weight: f32,
+    /// Largest lean from vertical, in degrees. 0 keeps instances upright.
+    pub max_tilt_deg: f32,
 }
 
 impl Default for FoliageBrush {
@@ -64,6 +93,12 @@ impl Default for FoliageBrush {
             scale_min: 0.8,
             scale_max: 1.3,
             max_slope_deg: 40.0,
+            layer: 0,
+            // Both off by default: the defaults are the pre-TSUSHIMA brush
+            // exactly, and the palette turns them on for the entries that want
+            // them.
+            min_layer_weight: 0.0,
+            max_tilt_deg: 0.0,
         }
     }
 }
@@ -74,6 +109,12 @@ pub struct GroundSample {
     pub height: f32,
     /// Cosine of the slope: 1 is flat, 0 vertical.
     pub slope_cos: f32,
+    /// Splat weight of the brush's own layer here, `0..=1` (Phase TSUSHIMA-I).
+    ///
+    /// The caller decides which layer that is, because the caller is the one
+    /// holding the brush. `TerrainData::surface_sample` has computed this all
+    /// along and `ground_sample` was dropping it on the floor.
+    pub layer_weight: f32,
 }
 
 /// Minimum spacing implied by a density, in world units.
@@ -104,9 +145,16 @@ pub fn paint(
     let scale_hi = brush.scale_min.max(brush.scale_max).max(0.01);
     let before = out.len();
 
+    let tilt_limit = brush.max_tilt_deg.clamp(0.0, 90.0).to_radians();
     let place = |x: f32, z: f32, salt: u32, out: &mut Vec<PaintedFoliage>| {
         let g = sample(x, z);
         if g.slope_cos < slope_limit || !g.height.is_finite() {
+            return;
+        }
+        // A hard threshold, not a probability. A probability would scatter a
+        // thinning fringe of pebbles out across the grass, and the thing that
+        // makes a gravel patch read as gravel is that it *stops*.
+        if brush.min_layer_weight > 0.0 && g.layer_weight < brush.min_layer_weight {
             return;
         }
         let spacing = if brush.single {
@@ -124,10 +172,17 @@ pub fn paint(
         }
         let jy = unit_from(hash2(salt, 0x51_7C_C1_B7));
         let js = unit_from(hash2(salt, 0x27_22_0A_95));
+        // `sqrt`, for the same reason the candidate radius above takes one: a
+        // uniform angle puts as many instances near flat as near the limit, and
+        // what a pile of debris actually looks like is mostly-settled with a
+        // few propped up. The third salt keeps tilt independent of yaw and
+        // scale, so raising the limit does not also reshuffle the field.
+        let jt = unit_from(hash2(salt, 0x9E_37_79_B1)).sqrt();
         out.push(PaintedFoliage {
             kind: brush.kind,
             position: Vec3::new(x, g.height, z),
             yaw: jy * std::f32::consts::TAU,
+            tilt: jt * tilt_limit,
             scale: scale_lo + js * (scale_hi - scale_lo),
         });
     };
@@ -204,6 +259,7 @@ mod tests {
         GroundSample {
             height: 0.0,
             slope_cos: 1.0,
+            layer_weight: 1.0,
         }
     }
 
@@ -359,6 +415,7 @@ mod tests {
         let cliff = |_x: f32, _z: f32| GroundSample {
             height: 0.0,
             slope_cos: 0.1,
+            layer_weight: 1.0,
         };
         let mut v = Vec::new();
         assert_eq!(paint(&mut v, &brush(), [0.0, 0.0], 1, cliff), 0);
@@ -369,6 +426,7 @@ mod tests {
         let hill = |x: f32, z: f32| GroundSample {
             height: x * 0.5 + z,
             slope_cos: 1.0,
+            layer_weight: 1.0,
         };
         let mut v = Vec::new();
         paint(&mut v, &brush(), [10.0, 10.0], 1, hill);
@@ -490,5 +548,87 @@ mod tests {
         );
         assert_eq!(erase(&mut v, [0.0, 0.0], 0.0, None), 0);
         assert_eq!(spacing_for_density(0.0), f32::MAX);
+    }
+
+    /// The rejection has to be a *cliff*, not a gradient. A probability would
+    /// scatter a thinning fringe of debris across the neighbouring material,
+    /// and the thing that makes a gravel patch read as gravel is that it stops.
+    #[test]
+    fn debris_stops_where_its_layer_does() {
+        // A boundary down the middle: layer 3 is fully painted for x < 0 and
+        // absent for x > 0.
+        let split = |x: f32, _z: f32| GroundSample {
+            height: 0.0,
+            slope_cos: 1.0,
+            layer_weight: if x < 0.0 { 1.0 } else { 0.0 },
+        };
+        let b = FoliageBrush {
+            radius: 8.0,
+            density: 3.0,
+            layer: 3,
+            min_layer_weight: 0.5,
+            ..Default::default()
+        };
+        let mut v = Vec::new();
+        // Centred on the boundary, so a brush that ignored the layer would
+        // fill both halves.
+        let n = paint(&mut v, &b, [0.0, 0.0], 1, split);
+        assert!(n > 0, "the painted half placed nothing at all");
+        assert!(
+            v.iter().all(|p| p.position.x < 0.0),
+            "debris landed on ground its layer is not painted on"
+        );
+    }
+
+    /// Zero is the pre-TSUSHIMA brush exactly, not "a threshold of zero".
+    #[test]
+    fn a_zero_layer_threshold_places_on_bare_ground() {
+        let bare = |_x: f32, _z: f32| GroundSample {
+            height: 0.0,
+            slope_cos: 1.0,
+            layer_weight: 0.0,
+        };
+        let mut v = Vec::new();
+        assert!(paint(&mut v, &brush(), [0.0, 0.0], 1, bare) > 0);
+    }
+
+    /// A field of pebbles all sitting perfectly flat reads as placed rather
+    /// than fallen, and every one leaning the same way reads as wind. The test
+    /// is that the tilts are varied and bounded, and that an upright brush is
+    /// still exactly upright.
+    #[test]
+    fn tilt_is_varied_bounded_and_off_by_default() {
+        let mut upright = Vec::new();
+        paint(&mut upright, &brush(), [0.0, 0.0], 1, flat);
+        assert!(upright.iter().all(|p| p.tilt == 0.0), "default brush leaned");
+
+        let b = FoliageBrush {
+            max_tilt_deg: 30.0,
+            ..brush()
+        };
+        let mut v = Vec::new();
+        paint(&mut v, &b, [0.0, 0.0], 1, flat);
+        assert!(v.len() > 8, "not enough instances to say anything");
+        let limit = 30.0_f32.to_radians();
+        assert!(v.iter().all(|p| p.tilt >= 0.0 && p.tilt <= limit + 1e-6));
+        let distinct = v
+            .windows(2)
+            .filter(|w| (w[0].tilt - w[1].tilt).abs() > 1e-6)
+            .count();
+        assert!(
+            distinct > v.len() / 2,
+            "tilt is not varying across instances: {distinct} of {}",
+            v.len()
+        );
+        // And it is not correlated with yaw — the yaw picks the *direction* of
+        // the lean, so a tilt that tracked it would lean every instance the
+        // same way in world space.
+        let sorted_by_yaw = {
+            let mut c = v.clone();
+            c.sort_by(|a, b| a.yaw.partial_cmp(&b.yaw).unwrap());
+            c
+        };
+        let monotonic = sorted_by_yaw.windows(2).all(|w| w[0].tilt <= w[1].tilt);
+        assert!(!monotonic, "tilt is a function of yaw");
     }
 }

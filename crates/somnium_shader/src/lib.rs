@@ -55,10 +55,13 @@
 
 pub mod cache;
 pub mod compose;
+mod spirv;
 pub mod watch;
 
 pub use cache::{BudgetRow, ShaderKey, VariantCache, VariantRecord, budget, budget_table};
 pub use compose::{ComposeError, Defines, ModuleId, Registry};
+pub use compose::{Origin, SourceMap};
+pub use spirv::SpirvEntryPoint;
 pub use watch::SourceWatcher;
 
 use std::collections::HashMap;
@@ -81,6 +84,16 @@ pub enum ShaderError {
     },
     /// A key was requested for a module that was never registered.
     UnknownModule(ModuleId),
+    /// A named Slang/SPIR-V module was not registered.
+    UnknownSpirvModule(String),
+    /// A checked-in Slang/SPIR-V artifact was malformed or unsupported by the
+    /// active adapter.
+    Spirv {
+        /// The authored Slang module.
+        module: &'static str,
+        /// The precise artifact or capability failure.
+        diagnostic: String,
+    },
 }
 
 impl std::fmt::Display for ShaderError {
@@ -89,6 +102,10 @@ impl std::fmt::Display for ShaderError {
             Self::Compose(error) => write!(f, "{error}"),
             Self::Validation { module, diagnostic } => write!(f, "{module}: {diagnostic}"),
             Self::UnknownModule(id) => write!(f, "module {} is not registered", id.0),
+            Self::UnknownSpirvModule(name) => {
+                write!(f, "Slang/SPIR-V module `{name}` is not registered")
+            }
+            Self::Spirv { module, diagnostic } => write!(f, "{module}: {diagnostic}"),
         }
     }
 }
@@ -160,6 +177,13 @@ pub struct ShaderSystem {
     /// Resolved WGSL per key, so a recompile after a reload does not redo the
     /// composition work — and so a test can assert what was fed to naga.
     sources: HashMap<ShaderKey, String>,
+    /// Where each variant's composed lines came from, so a diagnostic can name
+    /// the file somebody has open rather than an offset into a 209 KB string.
+    maps: HashMap<ShaderKey, compose::SourceMap>,
+    /// Checked-in Slang cooks, registered beside WGSL rather than in a second
+    /// shader system. Names are the authored `.slang` paths so diagnostics lead
+    /// back to the file a developer edits.
+    spirv: HashMap<&'static str, spirv::SpirvArtifact>,
     watcher: SourceWatcher,
 }
 
@@ -200,6 +224,72 @@ impl ShaderSystem {
         id
     }
 
+    /// Register a checked-in SPIR-V cook of an authored Slang module.
+    ///
+    /// The artifact is structurally checked here. Semantic and byte-for-byte
+    /// reproducibility checks belong to `tools/slangcook`, which has access to
+    /// the compiler and runs before the artifact is committed.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be a trusted, semantically valid artifact produced by the
+    /// declared compiler/tooling. Passthrough modules bypass wgpu's normal
+    /// validation and malformed input may crash a graphics driver. This API is
+    /// unsafe so arbitrary callers cannot cross that boundary through a safe
+    /// registry method.
+    pub unsafe fn register_spirv(
+        &mut self,
+        name: &'static str,
+        bytes: &[u8],
+        entry_points: &[SpirvEntryPoint],
+    ) -> Result<(), ShaderError> {
+        let artifact = spirv::SpirvArtifact::parse(bytes, entry_points).map_err(|diagnostic| {
+            ShaderError::Spirv {
+                module: name,
+                diagnostic,
+            }
+        })?;
+        self.spirv.insert(name, artifact);
+        Ok(())
+    }
+
+    /// Every shader name owned by the system, across WGSL and Slang.
+    #[must_use]
+    pub fn registered_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<_> = self
+            .registry
+            .ids()
+            .filter_map(|id| self.registry.name(id))
+            .collect();
+        names.extend(self.spirv.keys().copied());
+        names.sort_unstable();
+        names
+    }
+
+    /// Create a passthrough shader module from a registered Slang/SPIR-V cook.
+    pub fn spirv_module(
+        &self,
+        device: &wgpu::Device,
+        name: &str,
+    ) -> Result<wgpu::ShaderModule, ShaderError> {
+        let (registered_name, artifact) = self
+            .spirv
+            .get_key_value(name)
+            .ok_or_else(|| ShaderError::UnknownSpirvModule(name.to_string()))?;
+        artifact
+            .create_module(device, registered_name)
+            .map_err(|diagnostic| ShaderError::Spirv {
+                module: registered_name,
+                diagnostic,
+            })
+    }
+
+    /// Words in a registered SPIR-V artifact, for reports and GPU-free tests.
+    #[must_use]
+    pub fn spirv_words(&self, name: &str) -> Option<&[u32]> {
+        self.spirv.get(name).map(spirv::SpirvArtifact::words)
+    }
+
     /// Give a define bit a name, so `//!if NAME` resolves and a typo does not.
     pub fn register_define(&mut self, bit: u32, name: &'static str) {
         self.registry.register_define(bit, name);
@@ -227,13 +317,30 @@ impl ShaderSystem {
             return Err(ShaderError::UnknownModule(key.module));
         }
         if !self.sources.contains_key(&key) {
-            let text = self.registry.resolve(key.module, key.defines)?;
+            let (text, map) = self.registry.resolve_mapped(key.module, key.defines)?;
             let dependencies = self.registry.dependencies(key.module, key.defines)?;
             self.variants.insert(key, dependencies, text.len());
             self.sources.insert(key, text);
+            self.maps.insert(key, map);
         }
         self.variants.lookup(key);
         Ok(self.sources.get(&key).expect("just inserted"))
+    }
+
+    /// Which module and line a line of a variant's composed source came from.
+    ///
+    /// DREAMS-A. `source` hands naga one string built from up to eight files,
+    /// and naga reports against that string. Without this, an error on line 48
+    /// of `brdf.wgsl` arrives as "line 195" of an unnamed 4,801-line text, and
+    /// the renderer then labelled it with the *root* module's name, which is a
+    /// file the error is not in.
+    ///
+    /// `None` for a line in the hoisted `enable` header, which belongs to no
+    /// single module because it was lifted out of several, and for a variant
+    /// that has not been resolved yet.
+    #[must_use]
+    pub fn locate(&self, key: ShaderKey, composed_line: usize) -> Option<Origin> {
+        self.maps.get(&key)?.locate(composed_line)
     }
 
     /// Create a `wgpu::ShaderModule` for a variant.
@@ -286,10 +393,16 @@ impl ShaderSystem {
     /// Validation happens against the *dependent variants*, not the changed
     /// module alone — a module is a fragment, and a fragment does not have to
     /// be a valid WGSL program on its own.
+    ///
+    /// `validate` is handed the root's name, the composed source, and the map
+    /// from that source's lines back to the files they were written in
+    /// (DREAMS-A). The map is a parameter rather than something the caller
+    /// looks up afterwards because this method holds the system while the
+    /// closure runs, so the closure cannot ask for it.
     pub fn apply_reload(
         &mut self,
         changed: Vec<(ModuleId, String)>,
-        mut validate: impl FnMut(&str, &str) -> Result<(), String>,
+        mut validate: impl FnMut(&str, &str, &compose::SourceMap) -> Result<(), String>,
     ) -> ReloadOutcome {
         let mut outcome = ReloadOutcome::default();
 
@@ -315,9 +428,9 @@ impl ShaderSystem {
             let mut failure = None;
             let mut recompiled = Vec::new();
             for key in &affected {
-                match self.registry.resolve(key.module, key.defines) {
-                    Ok(text) => {
-                        if let Err(diagnostic) = validate(name, &text) {
+                match self.registry.resolve_mapped(key.module, key.defines) {
+                    Ok((text, map)) => {
+                        if let Err(diagnostic) = validate(name, &text, &map) {
                             failure = Some(ShaderError::Validation {
                                 module: name,
                                 diagnostic,

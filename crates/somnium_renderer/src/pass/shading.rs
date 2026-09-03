@@ -136,6 +136,8 @@ pub struct ShadingPass {
     split_aerial: Option<(ShadingSpec, wgpu::RenderPipeline)>,
     hdr_format: wgpu::TextureFormat,
     spec: ShadingSpec,
+    /// Composition options are part of the live pipeline and survive hot reload.
+    defines: somnium_shader::Defines,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
     // Stored for bind-group recreation on resize / shadow atlas change.
@@ -178,6 +180,8 @@ pub struct ShadingPass {
     virtual_shadow_sampler: wgpu::Sampler,
     virtual_shadow_page_table: wgpu::Buffer,
     virtual_shadow_params: wgpu::Buffer,
+    /// DREAMS-B's shared stochastic sampling atlas.
+    grain_packed: wgpu::Buffer,
     _virtual_shadow_dummy: wgpu::Texture,
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
@@ -212,6 +216,7 @@ impl ShadingPass {
         cloud_shadow_view: &wgpu::TextureView,
         cloud_shadow_params: &wgpu::Buffer,
         decals: &crate::pass::decal::DecalGrid,
+        grain_packed: &wgpu::Buffer,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shading Pass Bind Group Layout"),
@@ -499,6 +504,16 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 28,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -616,11 +631,15 @@ impl ShadingPass {
             &virtual_shadow_sampler,
             &virtual_shadow_page_table,
             &virtual_shadow_params,
+            grain_packed,
         );
 
         // MORROWIND-C: composition is declared in `shading.wgsl` and
         // resolved by `somnium_shader`; this site no longer knows the order.
-        let shader_source = shaders.source_or_panic("shading.wgsl");
+        let defines = crate::shaders::define::DREAMS_STF;
+        let shader_source = shaders
+            .source("shading.wgsl", defines)
+            .unwrap_or_else(|error| panic!("shading.wgsl composition failed: {error}"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shading Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -717,6 +736,7 @@ impl ShadingPass {
             split_aerial: None,
             hdr_format: surface_format,
             spec,
+            defines,
             bind_group_layout,
             bind_group,
             sampler,
@@ -743,6 +763,7 @@ impl ShadingPass {
             virtual_shadow_sampler,
             virtual_shadow_page_table,
             virtual_shadow_params,
+            grain_packed: grain_packed.clone(),
             _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
             clipmap_sampler,
@@ -773,7 +794,7 @@ impl ShadingPass {
         device: &wgpu::Device,
         shaders: &crate::shaders::Shaders,
     ) -> Result<(), somnium_shader::ShaderError> {
-        let source = shaders.source("shading.wgsl", somnium_shader::Defines::NONE)?;
+        let source = shaders.source("shading.wgsl", self.defines)?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shading Shader"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -1136,6 +1157,7 @@ impl ShadingPass {
         virtual_shadow_sampler: &wgpu::Sampler,
         virtual_shadow_page_table: &wgpu::Buffer,
         virtual_shadow_params: &wgpu::Buffer,
+        grain_packed: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"),
@@ -1252,6 +1274,10 @@ impl ShadingPass {
                 wgpu::BindGroupEntry {
                     binding: 27,
                     resource: virtual_shadow_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 28,
+                    resource: grain_packed.as_entire_binding(),
                 },
             ],
         })
@@ -1449,6 +1475,7 @@ impl ShadingPass {
             &self.virtual_shadow_sampler,
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
+            &self.grain_packed,
         );
     }
 
@@ -1491,6 +1518,7 @@ impl ShadingPass {
             &self.virtual_shadow_sampler,
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
+            &self.grain_packed,
         );
     }
 

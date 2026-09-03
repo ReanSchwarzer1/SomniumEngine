@@ -40,7 +40,8 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
 /// and are right to within each layer's own variation.
 fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
-    let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
+    let local_xz = world_pos.xz - tm.terrain_origin;
+    let uv = local_xz * tm.inv_world_size;
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
@@ -50,7 +51,11 @@ fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     }
     // `var`, and by pointer: `terrain_strongest_four` takes the scan array by
     // reference so the shading path does not copy 128 bytes per pixel.
-    var weight = terrain_unpack_splats(splat_s);
+    // Through the same unpack as the raster path, so TSUSHIMA-G's perturbed
+    // boundary is the boundary a bounce ray sees too. A traced reflection that
+    // disagreed with the surface it reflects about where gravel stops would be
+    // exactly the drift this file keeps one definition of the weights to avoid.
+    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var c = vec3<f32>(0.0);
     var total = 0.0;

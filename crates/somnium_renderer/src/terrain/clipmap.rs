@@ -40,12 +40,30 @@ pub const HEX_MIN_TEXELS_PER_M: f32 = 8.0;
 /// filling the cheap stack in the same frame as a hex ring was 6M texels and
 /// hitchs the editor. Walking L-strips are tens of thousands of texels.
 pub const MAX_GEN_TEXELS: u32 = 1024 * 1024;
-const MAX_TAKE_JOBS: usize = 32;
+/// Dirty rectangles one stack may hand to generate in a single frame.
+///
+/// Public because it is also the size of that stack's slice of the generate
+/// pass's uniform buffer: every job taken here needs its own slot, or two of
+/// them share one and the second wins.
+pub const MAX_TAKE_JOBS: usize = 32;
 /// Ring 3 is 8 m at 64 t/m — the near slope the player actually sees. Paint
 /// it first, then sharpen inward, then distance. Finest-first left that 8 m
 /// disk empty for seven hex frames (~1.5 s).
 const DETAIL_GEN_ORDER: [usize; DETAIL_RINGS as usize] = [3, 2, 1, 0, 4, 5, 6, 7];
 const MACRO_GEN_ORDER: [usize; MACRO_RINGS as usize] = [3, 2, 1, 0];
+/// Order for rings that are **not ready**: coverage before sharpness.
+///
+/// A not-ready ring is not being sampled, so nothing on screen improves until
+/// it is finished -- and what the screen needs first is *some* data everywhere,
+/// not perfect data in an 8 m disk. Measured on a cold cache: with the near-
+/// first order above, frame 2 was a small sharp circle of ring 3 surrounded by
+/// 27.8% of the frame on the flat macro-map fallback, which has no detail
+/// normal at all and reads as a smooth, straight-edged patch lying on the
+/// ground. That is the band artifact.
+///
+/// `DETAIL_GEN_ORDER` still governs rings that *are* ready, where near-first is
+/// right: those are the thin slide strips of rings already on screen.
+const DETAIL_COLD_ORDER: [usize; DETAIL_RINGS as usize] = [7, 6, 5, 4, 3, 2, 1, 0];
 
 const CLIPMAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -343,6 +361,15 @@ impl TerrainClipmap {
         jobs_for(&self.macro_rings, false)
     }
 
+    /// Whether the macro stack can shade the whole view.
+    ///
+    /// While this is false there is terrain on screen that no ring can serve,
+    /// and it falls through to the flat macro-map placeholder.
+    #[must_use]
+    pub fn macro_covers_view(&self) -> bool {
+        self.macro_rings.iter().all(|ring| ring.ready)
+    }
+
     pub fn has_dirty(&self) -> bool {
         self.rings.iter().any(|r| r.dirty_count > 0)
             || self.macro_rings.iter().any(|r| r.dirty_count > 0)
@@ -351,11 +378,12 @@ impl TerrainClipmap {
     /// Consume dirty rectangles up to `budget` texels, near-cover ring first.
     /// Leftover stays queued; do not call `clear_dirty` after this.
     pub fn take_jobs(&mut self, is_detail: bool, budget: &mut u32) -> Vec<ClipmapGenJob> {
-        let order: &[usize] = if is_detail {
-            &DETAIL_GEN_ORDER
+        let rings_len = if is_detail {
+            self.rings.len()
         } else {
-            &MACRO_GEN_ORDER
+            self.macro_rings.len()
         };
+        debug_assert_eq!(rings_len, gen_order(is_detail, true).len());
         let rings = if is_detail {
             &mut self.rings[..]
         } else {
@@ -377,6 +405,7 @@ impl TerrainClipmap {
         // slide is the thin strip it always should have been, the ordering is
         // what keeps it safe.
         for ready_pass in [true, false] {
+            let order = gen_order(is_detail, ready_pass);
             for &ring_i in order {
                 if *budget == 0 || out.len() >= MAX_TAKE_JOBS {
                     break;
@@ -420,6 +449,30 @@ impl TerrainClipmap {
             }
         }
         out
+    }
+
+    /// Which detail / macro rings shading may sample this frame.
+    ///
+    /// The bit is the whole question the pictures could not answer: a stack
+    /// where only the coarsest ring is ever ready shades from 4 texels/m and
+    /// still reports "a detail ring" to debug view 34, so the source view
+    /// cannot tell a working stack from a starved one.
+    #[must_use]
+    pub fn ready_masks(&self) -> (u32, u32) {
+        (ready_mask(&self.rings), ready_mask(&self.macro_rings))
+    }
+
+    /// Dirty texels still queued across both stacks.
+    #[must_use]
+    pub fn pending_texels(&self) -> u64 {
+        let sum = |rings: &[ClipmapRing]| -> u64 {
+            rings
+                .iter()
+                .flat_map(|r| r.dirty[..r.dirty_count as usize].iter())
+                .map(|rect| u64::from(rect.w) * u64::from(rect.h))
+                .sum()
+        };
+        sum(&self.rings) + sum(&self.macro_rings)
     }
 
     pub fn clear_dirty(&mut self) {
@@ -604,7 +657,7 @@ fn update_ring(ring: &mut ClipmapRing, camera_xz: [f32; 2], force_full: bool) {
         wrap_i(old_origin[0] + dx_tex, size),
         wrap_i(old_origin[1] + dy_tex, size),
     ];
-    for rect in toroidal_dirty_rects(old_origin, ring.origin, size) {
+    for rect in toroidal_dirty_rects(old_origin, [dx_tex, dy_tex], size) {
         for expanded in expand_and_wrap(rect, size, EXTENDED_MARGIN) {
             ring.push_dirty(expanded);
         }
@@ -615,17 +668,18 @@ fn wrap_i(v: i32, size: i32) -> i32 {
     ((v % size) + size) % size
 }
 
-/// Dirty strips when a toroidal origin slides from `old` to `new`.
+/// Dirty strips when a toroidal origin slides by an unwrapped signed delta.
 ///
 /// The region that just entered the window is an L-shape; wrapping can split
 /// each arm into two, so the caller may see up to four rectangles.
-pub fn toroidal_dirty_rects(
-    old_origin: [i32; 2],
-    new_origin: [i32; 2],
-    size: i32,
-) -> Vec<ClipRect> {
-    let dx = wrap_delta(new_origin[0] - old_origin[0], size);
-    let dy = wrap_delta(new_origin[1] - old_origin[1], size);
+///
+/// The delta is part of this interface deliberately. Two wrapped origins do
+/// not preserve it: on a 1024-texel ring, moving +768 and moving -256 produce
+/// the same new origin, but the first exposes 768 new columns and the second
+/// exposes 256. Inferring the shortest wrapped delta left the other columns
+/// holding valid-looking material from the old world position.
+pub fn toroidal_dirty_rects(old_origin: [i32; 2], delta: [i32; 2], size: i32) -> Vec<ClipRect> {
+    let [dx, dy] = delta;
     if dx == 0 && dy == 0 {
         return Vec::new();
     }
@@ -637,12 +691,16 @@ pub fn toroidal_dirty_rects(
             h: size as u32,
         }];
     }
+    let new_origin = [
+        wrap_i(old_origin[0] + dx, size),
+        wrap_i(old_origin[1] + dy, size),
+    ];
     let mut rects = Vec::new();
     // Columns that entered along X. Origin increase means the west edge left
     // and the east edge entered — those new columns live at the previous origin
     // (physical texels that now mean a new world position).
     if dx != 0 {
-        let w = dx.abs() as u32;
+        let w = dx.unsigned_abs();
         let x = if dx > 0 {
             wrap_i(old_origin[0], size) as u32
         } else {
@@ -651,7 +709,7 @@ pub fn toroidal_dirty_rects(
         rects.extend(wrap_span(x, 0, w, size as u32, size as u32));
     }
     if dy != 0 {
-        let h = dy.abs() as u32;
+        let h = dy.unsigned_abs();
         let y = if dy > 0 {
             wrap_i(old_origin[1], size) as u32
         } else {
@@ -660,14 +718,6 @@ pub fn toroidal_dirty_rects(
         rects.extend(wrap_span(0, y, size as u32, h, size as u32));
     }
     rects
-}
-
-fn wrap_delta(d: i32, size: i32) -> i32 {
-    let mut d = ((d % size) + size) % size;
-    if d > size / 2 {
-        d -= size;
-    }
-    d
 }
 
 fn wrap_span(x: u32, y: u32, w: u32, h: u32, size: u32) -> Vec<ClipRect> {
@@ -774,6 +824,26 @@ pub fn coarsest_detail_radius_metres() -> f32 {
     (DETAIL_SIZE as f32 / tpm) * 0.5
 }
 
+/// The order [`TerrainClipmap::take_jobs`] visits rings in, for one pass.
+///
+/// A **ready** ring is on screen right now and its dirty rectangles are the
+/// thin strip that just slid into view, so near-first is right: that is the
+/// ground the player is standing on.
+///
+/// A **not-ready** ring is skipped by the picker entirely, so nothing on screen
+/// improves until it finishes -- and what the screen needs first is *some* data
+/// everywhere rather than perfect data in an 8 m disk. Coarsest first.
+fn gen_order(is_detail: bool, ready_pass: bool) -> &'static [usize] {
+    match (is_detail, ready_pass) {
+        (true, true) => &DETAIL_GEN_ORDER,
+        (true, false) => &DETAIL_COLD_ORDER,
+        // The macro stack is authored coarsest-first already, so both passes
+        // want the same order. Reversing it here would be the exact mistake
+        // this function exists to avoid.
+        (false, _) => &MACRO_GEN_ORDER,
+    }
+}
+
 fn ready_mask(rings: &[ClipmapRing]) -> u32 {
     let mut bits = 0u32;
     for (i, ring) in rings.iter().enumerate() {
@@ -822,6 +892,49 @@ impl GpuClipmapGen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Coverage before sharpness while the cache is cold.
+    ///
+    /// Measured on the `coastal-flyover` rail with debug view 34 (clipmap
+    /// source). Before: frame 2 was 27.83% of the frame on the flat macro-map
+    /// fallback -- terrain with no cache data and no detail normal, which is
+    /// the smooth straight-edged patch reported as the band artifact. After:
+    /// 0.00%, with the macro stack covering 52.35%. The converged frame 240 is
+    /// unchanged (38 of 921,600 pixels differ by more than 2, peak delta 5).
+    #[test]
+    fn a_cold_cache_paints_coverage_before_sharpness() {
+        // Ready rings are the thin slide strips of ground already on screen.
+        assert_eq!(
+            gen_order(true, true)[0],
+            3,
+            "a ready pass must stay near-first; ring 3 is the 8 m disk underfoot"
+        );
+        // Not-ready rings contribute nothing until they finish, so the widest
+        // one -- the only one that covers the horizon -- has to go first.
+        assert_eq!(
+            gen_order(true, false)[0],
+            DETAIL_RINGS as usize - 1,
+            "a cold pass must be coarsest-first, or the view outside the finest              ring spends the fill on the flat fallback"
+        );
+        assert_eq!(
+            gen_order(false, false)[0],
+            MACRO_RINGS as usize - 1,
+            "the macro stack is authored coarsest-first and must not be reversed"
+        );
+        // Every ring exactly once, in every pass: a permutation, not a filter.
+        for is_detail in [true, false] {
+            let n = if is_detail { DETAIL_RINGS } else { MACRO_RINGS } as usize;
+            for ready_pass in [true, false] {
+                let mut seen = gen_order(is_detail, ready_pass).to_vec();
+                seen.sort_unstable();
+                assert_eq!(
+                    seen,
+                    (0..n).collect::<Vec<_>>(),
+                    "detail={is_detail} ready={ready_pass} is not a permutation"
+                );
+            }
+        }
+    }
 
     #[test]
     fn origin_wrap_stays_inside_the_texture() {
@@ -971,6 +1084,46 @@ mod tests {
             texels < MAX_GEN_TEXELS / 4,
             "a walking slide should be a small fraction of one frame's budget, got {texels}"
         );
+    }
+
+    /// A displacement is not interchangeable with the shortest delta between
+    /// two wrapped origins. A large one-frame focus change can move a ring 768
+    /// of its 1024 texels. Interpreting that as the shorter -256 wrap refreshes
+    /// the old overlap and leaves the 768 newly-visible columns holding
+    /// valid-looking texels from the old world position. Those stale texels are
+    /// the persistent rectangular terrain patch: source debug reports a ring
+    /// hit because their AO is still non-zero, so the miss-path fix cannot
+    /// catch them.
+    #[test]
+    fn a_slide_larger_than_half_the_ring_refreshes_the_entering_side() {
+        let cases = [
+            ([768.0, 0.0], [100, DETAIL_SIZE / 2], "+X"),
+            ([-768.0, 0.0], [900, DETAIL_SIZE / 2], "-X"),
+            ([0.0, 768.0], [DETAIL_SIZE / 2, 100], "+Y"),
+            ([0.0, -768.0], [DETAIL_SIZE / 2, 900], "-Y"),
+        ];
+
+        for (center, entering_texel, direction) in cases {
+            let mut ring = ClipmapRing::new(1.0, DETAIL_SIZE);
+            update_ring(&mut ring, [0.0, 0.0], true);
+            ring.clear_dirty();
+            ring.ready = true;
+
+            update_ring(&mut ring, center, false);
+
+            let entering_texel_is_dirty =
+                ring.dirty[..ring.dirty_count as usize].iter().any(|rect| {
+                    entering_texel[0] >= rect.x
+                        && entering_texel[0] < rect.x + rect.w
+                        && entering_texel[1] >= rect.y
+                        && entering_texel[1] < rect.y + rect.h
+                });
+            assert!(
+                entering_texel_is_dirty,
+                "the 768 entering texels along {direction} must be regenerated; queued rectangles were {:?}",
+                &ring.dirty[..ring.dirty_count as usize]
+            );
+        }
     }
 
     #[test]

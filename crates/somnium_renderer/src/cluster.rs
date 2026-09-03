@@ -90,7 +90,7 @@ pub struct GpuClusterParams {
     pub near: f32,
     pub far: f32,
     /// Packed shading flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows,
-    /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun visibility is live.
+    /// bit 3 = analytic grads, bit 4 = ReSTIR DI, bit 5 = DREAMS-B terrain STF.
     pub shading_mode: u32,
     pub num_local_lights: u32,
 }

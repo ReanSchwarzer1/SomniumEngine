@@ -89,7 +89,13 @@ pub fn write_surface_png(
         label: Some("Surface PNG Capture"),
     });
     let Some((staging, pending)) = FrameCapture::copy_swapchain(
-        device, &mut encoder, texture, width, height, format, "surface",
+        device,
+        &mut encoder,
+        texture,
+        width,
+        height,
+        format,
+        "surface",
     ) else {
         return;
     };

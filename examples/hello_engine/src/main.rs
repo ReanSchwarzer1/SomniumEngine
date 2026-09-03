@@ -19,6 +19,8 @@
 //! - Scene save/load (11.5F)
 //! - Editor mode (Play/Pause/Stop) (11.5L)
 
+mod dreams_fixture;
+
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
@@ -253,7 +255,9 @@ fn apply_kit_view(
             let lx = (tx as f32 + 0.5) / sw as f32 * wx;
             let lz = (tz as f32 + 0.5) / sh as f32 * wz;
             let h = terrain.world_height_at(lx, lz);
-            let slope = terrain.ground_sample(lx, lz).slope_cos;
+            // Layer 0: this view scores slope only and reads the splat itself
+            // a few lines below, so which layer the weight comes from is moot.
+            let slope = terrain.ground_sample(lx, lz, 0).slope_cos;
             let idx = (tz * sw + tx) as usize;
             let texel = terrain.splatmap.data.get(idx).copied().unwrap_or([0; 32]);
             let w = |layer: usize| texel[layer] as f32;
@@ -292,6 +296,19 @@ fn apply_kit_view(
                         h + (1.0 - slope) * 4.0
                     }
                 }
+                // Phase TSUSHIMA-A. Height, and only height: a vista wants the
+                // camera high enough that the frame is mostly ground at a
+                // hundred metres and beyond. `ridge` is the near relative of
+                // this and stands *on* the ridge at eye height; this one
+                // stands well above it, because the whole subject of the
+                // phase is what the ground looks like past the last cascade.
+                "vista" => {
+                    if h <= water + 6.0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        h
+                    }
+                }
                 _ => f32::NEG_INFINITY,
             };
             if score > best.0 {
@@ -310,6 +327,44 @@ fn apply_kit_view(
             camera.position = to_world(lx, h + 1.7, lz);
             camera.yaw = 20.0;
             camera.pitch = -22.0;
+        }
+        "vista" => {
+            // Face whichever bearing has the most land in front of it.
+            //
+            // A fixed yaw works on one map and points at open water on the
+            // other, and a capture of the sea is not a capture of terrain.
+            // Eight bearings, counting above-water samples out to 400 m, is
+            // enough to find the long axis of either map and costs nothing
+            // next to the scoring sweep that just ran.
+            let mut best_yaw = -90.0f32;
+            let mut best_land = -1.0f32;
+            for i in 0..8 {
+                let yaw = i as f32 * 45.0;
+                let r = yaw.to_radians();
+                let (dx, dz) = (r.cos(), r.sin());
+                let mut land = 0.0f32;
+                for step in 1..=40 {
+                    let d = step as f32 * 10.0;
+                    let sx = lx + dx * d;
+                    let sz = lz + dz * d;
+                    if sx < 0.0 || sz < 0.0 || sx >= wx || sz >= wz {
+                        continue;
+                    }
+                    if terrain.world_height_at(sx, sz) > water + 0.5 {
+                        land += 1.0;
+                    }
+                }
+                if land > best_land {
+                    best_land = land;
+                    best_yaw = yaw;
+                }
+            }
+            // Above the summit rather than on it, so the near ground does not
+            // fill the lower half of the frame and steal the shot from the
+            // distance the phase is actually about.
+            camera.position = to_world(lx, h + 22.0, lz);
+            camera.yaw = best_yaw;
+            camera.pitch = -12.0;
         }
         "shore" => {
             camera.position = to_world(lx, h.max(water) + 1.8, lz);
@@ -346,6 +401,42 @@ fn apply_kit_view(
 /// | `coastal-ground` | Coastal | walk / eye height on the terrain |
 /// | `island` | Island | the recipe's own seed, `(0, 28, 115)` |
 /// | `island-ground` | Island | walk / eye height |
+/// Pin the sun's elevation, in degrees above the horizon (Phase TSUSHIMA-A).
+///
+/// Without this the sun comes from the directional light's authored transform
+/// and there is no way to ask for a *low* one, which is the single condition
+/// where TSUSHIMA-B's long shadows, TSUSHIMA-E's grazing relief and
+/// TSUSHIMA-F's specular all show most. It is also what makes a low-sun shot
+/// reproducible six weeks later rather than "whatever the preset happened to
+/// be".
+///
+/// The azimuth is left alone deliberately: the map's authored sun bearing is
+/// what puts shadows where the terrain was built to receive them, so this
+/// rotates the sun in elevation only.
+fn pinned_sun_elevation() -> Option<f32> {
+    let raw = std::env::var("SOMNIUM_SUN_ELEVATION").ok()?;
+    let degrees = raw.trim().parse::<f32>().ok()?;
+    if !degrees.is_finite() {
+        tracing::warn!("SOMNIUM_SUN_ELEVATION={raw} is not a number; ignoring");
+        return None;
+    }
+    Some(degrees.clamp(-90.0, 90.0).to_radians())
+}
+
+/// Re-aim `to_light` at `elevation` while keeping its compass bearing.
+fn sun_at_elevation(to_light: glam::Vec3, elevation: f32) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(to_light.x, to_light.z);
+    // A sun directly overhead has no bearing to keep. Pick one rather than
+    // normalising a zero vector into NaN and blacking out the frame.
+    let bearing = if horizontal.length_squared() < 1e-8 {
+        glam::Vec2::new(1.0, 0.0)
+    } else {
+        horizontal.normalize()
+    };
+    let (sin_e, cos_e) = elevation.sin_cos();
+    glam::Vec3::new(bearing.x * cos_e, sin_e, bearing.y * cos_e).normalize()
+}
+
 fn timing_view() -> Option<String> {
     let raw = std::env::var("SOMNIUM_TIME_VIEW").ok()?;
     let name = raw.trim().to_ascii_lowercase();
@@ -382,6 +473,12 @@ fn apply_capture_camera_overrides(
         if view.ends_with("-ground") || view.ends_with("-walk") {
             match terrain {
                 Some(terrain) => apply_kit_view(camera, terrain, origin, "walk"),
+                None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
+            }
+        } else if view.ends_with("-vista") {
+            // Phase TSUSHIMA-A.
+            match terrain {
+                Some(terrain) => apply_kit_view(camera, terrain, origin, "vista"),
                 None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
             }
         }
@@ -611,6 +708,7 @@ impl VoxelTerrain {
 struct HelloGame {
     log_timer: f32,
     camera: EditorCamera,
+    dreams_rail: Option<dreams_fixture::DreamRail>,
     cascade_debug: bool,
     last_simulation_time: f32,
     boat: Option<BoatRuntime>,
@@ -713,6 +811,7 @@ impl HelloGame {
         Self {
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
+            dreams_rail: None,
             cascade_debug: false,
             last_simulation_time: 0.0,
             boat: None,
@@ -950,6 +1049,36 @@ impl HelloGame {
                 .and_then(|id| ctx.renderer.as_ref().and_then(|r| r.terrain(id))),
             result.terrain_origin,
         );
+        self.dreams_rail = std::env::var("SOMNIUM_DREAMS_RAIL").ok().and_then(|name| {
+            // A rail is frame-indexed from the frame the map finished loading,
+            // and `SOMNIUM_CAPTURE_FRAME` counts from process start. Those are
+            // two clocks: a slower load moves the capture to a different point
+            // on the rail, and two runs that look like the same recipe are not
+            // the same experiment. Log the offset so a capture pair can be
+            // checked rather than assumed.
+            let start = ctx.time.frame_count();
+            let rail = dreams_fixture::DreamRail::named(
+                name.trim(),
+                dreams_fixture::CameraPose {
+                    position: self.camera.position,
+                    yaw: self.camera.yaw,
+                    pitch: self.camera.pitch,
+                },
+                start,
+                dreams_fixture::flyover_stop_frames(),
+            );
+            if rail.is_some() {
+                tracing::info!(
+                    rail = name.trim(),
+                    start_frame = start,
+                    anchor = ?self.camera.position,
+                    yaw = self.camera.yaw,
+                    pitch = self.camera.pitch,
+                    "DREAMS rail armed"
+                );
+            }
+            rail
+        });
         let pose = self.camera.to_transform();
         let camera_entity = ctx.world.entities().find(|&e| {
             ctx.world
@@ -1247,7 +1376,7 @@ impl GameApp for HelloGame {
                                             &brush,
                                             [cx, cz],
                                             stroke,
-                                            |x, z| terrain.ground_sample(x, z),
+                                            |x, z| terrain.ground_sample(x, z, brush.layer),
                                         );
                                     }
                                 }
@@ -1841,6 +1970,38 @@ impl GameApp for HelloGame {
         // reflect Play, Pause, and Stop in the same frame.
         propagate_transforms(ctx.world);
 
+        // Flip a render switch mid-run, the way the Details panel does.
+        //
+        // A switch thrown at frame 200 is not the same experiment as the same
+        // switch set before startup: the second decides how the terrain loads
+        // its textures and starts every cache warm, while the first invalidates
+        // a running cache under a camera that has been moving. The clipmap
+        // artifact was reported on the *toggle*, and until this existed there
+        // was no way to capture that without synthetic mouse input.
+        if std::env::var("SOMNIUM_AUDIT_TOGGLE_FRAME")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(ctx.time.frame_count())
+            && let Ok(id) = std::env::var("SOMNIUM_AUDIT_TOGGLE_SWITCH")
+            && let Some(renderer) = ctx.renderer.as_mut()
+        {
+            // Deliberately the same three statements as
+            // `Engine::toggle_render_switch`, minus the checkbox repaint.
+            let next = !renderer.debug_toggles.is_on(id.trim());
+            match renderer.debug_toggles.set(id.trim(), next) {
+                Ok(()) => {
+                    renderer.apply_debug_toggles();
+                    info!(
+                        frame = ctx.time.frame_count(),
+                        switch = id.trim(),
+                        on = next,
+                        "audit render switch"
+                    );
+                }
+                Err(reason) => tracing::warn!(switch = id.trim(), %reason, "audit toggle refused"),
+            }
+        }
+
         // Deterministic temporal-audit hook. It is inert in ordinary runs and
         // lets the path/reflection capture matrix make a one-frame camera cut
         // without synthetic mouse input or timing-sensitive automation.
@@ -1862,6 +2023,12 @@ impl GameApp for HelloGame {
 
         if !play_session(ctx) {
             self.camera.update(dt, ctx.camera_speed);
+        }
+        if let Some(rail) = self.dreams_rail {
+            let pose = rail.pose(ctx.time.frame_count());
+            self.camera.position = pose.position;
+            self.camera.yaw = pose.yaw;
+            self.camera.pitch = pose.pitch;
         }
         self.log_timer += dt;
 
@@ -2135,6 +2302,15 @@ impl GameApp for HelloGame {
                                 // and the sky's own moon blending all take the
                                 // light buffer, so there is nowhere for them to
                                 // disagree about whether the sun has set.
+                                // Phase TSUSHIMA-A: the capture harness's sun
+                                // pin. Applied here, before `transmittance`
+                                // reads `to_light.y`, so a pinned low sun
+                                // reddens exactly as an authored one would —
+                                // the reddening is a function of elevation and
+                                // must not be bypassed by overriding the
+                                // direction after it.
+                                let to_light = pinned_sun_elevation()
+                                    .map_or(to_light, |e| sun_at_elevation(to_light, e));
                                 let survives = somnium_core::sun::transmittance(
                                     to_light.y,
                                     transform.translation.y * 0.001,

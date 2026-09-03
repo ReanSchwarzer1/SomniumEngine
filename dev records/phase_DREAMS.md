@@ -19,12 +19,18 @@
 > Experimental rendering without a budget meter is a research demo. This phase
 > takes both halves.
 >
-> **Status:** **DRAFT, plan only, nothing in tree.** Written 2026-08-31 against
-> `3ecbda6` on `dev`. Every audit row below is **measured** from that tree or
-> from `context.md`; the research rows in §6 are **read, not run**, and §6.4
-> states the confidence on each one. Nothing here is an implementation
-> commitment: DREAMS-A's first job is to replace the survey's guesses with
-> measurements on this hardware.
+> **Status:** **ACTIVE. DREAMS-B complete, amended 2026-09-01; C active.** Drafted against
+> `3ecbda6`; A landed against `3cc321a`. B through E are plan only.
+> **F and G added 2026-09-01 as research and draft only**, after the in-tree
+> path tracer was measured rather than assumed (§6.7, §7 DREAMS-F).
+>
+> **A correction this document already owes.** §4.2 originally listed "any
+> shader module system" as an absence. It is not one: MORROWIND-C built one,
+> with named includes, conditional compilation, variant keys and hot reload.
+> The row was written from `context.md`, which describes the renderer and not
+> the shader system. **An absence claimed from a summary is not a measurement**,
+> and §4.2 and §7's DREAMS-A entry are corrected below. The rest of §4 was
+> checked against the tree and stands.
 >
 > **Relationship to MORROWIND: alongside, not after.** This is the unusual thing
 > about this phase and §1.2 is entirely about it. MORROWIND **freezes the
@@ -50,6 +56,13 @@
 > non-commercial or unstated terms**, and §6.5 states the rule for those
 > specifically: they are read for the idea and never linked.
 
+> **2026-09-01 product-default amendment (supersedes the default-off language
+> below for DREAMS-B only):** Shared Grain and Terrain STF ship on and are
+> authored in Details > DREAMS Sampling. Their explicit `=0` rails remain the
+> matched pre-B control. This was a direct product decision after B's measured
+> off/on evidence, not an accidental switch flip; C through E still use the
+> original default-change gate unless separately decided and recorded.
+
 ---
 
 ## 0. How to use this document
@@ -61,8 +74,14 @@ allowed to exist at all.
 
 §6 is the research survey and is the longest section. It is organised by *what
 Somnium lacks*, not by conference, and every row carries a licence note and a
-confidence mark. §7 is the five sub-phases. Everything after §8 is the usual
+confidence mark. §7 is the seven sub-phases. Everything after §8 is the usual
 plan apparatus.
+
+**§6.7 and DREAMS-F/G are newer than the rest** and were added after the phase
+was already running. They are the one part of this document grounded in a
+measurement of a system that *already exists* in tree rather than in an absence,
+which changes how they read: F is a repair with a known starting state, not an
+exploration.
 
 If you are picking this up cold: this phase has **no code in tree**. Nothing
 below describes current functionality.
@@ -73,8 +92,10 @@ below describes current functionality.
 
 ### 1.1 What this phase is
 
-Five sub-phases, each taking one class of technique that Somnium's renderer
-cannot currently express, and answering three questions about it in order:
+Seven sub-phases. A through E each take one class of technique that Somnium's
+renderer cannot currently express; F and G take one it expresses *badly*, which
+is a different and easier question because the starting state can be measured.
+Each answers three questions in order:
 
 1. **Does it run at all** on wgpu 30 native, with the feature bits this device
    actually reports?
@@ -86,7 +107,7 @@ A technique that fails (1) is written up and dropped. A technique that passes
 and fails (3) **lands off by default with its cost published**, which is the
 same treatment DOOM gave dynamic resolution and tile binning.
 
-The phase's output is therefore not "five features". It is **five honest
+The phase's output is therefore not "seven features". It is **seven honest
 answers**, some of which are no, and the ones that are yes are switches.
 
 ### 1.2 Why it can run beside MORROWIND
@@ -159,9 +180,9 @@ Three arguments, and the third is the real one.
 
 ## 2. Goals
 
-1. Land a **shading-language and shader-tooling layer** that makes the other
-   four sub-phases writable at all. Somnium hand-writes 55 WGSL modules with no
-   imports, no generics and no conditional compilation.
+1. Make the other four sub-phases writable at all. **Done by DREAMS-A**, and
+   not the way this line expected: the module system already existed, and what
+   was missing was a shader error that names the file it is in.
 2. Land a **sampling and filtering substrate**: blue-noise sequences, stochastic
    texture filtering, and the deterministic fixture that lets a stochastic
    technique be compared to anything.
@@ -179,8 +200,14 @@ Three arguments, and the third is the real one.
 - **No default changes.** See §1.2. A DREAMS sub-phase that flips a default has
   gone wrong.
 - **No offline renderer.** A path-traced reference mode is in scope only as a
-  *fixture* for comparing the real-time result against, and only if §7.2 needs
-  it. It is not a product.
+  *fixture* for comparing the real-time result against. It is not a product.
+  **Amended 2026-09-01 by DREAMS-F/G:** this line was written believing the
+  reference mode was hypothetical. It is not — `SOMNIUM_PATH_TRACER=1` has run
+  since Phase 24O. The non-goal is unchanged in substance (no offline product,
+  no film renderer) and F and G stay inside it: F repairs the tracer so the
+  fixture is *worth* comparing against, and G is the comparison harness itself.
+  A path-traced viewport a person is expected to ship frames from would be
+  outside this phase.
 - **No training pipeline.** Where a technique is learned, DREAMS consumes
   weights produced elsewhere or it does not do that technique. Somnium is not
   acquiring a machine-learning build step.
@@ -223,7 +250,7 @@ guess.
 
 | Absent | Evidence |
 |---|---|
-| Any shader module system | 55 hand-written WGSL modules, `include_str!`-style composition, no imports |
+| ~~Any shader module system~~ **Corrected by DREAMS-A** | MORROWIND-C's `somnium_shader` has named includes, `//!if` conditionals, variant keys, hot reload and a budget report. What it lacked was **diagnostics that name the file an error is in**, which DREAMS-A measured and fixed. Generics and interfaces remain absent |
 | Any blue-noise or low-discrepancy sequence | No noise asset, no sampler table; stochastic passes use hash functions |
 | Any stochastic or wave-cooperative texture filtering | Texture reads are hardware-filtered `textureSample` |
 | Any many-light importance sampling | Locals are clustered and all shaded; there is no light BVH and no per-pixel light selection |
@@ -288,7 +315,7 @@ Four rows, checked per sub-phase, not per commit:
 |---|---|
 | `budget` | A `.somtime` A/B on **both** shipped maps, feature off versus on, back to back, with the standard deviation reported. Off must be within noise of the pre-phase baseline. |
 | `picture` | A golden image with the feature on, and the off/on pair side by side. A technique nobody can see is a technique that is dropped, and the pair is the evidence for that decision either way. |
-| `default` | Every switch this sub-phase added reads *off* in a clean profile, proven by a capture of the default editor. |
+| `default` | The authored product default is named and captured. Normally it is off; DREAMS-B's recorded 2026-09-01 decision is the sole exception and proves default equals explicit on. |
 | `deletable` | The sub-phase names the files that would be removed to undo it, and the count of lines outside those files that would have to change. Over 200 and it is not opt-in, whatever the switch says. |
 
 The `deletable` row is the one that keeps this phase from silently becoming a
@@ -388,6 +415,13 @@ is the one the other four are blocked on.
 - **Low confidence, deliberately:** whether any given technique is worth it
   *here*. That is the whole question the phase asks and it would be dishonest to
   answer it in a survey.
+- **High confidence, and a different kind:** every licence in §6.7.2 was read
+  from the `LICENSE.txt` shipped inside the local copy of that repository, not
+  from a README, a summary or a blog post. One of them contradicted the notes
+  file that came with the repositories, which is recorded in place.
+- **High confidence:** §6.7.1's description of the in-tree path tracer. It was
+  run, captured and read line by line, not inferred from `context.md`. This is
+  the section of the survey that is a measurement rather than a search.
 - **Not covered:** anything requiring work graphs (§6.3), anything requiring a
   training pipeline (§3), and offline rendering.
 
@@ -399,63 +433,154 @@ DREAMS actually depends on goes through the same audit as any dependency and is
 recorded in `ATTRIBUTION.md` §13K with its licence text. The wgpu/Rust splatting
 crates in §6.3 are the likely candidates and their licences are individually
 unverified as of this draft.
+### 6.7 Path tracing, and what can actually be bound
+
+Added 2026-09-01. This group differs from §6.1 to §6.5 in two ways: Somnium
+**already has** a path tracer, and the candidates are large engineering SDKs
+rather than papers. The licence column is therefore not a footnote here, it is
+the whole answer.
+
+#### 6.7.1 What is in tree, measured
+
+`SOMNIUM_PATH_TRACER=1`, `PostProcessSettings::path_tracer`, `path_bounces` 1 to
+8 defaulting to 3, the `path_trace` entry point in `lighting_extra.wgsl`, gated
+on `raytrace_pass.supported()`. Run on the coastal map from 60 m, frame 240:
+
+| | Measured |
+|---|---|
+| Does it run | **Yes.** No crash, no validation error. The TLAS builds in 0.073 ms with 59 instances, 58 of them terrain |
+| BSDF | **Lambertian only.** `throughput *= hit.albedo` after cosine-hemisphere sampling. `RtHit` already carries `roughness` and `metallic` and the loop never reads either, so there is no specular at any roughness and no metal |
+| Next-event estimation | **The sun, and nothing else.** One shadow ray along `normalize(light.direction)`. The clustered local lights the raster path shades are never sampled, so a scene lit by point or spot lights path-traces unlit |
+| Importance sampling | None. Cosine hemisphere, no MIS, no Russian roulette |
+| Denoising | None. Progressive accumulation, `mix(prev, radiance, 1/(frame+1))`, which is why `synchronize_path_trace_pause` freezes the simulation while it is on |
+| Result | A plausible but flat image: no specular anywhere, no visible sun shadowing on the dunes, flat water |
+
+So "path tracing doesn't work" is right about the effect and wrong about the
+mechanism. It is not broken. **It is a Lambertian ambient-occlusion tracer
+wearing the name**, and every gap above is a named, bounded piece of work rather
+than a mystery.
+
+#### 6.7.2 The candidates, by licence
+
+| Source | What it is | Licence | Verdict |
+|---|---|---|---|
+| **Intel Real-Time Path Tracing Research Framework** | Vulkan RT and GLSL. 40 shader files: `bsdfs/gltf_bsdf.glsl` (glTF BSDF, normal maps, PBR specular and transmission layers), `mc/nee.glsl` with `lights_linear/point/sun.glsl` (next-event estimation over point, quad, triangle and sun lights), `pointsets/` (Sobol tables, blue-noise RNG, sample ordering), and megakernel, iterative and recursive tracer variants | **MIT.** Copyright (c) 2023 Intel Corporation, based on ChameleonRT (Will Usher, 2019, MIT). Third-party components are MIT or MIT-compatible | **The only one that can be adapted.** GLSL compiles to SPIR-V through shaderc, and `PASSTHROUGH_SHADERS` is already unioned into `FSR_FEATURES` in `context.rs` for `wgpu-ffx`, so raw SPIR-V has a working precedent in tree |
+| **NVIDIA RTXPT 1.8.1** | The reference production path tracer. Single-pass light transport with light-sampling caches, path-space layer decomposition, guide buffers for DLSS-RR. Derived from Falcor, ported to Donut | **NVIDIA RTX SDKs License.** Non-exclusive, non-transferable, **no right to sublicense**; source is not redistributable, distribution is object code only, inside an application with "material additional functionality", with a required notice | **Read for the idea, never linked.** Structurally out of reach as well: HLSL through NVRHI, denoising through DLSS-RR, SER and Opacity Micromaps through the Agility SDK. Binding it means adopting a second RHI |
+| **NVIDIA NRD** | ReBLUR and RELAX, the latter an SVGF derivative, as real-time denoisers | NVIDIA RTX SDKs License | Same restriction. This is the one that hurts, because denoising is DREAMS-G's hard half |
+| **NVIDIA NVRHI** | A D3D12 and Vulkan abstraction layer | **MIT** | Permissively licensed and still refused: Somnium's RHI is wgpu, and GHOSTFENCE's `no-second-system` row exists to stop a second one |
+| **NVIDIA RTXNTC** | Neural texture compression | NVIDIA RTX SDKs License | Out of scope under §3 (no training pipeline), independent of its licence |
+| **Intel Open Image Denoise** | Apache-2.0 denoiser with GPU backends for AMD, Intel and NVIDIA, an `OIDN_QUALITY_FAST` mode for interactive use, and temporal denoising arriving in OIDN 3 | **Apache-2.0** | The licence is fine. The friction is runtime: its GPU backends are SYCL, CUDA, HIP and Metal, a second device beside wgpu's Vulkan one, so every denoised frame crosses an external-memory boundary. Real, but a dependency with teeth |
+
+> **A correction the source notes needed.** `nvidia repos/nvidia licensing.txt`
+> states that "the Code Samples are Permissive" and that RTXPT is MIT with only
+> its companion SDKs proprietary. The `LICENSE.txt` shipped inside `RTXPT-main`
+> is the NVIDIA RTX SDKs License, and it is the only licence file in the
+> repository. **The sample source is under it too.** This is precisely the claim
+> §6.5 exists to catch, and it is recorded here rather than quietly worked
+> around, because it is the difference between adapting NVIDIA's tracer and
+> reading it.
+
+#### 6.7.3 What that leaves
+
+The licence column collapses six candidates into one adaptable body of source
+and one usable denoiser dependency:
+
+```text
+adaptable   Intel RTPTRF          MIT               -> DREAMS-F, cited in ATTRIBUTION §13K
+readable    RTXPT, NRD            NVIDIA RTX SDK    -> ideas only, never linked
+refused     NVRHI                 MIT, but a 2nd RHI-> no-second-system
+dependency  Open Image Denoise    Apache-2.0        -> DREAMS-G, if interop survives audit
+```
+
+And the direction Somnium is unusually well placed for is neither of those:
+**ReSTIR path tracing**. ReSTIR DI *and* ReSTIR GI are already in tree, so the
+reservoirs, the temporal reuse and the spatial reuse all exist and are debugged.
+ReSTIR PT is the shortest route from what is here to a tracer viewable at one
+sample per pixel, and it is a paper rather than an SDK, so there is no licence
+question at all. DREAMS-G carries it.
 
 ---
 
-## 7. The five sub-phases
+## 7. The sub-phases
 
 Track names are Dreams' vocabulary where it fits and chosen for meaning where it
 does not.
 
 ```mermaid
 flowchart TB
-    A["DREAMS-A · GADGET<br/>the shading language"] --> B["DREAMS-B · GRAIN<br/>sampling and filtering"]
+    A["DREAMS-A · GADGET<br/>the shading language<br/>(done: stayed, fixed diagnostics)"] --> B["DREAMS-B · GRAIN<br/>sampling and filtering"]
     B --> C["DREAMS-C · BUBBLE<br/>light transport"]
     B --> D["DREAMS-D · FLECK<br/>geometry that is not a triangle"]
     B --> E["DREAMS-E · PUPPET<br/>appearance"]
+    B --> F["DREAMS-F · WIRE<br/>the path tracer<br/>(repair, not exploration)"]
+    F --> G["DREAMS-G · COACH<br/>denoise it, then make it<br/>the thing everything is scored against"]
     A -.->|"every later sub-phase<br/>is written in what A picks"| C
     A -.-> D
     A -.-> E
+    A -.-> F
     C --> TH["THERMOMETER<br/>a number and a picture, each"]
     D --> TH
     E --> TH
+    F --> TH
+    G --> TH
+    G -.->|"ground truth for"| C
+    G -.-> E
 ```
 
-A and B are ordered. C, D and E are independent of each other and may be taken
-in any order or dropped individually.
+A and B are ordered. C, D, E and F are independent of each other and may be
+taken in any order or dropped individually. G needs F.
+
+**G is the one with a second job.** Every other sub-phase is scored by a golden
+image and a person's eye. G's reference mode is what would let C and E be scored
+against *ground truth* instead, which is the failure THERMOMETER's `picture` row
+has been working around since MORROWIND-AC. That makes G worth taking even if
+its denoiser half returns a no.
 
 ### DREAMS-A · GADGET — the shading language
 
-**Question:** can Somnium's shaders be written in something with modules and
-conditional compilation, without giving up naga, wgpu or the existing 55
-modules?
+**Complete, 2026-08-31.** Record:
+[DREAMS-A.md](<phase DREAMS/DREAMS-A.md>).
 
-**Why it is first:** every other sub-phase in this phase multiplies shader
-variants. Stochastic filtering needs a switch through every texture read. Glints
-need a term threaded through the BSDF. A software rasteriser needs the
-visibility-buffer layout shared between a compute shader and a fragment shader
-that currently duplicate it. Doing four of those against 55 hand-written modules
-with no `import` is how a phase becomes a mess.
+**Question, as asked:** can Somnium's shaders be written in something with
+modules and conditional compilation?
 
-**Scope:**
+**Question, as it turned out:** they already are. MORROWIND-C's
+`somnium_shader` has named includes, `//!if` conditionals, define registration,
+variant keys, hot reload that never silently reverts, and a budget report. So
+the real question was whether that system has a ceiling DREAMS-B through E would
+hit, and whether Slang or WESL raises it.
 
-- Decide between Slang, WESL and staying put, on measured criteria: build time,
-  what breaks in naga, whether hot reload survives, and how many of the 55
-  modules have to change.
-- Whichever wins, **port exactly one non-trivial module** and leave the other 54
-  alone. A migration is not this sub-phase.
-- Prove the SPIR-V passthrough path works for a hand-written module, since
-  `wgpu-ffx` already proves it works for a vendored one.
-- Shader hot reload, if the chosen path makes it cheap.
+**Decision: stay.** The measured ceiling was diagnostics, not the language.
 
-**Legitimate outcome:** "neither is worth it, here is the build-time and
-breakage table". That is a complete sub-phase.
+| Measured | Result |
+|---|---|
+| Composition cost | 2.87 ms for `shading.wgsl` cold, 0.8 µs cached, 8.03 ms for all 55 roots at startup. Not a problem |
+| Diagnostics | An error on line 48 of `brdf.wgsl` was reported as `wgsl:195` and labelled `shading.wgsl`, a file it is not in. **The one real cost** |
+| WESL 0.4.4 | Real source maps, generics, wildcard imports, MIT OR Apache-2.0, and `rust-version = 1.97.1` against a tree frozen at rustc 1.88. Not adoptable without a toolchain bump |
+| Slang | **Measured in [DREAMS-A2](<phase DREAMS/DREAMS-A2.md>).** Its WGSL target refuses `NonUniformResourceIndex` and so cannot compile this engine's bindless shaders; its SPIR-V target runs end to end through `PASSTHROUGH_SHADERS`, verified by dispatch. Adopted for **new** shaders only |
+| Generics | Wanted by exactly one of B through E (PUPPET's layered BSDF). One of four is not a migration |
 
-**Risk:** naga is the compatibility surface for every other backend. A path that
-bypasses naga on Vulkan and not elsewhere is a fork in the shader pipeline, and
-§7.1 must say what that costs before it is taken.
+**What landed instead:** a line-origin map built during the composition that was
+already happening. 10 spans for 4,801 composed lines, 0.5% of a startup-only
+path, and the diagnostic now reads `brdf.wgsl:48:37`.
+
+**Re-opened, and answered:** [DREAMS-A2](<phase DREAMS/DREAMS-A2.md>) measured
+Slang rather than leaving it filed. Its WGSL target cannot compile this engine's
+bindless shaders, its SPIR-V target runs end to end with a verified dispatch,
+and its generics monomorphise to nothing. **Slang is adopted for new shaders on
+the SPIR-V path, alongside the 55 WGSL modules, which are not migrated.** Four
+questions are answered by [DREAMS-B](<phase DREAMS/DREAMS-B.md>). Per the
+project decision made after A2, every new DREAMS shader module is now Slang;
+existing WGSL modules may receive narrow integration edits rather than being
+rewritten for policy's sake.
 
 ### DREAMS-B · GRAIN — sampling and filtering
+
+**Status: complete, with the 2026-09-01 default amendment.** The deterministic THERMOMETER fixture, shared
+spatiotemporal mask resource, five consumer integrations and terrain STF are in
+tree. Collaborative filtering was refused after the temporal STF capture did
+not show the persistent noise that would justify another pass. See
+[DREAMS-B](<phase DREAMS/DREAMS-B.md>).
 
 **Question:** what does the frame look like with a real sampler under it?
 
@@ -477,8 +602,9 @@ failed for exactly the lack of one.
 - **Collaborative texture filtering** on top, using subgroups, if STF's
   magnification noise is as visible here as the paper says.
 
-**Expected shape of the answer:** blue noise is nearly free and lands on. STF is
-a cost/quality trade that lands off with a published number. Collaborative
+**Measured answer:** Shared Grain and STF are default-on product features with
+live Details toggles and explicit off rails. Their timings do not support a
+performance claim; the default is a product decision. Collaborative
 filtering is the interesting unknown, because it depends on the wave width the
 device reports and Somnium's is a uniform 32.
 
@@ -553,6 +679,135 @@ four Details rows and four `.sommat` fields. The material system is CONTROL's
 and MORROWIND extends it. This sub-phase must add fields, never renegotiate the
 schema, and if a technique needs a schema change it is reported as a no.
 
+### DREAMS-F · WIRE — the path tracer
+
+Dreams wires connect one gadget's output to another's input. This sub-phase is
+wiring: almost nothing here is a new idea, it is connecting things the engine
+already has to a loop that never asked for them.
+
+**Question:** the engine has a path tracer. What would make it a reference worth
+comparing anything against?
+
+**Starting state, measured 2026-09-01 (§6.7.1), not assumed.** It runs. It is
+Lambertian, it samples only the sun, it has no MIS and no Russian roulette, and
+`RtHit` hands it a `roughness` and a `metallic` that the loop discards. The
+image is flat, and flat is exactly what that code should produce.
+
+**Why this is the easiest sub-phase in the phase.** Every other one asks whether
+a technique is worth having here. This one has a measured starting state, a
+measured end state (the raster frame, which is right), and four named gaps
+between them. It is the only DREAMS sub-phase where a *no* would be surprising.
+
+**Scope, in dependency order:**
+
+1. **Use the BSDF that is already in the hit.** GGX plus Lambert, importance
+   sampled, with MIS between BSDF sampling and light sampling. `RtHit.roughness`
+   and `RtHit.metallic` are already populated by `rt_resolve`; nothing new has to
+   be plumbed to make this correct. Intel's `bsdfs/gltf_bsdf.glsl` is the
+   reference, and being MIT it may be **adapted with attribution** rather than
+   only read — the first source in this phase for which that is true.
+2. **Next-event estimation over the local lights.** The clustered locals already
+   exist, already have positions, colours and ranges, and are already shaded by
+   the raster path. Sampling them is the difference between a path-traced night
+   scene and a black one. Intel's `mc/nee.glsl` and `mc/lights_linear.glsl`.
+3. **Sample sequences from DREAMS-B.** B shipped a spatiotemporal blue-noise
+   mask as an engine resource and it is currently consumed by five raster passes.
+   A path tracer is the consumer that resource was actually designed for. Sobol
+   for the deep dimensions, blue noise for the first two, following
+   `pointsets/sample_order.glsl`.
+4. **Russian roulette**, so `path_bounces` stops being a hard clamp at 8 and
+   becomes a quality dial with unbiased termination.
+
+**Deliberately out of scope:** transmission and refraction, participating media,
+caustics, and any second BSDF model. Each is a sub-phase of its own and none is
+needed for a reference image of the two shipped maps.
+
+**Where THERMOMETER has to bend, and it must be said out loud.** The `budget`
+row assumes a feature is compared against the frame without it. A path tracer is
+not: it replaces the frame. Its number is **samples per second and time to
+converge at a fixed camera**, and its `budget` row records that the *default*
+frame is untouched — which it is, because `path_tracer` already defaults off and
+already gates the whole entry point. A sub-phase that reports "the raster frame
+regressed" here has broken §1.2 and must stop.
+
+**Contract check (§1.2).** This replaces the contents of `path_trace` inside
+`lighting_extra.wgsl` behind a switch that already exists and already defaults
+off. That is the second row of the "DREAMS may" column. It reorders no pass and
+changes no default.
+
+**`deletable` estimate:** one entry point in one shader, plus whatever new
+modules land beside it. The switch, the settings field, the Details rows and the
+pause plumbing all already exist and would remain regardless. This is the
+smallest `deletable` count in the phase.
+
+**Risk.** The honest one is scope: a path tracer is the single easiest place in
+a renderer to keep adding correctness forever. The four scope items above are
+the whole of it, and item 5 does not exist. If transmission looks tempting
+mid-sub-phase, that is DREAMS-E's problem or a later phase's.
+
+### DREAMS-G · COACH — denoise it, and make it the reference
+
+Dreams' Coach is the guide that tells you what you are looking at. This
+sub-phase is the renderer's: the thing that says what the frame *should* have
+looked like.
+
+**Question:** can the path tracer become the thing the real-time renderer is
+checked against, and can it be viewed at interactive rates while doing it?
+
+Two halves, and **they are separable — the first is worth having even if the
+second returns a no.**
+
+#### G.1 The reference mode
+
+Converge N samples at a fixed camera on the two shipped maps and write a
+`.somcap`. That is it. No denoiser, no interactivity, no product.
+
+The reason it matters is §5:
+
+> MORROWIND-AC's visual comparisons were **inconclusive because control runs
+> moved as much as feature runs**.
+
+DREAMS-B answered that with a deterministic fixture, which makes two runs
+*comparable to each other*. It does not make either of them comparable to
+**correct**. A converged reference does, and it changes what C and E can claim:
+"radiance cascades look different from DDGI" becomes "radiance cascades are
+closer to ground truth than DDGI by this much, in this region of the image".
+
+This is the deliverable §3 has always allowed and never had, and it is cheap
+once DREAMS-F is done, because a reference renderer is a path tracer with the
+frame budget removed.
+
+#### G.2 Denoising, which is the hard half
+
+One sample per pixel is unviewable without one, and the licence table (§6.7.2)
+is unkind here: NRD is the obvious answer and cannot be used.
+
+Three options, in the order they should be tried:
+
+| Option | Why it is on the list | The catch |
+|---|---|---|
+| **ReSTIR PT** | Not a denoiser but a variance reduction, and Somnium has ReSTIR DI *and* GI already. Reservoirs, temporal reuse and spatial reuse are in tree and debugged. A paper, so no licence question | The largest algorithmic change of the three, and the one most likely to want the shading pass |
+| **An in-tree SVGF or A-SVGF** | A compute pass, a few hundred lines, using the velocity buffer and the DREAMS-B masks that both already exist. Nothing to link and nothing to audit | Well-known temporal lag and ghosting, which is exactly what RELAX exists to fix and what this cannot borrow |
+| **Open Image Denoise** | Apache-2.0, real quality, `OIDN_QUALITY_FAST`, temporal denoising in OIDN 3 | A second GPU runtime beside wgpu's Vulkan device. Every frame crosses an external-memory boundary, and that interop is the actual research question, not the denoising |
+
+**The recommendation this draft makes, to be overturned by measurement:** try
+ReSTIR PT first, because the reservoirs already exist and it is the only option
+with no dependency at all. Fall back to in-tree SVGF. Treat OIDN as the thing
+that gets audited only if both return a no, since it is the one that adds a
+dependency with a runtime.
+
+**Contract check (§1.2).** G.1 adds no pass to the default frame at all; it is a
+capture mode. G.2 adds a pass that runs only when the path tracer is on. Neither
+touches the raster frame. ReSTIR PT is the one to watch, because it is the only
+item in either sub-phase that could reach into the existing ReSTIR passes rather
+than beside them — and if it cannot be done additively, §1.2 says it is reported
+as a no.
+
+**Risk.** G.2 is the only place in DREAMS where a *licence* could dictate a
+technical answer, and that is worth naming rather than discovering later. If all
+three options fail, G.1 still stands on its own, and a reference mode that takes
+ten seconds to converge is still a reference mode.
+
 ---
 
 ## 8. Sequencing
@@ -563,11 +818,19 @@ DREAMS-A  (GADGET)      language decision, one module ported
         -> DREAMS-C (BUBBLE)   independent
         -> DREAMS-D (FLECK)    independent
         -> DREAMS-E (PUPPET)   independent, but hair needs D
+        -> DREAMS-F (WIRE)     independent; BSDF, NEE, sequences, roulette
+            -> DREAMS-G (COACH) reference mode, then a denoiser
 ```
+
+**F is schedulable before C and E and there is an argument for doing so**, since
+G.1 gives both of them a ground truth to be scored against, and neither can get
+one any other way. It is not a dependency and this document does not make it
+one: C and E can be taken with golden images alone, as originally planned.
 
 Scheduling against MORROWIND: DREAMS sub-phases are **individually
 interruptible**. Each one closes with its own THERMOMETER rows and leaves the
-tree with a switch that is off. There is no DREAMS state that a MORROWIND
+tree with an authored switch. DREAMS-B is on by the recorded product decision;
+C through E remain off unless separately promoted. There is no DREAMS state that a MORROWIND
 sub-phase has to be aware of, which is the property that lets the two run
 alongside each other.
 
@@ -579,9 +842,9 @@ Everything MORROWIND freezes, unchanged, plus:
 
 - GHOSTFENCE passes, including the shader-budget row. A sub-phase that adds
   shader modules edits the budget in the same commit and says why.
-- The default editor's frame is byte-identical to the pre-phase baseline with
-  every DREAMS switch off. This is stronger than "within noise" and it is
-  checkable by capture.
+- The explicit-off editor frame is byte-identical to the pre-phase baseline.
+  An intentional default promotion additionally proves default equals explicit
+  on and records the editor route that can turn it back off.
 - No new *required* device feature. Every feature added to `capability.rs` is
   detected, reported, and has a path that runs without it.
 - `.somtime`'s existing counters keep their names and meanings.
@@ -590,7 +853,7 @@ Everything MORROWIND freezes, unchanged, plus:
 
 ## 10. Acceptance
 
-The phase is complete when all five sub-phases have four filled THERMOMETER
+The phase is complete when all seven sub-phases have four filled THERMOMETER
 rows, and `context.md` gains a section that states, for each technique tried,
 whether it is in tree, what it costs, and whether it is on. **A phase that lands
 two features and five honest measurements has succeeded.** A phase that lands
@@ -610,6 +873,9 @@ five features and cannot say what they cost has not.
 | A vendored crate with an unclear licence | Individual audit into `ATTRIBUTION.md` §13K before any dependency lands |
 | The shading-language decision fragments the shader pipeline | DREAMS-A ports **one** module and publishes the fork cost before anything else is written in it |
 | Chasing the wave-optics paper | Explicitly listed in §13 as out of scope for this phase, with the reason |
+| NVIDIA RTX SDK source reaching the tree | §6.7.2: RTXPT and NRD are under a non-transferable, non-sublicensable licence. Read only. The source-notes file that says otherwise is corrected in place |
+| A path tracer becoming an endless correctness project | DREAMS-F's scope is four numbered items and the document says item 5 does not exist |
+| A denoiser dependency dragging in a second GPU runtime | DREAMS-G tries ReSTIR PT and in-tree SVGF *before* Open Image Denoise, and OIDN's interop is audited as a dependency, not assumed |
 
 ---
 
@@ -646,21 +912,41 @@ No sub-phase closes without all four.
   poor fit for a phase that is forbidden to reorder passes, because decoupled
   shading *is* a pass-order change. Named here as the strongest candidate for a
   future phase that is allowed to make one.
+- **Transmission, refraction and caustics in the path tracer.** Named by
+  DREAMS-F as out of its scope so that the scope has an edge. Intel's framework
+  carries a transmission layer under MIT, so this is a bounded future
+  sub-phase rather than an open research question.
+- **DLSS Ray Reconstruction and the rest of the RTX chain.** Technically the
+  strongest denoising answer available for a path tracer on this device, and
+  unavailable: it is proprietary, binary, and would make the path-traced mode
+  vendor-locked in a way nothing else in this engine is. Named so nobody has to
+  re-derive why it was not taken.
 - **Mesh shaders.** Detected on this device, unused, and not in DREAMS' scope:
   replacing the meshlet path is a change to the default frame, which is exactly
   what §1.2 forbids. It belongs to a phase that owns the pipeline.
 
 ---
 
-## 14. Start checklist for DREAMS-A
+## 14. Start checklist
 
-1. Create `dev records/phase DREAMS/` and open `ATTRIBUTION.md` §13K.
-2. Add the four THERMOMETER rows to `tools/ghostfence/run.py` as a separate gate,
-   or as a sibling script. Do not weaken GHOSTFENCE to make room for it.
-3. Re-measure §4.3 on the machine the phase will run on, and correct this
-   document if any feature bit differs.
-4. Build the Slang and WESL comparison against **one** real module, not a toy.
-5. Publish the table and the decision before writing anything else.
+**DREAMS-A, done:** `dev records/phase DREAMS/` exists, `ATTRIBUTION.md` §13K is
+open, §4.3's feature bits were re-read from `wgpu-types-30.0.1` in the local
+registry, and the language table and decision are published in the record.
+
+THERMOMETER's four rows were filled by hand in the DREAMS-A record rather than
+by a script. **Writing that script is DREAMS-B's first task**, because B is the
+first sub-phase whose work reaches the GPU and therefore the first whose rows a
+person cannot fill from memory.
+
+**DREAMS-B, complete:**
+
+1. Write the THERMOMETER script beside `tools/ghostfence/run.py`. Do not weaken
+   GHOSTFENCE to make room for it.
+2. Build the deterministic capture fixture **before** any technique. It is the
+   thing MORROWIND-AC turned out to need and the thing C, D and E are blocked
+   on.
+3. Only then: blue noise, then stochastic texture filtering, then collaborative
+   filtering.
 
 ---
 
@@ -708,6 +994,19 @@ publisher pages; performance claims are the authors' own.
 - [WESL specification](https://wesl-lang.dev/spec/README)
 - [wesl-rs, the Rust WESL compiler](https://github.com/wgsl-tooling-wg/wesl-rs)
 - [wgpu ray tracing API specification](https://github.com/gfx-rs/wgpu/blob/trunk/docs/api-specs/ray_tracing.md)
+
+**Path tracing, §6.7** (licences read from the `LICENSE.txt` shipped in each
+local repository, not from a summary)
+- [intel/RealTimePathTracingResearchFramework](https://github.com/intel/RealTimePathTracingResearchFramework) — MIT, Copyright (c) 2023 Intel Corporation, based on ChameleonRT
+- [ChameleonRT (Will Usher)](https://github.com/Twinklebear/ChameleonRT) — MIT, the framework's ancestor
+- [NVIDIA-RTX/RTXPT](https://github.com/NVIDIA-RTX/RTXPT) — NVIDIA RTX SDKs License
+- [NVIDIA-RTX/NRD](https://github.com/NVIDIA-RTX/NRD) — NVIDIA RTX SDKs License
+- [Intel Open Image Denoise](https://www.openimagedenoise.org/) — Apache-2.0
+- [RenderKit/oidn](https://github.com/RenderKit/oidn)
+- [ReSTIR PT Enhanced: Algorithmic Advances for Faster and More Robust ReSTIR Path Tracing (NVIDIA, 2026)](https://research.nvidia.com/labs/rtr/publication/lin2026restirptenhanced/)
+- [ReSTIR PG: Path Guiding with Spatiotemporally Resampled Paths (SIGGRAPH Asia 2025)](https://dl.acm.org/doi/10.1145/3757377.3763813)
+- [A Gentle Introduction to ReSTIR Path Reuse in Real-Time (SIGGRAPH 2023 Courses)](https://dl.acm.org/doi/10.1145/3587423.3595511)
+- [ReSTIR Subsurface Scattering for Real-Time Path Tracing](https://cg.ivd.kit.edu/restir-sss.php)
 
 **Texture-space shading, named in §13**
 - [FastAtlas: Real-Time Compact Atlases for Texture Space Shading (arXiv:2502.17712)](https://arxiv.org/abs/2502.17712)

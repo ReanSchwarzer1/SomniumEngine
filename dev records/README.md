@@ -38,18 +38,20 @@ flowchart LR
     CONTROL["CONTROL<br/>complete"] --> MORROWIND["MORROWIND<br/>active, partial"]
     MORROWIND --> KENSHI["KENSHI<br/>planned scale phase"]
     MORROWIND --> PORTAL["PORTAL<br/>planned, audit needs rebase"]
+    MORROWIND --> TSUSHIMA["TSUSHIMA<br/>active, partial"]
     KENSHI --> STALKER["STALKER<br/>planned product phase"]
     PORTAL --> STALKER
     P0["PORTAL-0<br/>complete"] -. focused precursor .-> PORTAL
 ```
 
-MORROWIND is the active phase. PORTAL-0 is complete but is not the full PORTAL
-plan. KENSHI and PORTAL can proceed independently after MORROWIND where their
+MORROWIND is the active phase. TSUSHIMA runs beside it and touches only the
+renderer, so the two do not contend. PORTAL-0 is complete but is not the full
+PORTAL plan. KENSHI and PORTAL can proceed independently after MORROWIND where their
 work does not overlap. STALKER waits for the relevant outputs of both.
 
 ## Phase index
 
-The status column is current as of 2026-08-30. The linked file still contains
+The status column is current as of 2026-09-03. The linked file still contains
 its own historical snapshot and revision notes.
 
 | Phase | Focus | Current status | Plan or record |
@@ -68,6 +70,8 @@ its own historical snapshot and revision notes.
 | CONTROL / Northlight | Schema-driven editor reach and world authoring | A through O complete | [`phase_CONTROL.md`](phase_CONTROL.md) |
 | PORTAL-0 / Source | Focused performance and engineering audit | A through G complete | [`phase_PORTAL-0.md`](phase_PORTAL-0.md) |
 | MORROWIND / NetImmerse | Runtime UI, cook, streaming, animation, game framework, rendering gaps | Active and partial | [`phase_MORROWIND.md`](phase_MORROWIND.md) |
+| TSUSHIMA / Ghost of Tsushima | Terrain photorealism: heightfield bakes, atmosphere, BRDF energy terms | A through F in tree; H partial; G and I open | [`phase_TSUSHIMA.md`](phase_TSUSHIMA.md) |
+| DREAMS / Media Molecule | Experimental sampling, light transport, geometry and appearance under THERMOMETER | A and B complete; B sampling defaults on with Details controls; C active | [`phase_DREAMS.md`](phase_DREAMS.md) |
 | PORTAL / Source | Engineering health and durable gates | Planned; rebase the 2026-08-18 audit before starting | [`phase_PORTAL.md`](phase_PORTAL.md) |
 | KENSHI / OGRE | Combined-load measurement and published engine limits | Planned | [`phase_KENSHI.md`](phase_KENSHI.md) |
 | STALKER / X-Ray | Player, packages, mods, product UI, living world, release | Planned | [`phase_STALKER.md`](phase_STALKER.md) |
@@ -105,6 +109,8 @@ infer completion only from a filename.
 | [`phase CONTROL/`](phase%20CONTROL/) | Editor-reach sub-phase records and evidence |
 | [`phase PORTAL-0/`](phase%20PORTAL-0/) | Focused audit records and matched measurements |
 | [`phase MORROWIND/`](phase%20MORROWIND/) | Active MORROWIND sub-phase records and audits |
+| [`phase DREAMS/`](phase%20DREAMS/) | DREAMS language decisions, matched timings, captures, and sub-phase records |
+| [`phase TSUSHIMA/`](phase%20TSUSHIMA/) | Terrain A/B captures, HDR attribution work, and sub-phase records |
 | [`evidence/`](evidence/) | Cross-phase or uncategorized committed evidence |
 
 Planned phases do not receive evidence folders in advance. The first sub-phase
@@ -157,6 +163,7 @@ described as fully green.
 
 These are useful snapshots, not current entry points:
 
+- [`post_TSUSHIMA_session_handoff.md`](post_TSUSHIMA_session_handoff.md)
 - [`post_halcyon_audit_handoff.md`](post_halcyon_audit_handoff.md)
 - [`halcyon_context_handoff.md`](halcyon_context_handoff.md)
 - [`post_IV_context_handoff.md`](post_IV_context_handoff.md)

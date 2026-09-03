@@ -70,6 +70,8 @@ pub struct RestirGiPass {
     gi_a: Option<wgpu::Buffer>,
     gi_b: Option<wgpu::Buffer>,
     bind: Option<wgpu::BindGroup>,
+    grain_view: wgpu::TextureView,
+    grain_enabled: bool,
     out_view: Option<wgpu::TextureView>,
     out_tex: Option<wgpu::Texture>,
     /// Set once the pass has written the target, so a disabled pass knows it
@@ -96,6 +98,7 @@ impl RestirGiPass {
         shaders: &crate::shaders::Shaders,
         global_layout: &wgpu::BindGroupLayout,
         supported: bool,
+        grain_view: &wgpu::TextureView,
         width: u32,
         height: u32,
     ) -> Self {
@@ -116,6 +119,9 @@ impl RestirGiPass {
             gi_a: None,
             gi_b: None,
             bind: None,
+            grain_view: grain_view.clone(),
+            grain_enabled: supported
+                && crate::pass::grain::enabled_by_default("SOMNIUM_DREAMS_GRAIN"),
             out_view: None,
             out_tex: None,
             dirty: false,
@@ -223,6 +229,16 @@ impl RestirGiPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -253,6 +269,15 @@ impl RestirGiPass {
         }));
         pass.resize(device, width, height);
         pass
+    }
+
+    /// Select the shared DREAMS sampling sequence when this adapter supports the pass.
+    pub fn set_grain_enabled(&mut self, enabled: bool) {
+        let enabled = self.supported && enabled;
+        if self.grain_enabled != enabled {
+            self.history_valid = false;
+        }
+        self.grain_enabled = enabled;
     }
 
     pub fn supported(&self) -> bool {
@@ -373,6 +398,10 @@ impl RestirGiPass {
                     binding: 7,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self.grain_view),
+                },
             ],
         }));
     }
@@ -473,7 +502,8 @@ impl RestirGiPass {
                 camera_pos: camera_pos.to_array(),
                 frame: self.frame,
                 inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
-                history_valid: f32::from(u8::from(self.history_valid)),
+                history_valid: f32::from(u8::from(self.history_valid))
+                    + 2.0 * f32::from(u8::from(self.grain_enabled)),
                 intensity: self.intensity,
                 max_distance: self.max_distance,
                 _pad: [0.0; 3],

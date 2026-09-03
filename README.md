@@ -157,6 +157,7 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | CONTROL | Northlight | **Editor reach** — property seam, asset database, drag-and-drop, viewport control, preferences, scene lifecycle, curves, time of day, clouds, weather, decals | **A–O complete** |
 | MORROWIND | NetImmerse | The engine's non-renderer half — see below | **In progress** |
 | PORTAL-0 | Source | Performance audit and engineering health | **Complete** |
+| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, and parallax on cliffs | **A–I in tree**, H's contrast-with-distance open |
 
 ### Phase MORROWIND, by track
 
@@ -213,8 +214,8 @@ construction. Where the rest of the frame goes is in
 **Rendering**
 - Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
 - GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters, Hi-Z two-phase occlusion culling
-- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode
-- **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster)
+- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode, plus **multiple-scattering energy compensation** on both the direct lobe and the IBL, **Hammon's rough diffuse**, **micro-shadowing**, and geometric **specular antialiasing** with a roughness-scaled bound on every lobe
+- **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster). Cascades stop at 100 m, so terrain also carries a baked heightfield **horizon map** that shadows it at any distance, cross-faded in where the last cascade fades out
 - **Global illumination** — ReSTIR DI/GI on wgpu acceleration structures, with a **portable DDGI tier** (SDF-traced 4×4×4 volume, budgeted temporal SH updates) for hardware without ray query
 - **Atmosphere and sky** — Hillaire scattering LUTs driving both sky and IBL, analytic NOAA sun position, a five-track day cycle, and volumetric clouds (Perlin–Worley, quarter-res adaptive march, cloud shadows folded into one `shadow_factor` every surface reads)
 - **Weather** — coverage → precipitation → wetness on Lagarde's two time constants, porosity as a material channel, rain ripples on water
@@ -223,6 +224,7 @@ construction. Where the rest of the frame goes is in
 - **Order-independent transparency** — weighted-blended, authored per scene, with the sorted path retained
 - Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps, temporal foam, Beer's-law transport, a shoreline SDF and a depth-faded shore. Reflections blend screen-space tracing, half-res hardware ray tracing, and the environment cube
 - **Terrain** — 32-layer material with strongest-four blending, triplanar cliffs, hex tiling and parallax occlusion; nested material **clipmaps**; **virtual texturing** streaming BC7 source pages into a fixed 64 MiB atlas
+- **Terrain lighting** — three heightfield bakes: horizon angles in eight azimuths for long-range sun shadow, cosine-weighted **sky visibility** with a bent direction so valleys are darker than the ridges above them, and a mip-chained **relief normal** that carries its own discarded variance into roughness
 
 **World & content**
 - glTF 2.0 loading (meshes, PBR materials, textures, skins), importable at runtime

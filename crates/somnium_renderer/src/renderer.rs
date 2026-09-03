@@ -112,6 +112,8 @@ pub struct SomniumRenderer {
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
     pub shaders: crate::shaders::Shaders,
+    /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
+    pub grain_masks: crate::pass::grain::GrainMasks,
     /// The visibility buffer render pass.
     pub vis_pass: VisibilityBufferPass,
     /// The final shading pass.
@@ -173,6 +175,12 @@ pub struct SomniumRenderer {
     /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
     /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
+    /// Phase TSUSHIMA-F: multiple-scattering compensation, direct and IBL.
+    pub brdf_multiscatter: bool,
+    /// Phase TSUSHIMA-F: Hammon's rough diffuse in place of Burley.
+    pub brdf_rough_diffuse: bool,
+    /// Phase TSUSHIMA-F: AO-derived occlusion of direct light.
+    pub brdf_micro_shadow: bool,
     /// What the per-view overrides are overriding, for this frame.
     frame_view_state: FrameViewState,
     /// One slot per view, copied into the view buffer from inside the encoder.
@@ -505,6 +513,19 @@ pub struct SomniumRenderer {
     draw_queue: Vec<DrawCommand>,
 }
 
+/// One TSUSHIMA-F term's switch: its own variable, or the group switch, or on.
+///
+/// The group switch exists so a single `SOMNIUM_TERRAIN_BRDF=0` still returns
+/// the whole pre-phase response in one go; the per-term variables exist
+/// because measuring three terms through one switch cannot say which of them
+/// moved the picture, and on this content they do not move it equally.
+fn brdf_term_enabled(var_name: &str) -> bool {
+    if let Ok(v) = std::env::var(var_name) {
+        return v != "0";
+    }
+    std::env::var("SOMNIUM_TERRAIN_BRDF").as_deref() != Ok("0")
+}
+
 impl SomniumRenderer {
     /// Push [`Self::debug_toggles`] into the fields the passes actually read.
     ///
@@ -524,6 +545,14 @@ impl SomniumRenderer {
         self.census_pass.enabled = on("pixel_census");
         self.cloud_pass.jitter = on("cloud_jitter");
         self.classify_pass.enabled = on("shading_bins");
+        let grain = on("dreams_grain");
+        self.grain_masks.set_shared_enabled(grain);
+        self.gtao_pass.set_grain_enabled(grain);
+        self.restir_pass.set_grain_enabled(grain);
+        self.restir_gi_pass.set_grain_enabled(grain);
+        self.taa_pass.set_grain_enabled(grain);
+        self.volumetric_pass.set_grain_enabled(grain);
+        self.grain_masks.set_stf_enabled(on("dreams_stf"));
 
         let hex = on("hex_tiling");
         let morph = on("terrain_lod_morph");
@@ -545,8 +574,49 @@ impl SomniumRenderer {
             terrain.parallax_scale = if parallax { terrain.parallax_held } else { 0.0 };
             terrain.invalidate_unique_colour();
         }
+        self.reconcile_clipmaps();
+    }
+
+    /// Whether virtual texturing has taken ownership of the clipmap.
+    ///
+    /// In VT mode `TerrainLayerTextures`' legacy layer arrays are 4x4
+    /// placeholders — `load_bc7_layers` registers dummies on purpose — and the
+    /// real BC7 pages only reach shading through the clipmap rings. A VT
+    /// terrain with the clipmap off is therefore not "the clipmap turned off",
+    /// it is terrain shaded from eight mean colours. The clipmap is not
+    /// optional here, and `terrain_clipmap` is not allowed to claim otherwise.
+    #[must_use]
+    pub fn clipmap_owned_by_virtual_texturing(&self) -> bool {
+        self.terrains
+            .iter()
+            .any(|terrain| terrain.virtual_texture_enabled)
+    }
+
+    /// The single writer of [`TerrainClipmap::enabled`].
+    ///
+    /// It used to have three. `apply_debug_toggles` wrote it from
+    /// `debug_toggles`, `EditorEvent::ToggleTerrainClipmap` wrote it straight
+    /// from the checkbox, and the per-frame terrain submit in `somnium_core`
+    /// wrote it back to `true` for every virtual-textured terrain. The
+    /// per-frame one ran last and ran always, so on any machine that takes the
+    /// BC7 path the Clipmap checkbox had not turned the clipmap off since the
+    /// virtual-texturing commit: the click was accepted, reverted within the
+    /// frame, and the checkbox re-ticked itself at the next inspector refresh.
+    ///
+    /// Everything that wants to change it now goes through here.
+    pub fn reconcile_clipmaps(&mut self) {
+        let want = !crate::terrain::clipmap::TerrainClipmap::env_forced_off()
+            && (self.debug_toggles.is_on("terrain_clipmap")
+                || self.clipmap_owned_by_virtual_texturing());
         for clipmap in &mut self.clipmaps {
-            clipmap.enabled = on("terrain_clipmap");
+            // Coming back on has to force a refresh. While it was off the
+            // camera kept moving and the rings kept their old centres, so the
+            // first frame back shades the ground from a cache of somewhere
+            // else, which is itself a straight-edged patch of wrong terrain.
+            if want && !clipmap.enabled {
+                clipmap.invalidate();
+            }
+            clipmap.enabled = want;
         }
     }
 
@@ -603,6 +673,7 @@ impl SomniumRenderer {
         // and every pass below composes through it. This replaces the 29-line
         // `MaterialSystem` stub that described Ogre's HLMS and did nothing.
         let shaders = crate::shaders::Shaders::new();
+        let grain_masks = crate::pass::grain::GrainMasks::new(&ctx.device, &ctx.queue, &shaders);
 
         let census_pass =
             crate::pass::census::CensusPass::new(&ctx.device, &shaders, &global_pool.layout);
@@ -635,6 +706,7 @@ impl SomniumRenderer {
             &ctx.device,
             &shaders,
             raytrace_pass.supported(),
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -647,6 +719,7 @@ impl SomniumRenderer {
             &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -702,6 +775,7 @@ impl SomniumRenderer {
         let gtao_pass = crate::pass::gtao::GtaoPass::new(
             &ctx.device,
             &shaders,
+            grain_masks.view(),
             ctx.config.width,
             ctx.config.height,
         );
@@ -776,7 +850,8 @@ impl SomniumRenderer {
             ctx.config.height,
             &vis_pass.depth_view,
         );
-        let volumetric_pass = crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders);
+        let volumetric_pass =
+            crate::pass::volumetric::VolumetricPass::new(&ctx.device, &shaders, grain_masks.view());
 
         // Phase CONTROL-M. Built before the shading pass because shading binds
         // its cloud-shadow field, and the field must exist before the bind
@@ -818,6 +893,7 @@ impl SomniumRenderer {
             &cloud_pass.shadow_view,
             &cloud_pass.shadow_params,
             &decal_grid,
+            grain_masks.packed(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -898,6 +974,9 @@ impl SomniumRenderer {
             view_proj: glam::Mat4::IDENTITY,
             camera_pos: glam::Vec3::ZERO,
             time: 0.0,
+            brdf_multiscatter: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MS"),
+            brdf_rough_diffuse: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_DIFFUSE"),
+            brdf_micro_shadow: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MICROSHADOW"),
             light_direction: default_dir,
             ibl_intensity: 1.0,
             light_color: default_color,
@@ -1047,7 +1126,14 @@ impl SomniumRenderer {
             underwater_body: None,
             camera_submersion: 0.0,
             terrain_materials,
-            shading_debug: 0.0,
+            // Every other debug lever in this renderer can be set from the
+            // environment; the shading debug view could only be set from the
+            // editor menu, which a headless capture has no way to click. The
+            // codes are `somnium_ui::debug::VIEWS`.
+            shading_debug: std::env::var("SOMNIUM_SHADING_DEBUG")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .unwrap_or(0.0),
             frame_view_state: FrameViewState::default(),
             view_stage,
             view_slot: 0,
@@ -1081,9 +1167,9 @@ impl SomniumRenderer {
 
             water_textures_bind_group,
             water_bodies: Default::default(),
-            // Last, deliberately: the fields above borrow it, and a struct
-            // literal evaluates its fields in written order.
+            // Shader ownership and its DREAMS sampling resource stay together.
             shaders,
+            grain_masks,
         }
     }
 
@@ -2278,6 +2364,15 @@ impl SomniumRenderer {
             }
         });
         ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
+        // Phase TSUSHIMA-B/C. Registered once, like the macro map: the bake is
+        // rewritten in place after a sculpt, so these three indices are valid
+        // for the terrain's life and no bind group is ever invalidated.
+        ids.horizon_maps = [
+            self.add_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
+            self.add_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
+        ];
+        ids.sky_visibility = self.add_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
+        ids.relief_normal = self.add_texture(ctx, terrain.relief_gpu.view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
         // Virtual mode deliberately leaves every legacy layer id at -1. The
         // 4x4 arrays only keep the struct/fallback shape valid; publishing
@@ -2437,6 +2532,40 @@ impl SomniumRenderer {
     /// 3. **A good edit swaps atomically.** The new module and pipeline are
     ///    built before either replaces its predecessor.
     ///
+    /// Say where a shader error is, in the file somebody has open.
+    ///
+    /// DREAMS-A. naga parses the *composed* text, so it reports a line in a
+    /// string built from up to eight files. Before this the message was
+    /// prefixed with the **root** module's name, which for an error inside
+    /// `brdf.wgsl` names a file the error is not in: measured, the diagnostic
+    /// read `wgsl:195` for a mistake on line 48 of a 120-line module.
+    ///
+    /// The composed snippet is kept. It is what naga drew the caret under, and
+    /// dropping it would trade one confusing message for a shorter one.
+    fn shader_diagnostic(
+        root: &str,
+        source: &str,
+        map: &somnium_shader::SourceMap,
+        error: &naga::front::wgsl::ParseError,
+    ) -> String {
+        let body = error.emit_to_string(source);
+        let Some(location) = error.location(source) else {
+            // No span to translate. The root's name is still the best label
+            // available, and saying so is better than dropping the label.
+            return format!("{root}: {body}");
+        };
+        let line = location.line_number as usize;
+        match map.locate(line) {
+            Some(origin) => format!(
+                "{}:{}:{} (composed {root} line {line})\n{body}",
+                origin.module, origin.line, location.line_position,
+            ),
+            // The hoisted `enable` header, which was lifted out of several
+            // modules and belongs to none of them.
+            None => format!("{root}: hoisted header line {line}\n{body}"),
+        }
+    }
+
     /// Coverage is honest and partial: the shading pass rebuilds, because it is
     /// the acceptance case and `brdf.wgsl` composes into it. Every other pass
     /// reports its reload and keeps its existing pipeline until it grows a
@@ -2444,7 +2573,7 @@ impl SomniumRenderer {
     /// message says which passes are waiting so the gap is visible rather than
     /// mistaken for a shader that did not take.
     pub fn reload_shaders(&mut self, ctx: &RenderContext) -> Option<String> {
-        let outcome = self.shaders.poll_reload(|module, source| {
+        let outcome = self.shaders.poll_reload(|module, source, map| {
             // Parse only. Full validation needs capability flags that mirror the
             // device's, and a parse failure is the overwhelming majority of what
             // a mid-edit save produces; a variant that parses and fails
@@ -2452,7 +2581,7 @@ impl SomniumRenderer {
             // the old pipeline in place either way.
             naga::front::wgsl::parse_str(source)
                 .map(|_| ())
-                .map_err(|error| format!("{module}: {}", error.emit_to_string(source)))
+                .map_err(|error| Self::shader_diagnostic(module, source, map, &error))
         });
 
         if outcome.is_empty() {
@@ -2520,6 +2649,7 @@ impl SomniumRenderer {
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+        self.grain_masks.advance_packed(&ctx.queue);
 
         // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
         //
@@ -2669,6 +2799,15 @@ impl SomniumRenderer {
             )
             .unwrap_or(u32::MAX);
             c.tlas_instances = self.raytrace_pass.instance_count();
+            c.dreams_grain_consumers = if self.grain_masks.shared_enabled() {
+                u32::from(self.gtao_pass.enabled)
+                    + u32::from(self.volumetric_pass.enabled)
+                    + u32::from(self.taa_pass.enabled())
+                    + u32::from(self.restir_pass.active())
+                    + u32::from(self.restir_gi_pass.active())
+            } else {
+                0
+            } + u32::from(self.grain_masks.stf_enabled());
         }
 
         // ── MORROWIND-J step 3: one pass per view ────────────────────────────
@@ -2784,13 +2923,8 @@ impl SomniumRenderer {
             let mut lines =
                 crate::pass::light_gizmo::build_light_gizmo_lines(&self.light_gizmo_queue);
             lines.extend_from_slice(&self.line_gizmo_queue);
-            self.light_gizmo_pass.record(
-                &ctx.device,
-                &ctx.queue,
-                &mut encoder,
-                scene_view,
-                &lines,
-            );
+            self.light_gizmo_pass
+                .record(&ctx.device, &ctx.queue, &mut encoder, scene_view, &lines);
         }
 
         // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
@@ -3127,6 +3261,31 @@ impl SomniumRenderer {
         let mut shading_mode = self.shading_mode;
         if self.restir_pass.active() && self.raytrace_pass.tlas().is_some() {
             shading_mode |= 16;
+        }
+        if self.grain_masks.stf_enabled() {
+            shading_mode |= 32;
+        }
+        // Phase TSUSHIMA-F: the energy terms — multiple-scattering
+        // compensation on both the direct lobe and the IBL, Hammon's rough
+        // diffuse, and micro-shadowing. On by default;
+        // `SOMNIUM_TERRAIN_BRDF=0` is the A/B rail.
+        //
+        // A `shading_mode` bit rather than a pipeline override because these
+        // are a handful of ALU on values already in registers, not a march.
+        // The occupancy argument that put hex and POM behind `override`s does
+        // not apply, and this avoids a tenth entry in `ShadingSpec::constants`
+        // and a new variant in a budget `context.md` tracks.
+        // Three bits, not one: the terms pull in different directions and a
+        // single switch cannot attribute a change to any of them.
+        // `SOMNIUM_TERRAIN_BRDF=0` still turns all three off in one go.
+        if self.brdf_multiscatter {
+            shading_mode |= 64;
+        }
+        if self.brdf_rough_diffuse {
+            shading_mode |= 128;
+        }
+        if self.brdf_micro_shadow {
+            shading_mode |= 256;
         }
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
@@ -4036,10 +4195,29 @@ impl SomniumRenderer {
             work.push((i, terrain.terrain_index));
         }
         if !work.is_empty() {
+            // Every `record` this frame takes its own slice of the generate
+            // pass's uniform buffer. wgpu applies queue writes in call order
+            // just before the frame's passes, so two calls writing at offset 0
+            // did not take turns -- the detail stack was generated with the
+            // macro stack's rectangle and centre.
+            self.clipmap_pass.begin_frame(&ctx.device, work.len());
             let mut budget = crate::terrain::clipmap::MAX_GEN_TEXELS;
             for (i, terrain_index) in work {
-                let detail = self.clipmaps[i].take_jobs(true, &mut budget);
-                let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                // Coverage before sharpness. Detail used to take the whole
+                // budget first, and on a cold cache it exhausted it every
+                // frame, so the macro stack -- the only one that covers the
+                // whole view -- was starved for the ten-odd frames the detail
+                // rings took to fill. Everything it would have shaded spent
+                // those frames on the flat macro-map fallback instead.
+                let (detail, macro_jobs) = if self.clipmaps[i].macro_covers_view() {
+                    let detail = self.clipmaps[i].take_jobs(true, &mut budget);
+                    let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                    (detail, macro_jobs)
+                } else {
+                    let macro_jobs = self.clipmaps[i].take_jobs(false, &mut budget);
+                    let detail = self.clipmaps[i].take_jobs(true, &mut budget);
+                    (detail, macro_jobs)
+                };
                 let mut feedback_jobs = Vec::with_capacity(detail.len() + macro_jobs.len());
                 feedback_jobs.extend_from_slice(&detail);
                 feedback_jobs.extend_from_slice(&macro_jobs);
@@ -4093,6 +4271,30 @@ impl SomniumRenderer {
                 // have rendered so page arrival cannot leave stale texels.
                 if vt_uploaded {
                     self.clipmaps[i].invalidate();
+                }
+                if clipmap_trace() {
+                    let frame =
+                        CLIPMAP_TRACE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (detail_ready, macro_ready) = self.clipmaps[i].ready_masks();
+                    let vt = self
+                        .terrains
+                        .get(i)
+                        .map(|t| *t.virtual_texture_stats())
+                        .unwrap_or_default();
+                    tracing::info!(
+                        frame,
+                        detail_ready = format!("{detail_ready:08b}"),
+                        macro_ready = format!("{macro_ready:04b}"),
+                        detail_jobs = detail.len(),
+                        macro_jobs = macro_jobs.len(),
+                        queued_texels = self.clipmaps[i].pending_texels(),
+                        vt_resident = vt.resident_pages,
+                        vt_pending = vt.pending_pages,
+                        vt_uploads = vt.uploads,
+                        vt_evictions = vt.evictions,
+                        invalidated = vt_uploaded,
+                        "DF-TRACE"
+                    );
                 }
             }
         }
@@ -5336,6 +5538,21 @@ fn cpu_frustum_env_off() -> bool {
 
 fn cascade_cull_env_off() -> bool {
     std::env::var("SOMNIUM_CASCADE_CULL").as_deref() == Ok("0")
+}
+
+/// Frames counted by the clipmap trace, so a log line can be placed in time.
+static CLIPMAP_TRACE_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `SOMNIUM_CLIPMAP_TRACE=1` — one `DF-TRACE` line per generating frame.
+///
+/// The clipmap's failures are all invisible in a picture: a stack where only
+/// the coarsest ring is ever ready renders as a plausible blur, and debug view
+/// 34 calls it "a detail ring" because it is one. The ready mask, the queued
+/// texel count and the source-page counters are the three numbers that say
+/// which, and none of them had a way out of the renderer.
+fn clipmap_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("SOMNIUM_CLIPMAP_TRACE").as_deref(), Ok("1")))
 }
 
 /// PORTAL-0-D: `packed` is this frame's `terrain_lod_by_vertex`, built by the

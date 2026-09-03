@@ -291,9 +291,11 @@ fn evaluate_clipmap_material(
             }
         }
     }
+    terrain_clipmap_source = select(2.0, 0.0, tap.valid);
     if !tap.valid {
         let mr = clipmap_pick_macro_ring(tm, sample_xz);
         tap = clipmap_tap_macro(tm, sample_xz, mr);
+        terrain_clipmap_source = select(2.0, 1.0, tap.valid);
     }
     if !tap.valid {
         let splat_uv_fb = (world_xz - tm.terrain_origin) * tm.inv_world_size;
@@ -307,6 +309,7 @@ fn evaluate_clipmap_material(
             tap.albedo = m * m;
         } else {
             tap.albedo = vec3<f32>(0.35, 0.32, 0.28);
+            terrain_clipmap_source = 3.0;
         }
         tap.roughness = 0.8;
         tap.occlusion = 1.0;
