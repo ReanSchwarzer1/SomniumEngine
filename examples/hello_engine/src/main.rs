@@ -255,7 +255,9 @@ fn apply_kit_view(
             let lx = (tx as f32 + 0.5) / sw as f32 * wx;
             let lz = (tz as f32 + 0.5) / sh as f32 * wz;
             let h = terrain.world_height_at(lx, lz);
-            let slope = terrain.ground_sample(lx, lz).slope_cos;
+            // Layer 0: this view scores slope only and reads the splat itself
+            // a few lines below, so which layer the weight comes from is moot.
+            let slope = terrain.ground_sample(lx, lz, 0).slope_cos;
             let idx = (tz * sw + tx) as usize;
             let texel = terrain.splatmap.data.get(idx).copied().unwrap_or([0; 32]);
             let w = |layer: usize| texel[layer] as f32;
@@ -1374,7 +1376,7 @@ impl GameApp for HelloGame {
                                             &brush,
                                             [cx, cz],
                                             stroke,
-                                            |x, z| terrain.ground_sample(x, z),
+                                            |x, z| terrain.ground_sample(x, z, brush.layer),
                                         );
                                     }
                                 }

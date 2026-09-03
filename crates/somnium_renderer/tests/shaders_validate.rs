@@ -250,7 +250,7 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
         panic!("TerrainMaterial is not a struct");
     };
 
-    assert_eq!(*span, 2064, "WGSL size disagrees with GpuTerrainMaterial");
+    assert_eq!(*span, 2080, "WGSL size disagrees with GpuTerrainMaterial");
 
     // Only the members whose offsets the Rust test also pins. Checking every
     // one would just restate the declaration; these are the ones where a
@@ -288,6 +288,10 @@ fn the_terrain_material_struct_matches_the_rust_layout() {
     assert_eq!(offset("clipmap_center"), 1744);
     assert_eq!(offset("clipmap_tpm"), 1872);
     assert_eq!(offset("clipmap_macro_rings"), 2016);
+    // TSUSHIMA-G lands in the two words TSUSHIMA-B/C padded, and TSUSHIMA-H's
+    // vec4 has to be 16-byte aligned or every `array<vec4<_>>` above it moves.
+    assert_eq!(offset("weight_noise_strength"), 2056);
+    assert_eq!(offset("macro_octave_strength"), 2064);
 }
 
 /// The `enable` directives survive composition and end up first.
@@ -482,4 +486,157 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
         .find("surface.f0       = mix(vec3<f32>(0.04)")
         .expect("f0 derivation is still there");
     assert!(aa < f0, "specular AA must run before f0 is derived");
+}
+
+/// TSUSHIMA-G's perturbation is worth nothing unless it runs before selection.
+///
+/// A perturbation applied after `terrain_strongest_four` can only wobble an
+/// edge the four winners have already drawn. Applied before, it can change
+/// *which* four win, which is what turns an oval into an interlocked boundary.
+/// Both are one line apart in the source and produce pictures that differ only
+/// in ways nobody notices until the terrain is in front of them — which is the
+/// exact shape of the specular-AA bug this file also pins.
+#[test]
+fn weight_noise_is_applied_before_strongest_four() {
+    let source = composed("shading.wgsl");
+
+    // Inside the unpack, not at the call sites: three call sites means three
+    // chances for one to be missed, and the ray-traced path was already
+    // missed once.
+    let unpack = source
+        .find("fn terrain_unpack_splats(")
+        .expect("terrain_unpack_splats is still there");
+    let perturb = source
+        .find("terrain_perturb_weights(tm, &w, local_xz);")
+        .expect("the perturbation call is still inside the unpack");
+    let unpack_end = source[unpack..]
+        .find("\n}")
+        .expect("terrain_unpack_splats has a closing brace")
+        + unpack;
+    assert!(
+        perturb > unpack && perturb < unpack_end,
+        "the perturbation left `terrain_unpack_splats`, so a call site can now miss it"
+    );
+
+    // And every caller unpacks before it selects.
+    let mut sites = 0usize;
+    for (at, _) in source.match_indices("terrain_unpack_splats(splat_s, tm, local_xz)") {
+        let select = source[at..]
+            .find("terrain_strongest_four(&weight)")
+            .map(|o| o + at)
+            .expect("a call site that unpacks but never selects");
+        assert!(at < select, "weights are selected before they are perturbed");
+        sites += 1;
+    }
+    assert_eq!(
+        sites, 2,
+        "shading.wgsl composes the live and clipmap-generate paths; \
+         a third or a missing one means a path changed shape"
+    );
+}
+
+/// TSUSHIMA-H's octaves compose with the macro blend only in its own space.
+///
+/// `terrain_macro_blend`'s overlay and linear-light modes are defined against a
+/// perceptual operand, and the albedo is squared back to linear immediately
+/// after. An octave multiply that landed below the squaring would be a second,
+/// independent gain on linear radiance fighting the blend instead of composing
+/// with it — and it would look almost right, which is the problem.
+#[test]
+fn macro_octaves_land_between_the_macro_blend_and_the_squaring() {
+    let source = composed("shading.wgsl");
+    let mut found = 0usize;
+    for (blend, _) in source.match_indices("albedo = terrain_macro_blend(") {
+        let rest = &source[blend..];
+        let octaves = rest
+            .find("terrain_macro_octaves(local_xz, tm.macro_octave_strength.xyz)")
+            .expect("the macro blend is no longer followed by the octaves");
+        let square = rest
+            .find("albedo = albedo * albedo;")
+            .expect("the macro blend is no longer followed by the squaring");
+        assert!(
+            octaves < square,
+            "the octaves are applied to linear albedo, not to the perceptual value \
+             `terrain_macro_blend` works in"
+        );
+        found += 1;
+    }
+    assert_eq!(
+        found, 2,
+        "the live and clipmap-generate paths each blend a macro map; \
+         a terrain shades through whichever the distance picks and they must agree"
+    );
+}
+
+/// TSUSHIMA-I's cliff parallax must actually reach the sampler.
+///
+/// The failure this pins has happened twice in this phase already: a filter
+/// that is computed into a local and then not used, with a comment above it
+/// saying it is. Here it would be an offset added to a `uv_*` that the sample
+/// call below does not read, and the picture would be the pre-TSUSHIMA cliff —
+/// correct-looking, flat, and indistinguishable from a cliff that was never
+/// meant to have parallax.
+#[test]
+fn cliff_parallax_reaches_the_projected_sampler() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("fn terrain_projected_pbr(")
+        .expect("terrain_projected_pbr is still there");
+    let end = source[start..]
+        .find("\n}")
+        .expect("terrain_projected_pbr has a closing brace")
+        + start;
+    let body = &source[start..end];
+
+    // One plane per world axis, each marching in its own coordinate and each
+    // sampling the coordinate it marched.
+    for plane in ["uv_x", "uv_y", "uv_z"] {
+        let offset = body
+            .find(&format!("{plane} += terrain_projected_offset("))
+            .unwrap_or_else(|| panic!("{plane} no longer takes a parallax offset"));
+        let sampled = body
+            .find(&format!("tm, layer, {plane},"))
+            .unwrap_or_else(|| panic!("{plane} is no longer what the maps are sampled at"));
+        assert!(
+            offset < sampled,
+            "{plane} is sampled before it is displaced, so the march is discarded"
+        );
+    }
+
+    // And the heightfield march it replaces is still excluded on cliffs — two
+    // parallax solutions applied to one pixel would displace it twice.
+    assert!(
+        source.contains("let allow_pom = cliff_blend < 0.05;"),
+        "the UV-space march is no longer excluded on cliffs"
+    );
+}
+
+/// Both parallax paths share one march.
+///
+/// The steep-parallax loop and its single-lookup refinement are the subtle
+/// part, and the refinement is the half nobody re-reads. Two copies is two
+/// chances for one of them to keep a bug the other lost.
+#[test]
+fn one_parallax_march_serves_both_frames() {
+    let source = composed("shading.wgsl");
+    assert_eq!(
+        source.matches("fn terrain_parallax_march(").count(),
+        1,
+        "the march is declared more than once"
+    );
+    for caller in ["terrain_parallax_offset", "terrain_projected_offset"] {
+        let start = source
+            .find(&format!("fn {caller}("))
+            .unwrap_or_else(|| panic!("{caller} is gone"));
+        let end = source[start..].find("\n}").unwrap() + start;
+        let body = &source[start..end];
+        assert!(
+            body.contains("terrain_parallax_march("),
+            "{caller} no longer delegates to the shared march"
+        );
+        assert!(
+            !body.contains("loop {"),
+            "{caller} grew a march of its own"
+        );
+    }
 }

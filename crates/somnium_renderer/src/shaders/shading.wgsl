@@ -1729,6 +1729,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // term's occluders are a superset of the other's, which is exactly
         // what these two are not.
         let sky_vis = terrain_sky_visibility(tm, uv);
+
+        // ── Ground that knows where the water went (TSUSHIMA-H2) ───────────
+        //
+        // The macro octaves in `terrain_material.wgsl` are noise: variance at
+        // the right scales, meaning nothing. This is the term that makes the
+        // difference between noise and a landscape — one band of the tint
+        // driven by something the ground actually is. Sheltered ground holds
+        // water and the organic matter that comes with it and reads damp and
+        // green; open ground drains, bleaches and reads dry.
+        //
+        // Driven from C's bake rather than from slope, because slope cannot
+        // tell a valley floor from a plain and sky visibility can: they have
+        // the same normal and very different drainage.
+        //
+        // It lives here, not in `evaluate_terrain_material`, for the reason
+        // the block below states about B and C — `sky_vis` is already in hand
+        // at this one call site, and putting the tint in the material would
+        // mean a *second* fetch of the same texture in the live path and a
+        // third copy of the rule in the clipmap and virtual-texture paths.
+        // The cost of that placement is that the tint is a multiply on linear
+        // albedo rather than on the perceptual value the octaves use, which is
+        // a reparametrisation of the strength and nothing more.
+        //
+        // The remap is not `1 - sky_vis`, and its lower edge is not the map's
+        // *minimum* either. TSUSHIMA-C measured 0.47 to 1.00 with a mean of
+        // 0.93, and the first cut read that as "the useful band is 0.99 down to
+        // 0.78". That was reading the range instead of the distribution: 0.47
+        // is one valley floor, almost every visible pixel sits within a few
+        // hundredths of 1.0, and a remap stretched to the minimum leaves the
+        // term multiplying by two percent over the whole frame. Measured, it
+        // moved 1,604 of 705,355 terrain pixels.
+        //
+        // The upper edge is exactly 1.0 so genuinely open ground is the exact
+        // identity, and the lower edge sits just below the mean, which is where
+        // the pixels that differ from open ground actually are.
+        let sheltered = smoothstep(1.0, 0.88, sky_vis) * tm.macro_octave_strength.w;
+        // Luminance ~0.94, so this is mostly a hue shift and only slightly a
+        // darkening. C already darkens sheltered ground through `occlusion`
+        // below, and that is a transport term; this one is what the ground is
+        // made of. Both are true, but stacking two full-strength darkenings on
+        // the same pixels would read as a painted-on shadow.
+        surface.albedo = surface.albedo * mix(vec3(1.0), vec3(0.88, 0.97, 0.78), sheltered);
+
         surface.occlusion = surface.occlusion * sky_vis;
         // The landscape-scale bent normal, **composed with** the contact-scale
         // one GTAO already wrote rather than replacing it. The two see

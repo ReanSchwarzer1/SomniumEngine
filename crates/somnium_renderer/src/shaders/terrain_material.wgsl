@@ -76,7 +76,14 @@ struct TerrainMaterial {
     sky_visibility_strength: f32,
     relief_map: i32,
     relief_takeover: f32,
-    _tsushima_pad: vec2<f32>,
+    // Phase TSUSHIMA-G: splat-weight noise. These two land in the pad B/C left
+    // behind, so the struct keeps its 2064-byte size and every
+    // `array<vec4<_>>` above keeps its offset.
+    weight_noise_strength: f32,
+    weight_noise_scale: f32,
+    // Phase TSUSHIMA-H: macro octave strengths at ~1 km, ~100 m and ~10 m, and
+    // in `w` the strength of the sky-visibility-driven tint. 2080 bytes total.
+    macro_octave_strength: vec4<f32>,
 }
 
 /// Layers per terrain — must match `textures::TERRAIN_LAYER_COUNT`.
@@ -149,7 +156,124 @@ fn terrain_moisture(tm: TerrainMaterial, layer: u32) -> f32 {
     return tm.layer_moisture[layer / 4u][layer % 4u];
 }
 
-fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
+/// Value noise on the integer lattice, smoothstep-interpolated.
+///
+/// Shared by TSUSHIMA-G's weight perturbation and TSUSHIMA-H's macro octaves,
+/// which want the same field at very different scales — metres for one,
+/// kilometres for the other.
+///
+/// The hash is an integer bit-mix, not the usual `fract(sin(dot(p, k)) * n)`.
+/// That one-liner is fine for a screen-space dither and wrong here: its period
+/// collapses once the argument is large, and world coordinates on these maps
+/// reach a couple of thousand metres. Its failure mode is diagonal banding at
+/// exactly the low frequencies this exists to supply.
+fn terrain_noise_hash(cell: vec2<i32>) -> f32 {
+    // `bitcast`, not `u32(...)`: a value conversion of a negative i32 is not
+    // defined to wrap, and `local_xz` is negative for anything off the
+    // terrain's positive quadrant.
+    var h = bitcast<u32>(cell.x) * 0x8DA6B343u ^ bitcast<u32>(cell.y) * 0xD8242BA5u;
+    h ^= h >> 16u;
+    h = h * 0x85EBCA6Bu;
+    h ^= h >> 13u;
+    h = h * 0xC2B2AE35u;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+fn terrain_value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    // Smoothstep rather than a straight lerp. Linear interpolation of a value
+    // lattice has a discontinuous derivative at every cell edge, and a
+    // discontinuous derivative in a field that perturbs a material *boundary*
+    // is a straight line in the boundary — a grid, which is the one artifact
+    // this whole sub-phase exists to remove.
+    let u = f * f * (3.0 - 2.0 * f);
+    let c = vec2<i32>(i);
+    let a00 = terrain_noise_hash(c);
+    let a10 = terrain_noise_hash(c + vec2<i32>(1, 0));
+    let a01 = terrain_noise_hash(c + vec2<i32>(0, 1));
+    let a11 = terrain_noise_hash(c + vec2<i32>(1, 1));
+    return mix(mix(a00, a10, u.x), mix(a01, a11, u.x), u.y);
+}
+
+/// Two octaves of value noise for one layer's splat weight (Phase TSUSHIMA-G).
+///
+/// Indexed by **world position**, never by UV and never by anything derived
+/// from the camera. A noise field that moves with the view crawls; the mirror
+/// of that mistake — indexing a dither by UV rather than by screen position —
+/// is written up at length in this file's stochastic-filtering comment. Here
+/// the world is the stable frame, because the boundary being perturbed is a
+/// property of the ground and not of who is looking at it.
+///
+/// The per-layer offset is what makes this break a boundary rather than move
+/// it. Perturb every layer with the same field and the weights rise and fall
+/// together, the ranking between them never changes, and the whole edge just
+/// translates. Two layers that disagree about where the noise is interlock.
+fn terrain_weight_noise(world_xz: vec2<f32>, layer: u32, scale: f32) -> f32 {
+    let o = vec2<f32>(f32(layer) * 13.37, f32(layer) * 7.77);
+    let n0 = terrain_value_noise((world_xz + o) * scale);
+    let n1 = terrain_value_noise((world_xz + o) * scale * 5.43);
+    return (n0 - 0.5) + (n1 - 0.5) * 0.5;
+}
+
+/// Perturb normalised splat weights, in place, before strongest-four runs.
+///
+/// **Before** selection is the whole point: a perturbation applied afterwards
+/// can only wobble an edge the four winners already drew, where one applied
+/// beforehand can change *which* four win. That is the difference between a
+/// wobbly oval and an interlocked one.
+///
+/// Scaled by `4·w·(1−w)`, which is zero at both ends and one at w = 0.5, so a
+/// fully-painted area and a bare area both stay exactly put and only the
+/// transition band moves. Without the envelope, noise punches holes in the
+/// middle of solid ground: an author who painted a road gets gravel in it.
+///
+/// Renormalises afterwards. The envelope is symmetric but the noise sample is
+/// not, so the perturbed weights do not sum to one on their own, and
+/// `discarded` downstream is defined as the weight the strongest-four
+/// selection threw away. Letting that drift makes a debug channel lie about
+/// the selection it exists to report.
+fn terrain_perturb_weights(
+    tm: TerrainMaterial,
+    weight: ptr<function, array<f32, 32>>,
+    local_xz: vec2<f32>,
+) {
+    let amount = tm.weight_noise_strength;
+    let scale = max(tm.weight_noise_scale, 1.0e-4);
+    var total = 0.0;
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        var w = (*weight)[i];
+        // Splat weights are sparse — two or three layers meet at any texel and
+        // the rest are exactly zero. Skipping those is what keeps this from
+        // costing 32 two-octave evaluations a pixel, and the branch is coherent
+        // across a warp because neighbouring texels agree about which layers
+        // are painted there.
+        if w > 0.0 && w < 1.0 {
+            w = saturate(
+                w + terrain_weight_noise(local_xz, i, scale) * amount * w * (1.0 - w) * 4.0);
+            (*weight)[i] = w;
+        }
+        total += w;
+    }
+    let inv = 1.0 / max(total, 0.0001);
+    for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        (*weight)[i] = (*weight)[i] * inv;
+    }
+}
+
+/// Splat samples to normalised per-layer weights.
+///
+/// Takes the material and the terrain-local position because TSUSHIMA-G's
+/// perturbation belongs here rather than at the two call sites: "what the
+/// weights are" is one question with one answer, and the invariant this
+/// function establishes — they sum to one — is the invariant the perturbation
+/// has to preserve.
+fn terrain_unpack_splats(
+    s: array<vec4<f32>, 8>,
+    tm: TerrainMaterial,
+    local_xz: vec2<f32>,
+) -> array<f32, 32> {
     var w = array<f32, 32>();
     var total = 0.0;
     for (var g = 0u; g < terrain_splat_groups(); g = g + 1u) {
@@ -164,6 +288,11 @@ fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
     total = max(total, 0.0001);
     for (var i = 0u; i < terrain_scan; i = i + 1u) {
         w[i] = w[i] / total;
+    }
+    // Strength 0 is the exact identity — not "noise scaled to nothing", the
+    // original weights untouched and two loops not run.
+    if tm.weight_noise_strength > 0.0 {
+        terrain_perturb_weights(tm, &w, local_xz);
     }
     return w;
 }
@@ -245,13 +374,8 @@ fn resolve_surfgrad(n_geo: vec3<f32>, g: vec3<f32>) -> vec3<f32> {
 //   `AdvancedParallaxMapping`'s march toward the light, which is what makes
 //   relief look lit rather than merely displaced.
 
-/// One height sample of `layer` at a world-XZ offset from `local_xz`.
-fn terrain_parallax_height(
-    tm: TerrainMaterial,
-    layer: u32,
-    local_xz: vec2<f32>,
-    tiling: f32,
-) -> f32 {
+/// One height sample of `layer` at a texture coordinate.
+fn terrain_parallax_height(tm: TerrainMaterial, layer: u32, uv: vec2<f32>) -> f32 {
     let map = tm.albedo_maps[layer / 4u][layer % 4u];
     if map < 0 {
         return 0.5;
@@ -259,7 +383,57 @@ fn terrain_parallax_height(
     // Level 0 explicitly. Inside a march the derivatives are meaningless — the
     // taps walk along a ray, not across the screen — and asking for them would
     // both pick a wrong mip and force the loop to unroll.
-    return textureSampleLevel(textures[map], default_sampler, local_xz * tiling, 0.0).a;
+    return textureSampleLevel(textures[map], default_sampler, uv, 0.0).a;
+}
+
+/// Steep parallax plus a POM refinement, in whatever frame the caller samples
+/// the height map in.
+///
+/// The march is the behaviour; the frame is the interface. Both of this file's
+/// parallax paths — the heightfield's world-XZ one and the cliff projection's
+/// plane-local one — reduce to "start at the peak, step along the ray until you
+/// are under the surface, interpolate the last two". Writing that twice is how
+/// the two copies end up disagreeing about the refinement, which is the one
+/// part nobody re-reads.
+///
+/// `uv` is where the surface would be with no displacement, `step_uv` is one
+/// layer's worth of lateral travel in the same units, and the result is the
+/// offset to add to `uv`.
+fn terrain_parallax_march(
+    tm: TerrainMaterial,
+    layer: u32,
+    uv: vec2<f32>,
+    step_uv: vec2<f32>,
+    layers: f32,
+) -> vec2<f32> {
+    let layer_depth = 1.0 / layers;
+    var offset = vec2<f32>(0.0);
+    var ray_depth = 0.0;
+    // The height map is 1 at the peak; the ray starts at the peak and descends.
+    var surface = 1.0 - terrain_parallax_height(tm, layer, uv);
+
+    var i = 0.0;
+    loop {
+        if surface <= ray_depth || i >= layers {
+            break;
+        }
+        offset += step_uv;
+        ray_depth += layer_depth;
+        surface = 1.0 - terrain_parallax_height(tm, layer, uv + offset);
+        i = i + 1.0;
+    }
+
+    // POM refinement: one extra lookup, interpolating between the step that
+    // crossed the surface and the one before it. Relief mapping's binary search
+    // is more exact and costs a lookup per bisection; at ground-detail depths
+    // the difference is below a pixel.
+    let prev_offset = offset - step_uv;
+    let after = surface - ray_depth;
+    let before = (1.0 - terrain_parallax_height(tm, layer, uv + prev_offset))
+        - ray_depth + layer_depth;
+    let denom = after - before;
+    let weight = select(0.0, after / denom, abs(denom) > 1e-6);
+    return mix(offset, prev_offset, clamp(weight, 0.0, 1.0));
 }
 
 /// World-XZ offset from steep parallax plus a POM refinement.
@@ -293,33 +467,47 @@ fn terrain_parallax_offset(
     let step_ts = -view_ts.xy / steepness * depth * layer_depth;
     let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
 
-    var offset = vec2<f32>(0.0);
-    var ray_depth = 0.0;
-    // The height map is 1 at the peak; the ray starts at the peak and descends.
-    var surface = 1.0 - terrain_parallax_height(tm, layer, local_xz, tiling);
-
-    var i = 0.0;
-    loop {
-        if surface <= ray_depth || i >= layers {
-            break;
-        }
-        offset += step_xz;
-        ray_depth += layer_depth;
-        surface = 1.0 - terrain_parallax_height(tm, layer, local_xz + offset, tiling);
-        i = i + 1.0;
+    // Into the layer's texture coordinate and back out again. Scaling both the
+    // start point and the step by the same non-zero scalar and dividing the
+    // result by it is exact, and it is what lets the march be written once for
+    // a path that thinks in metres and one that thinks in texture space.
+    //
+    // A zero tiling means the whole layer is one texel, which has no relief to
+    // displace, so the offset is zero rather than an infinity.
+    if abs(tiling) <= 1e-6 {
+        return vec2<f32>(0.0);
     }
+    return terrain_parallax_march(
+        tm, layer, local_xz * tiling, step_xz * tiling, layers) / tiling;
+}
 
-    // POM refinement: one extra lookup, interpolating between the step that
-    // crossed the surface and the one before it. Relief mapping's binary search
-    // is more exact and costs a lookup per bisection; at ground-detail depths
-    // the difference is below a pixel.
-    let prev_offset = offset - step_xz;
-    let after = surface - ray_depth;
-    let before = (1.0 - terrain_parallax_height(tm, layer, local_xz + prev_offset, tiling))
-        - ray_depth + layer_depth;
-    let denom = after - before;
-    let weight = select(0.0, after / denom, abs(denom) > 1e-6);
-    return mix(offset, prev_offset, clamp(weight, 0.0, 1.0));
+/// Parallax offset inside one projection plane's own texture coordinate.
+///
+/// `view_pl` is the direction toward the camera resolved into that plane's
+/// frame: xy along the two world axes the coordinate is built from, in that
+/// order, and z along the plane's outward normal. `depth` is in the same
+/// coordinate as `uv`, which is why the caller multiplies the layer's metre
+/// depth by the tiling before passing it.
+///
+/// No tangent frame appears anywhere in here, and that is the point — the
+/// coordinate *is* the parametrisation the texture is laid out in, so a step in
+/// it needs no basis to be meaningful. It is the heightfield path, which has to
+/// convert a tangent-space ray into world XZ first, that needs one.
+fn terrain_projected_offset(
+    tm: TerrainMaterial,
+    layer: u32,
+    uv: vec2<f32>,
+    view_pl: vec3<f32>,
+    depth: f32,
+    steps: f32,
+) -> vec2<f32> {
+    if steps < 4.0 {
+        return vec2<f32>(0.0);
+    }
+    let steepness = max(abs(view_pl.z), 0.05);
+    let layers = max(mix(steps, 1.0, steepness), 1.0);
+    let step_uv = -view_pl.xy / steepness * depth * (1.0 / layers);
+    return terrain_parallax_march(tm, layer, uv, step_uv, layers);
 }
 
 /// How much of the relief shadows itself from the sun (Phase 25H).
@@ -348,18 +536,22 @@ fn terrain_parallax_shadow(
         // it would only be a second, wrong darkening.
         return 1.0;
     }
-    let start = 1.0 - terrain_parallax_height(tm, layer, local_xz, tiling);
+    // Into the layer's texture coordinate once, as `terrain_parallax_offset`
+    // does: the height fetch is shared with the view march and takes a texture
+    // coordinate, not metres.
+    let uv = local_xz * tiling;
+    let start = 1.0 - terrain_parallax_height(tm, layer, uv);
     let step = 1.0 / f32(steps);
     let step_ts = light_ts.xy / light_ts.z * depth * step;
-    let step_xz = tangent_xz * step_ts.x + bitangent_xz * step_ts.y;
+    let step_uv = (tangent_xz * step_ts.x + bitangent_xz * step_ts.y) * tiling;
 
     var occlusion = 0.0;
     var offset = vec2<f32>(0.0);
     var ray = start;
     for (var i = 0u; i < steps; i = i + 1u) {
-        offset += step_xz;
+        offset += step_uv;
         ray -= step;
-        let h = 1.0 - terrain_parallax_height(tm, layer, local_xz + offset, tiling);
+        let h = 1.0 - terrain_parallax_height(tm, layer, uv + offset);
         // Weighted by how far along the march it is, as O3DE does: an occluder
         // right beside the point casts a harder shadow than one at the far end
         // of the trace, which is what keeps the contact edge sharp.
@@ -907,6 +1099,33 @@ fn terrain_macro_sample(
     return vec4<f32>(m.rgb, m.a * tm.macro_strength);
 }
 
+/// Low-frequency value variance at the scales between the tile and the terrain
+/// (Phase TSUSHIMA-H).
+///
+/// Real ground varies at 1 m, 10 m, 100 m and 1 km. This material had variance
+/// at the tile size and at the terrain size and at nothing in between, which is
+/// what makes a hillside read as one printed sheet of gravel however good the
+/// gravel is.
+///
+/// **Multiplied, not lerped**, so the octaves compose: a kilometre-wide band
+/// and a ten-metre mottle should both be visible in the same square metre, and
+/// a lerp lets the finer one erase the coarser one wherever it is strong.
+///
+/// Centred on 1.0, so a strength of 0 is the exact identity rather than a
+/// half-strength grey — the same property the macro map's 0.5 fallback has, for
+/// the same reason.
+fn terrain_macro_octaves(world_xz: vec2<f32>, strength: vec3<f32>) -> f32 {
+    // Cycles per metre: ~1 km, ~100 m, ~10 m. Fixed rather than uniform,
+    // because these are the design — the three bands the material was missing —
+    // and the strengths are what an author actually wants to reach for.
+    let a = terrain_value_noise(world_xz * 0.001);
+    let b = terrain_value_noise(world_xz * 0.010);
+    let c = terrain_value_noise(world_xz * 0.100);
+    return (1.0 + (a - 0.5) * strength.x)
+         * (1.0 + (b - 0.5) * strength.y)
+         * (1.0 + (c - 0.5) * strength.z);
+}
+
 /// How much of the per-pixel layer budget survives at `distance` metres.
 ///
 /// 0 close up, 1 past `detail_fade_end`. This is Phase 25D's answer to the
@@ -955,8 +1174,27 @@ fn terrain_sample_projected_maps(
     return s;
 }
 
-/// Full-PBR biplanar (default) or triplanar (debug) projection.
-/// Height is used for blending only — no POM on this path.
+/// Full-PBR biplanar (default) or triplanar (debug) projection, with
+/// world-space parallax (Phase TSUSHIMA-I).
+///
+/// # Why this needed its own march
+///
+/// `evaluate_terrain_material` disables the heightfield POM wherever
+/// `cliff_blend >= 0.05`, and the reason was correct: that march is UV-space —
+/// it walks the terrain's world-XZ parametrisation — and the cliff projection
+/// is not. On a vertical face the XZ parametrisation is degenerate, so a march
+/// along it either goes nowhere or smears. Godot makes the same exclusion.
+///
+/// The consequence was that the steepest ground in the scene, the ground a
+/// player is most often standing right next to, was the one surface with no
+/// depth at all: a photograph of a rock face on a flat triangle.
+///
+/// The fix is not to make the XZ march work. It is to march in the frame the
+/// projection actually samples in. Each plane's texture coordinate is two world
+/// axes scaled by the tiling, so a displacement in that coordinate has an exact
+/// physical meaning and the ray direction resolves into it with two dot
+/// products. `terrain_parallax_march` is then the same march the heightfield
+/// uses, because it was written to take a coordinate rather than a metre.
 fn terrain_projected_pbr(
     tm: TerrainMaterial,
     layer: u32,
@@ -983,6 +1221,26 @@ fn terrain_projected_pbr(
     }
     w = w / max(w.x + w.y + w.z, 1e-4);
 
+    // `world_pos` here is terrain-*local*: XZ has the origin subtracted, Y has
+    // not. The camera has to make the same move or the ray points somewhere
+    // else entirely.
+    let camera_local = view.camera_pos - vec3<f32>(tm.terrain_origin.x, 0.0, tm.terrain_origin.y);
+    let to_camera = camera_local - world_pos;
+    // Step count from the same two things the heightfield march uses, computed
+    // here rather than passed in: the two call sites — live terrain and the
+    // clipmap's shading pass — would otherwise each carry a copy of the rule
+    // and one of them would eventually stop matching.
+    let pom_steps = select(
+        0.0,
+        f32(tm.parallax_steps) * (1.0 - terrain_detail_fade(tm, length(to_camera))),
+        enable_pom && tm.parallax_steps >= 4u,
+    );
+    let pom_depth = terrain_parallax_depth(tm, layer) * tiling;
+    let v = normalize(to_camera);
+    // Marching a plane that contributes a few percent buys nothing and costs a
+    // full march, so the gate is far above the 0.001 the sample gate uses.
+    let pom_min_weight = 0.05;
+
     var out: TerrainLayerSample;
     out.albedo = vec3(0.0);
     out.height = 0.0;
@@ -992,8 +1250,13 @@ fn terrain_projected_pbr(
     var n_world = vec3(0.0);
 
     if w.x > 0.001 {
+        var uv_x = p.zy;
+        if pom_steps >= 4.0 && w.x > pom_min_weight && pom_depth > 0.0 {
+            uv_x += terrain_projected_offset(
+                tm, layer, uv_x, vec3<f32>(v.z, v.y, v.x * sign(n.x)), pom_depth, pom_steps);
+        }
         let s = terrain_sample_projected_maps(
-            tm, layer, p.zy, dpdx.zy, dpdy.zy);
+            tm, layer, uv_x, dpdx.zy, dpdy.zy);
         out.albedo += s.albedo * w.x;
         out.height += s.height * w.x;
         out.roughness += s.roughness * w.x;
@@ -1003,8 +1266,13 @@ fn terrain_projected_pbr(
         n_world += normalize(t * s.normal_ts.x + b * s.normal_ts.y + vec3(sign(n.x), 0.0, 0.0) * s.normal_ts.z) * w.x;
     }
     if w.y > 0.001 {
+        var uv_y = p.xz;
+        if pom_steps >= 4.0 && w.y > pom_min_weight && pom_depth > 0.0 {
+            uv_y += terrain_projected_offset(
+                tm, layer, uv_y, vec3<f32>(v.x, v.z, v.y * sign(n.y)), pom_depth, pom_steps);
+        }
         let s = terrain_sample_projected_maps(
-            tm, layer, p.xz, dpdx.xz, dpdy.xz);
+            tm, layer, uv_y, dpdx.xz, dpdy.xz);
         out.albedo += s.albedo * w.y;
         out.height += s.height * w.y;
         out.roughness += s.roughness * w.y;
@@ -1014,8 +1282,13 @@ fn terrain_projected_pbr(
         n_world += normalize(t * s.normal_ts.x + b * s.normal_ts.y + vec3(0.0, sign(n.y), 0.0) * s.normal_ts.z) * w.y;
     }
     if w.z > 0.001 {
+        var uv_z = p.xy;
+        if pom_steps >= 4.0 && w.z > pom_min_weight && pom_depth > 0.0 {
+            uv_z += terrain_projected_offset(
+                tm, layer, uv_z, vec3<f32>(v.x, v.y, v.z * sign(n.z)), pom_depth, pom_steps);
+        }
         let s = terrain_sample_projected_maps(
-            tm, layer, p.xy, dpdx.xy, dpdy.xy);
+            tm, layer, uv_z, dpdx.xy, dpdy.xy);
         out.albedo += s.albedo * w.z;
         out.height += s.height * w.z;
         out.roughness += s.roughness * w.z;
@@ -1077,8 +1350,9 @@ fn terrain_generate_texel(
     let splat_uv = (world_xz - tm.terrain_origin) * tm.inv_world_size;
     let splat_ddx = world_ddx * tm.inv_world_size;
     let splat_ddy = world_ddy * tm.inv_world_size;
+    let local_xz = world_xz - tm.terrain_origin;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
-    var weight = terrain_unpack_splats(splat_s);
+    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {
@@ -1094,7 +1368,6 @@ fn terrain_generate_texel(
         weight[selected[2]] / kept,
         weight[selected[3]] / kept,
     );
-    let local_xz = world_xz - tm.terrain_origin;
     let geo_normal = vec3<f32>(0.0, 1.0, 0.0);
     let tangent = vec3<f32>(1.0, 0.0, 0.0);
     let bitangent = vec3<f32>(0.0, 0.0, 1.0);
@@ -1160,6 +1433,11 @@ fn terrain_generate_texel(
     }
     let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
+    // Same octaves, same world frame, same place in the chain as the live path.
+    // A terrain shades through whichever of the two the distance picks, and a
+    // clipmap ring that disagreed with live terrain about the tint would put a
+    // visible ring on the ground at the handover.
+    albedo = albedo * terrain_macro_octaves(local_xz, tm.macro_octave_strength.xyz);
     albedo = albedo * albedo;
     let wet = saturate(tm.wetness * moisture);
     albedo *= mix(1.0, tm.wetness_darken, wet);
@@ -1184,8 +1462,11 @@ fn evaluate_terrain_material(
     let tm = terrain_materials[terrain_index];
     let splat_ddx = world_ddx * tm.inv_world_size;
     let splat_ddy = world_ddy * tm.inv_world_size;
+    // Hoisted above the unpack because TSUSHIMA-G's perturbation is indexed by
+    // world position and runs inside it.
+    let local_xz = world_pos.xz - tm.terrain_origin;
     var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
-    var weight = terrain_unpack_splats(splat_s);
+    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {
@@ -1208,7 +1489,6 @@ fn evaluate_terrain_material(
         weight[selected[3]] / kept,
     );
 
-    let local_xz = world_pos.xz - tm.terrain_origin;
     let view_distance = distance(world_pos, view.camera_pos);
     let fade = terrain_detail_fade(tm, view_distance);
     let epsilon = mix(LAYER_WEIGHT_EPSILON, FAR_LAYER_EPSILON, fade);
@@ -1330,6 +1610,12 @@ fn evaluate_terrain_material(
 
     let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
+    // TSUSHIMA-H, in the same approximately-perceptual space the macro blend
+    // above already works in — between the `sqrt` and the squaring, not after.
+    // Applied later it would be a second, independent gain on linear radiance
+    // fighting the blend rather than composing with it, and the overlay and
+    // linear-light modes are defined against a perceptual operand.
+    albedo = albedo * terrain_macro_octaves(local_xz, tm.macro_octave_strength.xyz);
     albedo = albedo * albedo;
 
     if cliff_blend > 0.0 {

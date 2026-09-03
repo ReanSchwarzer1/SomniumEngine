@@ -973,6 +973,19 @@ other entry here, which records a technique the code was informed by.
 | Fir Sapling | `assets/foliage/fir_sapling/` | Rob Tuytel (photography), Rico Cilliers (modeling) |
 | Island Tree 02 | `assets/foliage/island_tree_02/` | Rob Tuytel (scanning), Rico Cilliers (cleanup) |
 
+**Phase TSUSHIMA-I adds two more, and does *not* commit them:**
+
+| Asset | Path | Poly Haven slug |
+|---|---|---|
+| Pebbles | `assets/foliage/namaqualand_stones_01/` | `namaqualand_stones_01` |
+| Scree Rocks | `assets/foliage/rock_moss_set_01/` | `rock_moss_set_01` |
+
+Same CC0 dedication, same Poly Haven file API, fetched by
+`tools/fetch_foliage_rocks.sh`. They stay out of the repository because the four
+above already cost about 101 MB on every clone, these two are debris most
+projects will replace with their own, and `ensure_palette_mesh` already reduces
+a missing entry to one warning and no placement. 2k glTF: 10.2 MB and 3.1 MB.
+
 **License: CC0 1.0** (public domain dedication), from <https://polyhaven.com>.
 Poly Haven's license page states the assets may be redistributed, used
 commercially, and included in products that are sold, and that **attribution is

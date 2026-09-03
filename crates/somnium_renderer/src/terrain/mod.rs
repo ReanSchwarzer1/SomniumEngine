@@ -299,9 +299,20 @@ pub struct GpuTerrainMaterial {
     pub relief_map: i32,
     /// Metres at which the baked normal has fully replaced the vertex normal.
     pub relief_takeover: f32,
-    /// Keeps the struct a multiple of 16 bytes, so every `array<vec4<_>>`
-    /// above it keeps the offset the Rust and WGSL layout tests pin.
-    pub _tsushima_pad: [f32; 2],
+    /// Phase TSUSHIMA-G: how far splat weights are displaced in the transition
+    /// band. 0 is the exact identity. These two land in the pad TSUSHIMA-B/C
+    /// left behind, so the struct keeps its size and every `[f32; 16]` above
+    /// keeps the offset the layout tests pin.
+    pub weight_noise_strength: f32,
+    /// Cycles per metre of the coarse octave; the fine one is 5.43x it.
+    pub weight_noise_scale: f32,
+    /// Phase TSUSHIMA-H: macro octave strengths at ~1 km, ~100 m and ~10 m,
+    /// and in `[3]` the strength of the sky-visibility-driven tint.
+    ///
+    /// Keeps the struct a multiple of 16 bytes on its own, which is why it is
+    /// a `vec4` and not the three scalars the shader actually reads plus one
+    /// more pad word.
+    pub macro_octave_strength: [f32; 4],
 }
 
 /// Bindless indices of one terrain's textures, filled in at creation.
@@ -410,6 +421,41 @@ pub struct TerrainData {
     /// Metres at which the baked relief normal has fully taken over from the
     /// interpolated vertex normal.
     pub relief_takeover: f32,
+    /// Phase TSUSHIMA-G. `SOMNIUM_TERRAIN_WEIGHT_NOISE=0` is the A/B rail.
+    pub weight_noise: bool,
+    /// How far the noise displaces a weight at the centre of a transition
+    /// band. The `4*w*(1-w)` envelope means this is the peak displacement and
+    /// nothing outside the band moves at all.
+    pub weight_noise_strength: f32,
+    /// Cycles per metre of the coarse octave. 0.35 puts it near a three-metre
+    /// period, which is under the smallest brush anyone paints a boundary with
+    /// and is the point: the brush cannot make this shape.
+    pub weight_noise_scale: f32,
+    /// Phase TSUSHIMA-H. `SOMNIUM_TERRAIN_MACRO_OCTAVES=0` is the A/B rail.
+    pub macro_octaves: bool,
+    /// Phase TSUSHIMA-H2, on its own rail: `SOMNIUM_TERRAIN_SKYVIS_TINT`.
+    ///
+    /// Two switches and not one, because the two halves of H pull in opposite
+    /// directions — the octaves brighten (a symmetric perturbation centred on
+    /// 1.0, squared back to linear, has a mean above 1) and the tint darkens
+    /// sheltered ground. Measured together they partly cancel, and a single
+    /// number cannot say which did what. TSUSHIMA-F learned this the expensive
+    /// way: one BRDF switch reported a 39% darkening that turned out to be
+    /// three terms, one of which was brightening.
+    ///
+    /// A **float**, not a flag: `=0` is the A/B off, and any other value
+    /// replaces the default strength. Sky visibility on the shipped maps has
+    /// very little dynamic range in a typical frame — TSUSHIMA-C measured a
+    /// mean of 0.93 against a minimum of 0.47 — so the useful question about
+    /// this term is not whether it is on but how hard it has to push before it
+    /// says anything, and that question should not cost a rebuild to ask.
+    pub skyvis_tint: f32,
+    /// Strengths at ~1 km, ~100 m, ~10 m, then the sky-visibility tint.
+    ///
+    /// Falling with frequency because that is how ground actually varies —
+    /// a whole hillside differs from the next hillside more than one square
+    /// metre differs from the one beside it.
+    pub macro_octave_strength: [f32; 4],
 
     /// Shared LOD index spans in the global index pool, keyed by
     /// `(lod, edge_mask)` and holding `(index_offset, index_count)`.
@@ -726,6 +772,21 @@ impl TerrainData {
             horizon_shadow: std::env::var("SOMNIUM_TERRAIN_HORIZON").as_deref() != Ok("0"),
             sky_visibility: std::env::var("SOMNIUM_TERRAIN_SKYVIS").as_deref() != Ok("0"),
             sky_visibility_strength: 1.0,
+            weight_noise: std::env::var("SOMNIUM_TERRAIN_WEIGHT_NOISE").as_deref() != Ok("0"),
+            weight_noise_strength: 0.25,
+            weight_noise_scale: 0.35,
+            macro_octaves: std::env::var("SOMNIUM_TERRAIN_MACRO_OCTAVES").as_deref() != Ok("0"),
+            skyvis_tint: std::env::var("SOMNIUM_TERRAIN_SKYVIS_TINT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                // At full shelter this blends the tint 0.6 of the way in:
+                // (0.93, 0.98, 0.87) against white — a damp green cast you
+                // would notice on a valley floor, and nowhere near a repaint.
+                // The number is what the effect should *look* like at its
+                // strongest, not what makes a diff move.
+                .unwrap_or(0.6),
+            macro_octave_strength: [0.18, 0.13, 0.09, 0.35],
             horizon_dirty: false,
             desc,
             heightmap,
@@ -1104,7 +1165,32 @@ impl TerrainData {
                 -1
             },
             relief_takeover: self.relief_takeover,
-            _tsushima_pad: [0.0; 2],
+            // Unlike the baked maps above, "off" here is a strength of zero
+            // rather than an unbound texture: there is no texture, and the
+            // shader's identity at zero is exact — the perturbation loops do
+            // not run and the octave product is 1.
+            weight_noise_strength: if self.weight_noise {
+                self.weight_noise_strength
+            } else {
+                0.0
+            },
+            weight_noise_scale: self.weight_noise_scale,
+            macro_octave_strength: {
+                // `w` is the sky-visibility tint and rides its own switch; the
+                // three octave strengths ride `macro_octaves`. Both are exact
+                // identities at zero, so "off" is the pre-phase image and not a
+                // weak version of the new one.
+                let mut v = if self.macro_octaves {
+                    self.macro_octave_strength
+                } else {
+                    [0.0; 4]
+                };
+                // The tint's own strength, not the octaves'. `macro_octave_strength[3]`
+                // is where the shader reads it from and is kept in step for the
+                // layout's sake; `skyvis_tint` is the value that means anything.
+                v[3] = self.skyvis_tint.max(0.0);
+                v
+            },
         }
     }
 
@@ -1287,11 +1373,21 @@ impl TerrainData {
     }
 
     /// Ground query for the foliage brush (Phase 17F).
-    pub fn ground_sample(&self, local_x: f32, local_z: f32) -> foliage_paint::GroundSample {
-        let s = self.surface_sample(local_x, local_z, 0);
+    /// `layer` is the splat layer the caller's brush cares about; its weight
+    /// comes back so the brush can refuse ground made of something else
+    /// (Phase TSUSHIMA-I). `surface_sample` has always computed it — this used
+    /// to sample layer 0 and then discard the answer.
+    pub fn ground_sample(
+        &self,
+        local_x: f32,
+        local_z: f32,
+        layer: u8,
+    ) -> foliage_paint::GroundSample {
+        let s = self.surface_sample(local_x, local_z, layer);
         foliage_paint::GroundSample {
             height: s.height,
             slope_cos: s.slope_cos,
+            layer_weight: s.layer_weight,
         }
     }
 

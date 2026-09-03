@@ -551,30 +551,122 @@ enum LifecycleState {
     ShuttingDown,
 }
 
-/// The foliage palette: what the brush can paint (Phase 17F).
+/// One palette entry: a mesh, and how the brush should behave when it is
+/// selected.
+///
+/// The brush hints live here rather than in `FoliageBrush::default` because
+/// they are properties of the *thing*, not of the tool: a tree is placed one at
+/// a time because it is a tree, and a pebble leans because it is a pebble.
+/// Phase 17F expressed the first of those as `single = kind >= 2` at the
+/// selection site, which was true of a four-entry palette and stopped being
+/// true the moment TSUSHIMA-I added a fifth.
+#[derive(Clone, Copy)]
+pub struct FoliageEntry {
+    pub name: &'static str,
+    pub path: &'static str,
+    /// One instance per click, at the cursor, ignoring density.
+    pub single: bool,
+    /// Instances per square metre for a spread brush.
+    pub density: f32,
+    /// Terrain layer this entry wants underneath it. `min_layer_weight` of 0
+    /// means the entry does not care and the test is skipped entirely.
+    pub layer: u8,
+    pub min_layer_weight: f32,
+    /// Largest lean from vertical, degrees. Zero for anything that grew.
+    pub max_tilt_deg: f32,
+    pub scale_min: f32,
+    pub scale_max: f32,
+}
+
+/// The foliage palette: what the brush can paint (Phase 17F, extended by
+/// TSUSHIMA-I).
 ///
 /// Fixed for now. Once there is a content drawer this becomes whatever the
 /// project has imported, which is why the brush stores a palette *index* rather
 /// than anything about the mesh itself.
 ///
-/// All four are CC0 from Poly Haven — see ATTRIBUTION.md.
-pub const FOLIAGE_PALETTE: [(&str, &str); 4] = [
-    (
-        "Grass Medium",
-        "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
-    ),
-    (
-        "Grass Bermuda",
-        "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
-    ),
-    (
-        "Fir Sapling",
-        "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
-    ),
-    (
-        "Island Tree",
-        "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
-    ),
+/// All six are CC0 from Poly Haven — see ATTRIBUTION.md. The two debris entries
+/// are **not committed to the repository**; `tools/fetch_foliage_rocks.sh` puts
+/// them where these paths expect them. Until it is run the brush warns once and
+/// places nothing, which is what `ensure_palette_mesh` already does for any
+/// entry that is not installed.
+pub const FOLIAGE_PALETTE: [FoliageEntry; 6] = [
+    FoliageEntry {
+        name: "Grass Medium",
+        path: "assets/foliage/grass_medium_01/grass_medium_01_2k.gltf",
+        single: false,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Grass Bermuda",
+        path: "assets/foliage/grass_bermuda_01/grass_bermuda_01_2k.gltf",
+        single: false,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Fir Sapling",
+        path: "assets/foliage/fir_sapling/fir_sapling_2k.gltf",
+        single: true,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    FoliageEntry {
+        name: "Island Tree",
+        path: "assets/foliage/island_tree_02/island_tree_02_2k.gltf",
+        single: true,
+        density: 2.0,
+        layer: 0,
+        min_layer_weight: 0.0,
+        max_tilt_deg: 0.0,
+        scale_min: 0.8,
+        scale_max: 1.3,
+    },
+    // TSUSHIMA-I, the contact scale: between the texture underfoot and the
+    // tree on the ridge this world has nothing at all, and ground with nothing
+    // on it reads as a surface rather than as a place.
+    FoliageEntry {
+        name: "Pebbles",
+        path: "assets/foliage/namaqualand_stones_01/namaqualand_stones_01_2k.gltf",
+        single: false,
+        // Denser than grass, and much smaller. Pebbles read as a *field*; a
+        // sparse scatter of them reads as litter someone dropped.
+        density: 6.0,
+        layer: 7, // Gravel
+        // Half the texel has to be gravel. Lower and the fringe wanders out
+        // into whatever is painted beside it; higher and a boundary that is
+        // genuinely half gravel gets nothing at all.
+        min_layer_weight: 0.5,
+        max_tilt_deg: 35.0,
+        scale_min: 0.35,
+        scale_max: 0.9,
+    },
+    FoliageEntry {
+        name: "Scree Rocks",
+        path: "assets/foliage/rock_moss_set_01/rock_moss_set_01_2k.gltf",
+        single: false,
+        density: 0.4,
+        layer: 15, // Talus
+        min_layer_weight: 0.35,
+        // Less lean than the pebbles: a rock this size has usually settled onto
+        // a face rather than come to rest propped against something.
+        max_tilt_deg: 18.0,
+        scale_min: 0.6,
+        scale_max: 1.6,
+    },
 ];
 
 /// One drawable piece of a palette entry.
@@ -6828,9 +6920,16 @@ impl<G: GameApp> Engine<G> {
                 if scale <= 0.0 {
                     continue;
                 }
+                // Yaw then lean. `Ry · Rx` and not the other way round: the
+                // lean has to happen in the frame the yaw already chose, or
+                // every instance leans due east and the field reads as though
+                // one wind flattened it. TSUSHIMA-I stores a single tilt angle
+                // for exactly this reason — the random yaw is what makes the
+                // random direction.
                 let placement = glam::Mat4::from_scale_rotation_translation(
                     glam::Vec3::splat(scale),
-                    glam::Quat::from_rotation_y(inst.yaw),
+                    glam::Quat::from_rotation_y(inst.yaw)
+                        * glam::Quat::from_rotation_x(inst.tilt),
                     inst.position,
                 );
                 // Horizontal, like the draw cull above and for the same
@@ -6905,6 +7004,25 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
+    /// Point the brush at the selected entry's own defaults.
+    ///
+    /// Only the fields the palette has an opinion about. Radius and slope stay
+    /// where the author put them, because those are about how they are working
+    /// and not about what they are placing.
+    fn apply_foliage_palette_defaults(&mut self) {
+        let Some(entry) = FOLIAGE_PALETTE.get(self.foliage_brush.kind as usize) else {
+            return;
+        };
+        let b = &mut self.foliage_brush;
+        b.single = entry.single;
+        b.density = entry.density;
+        b.layer = entry.layer;
+        b.min_layer_weight = entry.min_layer_weight;
+        b.max_tilt_deg = entry.max_tilt_deg;
+        b.scale_min = entry.scale_min;
+        b.scale_max = entry.scale_max;
+    }
+
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
         let idx = kind as usize;
@@ -6914,7 +7032,7 @@ impl<G: GameApp> Engine<G> {
         {
             return;
         }
-        let (name, path) = FOLIAGE_PALETTE[idx];
+        let FoliageEntry { name, path, .. } = FOLIAGE_PALETTE[idx];
         if !std::path::Path::new(path).exists() {
             warn!("Foliage: {name} is not installed at {path}");
             return;
@@ -7090,13 +7208,13 @@ impl<G: GameApp> Engine<G> {
             &brush,
             center,
             seed,
-            |x, z| terrain.ground_sample(x, z),
+            |x, z| terrain.ground_sample(x, z, brush.layer),
         );
         terrain.painted_foliage = painted;
         if added > 0 {
             info!(
                 "Foliage: painted {added} of {} (total {})",
-                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].0,
+                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].name,
                 terrain.painted_foliage.len(),
             );
         }
@@ -8936,7 +9054,13 @@ impl<G: GameApp> Engine<G> {
                     FB::MaxSlope => brush.max_slope_deg = value.clamp(0.0, 90.0),
                     FB::Kind => {
                         brush.kind =
-                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8
+                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                        // The same entry defaults `SelectFoliageKind` applies.
+                        // Two ways to change one field that behave differently
+                        // is how a slider ends up painting pebbles with a
+                        // tree's brush.
+                        self.apply_foliage_palette_defaults();
+                        return;
                     }
                     FB::ScaleMin => brush.scale_min = value.max(0.01),
                     FB::ScaleMax => brush.scale_max = value.max(0.01),
@@ -9721,11 +9845,16 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::SelectFoliageKind(kind) => {
                 self.foliage_brush.kind = (kind as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
-                let (name, _) = FOLIAGE_PALETTE[self.foliage_brush.kind as usize];
-                // Trees want one-per-click; ground cover wants a spread. Setting
-                // the obvious default saves a second click almost every time.
-                self.foliage_brush.single = self.foliage_brush.kind >= 2;
-                info!("Foliage brush: {name}");
+                // Trees want one-per-click, ground cover wants a spread, and
+                // debris wants a layer test and a lean. Setting the obvious
+                // default saves a second click almost every time — and reading
+                // it from the entry rather than from the index means adding a
+                // seventh entry cannot silently give it a sapling's behaviour.
+                self.apply_foliage_palette_defaults();
+                info!(
+                    "Foliage brush: {}",
+                    FOLIAGE_PALETTE[self.foliage_brush.kind as usize].name
+                );
             }
 
             EditorEvent::CycleTonemapper => {
