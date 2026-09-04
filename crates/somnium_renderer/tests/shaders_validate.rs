@@ -488,6 +488,128 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
     assert!(aa < f0, "specular AA must run before f0 is derived");
 }
 
+/// A foliage occlusion texture refines the GTAO result; it must not replace it.
+///
+/// These two fields intentionally carry different meanings downstream:
+/// `surface.occlusion` is the composed ambient visibility, while
+/// `micro_occlusion` is material-only and feeds the direct-light micro-shadow
+/// path for non-foliage. Assigning the texture straight into the former silently
+/// discards GTAO on every mapped material.
+#[test]
+fn material_occlusion_multiplies_gtao_without_polluting_micro_occlusion() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("if material.occlusion_map >= 0 {")
+        .expect("the material occlusion block is still there");
+    let end = source[start..]
+        .find("var normal_variance")
+        .map(|offset| start + offset)
+        .expect("normal setup still follows material occlusion");
+    let body = &source[start..end];
+
+    assert!(
+        body.contains("let material_occlusion ="),
+        "material AO must be sampled separately before it is composed"
+    );
+    assert!(
+        body.contains("surface.occlusion *= material_occlusion;"),
+        "material AO replaced GTAO instead of multiplying it"
+    );
+    assert!(
+        body.contains("micro_occlusion = material_occlusion;"),
+        "micro-shadowing must retain material-only AO rather than composed GTAO"
+    );
+    assert!(
+        !body.contains("surface.occlusion = textureSample"),
+        "sampling directly into surface.occlusion discards GTAO"
+    );
+}
+
+/// Backside lighting still needs visibility from the receiver to the sun.
+///
+/// Transmission describes which side of a thin leaf the light exits; it does
+/// not make external occluders disappear. The original Phase 24S call added the
+/// lobe after the shadowed direct term, making foliage glow through terrain,
+/// trunks, and clouds at low sun angles.
+#[test]
+fn sun_transmission_uses_sun_visibility() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Transmitted sunlight")
+        .expect("the transmitted sunlight block is still there");
+    let end = source[start..]
+        .find("let gi_texel")
+        .map(|offset| start + offset)
+        .expect("GI setup still follows transmitted sunlight");
+    let compact: String = source[start..end]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains(
+            "transmitted_light(surface,light_dir,light_color,material.transmission)*shadow_factor"
+        ),
+        "sun transmission bypasses the sun/cloud shadow visibility"
+    );
+}
+
+/// Moonlight currently has no directional shadow receiver in the shading pass.
+///
+/// Reusing the thin-leaf transmission lobe without one makes every isolated
+/// back-facing grass texel emit an albedo-green pinprick under night exposure.
+/// Keep the ordinary moon BRDF, but do not restore transmitted moonlight until
+/// it can be multiplied by visibility traced from the receiver toward the moon.
+#[test]
+fn night_foliage_does_not_add_unshadowed_moon_transmission() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Phase 25M-2 (UE5 pattern): Directional Moonlight.")
+        .expect("the directional moonlight block is still there");
+    let end = source[start..]
+        .find("// Direct sunlight + directional moonlight")
+        .map(|offset| start + offset)
+        .expect("the sun/moon composition still follows moonlight setup");
+    let body = &source[start..end];
+
+    assert!(
+        body.contains("moonlight ="),
+        "ordinary reflected moonlight must remain available at night"
+    );
+    assert!(
+        !body.contains("transmitted_light"),
+        "moon transmission has no moon-direction shadow visibility and creates foliage pinpricks"
+    );
+}
+
+/// Moonlight predates the direct-lobe firefly bound and used to bypass it.
+///
+/// At night, exposure amplifies that omission precisely where sub-pixel leaf
+/// cards can catch a narrow Fresnel peak. The moon has nearly the same apparent
+/// angular radius as the sun, so it belongs on the same area-light BRDF path.
+#[test]
+fn moonlight_uses_the_bounded_area_brdf() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Phase 25M-2 (UE5 pattern): Directional Moonlight.")
+        .expect("the directional moonlight block is still there");
+    let end = source[start..]
+        .find("// Direct sunlight + directional moonlight")
+        .map(|offset| start + offset)
+        .expect("the sun/moon composition still follows moonlight setup");
+    let compact: String = source[start..end]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains(
+            "moonlight=clamp_specular_lobe(evaluate_brdf_area(surface,moon_dir,light.sun_angular_radius),surface.roughness,)*moon_color"
+        ),
+        "moonlight bypasses the area BRDF or direct-lobe firefly bound"
+    );
+}
+
 /// TSUSHIMA-G's perturbation is worth nothing unless it runs before selection.
 ///
 /// A perturbation applied after `terrain_strongest_four` can only wobble an
@@ -578,8 +700,7 @@ fn ray_query_terrain_hit_uses_the_bounded_splat_unpack() {
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
         let terrain_hit = terrain_hit.as_str();
         assert!(
             !terrain_hit.contains("terrain_unpack_splats_painted("),
