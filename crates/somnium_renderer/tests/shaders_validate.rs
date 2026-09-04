@@ -554,6 +554,62 @@ fn sun_transmission_uses_sun_visibility() {
     );
 }
 
+/// Moonlight currently has no directional shadow receiver in the shading pass.
+///
+/// Reusing the thin-leaf transmission lobe without one makes every isolated
+/// back-facing grass texel emit an albedo-green pinprick under night exposure.
+/// Keep the ordinary moon BRDF, but do not restore transmitted moonlight until
+/// it can be multiplied by visibility traced from the receiver toward the moon.
+#[test]
+fn night_foliage_does_not_add_unshadowed_moon_transmission() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Phase 25M-2 (UE5 pattern): Directional Moonlight.")
+        .expect("the directional moonlight block is still there");
+    let end = source[start..]
+        .find("// Direct sunlight + directional moonlight")
+        .map(|offset| start + offset)
+        .expect("the sun/moon composition still follows moonlight setup");
+    let body = &source[start..end];
+
+    assert!(
+        body.contains("moonlight ="),
+        "ordinary reflected moonlight must remain available at night"
+    );
+    assert!(
+        !body.contains("transmitted_light"),
+        "moon transmission has no moon-direction shadow visibility and creates foliage pinpricks"
+    );
+}
+
+/// Moonlight predates the direct-lobe firefly bound and used to bypass it.
+///
+/// At night, exposure amplifies that omission precisely where sub-pixel leaf
+/// cards can catch a narrow Fresnel peak. The moon has nearly the same apparent
+/// angular radius as the sun, so it belongs on the same area-light BRDF path.
+#[test]
+fn moonlight_uses_the_bounded_area_brdf() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Phase 25M-2 (UE5 pattern): Directional Moonlight.")
+        .expect("the directional moonlight block is still there");
+    let end = source[start..]
+        .find("// Direct sunlight + directional moonlight")
+        .map(|offset| start + offset)
+        .expect("the sun/moon composition still follows moonlight setup");
+    let compact: String = source[start..end]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains(
+            "moonlight=clamp_specular_lobe(evaluate_brdf_area(surface,moon_dir,light.sun_angular_radius),surface.roughness,)*moon_color"
+        ),
+        "moonlight bypasses the area BRDF or direct-lobe firefly bound"
+    );
+}
+
 /// TSUSHIMA-G's perturbation is worth nothing unless it runs before selection.
 ///
 /// A perturbation applied after `terrain_strongest_four` can only wobble an

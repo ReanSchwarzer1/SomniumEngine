@@ -2168,22 +2168,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var moonlight = vec3<f32>(0.0);
         let sun_illuminance = dot(light.color, vec3<f32>(0.2126, 0.7152, 0.0722));
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
-        let is_foliage = (material.flags & 2u) != 0u;
 
         if moon_strength > 0.0 && light.moon_intensity > 0.0 {
             let moon_dir = normalize(light.moon_direction);
             let moon_color = vec3<f32>(0.55, 0.72, 1.0) * light.moon_intensity * moon_strength;
 
-            // `evaluate_brdf` already contains N.L. The previous extra
+            // The BRDF already contains N.L. The previous extra
             // multiply squared the front-face response, while its attempted
             // double-sided factor could not revive a back face after the BRDF
-            // had already returned zero.
-            moonlight = evaluate_brdf(surface, moon_dir) * moon_color;
+            // had already returned zero. Treat the moon as the same apparent
+            // disc size as the sun and keep its sub-pixel specular peaks under
+            // the direct-lobe energy bound as well.
+            moonlight = clamp_specular_lobe(
+                evaluate_brdf_area(surface, moon_dir, light.sun_angular_radius),
+                surface.roughness,
+            ) * moon_color;
 
-            // Transmitted moonlight for foliage leaves
-            if is_foliage && material.transmission > 0.0 {
-                moonlight += transmitted_light(surface, moon_dir, moon_color, material.transmission);
-            }
+            // Do not add the thin-leaf transmission lobe here. Unlike the sun,
+            // the moon has no directional shadow receiver yet, so transmission
+            // would make every isolated back-facing grass texel glow through
+            // terrain and neighbouring blades. Reflected moonlight remains.
         }
 
         // Direct sunlight + directional moonlight
