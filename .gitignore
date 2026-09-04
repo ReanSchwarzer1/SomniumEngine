@@ -125,6 +125,17 @@ dev records/phase DOOM/*
 !dev records/phase DOOM/DOOM-M.md
 !dev records/phase DOOM/DOOM-M_*.somtime
 
+# ── Phase TSUSHIMA (Ghost of Tsushima) ─────────────────────────────
+# Written after the fact, which is the failure PORTAL-0-C predicted: the phase's
+# records through I are in Git only because somebody reached for `git add -f`,
+# and a rule that works when you remember it is not a rule. TSUSHIMA-J was
+# written straight into an ignored path and would have been committed by nobody.
+!dev records/phase TSUSHIMA/
+dev records/phase TSUSHIMA/*
+!dev records/phase TSUSHIMA/TSUSHIMA-*.md
+!dev records/phase TSUSHIMA/TSUSHIMA-*.png
+!dev records/phase TSUSHIMA/TSUSHIMA-*.somtime
+
 # ── Phase PORTAL-0 (Source) ──────────────────────────────────────────────────
 # Same allowlist shape, and added in the same commit as the phase rather than
 # after it: MORROWIND-E2b found that `dev records/phase MORROWIND/` had been

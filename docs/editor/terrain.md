@@ -21,7 +21,34 @@ Click a tool so it highlights. Keys **1–6** pick the same tools.
 
 ## Foliage
 
-**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance. Foliage only grows on its paint layer and refuses steep ground. **Cull** / **LOD** / **Impostor** are **horizontal** metres: past LOD leaf/cutout parts drop; past Impostor only solid parts remain (there is no camera-facing billboard). Impostor `0` keeps every part.
+**F8** opens foliage paint on a selected terrain. Pick a kind in Details, then paint, erase, or place a single instance.
+
+### When a kind refuses to paint
+
+Some kinds place nothing until the ground underneath them is right, and that is deliberate rather than a fault. Thirteen of the twenty-five palette entries ask for a **terrain layer** first: pebbles want Gravel, Scree Rocks want Talus, Moss and Mossy Rocks want Mossy Rock, Nettles want Mud, Ferns and the deadwood want Forest Floor. Point one of them at a hillside that is still painted Grass and every candidate is rejected — which is correct, because a moss patch in the middle of a lawn is the artifact the rule exists to prevent.
+
+What changed is that the editor now **says so**. A stroke that places nothing writes one line to the Output Log naming the layer it wanted, the weight it needs, and the weight the ground actually has:
+
+> Foliage: Pebbles needs Gravel painted here — it wants a weight of 0.50 and the ground under the brush has at most 0.03.
+
+Two ways forward from there:
+
+- Paint the layer first with the terrain **Paint** brush, then paint the foliage over it. This is the intended workflow and what makes a gravel patch read as gravel.
+- Or set **Min layer** to `0` in the Foliage Brush section, which switches the test off for that brush. Grass, the shrubs, the flowers and every tree already ship at `0` and place on any ground that is not a cliff.
+
+**Max slope** is the other refusal, and it is reported the same way. A cliff face allows 90°; grass allows 40°.
+
+**Min layer** and **Max slope** are reset from the palette entry every time you change **Kind**, because they are facts about the thing being placed rather than about how you are working — a cliff face has to be allowed onto ground the grass default refuses. Set them after picking the kind, not before.
+
+### Distances
+
+**Cull** / **LOD** / **Impostor** are **horizontal** metres: past LOD leaf/cutout parts drop; past Impostor only solid parts remain (there is no camera-facing billboard). Impostor `0` keeps every part.
+
+### Vegetation shading
+
+Anything the palette imports as a cut-out or blended material is marked as vegetation: two-sided, translucent so a backlit leaf glows, and floored away from the wet-metal sheen thin surfaces otherwise pick up at night. This follows the **material**, not the exporter — a fern that arrives as `MASK` and a grass that arrives as `BLEND` are treated alike, which they were not before.
+
+The separate **Foliage card** material flag is off by default and should stay off for anything scanned or modelled. It bends the shading normal across the width of a card using `uv.x`, which is only meaningful when the material really is painted on flat cards with one blade per `0..1` sweep. On atlased plants — every entry in this palette — `uv.x` is the blade's address in the texture instead, and turning the flag on scatters the normals: blotches under a low sun and a sheet of white sparkle under a moon.
 
 ## LOD morph
 

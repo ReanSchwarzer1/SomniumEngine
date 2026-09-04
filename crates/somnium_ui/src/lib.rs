@@ -323,6 +323,7 @@ struct ToolHandles {
     foliage_layer: NodeHandle,
     foliage_smin: NodeHandle,
     foliage_smax: NodeHandle,
+    foliage_min_weight: NodeHandle,
 
     script_section: NodeHandle,
     script_add: NodeHandle,
@@ -500,6 +501,49 @@ pub(crate) const SNAP_ANGLE_NAMES: [&str; 5] =
 /// The degrees each entry means. Index 0 is off.
 pub(crate) const SNAP_ANGLE_VALUES: [f32; 5] = [0.0, 1.0, 5.0, 15.0, 45.0];
 
+/// How far the viewport's context bar is inset from the render, per side.
+///
+/// Named because two places need the same number and they disagreed: the bar
+/// is laid out with this margin, and the overflow rule has to subtract both
+/// sides of it from the width it thinks the bar has. It did not, and 24 px of
+/// phantom room is part of why controls were being sliced off the end.
+pub(crate) const CONTEXT_BAR_INSET: f32 = 12.0;
+
+/// Which context-bar clusters survive in `available` pixels.
+///
+/// Split out of [`UiManager::fit_context_bar`] so the decision can be tested
+/// without standing up a shell: the rule is arithmetic over four widths, and
+/// the thing worth pinning is that it drops in order, drops whole clusters, and
+/// never brings back one the owner does not want.
+///
+/// `widths[i]` is `None` for a cluster never yet seen visible. Those are always
+/// kept — a hidden node measures to zero, so dropping one on the strength of
+/// the zero it contributed would make its width unlearnable forever.
+fn context_bar_visibility(
+    widths: &[Option<f32>; UiManager::CONTEXT_BAR_CLUSTERS],
+    wanted: &[bool; UiManager::CONTEXT_BAR_CLUSTERS],
+    available: f32,
+) -> [bool; UiManager::CONTEXT_BAR_CLUSTERS] {
+    let mut show = *wanted;
+    let mut needed: f32 = (0..UiManager::CONTEXT_BAR_CLUSTERS)
+        .filter(|i| show[*i])
+        .map(|i| widths[i].unwrap_or(0.0))
+        .sum();
+
+    for i in 0..UiManager::CONTEXT_BAR_CLUSTERS {
+        if needed <= available {
+            break;
+        }
+        let Some(w) = widths[i] else { continue };
+        if !show[i] {
+            continue;
+        }
+        show[i] = false;
+        needed -= w;
+    }
+    show
+}
+
 const VIEWPORT_RESOLUTION_NAMES: [&str; 5] =
     ["Native", "2560×1440", "1920×1080", "1600×900", "1280×720"];
 
@@ -614,12 +658,18 @@ struct EditorLayout {
     viewport_float: NodeHandle,
     #[allow(dead_code)]
     vp_bar_h: NodeHandle,
-    /// The context bar's horizontal stack, so the overflow rule can ask what
-    /// the bar needs instead of guessing at a width.
+    /// The context bar's content column, opposite the reserved actions one.
+    ///
+    /// Read only by the layout tests now: the overflow rule works from each
+    /// cluster's own width rather than from one total for the stack, which is
+    /// what the single cached total got wrong.
+    #[allow(dead_code)]
     vp_stack: NodeHandle,
     /// The bar's reserved right-hand column: the overflow chevron and the
     /// float button, which the content beside them can never squeeze out.
     vp_actions: NodeHandle,
+    speed_cluster: NodeHandle,
+    res_cluster: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -1039,7 +1089,6 @@ pub struct UiManager {
     details_float: NodeHandle,
     log_float: NodeHandle,
     viewport_float: NodeHandle,
-    vp_stack: NodeHandle,
     /// The bar's reserved right-hand column: the overflow chevron and the
     /// float button, which the content beside them can never squeeze out.
     /// The viewport's context bar. Its own border is the empty strip between
@@ -1047,6 +1096,8 @@ pub struct UiManager {
     /// person can grab.
     vp_bar_h: NodeHandle,
     vp_actions: NodeHandle,
+    speed_cluster: NodeHandle,
+    res_cluster: NodeHandle,
     snap_cluster: NodeHandle,
     snap_grid_combo: NodeHandle,
     snap_angle_combo: NodeHandle,
@@ -1241,7 +1292,14 @@ pub struct UiManager {
     ///
     /// Measured once from a layout that had them all, rather than declared as a
     /// window width, so the rule stays right when the bar's contents change.
-    context_bar_full_width: Option<f32>,
+    /// Each collapsible cluster's width, learned while it was visible.
+    ///
+    /// Per cluster rather than one total for the bar, and re-learned rather
+    /// than frozen after the first frame — see [`Self::fit_context_bar`] for
+    /// what the single cached total got wrong.
+    context_bar_widths: [Option<f32>; Self::CONTEXT_BAR_CLUSTERS],
+    /// What the owners want on screen, before overflow subtracts from it.
+    context_bar_wanted: [bool; Self::CONTEXT_BAR_CLUSTERS],
     /// The header drag in flight, if there is one.
     panel_drag: Option<PanelDrag>,
     /// Whether a change to the floating set should be written to the layout.
@@ -1790,9 +1848,10 @@ impl UiManager {
             details_float: layout.details_float,
             log_float: layout.log_float,
             viewport_float: layout.viewport_float,
-            vp_stack: layout.vp_stack,
             vp_bar_h: layout.vp_bar_h,
             vp_actions: layout.vp_actions,
+            speed_cluster: layout.speed_cluster,
+            res_cluster: layout.res_cluster,
             snap_cluster: layout.snap_cluster,
             snap_grid_combo: layout.snap_grid_combo,
             snap_angle_combo: layout.snap_angle_combo,
@@ -1914,7 +1973,10 @@ impl UiManager {
             locale_grid: layout.locale_grid,
             locale_actions: layout.locale_actions,
             locale_open: false,
-            context_bar_full_width: None,
+            context_bar_widths: [None; Self::CONTEXT_BAR_CLUSTERS],
+            // The day cycle is the one cluster a scene can lack outright;
+            // `update_time_of_day` turns it on when there is an Environment.
+            context_bar_wanted: [true, true, true, false],
             panel_drag: None,
             remember_floating: true,
             floating_scales: std::collections::BTreeMap::new(),
@@ -2298,7 +2360,7 @@ impl UiManager {
         // arranges whatever tiles the new window built, so a scroll costs one
         // frame's rebuild rather than a frame of empty drawer.
         self.sync_content_tiles();
-        self.measure_context_bar();
+        self.fit_context_bar();
         self.request_visible_thumbnails();
         self.reanchor_open_popups();
         self.update_tooltip();
@@ -4271,10 +4333,6 @@ impl UiManager {
     }
 
     /// Publish the snapping and gizmo state to the viewport context bar.
-    ///
-    /// Also applies Unreal 5.6's overflow rule: below the collapse width the
-    /// whole cluster is hidden behind a chevron rather than clipped, because a
-    /// half-drawn control is worse than one you have to open.
     pub fn set_snap_state(
         &mut self,
         translate_m: f32,
@@ -4283,24 +4341,7 @@ impl UiManager {
         local_space: bool,
         select_only: bool,
     ) {
-        // Measured, not guessed. This used to read a 1600 px constant, so at
-        // 1280 the cluster collapsed into a chevron while the bar still had
-        // room for it, and the controls only appeared after a resize crossed
-        // the threshold. The bar can say what it needs; asking is both more
-        // accurate and immune to the chrome changing width later.
-        // The actions column is reserved, so what the middle of the bar has to
-        // fit in is whatever is left beside it.
-        let available = self.native_ui.screen_bounds(self.viewport_handle).w
-            - self.native_ui.desired_size(self.vp_actions).x;
-        let inline = match self.context_bar_full_width {
-            // Not measured yet. Stay inline so the next layout can measure it
-            // — a hidden node measures to zero, so the one way to learn the
-            // width is to have shown it once.
-            None => true,
-            Some(needed) => available >= needed,
-        };
-        self.native_ui.set_visibility(self.snap_cluster, inline);
-        self.native_ui.set_visibility(self.snap_overflow, !inline);
+        self.fit_context_bar();
 
         let grid = nearest_index(&SNAP_GRID_VALUES, translate_m);
         let angle = nearest_index(&SNAP_ANGLE_VALUES, rotate_deg);
@@ -4326,23 +4367,94 @@ impl UiManager {
         ));
     }
 
-    /// Learn what the context bar needs, once, from a layout that had it all.
+    /// How many collapsible clusters the viewport context bar has.
+    const CONTEXT_BAR_CLUSTERS: usize = 4;
+
+    /// Those clusters, **first to be dropped first**.
     ///
-    /// Called after `perform_layout`, because `desired_size` is only meaningful
-    /// once something has measured it. Recorded a single time: the cached width
-    /// is what keeps the rule from oscillating, since hiding the cluster shrinks
-    /// the stack and would otherwise immediately argue for showing it again.
-    fn measure_context_bar(&mut self) {
-        if self.context_bar_full_width.is_some() {
-            return;
+    /// The order is what a person can still do without each one, not what each
+    /// one costs. Snapping goes first because the chevron beside it opens the
+    /// same controls in a popup. Camera speed goes next because RMB + scroll
+    /// wheel in the viewport does the same job, and its own tooltip says so.
+    /// Resolution and the day-cycle scrub have no second route, so they stay
+    /// longest.
+    fn context_bar_clusters(&self) -> [NodeHandle; Self::CONTEXT_BAR_CLUSTERS] {
+        [
+            self.snap_cluster,
+            self.speed_cluster,
+            self.res_cluster,
+            self.time_cluster,
+        ]
+    }
+
+    /// Hide whole clusters, in order, until the context bar fits.
+    ///
+    /// # Why this replaced the rule that was here
+    ///
+    /// There was one rule and it governed one cluster: below a threshold the
+    /// snapping controls collapsed to a chevron. Everything else in the bar was
+    /// a bare child of a stack panel that clips to its cell — and a horizontal
+    /// stack does not shrink, it lays the overflow out past the edge where it
+    /// clips to nothing. So the bar's failure mode was to *slice*: "Resolution"
+    /// truncated mid-word to "Resoluti", the combo box it names gone, and
+    /// nothing on screen to say a control had been lost.
+    ///
+    /// Two measurement faults put that within reach of ordinary window sizes:
+    ///
+    /// - The needed width was cached **once**, the first time the snap cluster
+    ///   was visible. The day-cycle cluster is hidden until the scene has an
+    ///   Environment, so on almost every startup the number was learned without
+    ///   it and under-read the bar by that cluster's whole 169 px.
+    /// - The available width was the viewport's, less the actions column. The
+    ///   bar is inset 12 px on each side and those 24 px were never subtracted.
+    ///
+    /// Together the rule could believe the bar fitted with 193 px less room
+    /// than it needed, and the stack cut the difference off in silence.
+    ///
+    /// So: every cluster's width is learned separately and whenever it happens
+    /// to be visible, the sum is recomputed each layout rather than frozen, and
+    /// a cluster that has never been measured is never dropped — a hidden node
+    /// measures to zero, so showing it once is the only way to learn it.
+    fn fit_context_bar(&mut self) {
+        for (i, cluster) in self.context_bar_clusters().into_iter().enumerate() {
+            if self.native_ui.visibility(cluster) {
+                let w = self.native_ui.desired_size(cluster).x;
+                if w > 1.0 {
+                    self.context_bar_widths[i] = Some(w);
+                }
+            }
         }
-        if !self.native_ui.visibility(self.snap_cluster) {
-            return;
+
+        // The bar's inset is real width the stack never gets. Leaving it out is
+        // half of how the old rule came to believe a short bar fitted.
+        let inset = 2.0 * CONTEXT_BAR_INSET;
+        let available = self.native_ui.screen_bounds(self.viewport_handle).w
+            - self.native_ui.desired_size(self.vp_actions).x
+            - inset;
+
+        let show =
+            context_bar_visibility(&self.context_bar_widths, &self.context_bar_wanted, available);
+        for (i, cluster) in self.context_bar_clusters().into_iter().enumerate() {
+            self.native_ui.set_visibility(cluster, show[i]);
         }
-        let needed = self.native_ui.desired_size(self.vp_stack).x;
-        if needed > 1.0 {
-            self.context_bar_full_width = Some(needed);
+        // The chevron stands in for the snap cluster, and only for it.
+        self.native_ui.set_visibility(self.snap_overflow, !show[0]);
+    }
+
+    /// Say whether a cluster is wanted at all, independently of whether it fits.
+    ///
+    /// Two different reasons hide a cluster and they must not be confused: a
+    /// scene with no Environment has nothing for the day-cycle scrub to scrub,
+    /// and a narrow bar has no room for it. Overflow may only ever subtract
+    /// from what the owner asked for, or the first wide window would bring back
+    /// a control that has nothing to control.
+    fn want_context_cluster(&mut self, cluster: NodeHandle, wanted: bool) {
+        for i in 0..Self::CONTEXT_BAR_CLUSTERS {
+            if self.context_bar_clusters()[i] == cluster {
+                self.context_bar_wanted[i] = wanted;
+            }
         }
+        self.fit_context_bar();
     }
 
     /// Publish the corner axis widget. `axes` are the world X/Y/Z directions
@@ -6145,8 +6257,10 @@ impl UiManager {
     /// which is craft defect C8's rule applied to presence rather than to
     /// enablement.
     pub fn update_time_of_day(&mut self, hour: Option<f32>) {
-        let visible = hour.is_some();
-        self.native_ui.set_visibility(self.time_cluster, visible);
+        // Wanted, not shown: a narrow bar may still overflow it away, and the
+        // two decisions have to stay separable or one will keep undoing the
+        // other.
+        self.want_context_cluster(self.time_cluster, hour.is_some());
         let Some(hour) = hour else {
             self.time_shown = None;
             return;
@@ -6839,9 +6953,10 @@ impl UiManager {
 
     /// Show or hide the Foliage section and refresh it (Phase 17C).
     ///
-    /// `values` is `[density, seed, max_slope_deg, layer, scale_min, scale_max]`
-    /// plus the enable flag.
-    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 10], [bool; 4])>) {
+    /// `values` is `[density, radius, max_slope_deg, kind, scale_min, scale_max,
+    /// min_layer_weight]` followed by the component's four distances, plus the
+    /// enable flags.
+    pub fn update_foliage_inspector(&mut self, values: Option<([f32; 11], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
         let fields = [
@@ -6851,11 +6966,12 @@ impl UiManager {
             h.foliage_layer,
             h.foliage_smin,
             h.foliage_smax,
+            h.foliage_min_weight,
         ];
         match values {
             Some((v, flags)) => {
                 self.native_ui.set_visibility(section, true);
-                for (f, val) in fields.iter().zip(v[..6].iter()) {
+                for (f, val) in fields.iter().zip(v[..7].iter()) {
                     self.native_ui
                         .send(NumericFieldMessage::set_value(*f, *val));
                 }
@@ -7245,6 +7361,7 @@ impl UiManager {
             (h.foliage_layer, FoliageBrushField::Kind),
             (h.foliage_smin, FoliageBrushField::ScaleMin),
             (h.foliage_smax, FoliageBrushField::ScaleMax),
+            (h.foliage_min_weight, FoliageBrushField::MinLayerWeight),
         ];
         for msg in msgs {
             if msg.destination == self.animation_timeline.editor
@@ -9428,6 +9545,158 @@ mod zeta_layout_tests {
         assert!((context.h - theme::NOCTURNE.density.toolbar).abs() < 0.1);
         assert!(context.x >= viewport.x + 11.9);
         assert!(context.x + context.w <= viewport.x + viewport.w - 11.9);
+    }
+
+    /// Build the shell at a real window size, laid out.
+    ///
+    /// `ChromeLayout::default()` carries `viewport: 0.0` — the columns only
+    /// mean anything once `resolved` has divided a real window between them,
+    /// and a test that skips it measures a 200 px viewport whatever width it
+    /// asked for.
+    fn shell_at(width: f32) -> (UserInterface, EditorLayout) {
+        let mut ui = UserInterface::new(width, 1080.0);
+        let chrome = crate::layout_persist::ChromeLayout::default().resolved(width, 1080.0);
+        let layout = build_editor_layout(&mut ui, 0, chrome);
+        ui.perform_layout();
+        (ui, layout)
+    }
+
+    /// The label and the control it names overflow as one thing, or not at all.
+    ///
+    /// This grouping **is** the fix. The bar was a flat row with a single
+    /// cluster in it, so when it ran out of room the stack laid the remainder
+    /// out past its cell and the clip ate it mid-control: "Resolution"
+    /// truncated to "Resoluti" with its combo box gone. A label that can be
+    /// separated from its control will eventually be separated from it.
+    #[test]
+    fn every_context_bar_control_belongs_to_a_cluster_with_its_label() {
+        let (ui, layout) = shell_at(1920.0);
+        for (name, cluster, control) in [
+            (
+                "camera speed",
+                layout.speed_cluster,
+                layout.camera_speed_slider,
+            ),
+            ("resolution", layout.res_cluster, layout.viewport_res_combo),
+            ("snap", layout.snap_cluster, layout.snap_grid_combo),
+            ("day cycle", layout.time_cluster, layout.time_slider),
+        ] {
+            assert!(
+                ui.is_under(control, cluster),
+                "the {name} control is not inside its cluster, so overflow could drop \
+                 its label and keep the control, or the other way round"
+            );
+            assert!(
+                ui.is_under(cluster, layout.vp_stack),
+                "the {name} cluster is not in the bar's content column"
+            );
+        }
+    }
+
+    /// The whole bar fits on the window this editor is designed around.
+    ///
+    /// Measured, not assumed. The four clusters, the reserved actions column
+    /// and the bar's own 24 px of inset all come out of the viewport's width,
+    /// and at 1920 with the default dock columns they have to leave something
+    /// over — otherwise the ordinary case is already the overflow case, which
+    /// is what it had quietly become.
+    #[test]
+    fn the_whole_context_bar_fits_a_1920_window() {
+        let (mut ui, layout) = shell_at(1920.0);
+        ui.set_visibility(layout.time_cluster, true);
+        ui.perform_layout();
+
+        let needed: f32 = [
+            layout.speed_cluster,
+            layout.res_cluster,
+            layout.snap_cluster,
+            layout.time_cluster,
+        ]
+        .into_iter()
+        .map(|h| ui.desired_size(h).x)
+        .sum::<f32>()
+            + ui.desired_size(layout.vp_actions).x
+            + 2.0 * CONTEXT_BAR_INSET;
+        let available = bounds(&ui, layout.viewport_handle).w;
+
+        assert!(
+            needed <= available,
+            "the context bar wants {needed:.0} px and the viewport gives it {available:.0} \
+             — every control after the overflow point would be clipped away"
+        );
+    }
+
+    /// Overflow sheds whole clusters, in a fixed order, and only downward.
+    #[test]
+    fn the_context_bar_sheds_clusters_in_order() {
+        // Snap, camera speed, resolution, day cycle — the order they go in.
+        let widths = [Some(480.0), Some(330.0), Some(130.0), Some(170.0)];
+        let all = [true; UiManager::CONTEXT_BAR_CLUSTERS];
+
+        // Everything fits.
+        assert_eq!(
+            context_bar_visibility(&widths, &all, 1200.0),
+            [true, true, true, true]
+        );
+        // Short by a little: snapping goes, and only snapping. It is the one
+        // with a chevron that opens the same controls.
+        assert_eq!(
+            context_bar_visibility(&widths, &all, 900.0),
+            [false, true, true, true]
+        );
+        // Shorter: camera speed follows, because RMB + wheel still sets it.
+        assert_eq!(
+            context_bar_visibility(&widths, &all, 400.0),
+            [false, false, true, true]
+        );
+        // Resolution and the day cycle have no second route, so they last.
+        assert_eq!(
+            context_bar_visibility(&widths, &all, 200.0),
+            [false, false, false, true]
+        );
+
+        // Monotone. Nothing may come back as the bar narrows, or the controls
+        // flicker in and out while a splitter is dragged.
+        let mut prev = context_bar_visibility(&widths, &all, 2000.0);
+        for w in (0..2000).step_by(13).rev() {
+            let now = context_bar_visibility(&widths, &all, w as f32);
+            for i in 0..UiManager::CONTEXT_BAR_CLUSTERS {
+                assert!(
+                    !(now[i] && !prev[i]),
+                    "cluster {i} reappeared as the bar narrowed to {w}"
+                );
+            }
+            prev = now;
+        }
+    }
+
+    /// Two reasons to hide a cluster, and they must not be confused.
+    #[test]
+    fn overflow_can_only_subtract_from_what_the_scene_wants() {
+        let widths = [Some(480.0), Some(330.0), Some(130.0), Some(170.0)];
+        // A scene with no Environment has nothing for the day cycle to scrub.
+        // No amount of room may put it back.
+        let wanted = [true, true, true, false];
+        for available in [200.0f32, 900.0, 4000.0] {
+            let show = context_bar_visibility(&widths, &wanted, available);
+            assert!(
+                !show[3],
+                "the day cycle came back at {available} px on a scene that has no clock"
+            );
+        }
+    }
+
+    /// A cluster that has never been measured is never dropped.
+    ///
+    /// A hidden node measures to zero. Dropping one for the zero it contributed
+    /// itself would make its width unlearnable, and it would never be seen
+    /// again at any window size.
+    #[test]
+    fn an_unmeasured_cluster_is_kept_so_it_can_be_measured() {
+        let widths = [None, Some(330.0), Some(130.0), Some(170.0)];
+        let all = [true; UiManager::CONTEXT_BAR_CLUSTERS];
+        let show = context_bar_visibility(&widths, &all, 10.0);
+        assert!(show[0], "an unmeasured cluster was hidden on its own zero");
     }
 
     #[test]

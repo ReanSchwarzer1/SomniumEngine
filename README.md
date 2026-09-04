@@ -157,7 +157,7 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | CONTROL | Northlight | **Editor reach** — property seam, asset database, drag-and-drop, viewport control, preferences, scene lifecycle, curves, time of day, clouds, weather, decals | **A–O complete** |
 | MORROWIND | NetImmerse | The engine's non-renderer half — see below | **In progress** |
 | PORTAL-0 | Source | Performance audit and engineering health | **Complete** |
-| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, parallax on cliffs, a 25-entry foliage palette, and four kinds of water | **A–I in tree**, H's contrast-with-distance open |
+| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, parallax on cliffs, a 25-entry foliage palette, and four kinds of water | **A–J in tree**, H's contrast-with-distance open |
 
 ### Phase MORROWIND, by track
 
@@ -233,7 +233,7 @@ construction. Where the rest of the frame goes is in
 - **World partition** — double-precision cell hashing, camera/player/volume want-state, transactional unload that persists real ECS components through the schema serializer
 - **Voxel world** — 32³ padded chunks, `block_mesh` face culling, 3 LOD levels, sparse edit overlay
 - **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching, real-time sculpting and texture painting
-- **Foliage painting** — brush over terrain with density, size and single-instance placement
+- **Foliage painting** — brush over terrain with density, size and single-instance placement. A 25-entry CC0 palette; entries that require a terrain layer underneath them say so in the log when they refuse, and the requirement is a brush setting rather than a fixed property of the entry
 
 **Scripting & simulation**
 - **Luau** (`mlua`, interpreter only) — sandboxed, with a deferred command buffer as the only route into the world, generated type declarations, and acceptance budgets asserted as tests

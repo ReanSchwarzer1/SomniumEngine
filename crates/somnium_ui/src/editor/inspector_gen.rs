@@ -368,7 +368,7 @@ mod tests {
             &PropertyEditorRegistry::standard(),
             &EditingRulesRegistry::default(),
         );
-        assert_eq!(panel.rows.len(), 17);
+        assert_eq!(panel.rows.len(), 18);
         assert!(
             panel
                 .rows

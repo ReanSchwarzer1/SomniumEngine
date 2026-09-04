@@ -21,6 +21,18 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 
 Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings, a pass-order **Graph**, and CPU zones over the scene (including Water prepass / reflection / shade). Camera speed is the slider next to the m/s readout. **Resolution** caps the 3D target (Native, 2560×1440, 1920×1080, 1600×900, 1280×720) while the window and UI stay at display pixels — pick **1920×1080** for fullscreen on a 2K panel. **FSR** (Post Processing, default on) temporally reconstructs that internal target to the window; it replaces TAA and the bilinear blit while enabled. Frame generation is not in the engine. `SOMNIUM_FSR=0` kills it at startup. Water and other transparents have no reactive mask yet, so they can ghost under camera motion.
 
+### When the bar runs out of room
+
+The bar holds four groups — camera speed, **Resolution**, the snapping cluster, and the day-cycle scrub — plus a reserved right-hand end that always keeps the overflow chevron and **Float**. When the viewport is too narrow for all four, whole groups are hidden in a fixed order:
+
+1. **Snapping** goes first. The chevron that appears in its place opens the same controls.
+2. **Camera speed** goes next. **RMB + scroll wheel** in the viewport still sets it.
+3. **Resolution** and the **day cycle** go last, because neither has a second route.
+
+A group is never half-hidden, and a label is never separated from the control it names. If you have seen "Resoluti" with its dropdown missing, that was the previous rule slicing the bar at its cell edge; it is now measured every layout, per group, including the bar's own 12 px inset on each side.
+
+Widening the window, or floating the Outliner and Details panels out of the dock, brings the groups back in reverse order. The day-cycle scrub is the exception: it stays hidden on a scene with no Environment however much room there is, because there is no clock for it to scrub.
+
 ## Dynamic resolution
 
 Off by default, and deliberately. It is the only control in the engine that

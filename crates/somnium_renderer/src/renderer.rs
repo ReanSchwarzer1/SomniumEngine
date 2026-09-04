@@ -1410,6 +1410,10 @@ impl SomniumRenderer {
                             crate::material::pool::MATERIAL_FLAG_FOLIAGE
                         } else {
                             0
+                        } | if mat.foliage_card {
+                            crate::material::pool::MATERIAL_FLAG_FOLIAGE_CARD
+                        } else {
+                            0
                         },
                     },
                 );

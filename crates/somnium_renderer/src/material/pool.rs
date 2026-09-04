@@ -65,10 +65,23 @@ pub const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 1;
 
 /// `GpuMaterial::flags` bit 1 — vegetation (Phase 17E).
 ///
-/// Deliberately separate from `transmission`, which glass carries too: only a
-/// leaf should get the curved-card normal treatment in `shading.wgsl`. The
-/// shader tests `(flags & 2u)`.
+/// Deliberately separate from `transmission`, which glass carries too: a leaf
+/// wants two-sided transmitted light and a roughness floor, and a pane of glass
+/// wants neither. The shader tests `(flags & 2u)`.
 pub const MATERIAL_FLAG_FOLIAGE: u32 = 1 << 1;
+
+/// `GpuMaterial::flags` bit 2 — flat cut-out cards (Phase TSUSHIMA-J).
+///
+/// Split out of [`MATERIAL_FLAG_FOLIAGE`], because the two claims are not the
+/// same and treating them as one broke every plant in the palette. "Vegetation"
+/// is true of a scanned grass tuft; "a flat card whose `uv.x` runs across the
+/// blade" is not, and only the second licenses `shading.wgsl` to rotate the
+/// normal by `uv.x`. On an atlased tuft that rotation is keyed to where the
+/// blade sits in the texture, so neighbouring blades bend up to 60 degrees
+/// apart and the field turns to noise.
+///
+/// The shader tests `(flags & 4u)`.
+pub const MATERIAL_FLAG_FOLIAGE_CARD: u32 = 1 << 2;
 
 impl GpuMaterial {
     /// Rebuild the frozen 80-byte runtime payload from an authored material.
@@ -99,6 +112,10 @@ impl GpuMaterial {
                 0
             } | if asset.foliage {
                 MATERIAL_FLAG_FOLIAGE
+            } else {
+                0
+            } | if asset.foliage_card {
+                MATERIAL_FLAG_FOLIAGE_CARD
             } else {
                 0
             },

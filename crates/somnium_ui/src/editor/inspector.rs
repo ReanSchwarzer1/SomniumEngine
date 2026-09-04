@@ -176,6 +176,10 @@ pub(crate) fn build_inspector(
     let foliage_layer = number(ui, foliage_section, "Kind", 1.0, "");
     let foliage_smin = number(ui, foliage_section, "Scale min", 0.01, "");
     let foliage_smax = number(ui, foliage_section, "Scale max", 0.01, "");
+    // The escape hatch for the layer filter. Next to the rest of the brush
+    // because that is where someone looks after the log tells them a dab was
+    // refused for the ground it was over.
+    let foliage_min_weight = number(ui, foliage_section, "Min layer", 0.05, "");
     ui.set_visibility(foliage_section, false);
 
     let script_section = section(ui, parent, "Scripts");
@@ -234,6 +238,7 @@ pub(crate) fn build_inspector(
         foliage_layer,
         foliage_smin,
         foliage_smax,
+        foliage_min_weight,
         script_section,
         script_add,
         script_list,

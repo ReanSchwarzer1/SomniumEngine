@@ -609,7 +609,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_height(theme::NOCTURNE.density.toolbar)
             .with_vertical_alignment(VerticalAlignment::Top)
-            .with_margin(Thickness::uniform(12.0))
+            .with_margin(Thickness::uniform(crate::CONTEXT_BAR_INSET))
             // Translucent over the render so the scene stays readable behind
             // the bar; the hairline is what keeps it legible on a bright sky.
             .with_background(theme::with_alpha(theme::BG_VOID, 0xB8))
@@ -646,6 +646,20 @@ pub(crate) fn build_editor_layout(
     .build();
     let vp_stack_h = ui.add_node(vp_stack, vp_bar_grid_h);
 
+    // ── Everything in this bar belongs to a cluster ─────────────────────────
+    //
+    // The bar used to be a flat row of controls with one cluster in the middle
+    // of it, and only that cluster could collapse. When the row ran out of room
+    // the rest of it was *sliced*: a label truncated mid-word, the control
+    // beside it gone, and no indication that anything had happened. Grouping
+    // makes the unit of overflow a whole control-with-its-label, which is the
+    // only unit that degrades legibly — see `fit_context_bar`.
+    let speed_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let speed_cluster = ui.add_node(speed_cluster, vp_stack_h);
+
     let cam_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 10.0,
         top: 6.0,
@@ -655,7 +669,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::Label)
     .with_text("Camera Speed")
     .build();
-    ui.add_node(cam_lbl, vp_stack_h);
+    ui.add_node(cam_lbl, speed_cluster);
 
     let cam_slider_node = SliderBuilder::new(
         WidgetBuilder::new()
@@ -670,7 +684,7 @@ pub(crate) fn build_editor_layout(
     )
     .with_value(0.5)
     .build();
-    let camera_speed_slider = ui.add_node(cam_slider_node, vp_stack_h);
+    let camera_speed_slider = ui.add_node(cam_slider_node, speed_cluster);
 
     // Numeric readout, updated as the slider (or RMB+wheel) changes speed.
     let cam_val = TextBuilder::new(
@@ -686,7 +700,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::MonoStrong)
     .with_text("5.0 m/s")
     .build();
-    let camera_speed_label = ui.add_node(cam_val, vp_stack_h);
+    let camera_speed_label = ui.add_node(cam_val, speed_cluster);
 
     // Play/Pause/Stop live on the main toolbar (Phase 26-C).
 
@@ -703,6 +717,14 @@ pub(crate) fn build_editor_layout(
         22.0,
     );
 
+    // The label and the combo travel together. Apart, the bar could and did
+    // keep "Resoluti" and drop the control it names.
+    let res_cluster =
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build();
+    let res_cluster = ui.add_node(res_cluster, vp_stack_h);
+
     let res_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 14.0,
         top: 6.0,
@@ -712,7 +734,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::Label)
     .with_text("Resolution")
     .build();
-    ui.add_node(res_lbl, vp_stack_h);
+    ui.add_node(res_lbl, res_cluster);
 
     let viewport_res_combo_node = ComboBoxBuilder::new(
         WidgetBuilder::new()
@@ -728,7 +750,7 @@ pub(crate) fn build_editor_layout(
     .with_selected(0)
     .with_font_id(font_id)
     .build();
-    let viewport_res_combo = ui.add_node(viewport_res_combo_node, vp_stack_h);
+    let viewport_res_combo = ui.add_node(viewport_res_combo_node, res_cluster);
 
     // ── CONTROL-G: the snap cluster ─────────────────────────────────────────
     //
@@ -2105,6 +2127,8 @@ pub(crate) fn build_editor_layout(
         viewport_float,
         vp_stack: vp_stack_h,
         vp_actions: vp_actions_h,
+        speed_cluster,
+        res_cluster,
         snap_cluster,
         snap_grid_combo,
         snap_angle_combo,

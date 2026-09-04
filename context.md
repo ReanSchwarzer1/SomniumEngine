@@ -1809,8 +1809,9 @@ without a valid visual-effect claim.
 
 Terrain photorealism, planned as nine sub-phases in
 [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). **All nine are in tree
-and ship on.** The one item of the plan not done is H's third, re-injecting
-contrast with distance instead of fading detail out.
+and ship on**, plus an unplanned J that fixes three things the first nine left
+visible. The one item of the plan not done is H's third, re-injecting contrast
+with distance instead of fading detail out.
 
 The phase opened from a question about the BRDF. The audit put the BRDF fifth.
 
@@ -1832,6 +1833,7 @@ geometry rather than material, which is why B through E came before F.
 | H / INK, second half | Three macro octaves at 1 km / 100 m / 10 m, and a hue shift driven by C's baked sky visibility |
 | I / GRAVEL | Parallax on cliffs, in the projection's own frame; layer-weight rejection and tilt in the foliage funnel |
 | I, editor pass | 25-entry foliage palette, nine Details controls, `Create -> Terrain (Empty)`, and four kinds of water |
+| J / KIRIKO | The curved-card normal split off `FOLIAGE`, vegetation lighting keyed on the material rather than the exporter, a foliage brush that says why it refused, and a viewport bar that drops whole controls instead of halves |
 
 Every one has an environment-variable A/B rail, and the records carry the
 measurement each landed on. Three corrected the plan rather than following it:
@@ -1852,6 +1854,16 @@ measurement each landed on. Three corrected the plan rather than following it:
 - I's plan says the foliage funnel "already does slope, layer-weight, radius and
   distance culling". It did not do layer-weight: `surface_sample` computed the
   weight and `ground_sample` threw it away.
+- I connected that layer test to thirteen of the twenty-five palette entries and
+  did not connect anything to say when it fired. J found the brush being
+  reported as broken for refusing correctly, and there is a rule in that: a
+  filter and the message explaining it are one feature, and shipping the half
+  that says no is worse than shipping neither.
+- The `FOLIAGE` material flag had meant three things since 17E, and only two of
+  them were true of the assets it was set on. J.1 has the measurement; the
+  short version is that the palette's plants are atlased modelled geometry and
+  the flag claimed they were flat cards. Four separate phases had already
+  attacked the symptoms of that as if they were lighting faults.
 - The asset fetch script destroyed the four committed Phase 17E foliage models
   before anyone read its log. Python emits CRLF on Windows, `read` left the CR
   on the last field, the last field was the MD5, so every hash compared unequal
@@ -2126,6 +2138,44 @@ Each entry is deliberately short. The full argument lives in the phase record
 named at the end of it.
 
 ### The renderer
+
+**"Vegetation" and "a flat card" were one material flag, and the difference was
+every plant in the game.** `MATERIAL_FLAG_FOLIAGE` turned on three things at
+once: two-sided transmitted light, a roughness floor that keeps a leaf from
+reading as wet metal at night, and a curved-*card* normal that rotates the
+shading normal about the blade's long axis by an angle taken from `uv.x`. The
+first two are true of any vegetation. The third is only meaningful when the
+material really is painted on flat cards whose UV runs 0..1 across one blade,
+and **nothing in this engine's palette is**: a Poly Haven grass tuft is
+seventeen modelled clusters sharing one *atlas*, so `uv.x` is the blade's
+address in the texture. Measured, not assumed — `u` spans 0.016 to 0.996 across
+each primitive and vertex-normal coherence runs 0.22 to 0.88, which is curved
+geometry, not a plate.
+
+The rotation is ±60°, so two blades whose art sits at opposite ends of the sheet
+were bent 120° apart from one another. That is a ground plane of scattered
+normals, and it explains a symptom that had resisted every lighting change: dark
+blotches under a low sun, a sheet of white specular sparkle under a moon, wrong
+at every distance and under every sky, because it was never a lighting fault at
+all. `MATERIAL_FLAG_FOLIAGE_CARD` now carries the card claim on its own.
+
+It is **authored, never inferred**, and that is the whole lesson of the entry.
+Inference is what put it here: the flag was set from the `*_alpha_*` sidecar
+convention, which identifies a cut-out — not a card. Geometry cannot separate
+the two either, because a crossed-quad billboard *is* a card and has exactly the
+normal spread of a modelled tuft that is not one. A flag that cannot be checked
+must be asked for. (TSUSHIMA-J)
+
+**Which plants got leaf lighting depended on who exported them.** The palette
+promoted a material to vegetation when its `alphaMode` was `BLEND`, which is
+what Poly Haven's grass and tree leaves happen to be. Ferns, shrubs, dandelions
+and nettles export as `MASK`, and a few arrive `OPAQUE` with the cut-out in a
+sidecar. So a fern was lit as a solid dielectric — no transmission, no
+two-sidedness, so dark, flat, and missing every back face — because of a field
+in a file, and nothing about the plant said so. The test is "not `OPAQUE`" now,
+which still excludes tree bark because on every multi-material tree here the
+bark is the opaque part. A capability test that keys on an exporter's habit is a
+coin toss dressed as a rule. (TSUSHIMA-J)
 
 **Terrain used to shade in its own pass, and it cost more than it looked.**
 `TerrainPass` ran after the visibility pass, after the acceleration-structure
@@ -2598,6 +2648,49 @@ does not shrink; it places the overflow past the edge. The control added most
 recently is the one that goes, and in a bar of viewport options the newest one
 was the button that puts the viewport back in the window. The actions get a
 reserved `auto` column and the content column truncates instead.
+
+**Truncating is not degrading, and "the content column truncates instead" was
+half a fix.** Reserving the actions column saved the two controls at the end and
+left everything before them to be *sliced*: the viewport bar was seen keeping
+"Resoluti" with the combo box it names gone, and nothing on screen to say a
+control had been lost. Only one group in the bar could collapse, and the rest
+were bare siblings of a clipping stack — so the unit of overflow was the pixel
+rather than the control.
+
+Two measurement faults put that in reach of an ordinary window. The width the
+bar needed was cached **once**, the first time the snapping cluster was visible,
+and the day-cycle cluster is hidden until the scene has an Environment — so on
+almost every startup the number was learned without it and under-read the bar by
+that cluster's whole 169 px. The width the bar *had* was the viewport's less the
+actions column, and the bar is inset 12 px on each side, so 24 px of room it
+never had was counted twice over. Together the rule could believe a bar fitted
+with 193 px less space than it needed, and the stack cut the difference off in
+silence.
+
+Now every control sits in a cluster with its own label, each cluster's width is
+learned separately and re-measured every layout rather than frozen, and clusters
+are dropped whole in a fixed order — snapping first because a chevron opens the
+same controls, camera speed next because RMB + wheel still sets it, resolution
+and the day cycle last because neither has a second route. A cluster that has
+never been visible is never dropped, because a hidden node measures to zero and
+hiding it is what would stop its width ever being learned. (TSUSHIMA-J)
+
+**A brush that correctly places nothing still owes an explanation.** Thirteen of
+the twenty-five foliage palette entries carry a `min_layer_weight`: pebbles want
+Gravel under them, moss wants Mossy Rock, nettles want Mud. Pointed at a terrain
+still painted Grass, every candidate is rejected — which is right, and is the
+whole reason a gravel patch reads as gravel rather than fading into a lawn. What
+was wrong is that `paint` returned a count and the caller only spoke when it was
+non-zero, so a refusal was **completely silent**. Click, click, click, no
+instances, no message, and no way to tell a working brush from a broken one; it
+was reported as a broken brush, which is exactly what it looked like.
+
+The rejection stayed. It now comes back as a report — how many were refused, for
+which reason, and the strongest layer weight actually found — so the log can say
+"Pebbles needs Gravel painted here: it wants 0.50 and the ground has at most
+0.03", once per stroke rather than once per dab. **Min layer** is in the Foliage
+Brush section beside it, because being told why is only half an answer if the
+rule cannot be relaxed. (TSUSHIMA-J)
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **The overlays painted over a window are not widgets, so they do not travel.**

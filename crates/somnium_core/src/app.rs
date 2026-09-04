@@ -1128,6 +1128,11 @@ pub struct Engine<G: GameApp> {
     foliage_stroke_seed: u32,
     /// True while the left button is held during a foliage stroke.
     foliage_painting: bool,
+    /// Whether this stroke has already explained why it is placing nothing.
+    ///
+    /// One message per stroke. A brush dabs on every mouse-move, so a refusal
+    /// reported per dab would bury the log the moment anyone dragged.
+    foliage_refusal_reported: bool,
     /// Phase 17B: static heightfield body per terrain, with the terrain
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
@@ -1613,6 +1618,7 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_batch: Vec::new(),
             foliage_stroke_seed: 0,
             foliage_painting: false,
+            foliage_refusal_reported: false,
             terrain_colliders: std::collections::HashMap::new(),
             log_rx: Some(log_rx),
             shortcut_modifiers: somnium_ui::message::Modifiers::default(),
@@ -3601,6 +3607,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ..
             } = &event
             {
+                // A new stroke gets a new chance to explain itself. Latched
+                // for the rest of the drag so a held brush cannot repeat it
+                // once per mouse-move.
+                self.foliage_refusal_reported = false;
                 self.foliage_painting = self.paint_foliage_dab();
                 if self.foliage_painting {
                     return;
@@ -4256,6 +4266,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             f32::from(brush.kind),
                             brush.scale_min,
                             brush.scale_max,
+                            brush.min_layer_weight,
                             f.foliage_shadow_distance,
                             f.cull_distance,
                             f.lod_distance,
@@ -7376,30 +7387,45 @@ impl<G: GameApp> Engine<G> {
             }
         };
 
-        // Vegetation is almost always exported as BLEND — Poly Haven's grass
-        // and leaves are. Left that way it goes through the sorted forward
-        // pass: per-object-sorted draws with no depth write, so blades sort
-        // wrongly against each other, cast no shadows, and skip GPU culling.
-        // Re-tagging as MASK moves them to the visibility buffer where they
-        // belong. These particular models are modelled blades with JPEG
-        // textures and carry no alpha, so the cutout never fires — the win is
-        // the opaque path. Alpha-carded assets get the clipping for free.
+        // Which pieces of a palette model are leaves, and what that implies.
+        //
+        // **The test is "not OPAQUE", not "is BLEND"**, and the difference was
+        // half the palette. Poly Haven exports the same kind of plant three
+        // ways depending on who authored it: grass and tree leaves come out
+        // BLEND, ferns and shrubs and dandelions and nettles come out MASK, and
+        // a few arrive OPAQUE with the cut-out in an `*_alpha_*` sidecar that
+        // `load_gltf` folds in. Keying on BLEND alone meant a fern was lit as a
+        // solid dielectric — no transmission, no two-sidedness, so it was dark,
+        // flat, and missing every back face — purely because of which exporter
+        // its author used. Nothing about the plant said so.
+        //
+        // OPAQUE is still excluded, and that is what keeps trunks solid: on
+        // every multi-material tree here the bark is OPAQUE and only the leaf
+        // material is not.
+        //
+        // Re-tagging BLEND as MASK is a separate win: left blended it goes
+        // through the sorted forward pass — per-object-sorted, no depth write —
+        // so blades sort wrongly against each other, cast no shadows, and skip
+        // GPU culling. MASK puts them in the visibility buffer where they
+        // belong. Models that carry no alpha never fire the cutout and simply
+        // gain the opaque path; alpha-carded ones get the clipping for free.
         for m in &mut scene.materials {
-            if m.alpha_mode == somnium_asset::AlphaMode::Blend {
-                m.alpha_mode = somnium_asset::AlphaMode::Mask;
-                if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
-                    m.alpha_cutoff = 0.5;
-                }
-                // Palette entries are known vegetation. Re-routing a material
-                // to the opaque visibility path must retain the semantic data
-                // that activates curved normals, the roughness floor, and
-                // two-sided transmission in deferred shading. Limit this to
-                // the originally blended pieces so opaque trunks stay solid.
-                m.foliage = true;
-                m.double_sided = true;
-                if m.transmission <= 0.0 {
-                    m.transmission = 0.5;
-                }
+            if m.alpha_mode == somnium_asset::AlphaMode::Opaque {
+                continue;
+            }
+            m.alpha_mode = somnium_asset::AlphaMode::Mask;
+            if !(m.alpha_cutoff > 0.0 && m.alpha_cutoff < 1.0) {
+                m.alpha_cutoff = 0.5;
+            }
+            // Vegetation lighting: two-sided, translucent, and floored away
+            // from the wet-metal sheen a thin dielectric otherwise picks up at
+            // night. Deliberately *not* `foliage_card` — see that field's note.
+            // These are modelled, atlased plants, and claiming they are cards
+            // is what shattered their normals for six phases.
+            m.foliage = true;
+            m.double_sided = true;
+            if m.transmission <= 0.0 {
+                m.transmission = 0.5;
             }
         }
 
@@ -7527,7 +7553,7 @@ impl<G: GameApp> Engine<G> {
         // list, and both live on the terrain. Moving the list out for the
         // duration keeps the borrows disjoint without copying the heightmap.
         let mut painted = std::mem::take(&mut terrain.painted_foliage);
-        let added = somnium_renderer::terrain::foliage_paint::paint(
+        let report = somnium_renderer::terrain::foliage_paint::paint(
             &mut painted,
             &brush,
             center,
@@ -7535,14 +7561,57 @@ impl<G: GameApp> Engine<G> {
             |x, z| terrain.ground_sample(x, z, brush.layer),
         );
         terrain.painted_foliage = painted;
-        if added > 0 {
+        let total = terrain.painted_foliage.len();
+        let entry = &FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()];
+        if report.placed > 0 {
             info!(
-                "Foliage: painted {added} of {} (total {})",
-                FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()].name,
-                terrain.painted_foliage.len(),
+                "Foliage: painted {} of {} (total {total})",
+                report.placed, entry.name,
             );
+        } else if report.refused() {
+            self.report_refused_foliage_dab(entry.name, &brush, &report);
         }
         true
+    }
+
+    /// Say why a dab placed nothing, once per stroke.
+    ///
+    /// # Why this exists
+    ///
+    /// Thirteen of the twenty-five palette entries carry a layer requirement:
+    /// pebbles want gravel, moss wants mossy rock, nettles want mud. Point one
+    /// of them at a terrain whose ground is still the default grass and the
+    /// brush is *correct* to refuse — and until now the editor's entire
+    /// response was nothing. Click, click, click, no instances, no message, no
+    /// way to tell a working brush from a broken one.
+    ///
+    /// Once per stroke, and not once per dab, because a held brush fires with
+    /// every mouse-move: a message per dab would be its own bug.
+    fn report_refused_foliage_dab(
+        &mut self,
+        name: &str,
+        brush: &somnium_renderer::terrain::foliage_paint::FoliageBrush,
+        report: &somnium_renderer::terrain::foliage_paint::PaintReport,
+    ) {
+        if self.foliage_refusal_reported {
+            return;
+        }
+        self.foliage_refusal_reported = true;
+        if report.blocked_by_layer() {
+            let layer = somnium_renderer::terrain::textures::LAYER_NAMES
+                .get(brush.layer as usize)
+                .copied()
+                .unwrap_or("that layer");
+            warn!(
+                "Foliage: {name} needs {layer} painted here — it wants a weight of                  {:.2} and the ground under the brush has at most {:.2}. Paint {layer}                  with the terrain brush first, or lower \"Min layer\" in the Foliage                  Brush section.",
+                brush.min_layer_weight, report.best_layer_weight,
+            );
+        } else {
+            warn!(
+                "Foliage: {name} placed nothing — the ground under the brush is steeper                  than its {:.0}° limit. Raise \"Max slope\" in the Foliage Brush section                  to allow it.",
+                brush.max_slope_deg,
+            );
+        }
     }
 
     /// Queue a light gizmo for every light entity (Phase 13E).
@@ -9524,6 +9593,10 @@ impl<G: GameApp> Engine<G> {
                     }
                     FB::ScaleMin => brush.scale_min = value.max(0.01),
                     FB::ScaleMax => brush.scale_max = value.max(0.01),
+                    // 0 switches the layer test off entirely, which is what
+                    // every pre-TSUSHIMA brush had and what someone reaches for
+                    // when the log says a dab was refused for its ground.
+                    FB::MinLayerWeight => brush.min_layer_weight = value.clamp(0.0, 1.0),
                 }
             }
 

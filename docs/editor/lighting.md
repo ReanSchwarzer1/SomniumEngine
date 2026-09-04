@@ -93,6 +93,12 @@ On a terrain: **LOD Morph** (default off) and **Morph** (0–1, start of the ble
 
 **Cull**, **LOD**, and **Impostor** are **horizontal** metres. Past LOD, leaf/cutout parts drop; past Impostor, only solid bark/branches remain (not a billboard). Impostor `0` keeps every part.
 
+## Vegetation shading (17E, re-gated in TSUSHIMA-J)
+
+A material marked **Foliage** is lit two-sided, gets transmitted light so a backlit leaf glows, and takes a roughness floor that stops thin surfaces reading as wet metal under a moon. The palette sets it on any imported material that is not `OPAQUE`, which is a property of the material rather than of whichever exporter wrote the file.
+
+**Foliage card** is a separate flag and is off by default. It bends the shading normal across the width of a card using `uv.x`, and that is only meaningful on flat cut-out cards with one blade per `0..1` sweep. Scanned and modelled plants are atlased, so `uv.x` there is the blade's address in the texture: turning the flag on scatters their normals and produces blotches in daylight and white sparkle at night, at every distance. Leave it off unless the asset really is cards.
+
 ## Profiler (29)
 
 The overlay lists **GPU** pass times, then the **Graph** (pass order), then **CPU** zones (instances, cluster cull, foliage, lighting extra), then draw counters. Toggle **Profiler** on the viewport bar.

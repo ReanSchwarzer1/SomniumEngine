@@ -114,6 +114,14 @@ pub enum FoliageBrushField {
     Kind,
     ScaleMin,
     ScaleMax,
+    /// How strongly the brush's terrain layer has to be painted under a
+    /// candidate before it will place. `0` switches the test off.
+    ///
+    /// Exposed because it is the one brush setting that can make a palette
+    /// entry place *nothing at all*, and until it was here the only ways to
+    /// change it were to pick a different entry or to edit the palette. Moss on
+    /// a grass hillside is a legitimate thing to want.
+    MinLayerWeight,
 }
 
 // ── Phase 16-D: scripting ───────────────────────────────────────────────────
