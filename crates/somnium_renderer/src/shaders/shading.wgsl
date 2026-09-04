@@ -1512,15 +1512,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Foliage leans on this heavily — a grass tuft's interior sits in its own
     // shade, and without it every blade receives full open sky.
     if material.occlusion_map >= 0 {
-        if analytic_grad {
-            surface.occlusion = textureSampleGrad(
-                textures[material.occlusion_map], default_sampler, uv, uv_ddx, uv_ddy).r;
-        } else {
-            surface.occlusion = textureSample(
-                textures[material.occlusion_map], default_sampler, uv).r;
-        }
+        let material_occlusion = select(
+            textureSample(textures[material.occlusion_map], default_sampler, uv).r,
+            textureSampleGrad(
+                textures[material.occlusion_map], default_sampler, uv, uv_ddx, uv_ddy).r,
+            analytic_grad,
+        );
+        // GTAO and the authored map see different scales. Keep both instead of
+        // replacing the screen-space visibility on every mapped material.
+        surface.occlusion *= material_occlusion;
         // Phase TSUSHIMA-F1: the *material-scale* half, kept separately.
-        micro_occlusion = surface.occlusion;
+        micro_occlusion = material_occlusion;
     }
 
     var normal_variance = 0.0;
@@ -2199,7 +2201,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var transmitted = vec3<f32>(0.0);
         if sun_illuminance > 1.0e-6 {
             transmitted = transmitted_light(
-                surface, light_dir, light_color, material.transmission);
+                surface, light_dir, light_color, material.transmission) * shadow_factor;
         }
 
         let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);

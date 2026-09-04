@@ -488,6 +488,72 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
     assert!(aa < f0, "specular AA must run before f0 is derived");
 }
 
+/// A foliage occlusion texture refines the GTAO result; it must not replace it.
+///
+/// These two fields intentionally carry different meanings downstream:
+/// `surface.occlusion` is the composed ambient visibility, while
+/// `micro_occlusion` is material-only and feeds the direct-light micro-shadow
+/// path for non-foliage. Assigning the texture straight into the former silently
+/// discards GTAO on every mapped material.
+#[test]
+fn material_occlusion_multiplies_gtao_without_polluting_micro_occlusion() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("if material.occlusion_map >= 0 {")
+        .expect("the material occlusion block is still there");
+    let end = source[start..]
+        .find("var normal_variance")
+        .map(|offset| start + offset)
+        .expect("normal setup still follows material occlusion");
+    let body = &source[start..end];
+
+    assert!(
+        body.contains("let material_occlusion ="),
+        "material AO must be sampled separately before it is composed"
+    );
+    assert!(
+        body.contains("surface.occlusion *= material_occlusion;"),
+        "material AO replaced GTAO instead of multiplying it"
+    );
+    assert!(
+        body.contains("micro_occlusion = material_occlusion;"),
+        "micro-shadowing must retain material-only AO rather than composed GTAO"
+    );
+    assert!(
+        !body.contains("surface.occlusion = textureSample"),
+        "sampling directly into surface.occlusion discards GTAO"
+    );
+}
+
+/// Backside lighting still needs visibility from the receiver to the sun.
+///
+/// Transmission describes which side of a thin leaf the light exits; it does
+/// not make external occluders disappear. The original Phase 24S call added the
+/// lobe after the shadowed direct term, making foliage glow through terrain,
+/// trunks, and clouds at low sun angles.
+#[test]
+fn sun_transmission_uses_sun_visibility() {
+    let source = composed("shading.wgsl");
+    let start = source
+        .find("// Transmitted sunlight")
+        .expect("the transmitted sunlight block is still there");
+    let end = source[start..]
+        .find("let gi_texel")
+        .map(|offset| start + offset)
+        .expect("GI setup still follows transmitted sunlight");
+    let compact: String = source[start..end]
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains(
+            "transmitted_light(surface,light_dir,light_color,material.transmission)*shadow_factor"
+        ),
+        "sun transmission bypasses the sun/cloud shadow visibility"
+    );
+}
+
 /// TSUSHIMA-G's perturbation is worth nothing unless it runs before selection.
 ///
 /// A perturbation applied after `terrain_strongest_four` can only wobble an
@@ -578,8 +644,7 @@ fn ray_query_terrain_hit_uses_the_bounded_splat_unpack() {
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
         let terrain_hit = terrain_hit.as_str();
         assert!(
             !terrain_hit.contains("terrain_unpack_splats_painted("),
