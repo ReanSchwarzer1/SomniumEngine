@@ -1744,3 +1744,45 @@ of them could have worked, because the input was a texture coordinate and did
 not vary with light, distance or sky. That invariance was the diagnostic, and it
 was visible in the user's own words — *"no matter the lighting conditions"* —
 before any code was read.
+
+---
+
+## Appendix K — the faults J's fix uncovered
+
+Landed 2026-09-04 as `c4473a5` and `fba14e0`. Full record in
+[`phase TSUSHIMA/TSUSHIMA-K.md`](<phase TSUSHIMA/TSUSHIMA-K.md>).
+
+J restored the foliage normals. With the geometry finally lit correctly, three
+transport faults that had been in tree since 24S and 25M-2 stopped hiding behind
+the scattered normals and became the visible fault instead.
+
+| | What shipped | What was missing |
+|---|---|---|
+| K.1 | `transmitted_light` for the sun (24S) | `* shadow_factor`. Leaves glowed through trunks, hills and clouds |
+| K.2 | A material occlusion map sampled into `surface.occlusion` | `*=` rather than `=`. Every mapped material lost GTAO, so painted grass sat on the ground instead of in it |
+| K.3 | `transmitted_light` for the moon (25M-2) | Any shadow receiver at all. Night foliage grew green pinpricks under night exposure |
+| K.3b | Moonlight through `evaluate_brdf` | The area BRDF and firefly bound the sun already used |
+
+### What the plan should have said
+
+A.9 sequences what to build and says nothing about the qualifier each term
+needs. All four rows above are that one omission repeated: a correct formula,
+placed correctly, without the factor deciding when it applies.
+
+J.3 reached the same place from the other side. J.3 was a filter with no
+message; K is a term with no qualifier. Both ship something that behaves
+correctly in the case the author tested and wrongly everywhere else, and both
+look like a working feature until somebody uses them.
+
+Worth stating for the next phase: when you add a lighting term, name its
+qualifier in the same change. Visibility, composition and the energy bound are
+not follow-ups. A term without one is not a smaller version of the feature, it
+is a different feature that happens to agree in the easy case.
+
+### Deferred, with a prerequisite
+
+Transmitted moonlight is removed rather than refused. It returns when the
+shading pass can trace visibility from the receiver toward the moon. Until then
+night foliage carries reflected moonlight only, and the reason sits in the
+shader beside the removal so the symmetry with the sun does not tempt anyone to
+put it back.

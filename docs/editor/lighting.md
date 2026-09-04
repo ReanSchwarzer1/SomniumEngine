@@ -93,11 +93,19 @@ On a terrain: **LOD Morph** (default off) and **Morph** (0–1, start of the ble
 
 **Cull**, **LOD**, and **Impostor** are **horizontal** metres. Past LOD, leaf/cutout parts drop; past Impostor, only solid bark/branches remain (not a billboard). Impostor `0` keeps every part.
 
-## Vegetation shading (17E, re-gated in TSUSHIMA-J)
+## Vegetation shading (17E, re-gated in TSUSHIMA-J, transport fixed in TSUSHIMA-K)
 
 A material marked **Foliage** is lit two-sided, gets transmitted light so a backlit leaf glows, and takes a roughness floor that stops thin surfaces reading as wet metal under a moon. The palette sets it on any imported material that is not `OPAQUE`, which is a property of the material rather than of whichever exporter wrote the file.
 
 **Foliage card** is a separate flag and is off by default. It bends the shading normal across the width of a card using `uv.x`, and that is only meaningful on flat cut-out cards with one blade per `0..1` sweep. Scanned and modelled plants are atlased, so `uv.x` there is the blade's address in the texture: turning the flag on scatters their normals and produces blotches in daylight and white sparkle at night, at every distance. Leave it off unless the asset really is cards.
+
+### Backlit foliage
+
+The transmitted lobe carries the same shadow visibility the reflected light does, so a leaf glows when the sun is behind it and stops when a trunk, a hill or a cloud is in the way. It used to be shadowed by nothing, which showed up as foliage lit through solid terrain at low sun angles.
+
+Occlusion composes. GTAO, a material's own occlusion map, baked terrain sky visibility and terrain layer occlusion all multiply into one ambient number, so a tuft gets the contact darkening where it meets the ground as well as its own interior shade. Micro-shadowing is direct light and deliberately takes the material-scale value alone.
+
+Night has one deliberate asymmetry: the moon has no transmitted lobe. The shading pass cannot yet trace shadow visibility toward the moon, and an unshadowed transmission term under night exposure turns isolated back-facing grass into bright green pinpricks. Reflected moonlight stays, on the same area BRDF and specular bound the sun uses. Transmitted moonlight returns once there is a moon-direction shadow to multiply it by.
 
 ## Profiler (29)
 

@@ -157,7 +157,7 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | CONTROL | Northlight | **Editor reach** — property seam, asset database, drag-and-drop, viewport control, preferences, scene lifecycle, curves, time of day, clouds, weather, decals | **A–O complete** |
 | MORROWIND | NetImmerse | The engine's non-renderer half — see below | **In progress** |
 | PORTAL-0 | Source | Performance audit and engineering health | **Complete** |
-| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, parallax on cliffs, a 25-entry foliage palette, and four kinds of water | **A–J in tree**, H's contrast-with-distance open |
+| TSUSHIMA | Ghost of Tsushima | **Terrain photorealism** — long-range sun shadow, baked sky visibility, sky-lit aerial perspective, a relief normal that survives distance, the BRDF's energy terms, splat boundaries the brush cannot paint, macro colour variance, parallax on cliffs, a 25-entry foliage palette, four kinds of water, and the foliage lighting transport that three earlier phases left unqualified | **A–K in tree**, H's contrast-with-distance open, transmitted moonlight deferred |
 
 ### Phase MORROWIND, by track
 
@@ -209,12 +209,52 @@ exactly 1,981,440 fragment invocations for 1,981,440 pixels. No overdraw, by
 construction. Where the rest of the frame goes is in
 [context.md](context.md#where-the-frame-actually-goes).
 
+### What one pixel of that shading pass does
+
+Every visible surface walks the same path. The BRDF is the ordinary part. What
+matters is that each term carries the factor deciding when it applies:
+visibility for anything direct, composition for anything ambient, an energy
+bound for anything specular.
+
+```mermaid
+flowchart TB
+    VB["visibility buffer<br/>instance + triangle"] --> SURF["reconstruct surface<br/>position, normal, uv,<br/>analytic uv gradients"]
+    SURF --> MAT["material<br/>albedo, roughness, metallic,<br/>normal map, AO map"]
+
+    MAT --> AMB["surface.occlusion<br/>GTAO x authored AO x sky visibility<br/>x terrain layer AO"]
+    MAT ==> MICRO["micro_occlusion<br/>material-scale only"]
+
+    SUN["sun"] --> DIR["reflected: area BRDF<br/>+ specular lobe bound"]
+    SUN --> TR["transmitted: two-sided<br/>wrapped lobe, thin surfaces"]
+    MOON["moon"] --> MDIR["reflected: same area BRDF,<br/>same bound"]
+
+    SHAD["shadow_factor<br/>cascades x cloud x terrain horizon<br/>x micro-shadow"] --> DIR
+    SHAD --> TR
+    MICRO --> SHAD
+
+    DIR --> OUT["HDR radiance"]
+    TR --> OUT
+    MDIR --> OUT
+    AMB --> IBL["IBL + ReSTIR GI + volumetrics"]
+    IBL --> OUT
+```
+
+Four of those qualifiers were missing until TSUSHIMA-K, and painted foliage is
+what exposed them. `shadow_factor` did not reach the transmitted lobe, so leaves
+glowed through hills. The authored AO map overwrote GTAO instead of multiplying
+into it, so grass sat on the ground rather than in it. Moonlight skipped the
+specular bound the sun had. The moon's own transmitted lobe is not in the
+diagram because it was removed: there is no moon-direction shadow to multiply it
+by yet, and unshadowed it turned night foliage into green pinpricks. Details in
+[TSUSHIMA-K](dev%20records/phase%20TSUSHIMA/TSUSHIMA-K.md).
+
 ## Highlights
 
 **Rendering**
 - Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
 - GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters, Hi-Z two-phase occlusion culling
-- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode, plus **multiple-scattering energy compensation** on both the direct lobe and the IBL, **Hammon's rough diffuse**, **micro-shadowing**, and geometric **specular antialiasing** with a roughness-scaled bound on every lobe
+- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode, plus **multiple-scattering energy compensation** on both the direct lobe and the IBL, **Hammon's rough diffuse**, **micro-shadowing**, and geometric **specular antialiasing** with a roughness-scaled bound on every lobe, the sun and the moon both on it
+- **Two-sided foliage transport** — a wrapped, view-scattered transmission lobe so a backlit leaf glows, on the same `shadow_factor` the reflected term uses. Occlusion composes rather than replaces: GTAO, the authored map, baked sky visibility and terrain layer occlusion multiply into one number, and micro-shadowing takes a material-only copy
 - **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster). Cascades stop at 100 m, so terrain also carries a baked heightfield **horizon map** that shadows it at any distance, cross-faded in where the last cascade fades out
 - **Global illumination** — ReSTIR DI/GI on wgpu acceleration structures, with a **portable DDGI tier** (SDF-traced 4×4×4 volume, budgeted temporal SH updates) for hardware without ray query
 - **Atmosphere and sky** — Hillaire scattering LUTs driving both sky and IBL, analytic NOAA sun position, a five-track day cycle, and volumetric clouds (Perlin–Worley, quarter-res adaptive march, cloud shadows folded into one `shadow_factor` every surface reads)

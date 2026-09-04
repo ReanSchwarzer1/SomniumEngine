@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-09-01 against the current working tree.
+Last verified: 2026-09-04 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -17,6 +17,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Item | Current state |
 |---|---|
 | Active phase | MORROWIND, partially complete |
+| Most recent work | TSUSHIMA-K, three foliage lighting-transport fixes, 2026-09-04 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Next planned phases | PORTAL, KENSHI, then STALKER; none has started |
@@ -33,6 +34,7 @@ The top-level phase status is:
 |---|---|---|
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
+| TSUSHIMA | A through K in tree | [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>) |
 | DREAMS | A and B complete; C active | [`phase_DREAMS.md`](<dev records/phase_DREAMS.md>) |
 | PORTAL-0 | Complete, A through G | [`phase_PORTAL-0.md`](<dev records/phase_PORTAL-0.md>) |
 | PORTAL | Plan only, not started | [`phase_PORTAL.md`](<dev records/phase_PORTAL.md>) |
@@ -909,23 +911,45 @@ TSUSHIMA-B bakes a horizon map from the heightfield and cross-fades it in over
 the range the last cascade fades out at. Inside 100 m the cascades still win:
 they see meshes, and the horizon map only ever sees terrain.
 
-Four occlusion channels now exist and they measure different things. Confusing
-them has caused three separate visual bugs, all in the same term:
+Four occlusion channels exist and they measure different things at different
+scales. Confusing them has caused four separate visual bugs, all in the same
+handful of lines.
+
+The channels **multiply into ambient** and are not alternatives to one another.
+Only the material-scale one reaches direct light:
 
 ```mermaid
 flowchart TB
-    GTAO["GTAO<br/>screen-space, radius-bounded<br/>metres"] --> AMB["ambient only"]
+    GTAO["GTAO<br/>screen-space, radius-bounded<br/>metres"] --> AMB
     MAT["material AO map<br/>texture-scale<br/>below the pixel"] --> AMB
-    MAT --> MICRO["micro-shadowing<br/>direct light"]
     SKY["baked sky visibility<br/>landscape-scale<br/>hundreds of metres"] --> AMB
+    TERR["terrain layer occlusion<br/>splat-blended"] --> AMB
+    AMB["surface.occlusion<br/>the product of all four"] --> IBL["ambient and IBL only"]
+
+    MAT ==>|"material-only copy"| MICRO["micro_occlusion"]
+    TERR ==>|"material-only copy"| MICRO
+    MICRO --> MS["micro-shadowing<br/>hard cutoff on direct light"]
+    MS --> DIRECT["shadow_factor"]
+    HORIZON["baked horizon angle<br/>per azimuth"] --> DIRECT
     SKY --> BENT["bent normal<br/>composed with GTAO's"]
-    HORIZON["baked horizon angle<br/>per azimuth"] --> DIRECT["shadow_factor"]
-    MICRO --> DIRECT
 ```
 
-Micro-shadowing takes the material AO map and nothing else. It is a hard
-cutoff, `saturate(N·L + 2·ao² − 1)`, and a hard cutoff is only as well behaved
-as the field it thresholds. Three bugs came from feeding it something else:
+Two rules hold that picture together, and both were learned by breaking them.
+
+Ambient composes rather than replaces. `surface.occlusion` starts at 1 and each
+channel multiplies into it. Writing `surface.occlusion = <sample>` instead of
+`*=` throws away everything already there, which is what a material occlusion
+map did to GTAO on every mapped material in the engine. Every foliage palette
+entry carries one, so foliage lost all of its screen-space occlusion. That is
+the contact darkening where a tuft meets the ground, and losing it made painted
+grass read as sitting on the terrain rather than in it. An authored map cannot
+supply that term, because it knows the tuft's interior shade and nothing about
+what the tuft is standing on.
+([TSUSHIMA-K](<dev records/phase TSUSHIMA/TSUSHIMA-K.md>))
+
+Micro-shadowing takes material-scale AO and nothing else. It is a hard cutoff,
+`saturate(N·L + 2·ao² − 1)`, and a hard cutoff is only as well behaved as the
+field it thresholds. Three bugs came from feeding it something else:
 
 - GTAO turned every wobble in a screen-space estimate into a visible edge in
   direct sunlight.
@@ -933,6 +957,10 @@ as the field it thresholds. Three bugs came from feeding it something else:
 - A foliage occlusion map darkened grass twice. That map encodes a tuft's own
   interior shade at card scale and is already doing its job on the ambient
   term, so micro-shadowing skips foliage entirely.
+
+Those two rules pull opposite ways on one texture fetch. So the sample is taken
+once into a local and used twice, and a test pins all four properties of the
+block rather than just the composition.
 
 Specular also has a bound. A GGX lobe is a point sample of something that
 should be integrated over the pixel; where the lobe is narrower than the pixel,
@@ -949,6 +977,55 @@ Ordering matters as much as the filter. Specular AA must run after every writer
 of the shading normal and roughness. It shipped once above the terrain branch,
 where every terrain pixel computed it and threw it away;
 `specular_aa_runs_after_every_normal_and_roughness_writer` now pins it.
+
+### How a leaf receives light
+
+Foliage is the first content here that is thin, translucent, densely
+self-occluding and small enough that one wrong texel becomes a field of them. It
+turned up three transport faults that had been in tree for phases. None of them
+was a wrong formula. Each was a correct term missing the factor that says when
+it applies, which is why they are worth a picture.
+
+```mermaid
+flowchart TB
+    SUN["sun radiance"] --> REFL["reflected lobe<br/>evaluate_brdf_area<br/>+ clamp_specular_lobe"]
+    SUN --> TRANS["transmitted lobe<br/>wrapped, view-scattered<br/>Frostbite two-sided"]
+    REFL --> SF1{"x shadow_factor"}
+    TRANS --> SF2{"x shadow_factor"}
+    SF1 --> OUT["direct light"]
+    SF2 --> OUT
+
+    MOON["moon radiance"] --> MREFL["reflected lobe<br/>same area BRDF,<br/>same firefly bound"]
+    MREFL --> OUT
+    MOON -.->|"removed: nothing to<br/>multiply it by"| MTRANS["transmitted lobe<br/>deferred until the pass can trace<br/>visibility toward the moon"]
+
+    style MTRANS stroke-dasharray: 5 5
+```
+
+Transmission says which side of a thin surface light leaves. It says nothing
+about whether the light arrived. The lobe shipped in 24S multiplied by nothing,
+so a leaf behind a trunk, a hill or a cloud glowed as though the sun were
+directly behind it, hardest at low sun angles because that is when the most
+terrain is shadowed. It takes `shadow_factor` now, so every occluder folded into
+that number applies to it, including any added later. Bevy and Unreal both
+shadow their equivalent lobe. Somnium was the outlier by omission rather than by
+design.
+
+The moon does not get the same treatment, and the asymmetry is deliberate. The
+sun has `shadow_factor`; the moon has no directional shadow receiver in the
+shading pass, so there is nothing to multiply by. Night auto-exposure is scaled
+to a scene lit only by the moon, so an unshadowed lobe turns every isolated
+back-facing grass texel into a bright green pinprick. The lobe is removed with
+the reason beside it, so nobody restores it as an obvious symmetry with the sun.
+Deferred, not refused: it returns when the pass can trace visibility from the
+receiver toward the moon.
+
+Reflected moonlight also had to join the area BRDF and the direct-lobe firefly
+bound, which it had never been on. Night is the worst place to skip that bound,
+because exposure is highest exactly where sub-pixel leaf cards catch a narrow
+Fresnel peak. Reusing `sun_angular_radius` for the moon is not a shortcut: both
+discs subtend about half a degree from Earth, which is why total eclipses work.
+([TSUSHIMA-K](<dev records/phase TSUSHIMA/TSUSHIMA-K.md>))
 
 The conventional CSM atlas is persistent and cached per quadrant (DOOM-D).
 `CascadeShadowCache` is a pure policy module: it resolves the matrices first,
@@ -1809,8 +1886,9 @@ without a valid visual-effect claim.
 
 Terrain photorealism, planned as nine sub-phases in
 [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). **All nine are in tree
-and ship on**, plus an unplanned J that fixes three things the first nine left
-visible. The one item of the plan not done is H's third, re-injecting contrast
+and ship on**, plus two unplanned sub-phases. J fixed three things the first
+nine left visible. K fixed the three transport faults that J's corrected normals
+then exposed. The one item of the plan not done is H's third, re-injecting contrast
 with distance instead of fading detail out.
 
 The phase opened from a question about the BRDF. The audit put the BRDF fifth.
@@ -1834,6 +1912,7 @@ geometry rather than material, which is why B through E came before F.
 | I / GRAVEL | Parallax on cliffs, in the projection's own frame; layer-weight rejection and tilt in the foliage funnel |
 | I, editor pass | 25-entry foliage palette, nine Details controls, `Create -> Terrain (Empty)`, and four kinds of water |
 | J / KIRIKO | The curved-card normal split off `FOLIAGE`, vegetation lighting keyed on the material rather than the exporter, a foliage brush that says why it refused, and a viewport bar that drops whole controls instead of halves |
+| K / TSUKIYO | Sun transmission shadowed, material AO composed with GTAO rather than replacing it, unshadowed moon transmission removed. Three terms that shipped without the factor qualifying them |
 
 Every one has an environment-variable A/B rail, and the records carry the
 measurement each landed on. Three corrected the plan rather than following it:
@@ -1885,6 +1964,12 @@ Still outstanding:
   rather than re-injecting contrast against E's filtered normal.
 - I's cliff parallax has no capture.
 - The projected parallax has no self-shadow, where the heightfield march does.
+- J's and K's changes to the image have no pinned capture, because no preset
+  reproduces the painted-foliage scene the reports came from. Both rest on a
+  before and after the user saw rather than on a golden frame.
+- Transmitted moonlight is removed and owed. It comes back when the shading pass
+  can trace visibility from the receiver toward the moon. Until then night
+  foliage has reflected moonlight only.
 
 ## Planned work that has not started
 
@@ -2138,6 +2223,24 @@ Each entry is deliberately short. The full argument lives in the phase record
 named at the end of it.
 
 ### The renderer
+
+**A lighting term and the factor qualifying it are one change.** Three faults in
+how foliage receives light, three phases apart, all the same mistake.
+Transmission arrived without visibility, a material AO map without composition,
+moonlight without the energy bound the sun already had. None is a wrong
+equation. Each is missing the part that says when it applies, and none was
+visible until foliage arrived, because foliage is the first content here dense
+enough for one bad texel to become a field of them. Ship the term alone and you
+get something that behaves correctly in the case you tested. The three are
+described under *How a leaf receives light* above.
+([TSUSHIMA-K](<dev records/phase TSUSHIMA/TSUSHIMA-K.md>))
+
+**The moon is not a dimmer sun, because it has no shadow receiver.** Worth
+stating separately, because the fix for the sun does not generalise. 25M-2 gave
+moonlight the sun's transmission lobe and there is nothing to multiply it by, so
+the lobe is removed rather than shadowed. Deferred against a named prerequisite:
+it returns when the shading pass can trace visibility toward the moon.
+([TSUSHIMA-K](<dev records/phase TSUSHIMA/TSUSHIMA-K.md>))
 
 **"Vegetation" and "a flat card" were one material flag, and the difference was
 every plant in the game.** `MATERIAL_FLAG_FOLIAGE` turned on three things at
