@@ -271,8 +271,9 @@ pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
         AudioEmitter | ShorelineAudio => IconId::Audio,
         Spline => IconId::Mesh,
         Particle => IconId::Particle,
-        Terrain => IconId::Terrain,
+        Terrain | EmptyTerrain => IconId::Terrain,
         VoxelTerrain => IconId::VoxelTerrain,
+        Lake | Ocean | Sea | River => IconId::Vessel,
         UiCanvas => IconId::Window,
         // CONTROL-L: the environment is the sun, so it takes the sun icon.
         Environment => IconId::DirectionalLight,
@@ -306,6 +307,12 @@ mod tests {
         assert!(HELP_SCRIPTING.contains("only while Play is running"));
         assert!(HELP_WATER.contains("RT Reflect"));
         assert!(HELP_WATER.contains("RT Refraction"));
+        // TSUSHIMA-J: both pages document a refusal a person will otherwise
+        // read as a broken control. A brush that places nothing and a bar that
+        // hides a group are the two things most recently reported as bugs.
+        assert!(HELP_TERRAIN.contains("Min layer"));
+        assert!(HELP_TERRAIN.contains("Foliage card"));
+        assert!(HELP_VIEWPORT.contains("When the bar runs out of room"));
         assert!(HELP_LIGHTING.contains("Disc Light"));
         assert!(HELP_LIGHTING.contains("Tube Light"));
         assert!(HELP_LIGHTING.contains("4×4×4"));

@@ -127,6 +127,12 @@ pub struct MaterialAsset {
     pub alpha_cutoff: f32,
     pub double_sided: bool,
     pub foliage: bool,
+    /// Flat cut-out cards whose `uv.x` runs across the blade (Phase TSUSHIMA-J).
+    ///
+    /// Only this turns on the curved-card normal in `shading.wgsl`. See
+    /// [`somnium_asset::LoadedMaterial::foliage_card`] for why it is authored
+    /// rather than inferred, and what happened while it was inferred.
+    pub foliage_card: bool,
     pub albedo_map: AssetId,
     pub normal_map: AssetId,
     pub metallic_roughness_map: AssetId,
@@ -156,6 +162,7 @@ impl Default for MaterialAsset {
             alpha_cutoff: 0.5,
             double_sided: false,
             foliage: false,
+            foliage_card: false,
             albedo_map: AssetId::NONE,
             normal_map: AssetId::NONE,
             metallic_roughness_map: AssetId::NONE,
@@ -185,7 +192,10 @@ pub fn material_asset_schema() -> ComponentSchema {
             alpha_mode { group: "Raster" },
             alpha_cutoff { min: 0.0, max: 1.0, step: 0.01, group: "Raster" },
             double_sided { group: "Raster" },
-            foliage { group: "Raster", advanced: true },
+            foliage { group: "Raster", advanced: true,
+                doc: "Vegetation: two-sided, translucent, and floored away from a wet-metal sheen." },
+            foliage_card { group: "Raster", advanced: true,
+                doc: "Flat cut-out cards only. Bends normals across the card using uv.x, which is wrong for modelled or atlased plants." },
             albedo_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             normal_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             metallic_roughness_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
@@ -362,6 +372,7 @@ pub fn materialize_gltf_assets(
             alpha_cutoff: source_material.alpha_cutoff,
             double_sided: source_material.double_sided,
             foliage: source_material.foliage,
+            foliage_card: source_material.foliage_card,
             albedo_map: texture(source_material.albedo_map),
             normal_map: texture(source_material.normal_map),
             metallic_roughness_map: texture(source_material.metallic_roughness_map),
@@ -420,6 +431,7 @@ mod tests {
             alpha_cutoff: 0.35,
             double_sided: true,
             foliage: true,
+            foliage_card: true,
             albedo_map: AssetId::from_raw(1),
             normal_map: AssetId::from_raw(2),
             metallic_roughness_map: AssetId::from_raw(3),
@@ -439,7 +451,7 @@ mod tests {
     #[test]
     fn schema_is_complete_and_texture_slots_reject_non_textures() {
         let schema = material_asset_schema();
-        assert_eq!(schema.fields.len(), 17);
+        assert_eq!(schema.fields.len(), 18);
         let texture_fields: Vec<_> = schema
             .fields
             .iter()
@@ -509,6 +521,7 @@ mod tests {
                 alpha_cutoff: 0.5,
                 transmission: 0.0,
                 foliage: false,
+                foliage_card: false,
                 emissive: [0.0; 3],
                 emissive_intensity: 1.0,
                 emissive_map: None,

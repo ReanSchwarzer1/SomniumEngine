@@ -973,18 +973,25 @@ other entry here, which records a technique the code was informed by.
 | Fir Sapling | `assets/foliage/fir_sapling/` | Rob Tuytel (photography), Rico Cilliers (modeling) |
 | Island Tree 02 | `assets/foliage/island_tree_02/` | Rob Tuytel (scanning), Rico Cilliers (cleanup) |
 
-**Phase TSUSHIMA-I adds two more, and does *not* commit them:**
+**Phase TSUSHIMA-I adds twenty-one more, all CC0 from the same source:**
 
-| Asset | Path | Poly Haven slug |
-|---|---|---|
-| Pebbles | `assets/foliage/namaqualand_stones_01/` | `namaqualand_stones_01` |
-| Scree Rocks | `assets/foliage/rock_moss_set_01/` | `rock_moss_set_01` |
+| Group | Assets |
+|---|---|
+| Grass, flowers, ground cover | `grass_medium_02`, `dandelion_01`, `shrub_02`, `shrub_03`, `moss_01`, `fern_02`, `nettle_plant` |
+| Trees | `quiver_tree_01` |
+| Deadwood | `tree_stump_01`, `dead_tree_trunk`, `dry_branches_medium_01` |
+| Debris and rocks | `namaqualand_stones_01`, `rock_moss_set_01`, `rock_moss_set_02`, `rock_07`, `rock_09`, `stone_01`, `namaqualand_boulder_03` |
+| Cliff faces | `rock_face_01`, `rock_face_02`, `namaqualand_cliff_01` |
 
-Same CC0 dedication, same Poly Haven file API, fetched by
-`tools/fetch_foliage_rocks.sh`. They stay out of the repository because the four
-above already cost about 101 MB on every clone, these two are debris most
-projects will replace with their own, and `ensure_palette_mesh` already reduces
-a missing entry to one warning and no placement. 2k glTF: 10.2 MB and 3.1 MB.
+`tools/fetch_foliage.sh` downloads all twenty-five palette entries through the
+Poly Haven file API and verifies every file against the publisher's MD5,
+fail-closed. `tools/polyhaven_files.py` flattens one manifest into the record
+file it reads.
+
+Together the palette is about 264 MB at 2k. That is a large thing to put in a
+git repository and it is deliberate: the alternative — an engine whose sample
+content is four meshes — makes every terrain feature in Phase TSUSHIMA
+impossible to actually look at.
 
 **License: CC0 1.0** (public domain dedication), from <https://polyhaven.com>.
 Poly Haven's license page states the assets may be redistributed, used

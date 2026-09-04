@@ -5,8 +5,7 @@
 //!include "rt_hit.wgsl"
 //!include "global_pool.wgsl"
 //!include "brdf.wgsl"
-//!include "hextile.wgsl"
-//!include "terrain_material.wgsl"
+//!include "terrain_splat_core.wgsl"
 
 enable wgpu_ray_query;
 
@@ -17,8 +16,8 @@ enable wgpu_ray_query;
 // temporally accumulates. The water fragment shader bilateral-upsamples this
 // target and blends it with screen-space tracing on confidence.
 //
-// Concatenated with `rt_hit.wgsl`, `global_pool.wgsl`, `brdf.wgsl`,
-// `hextile.wgsl`, and `terrain_material.wgsl`.
+// Concatenated with `rt_hit.wgsl`, `global_pool.wgsl`, `brdf.wgsl`, and the
+// bounded `terrain_splat_core.wgsl`.
 
 struct ReflectParams {
     inv_view_proj: mat4x4<f32>,

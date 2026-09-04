@@ -3,8 +3,9 @@
 // Extracted from `gi_trace()` so ReSTIR GI and Halcyon water reflections
 // resolve a triangle through the same instance → barycentric → material path.
 // Concatenated after a module that `enable`s `wgpu_ray_query` and declares
-// `accel` plus `default_sampler`; `global_pool.wgsl` and `terrain_material.wgsl`
-// supply the scene arrays. Declarations are order-independent.
+// `accel` plus `default_sampler`; `global_pool.wgsl` and
+// `terrain_splat_core.wgsl` supply the scene arrays and bounded terrain-hit
+// helpers. Declarations are order-independent.
 
 /// What a ray hit turned out to be.
 struct RtHit {
@@ -40,8 +41,7 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
 /// and are right to within each layer's own variation.
 fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
-    let local_xz = world_pos.xz - tm.terrain_origin;
-    let uv = local_xz * tm.inv_world_size;
+    let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < 8u; g = g + 1u) {
         let id = tm.splat_maps[g / 4u][g % 4u];
@@ -49,13 +49,19 @@ fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
             splat_s[g] = textureSampleLevel(textures[id], default_sampler, uv, 0.0);
         }
     }
-    // `var`, and by pointer: `terrain_strongest_four` takes the scan array by
-    // reference so the shading path does not copy 128 bytes per pixel.
-    // Through the same unpack as the raster path, so TSUSHIMA-G's perturbed
-    // boundary is the boundary a bounce ray sees too. A traced reflection that
-    // disagreed with the surface it reflects about where gravel stops would be
-    // exactly the drift this file keeps one definition of the weights to avoid.
-    var weight = terrain_unpack_splats(splat_s, tm, local_xz);
+    // The **plain** unpack: bounce rays take the unperturbed means. That can
+    // make a painted boundary slightly less irregular in secondary lighting,
+    // and it keeps TSUSHIMA-G's noise loop out of a ray-query pipeline.
+    //
+    // Strongest-four stays, and the reason is a measured mistake. It was once
+    // replaced by summing all thirty-two weighted means — no local array, no
+    // sort — on the theory that ranking values you are about to average is
+    // wasted work. The instruction count did fall. The *loads* went from four
+    // albedo plus four moisture to thirty-two of each, because the top-four
+    // selection is what keeps this to a handful of storage reads, and in a
+    // divergent hit shader that traffic is the cost, not the ALU. It was a
+    // visible frame-rate regression. The sort is cheaper than what it avoids.
+    var weight = terrain_unpack_splats(splat_s);
     let selected = terrain_strongest_four(&weight);
     var c = vec3<f32>(0.0);
     var total = 0.0;

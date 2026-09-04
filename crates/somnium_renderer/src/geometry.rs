@@ -103,6 +103,14 @@ pub struct GeometryPool {
     index_bytes: u64,
 }
 
+fn geometry_usage(base: wgpu::BufferUsages, ray_query_enabled: bool) -> wgpu::BufferUsages {
+    if ray_query_enabled {
+        base | wgpu::BufferUsages::BLAS_INPUT
+    } else {
+        base
+    }
+}
+
 impl GeometryPool {
     pub fn new(device: &wgpu::Device) -> Self {
         let max_binding = u64::from(device.limits().max_storage_buffer_binding_size);
@@ -115,26 +123,33 @@ impl GeometryPool {
             max_binding as f64 / 1048576.0,
         );
 
+        let ray_query_enabled = device
+            .features()
+            .contains(crate::context::RAY_TRACING_FEATURES);
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Vertex Buffer"),
             size: vertex_bytes,
             // Phase 24J: BLAS_INPUT lets the acceleration-structure build read
             // positions straight out of the shared pool, so ray tracing needs
             // no second copy of the geometry.
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::BLAS_INPUT,
+            usage: geometry_usage(
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::VERTEX,
+                ray_query_enabled,
+            ),
             mapped_at_creation: false,
         });
 
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Index Buffer"),
             size: index_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::INDEX
-                | wgpu::BufferUsages::BLAS_INPUT,
+            usage: geometry_usage(
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::INDEX,
+                ray_query_enabled,
+            ),
             mapped_at_creation: false,
         });
 
@@ -675,6 +690,13 @@ mod tests {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
         }
+    }
+
+    #[test]
+    fn blas_usage_is_present_only_when_ray_queries_are_enabled() {
+        let base = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX;
+        assert_eq!(geometry_usage(base, false), base);
+        assert!(geometry_usage(base, true).contains(wgpu::BufferUsages::BLAS_INPUT));
     }
 
     #[test]

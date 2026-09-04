@@ -500,32 +500,34 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
 fn weight_noise_is_applied_before_strongest_four() {
     let source = composed("shading.wgsl");
 
-    // Inside the unpack, not at the call sites: three call sites means three
-    // chances for one to be missed, and the ray-traced path was already
-    // missed once.
+    // Inside the painted unpack, not at the call sites: two call sites means
+    // two chances for one to be missed.
     let unpack = source
-        .find("fn terrain_unpack_splats(")
-        .expect("terrain_unpack_splats is still there");
+        .find("fn terrain_unpack_splats_painted(")
+        .expect("terrain_unpack_splats_painted is still there");
     let perturb = source
         .find("terrain_perturb_weights(tm, &w, local_xz);")
-        .expect("the perturbation call is still inside the unpack");
+        .expect("the perturbation call is still inside the painted unpack");
     let unpack_end = source[unpack..]
         .find("\n}")
-        .expect("terrain_unpack_splats has a closing brace")
+        .expect("terrain_unpack_splats_painted has a closing brace")
         + unpack;
     assert!(
         perturb > unpack && perturb < unpack_end,
-        "the perturbation left `terrain_unpack_splats`, so a call site can now miss it"
+        "the perturbation left the painted unpack, so a call site can now miss it"
     );
 
     // And every caller unpacks before it selects.
     let mut sites = 0usize;
-    for (at, _) in source.match_indices("terrain_unpack_splats(splat_s, tm, local_xz)") {
+    for (at, _) in source.match_indices("terrain_unpack_splats_painted(splat_s, tm, local_xz)") {
         let select = source[at..]
             .find("terrain_strongest_four(&weight)")
             .map(|o| o + at)
             .expect("a call site that unpacks but never selects");
-        assert!(at < select, "weights are selected before they are perturbed");
+        assert!(
+            at < select,
+            "weights are selected before they are perturbed"
+        );
         sites += 1;
     }
     assert_eq!(
@@ -533,6 +535,67 @@ fn weight_noise_is_applied_before_strongest_four() {
         "shading.wgsl composes the live and clipmap-generate paths; \
          a third or a missing one means a path changed shape"
     );
+}
+
+/// No ray-query pipeline may reach the splat-weight perturbation.
+///
+/// This is a memory guard, not a correctness one, and it is worth a test
+/// because the failure is invisible in source and catastrophic at runtime.
+///
+/// `terrain_perturb_weights` is a `terrain_scan`-iteration loop holding two
+/// value-noise evaluations, and `terrain_scan` is a compile-time `override`.
+/// Routing `rt_hit.wgsl` through it took NVIDIA's Vulkan driver to **47 GB of
+/// private memory** compiling ReSTIR-GI's `initial_and_temporal`, and the engine
+/// never finished starting. Guarding one pipeline only moved the explosion to
+/// the next root that composes this file.
+///
+/// The raster path retains the painted perturbation. Secondary-ray albedo uses
+/// the bounded plain weights, accepting a small boundary mismatch rather than
+/// making the application unable to start.
+#[test]
+fn ray_query_terrain_hit_uses_the_bounded_splat_unpack() {
+    for root in [
+        "restir_gi.wgsl",
+        "lighting_extra.wgsl",
+        "water_reflection.wgsl",
+    ] {
+        let source = composed(root);
+        assert!(
+            !source.contains("fn terrain_perturb_weights("),
+            "{root} still composes the full painted terrain material"
+        );
+        let start = source
+            .find("fn rt_terrain_albedo(")
+            .unwrap_or_else(|| panic!("{root} no longer composes the shared terrain-hit path"));
+        let end = source[start..]
+            .find("\n/// Resolve a committed ray-query intersection")
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("could not isolate rt_terrain_albedo in {root}"));
+        // Code only. This function's own comments name the constructs banned
+        // below in order to explain why they are banned, and a substring scan
+        // cannot tell an explanation from a call.
+        let terrain_hit: String = source[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        let terrain_hit = terrain_hit.as_str();
+        assert!(
+            !terrain_hit.contains("terrain_unpack_splats_painted("),
+            "{root}'s terrain hit calls the perturbing unpack, recreating the \
+             47 GB startup compilation."
+        );
+        assert!(
+            terrain_hit.contains("terrain_unpack_splats(splat_s)"),
+            "{root}'s terrain hit no longer uses the bounded plain unpack"
+        );
+        // Deliberately *not* banning `terrain_strongest_four` here. Removing it
+        // was tried and reverted: it cuts ALU but takes the per-hit storage
+        // reads from eight to sixty-four, which cost measurable frame rate. The
+        // 47 GB compile it was meant to bound turned out to be a driver fault,
+        // not a shader one.
+    }
 }
 
 /// TSUSHIMA-H's octaves compose with the macro blend only in its own space.
@@ -634,9 +697,6 @@ fn one_parallax_march_serves_both_frames() {
             body.contains("terrain_parallax_march("),
             "{caller} no longer delegates to the shared march"
         );
-        assert!(
-            !body.contains("loop {"),
-            "{caller} grew a march of its own"
-        );
+        assert!(!body.contains("loop {"), "{caller} grew a march of its own");
     }
 }

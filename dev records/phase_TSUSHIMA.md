@@ -1687,3 +1687,60 @@ primary source in this session, and the two places a guess was made instead —
 micro-shadowing's attribution, and Hammon's albedo-squared line — are both
 flagged in place with the reasoning. Re-deriving from memory is how the wrong
 attribution got in the first draft.
+
+---
+
+## Appendix J — an unplanned sub-phase, and why the plan did not see it
+
+Added 2026-09-04, after A–I shipped. Full record in
+[`phase TSUSHIMA/TSUSHIMA-J.md`](<phase TSUSHIMA/TSUSHIMA-J.md>).
+
+Three defects reported together. Two of them were created by this phase's own
+editor pass; the third had been in tree since Phase 17E and this phase made it
+visible by adding twenty-one plants to look at it with.
+
+- **J.1** `MATERIAL_FLAG_FOLIAGE` meant "vegetation" and "a flat cut-out card"
+  at once, and the curved-card normal keyed on `uv.x` only makes sense for the
+  second. The palette's plants are atlased modelled geometry, so `uv.x` is a
+  texture address; the rotation scattered their normals by up to 120° between
+  neighbouring blades. Split into `MATERIAL_FLAG_FOLIAGE_CARD`, authored, off
+  by default.
+- **J.2** Vegetation lighting was keyed on `alphaMode == BLEND`, so ferns,
+  shrubs, dandelions and nettles — which export as `MASK` — got none of it.
+  Keyed on `!= OPAQUE` now.
+- **J.3** Thirteen palette entries carry I's layer requirement and refused in
+  total silence. `paint` reports its rejections; the log names the layer and
+  quotes both weights; **Min layer** is a brush control.
+- **J.4** The viewport bar's overflow rule under-measured itself by 193 px and
+  sliced controls in half rather than dropping them whole.
+
+### What the plan should have said
+
+Two of these are the same omission in different places. A.9 tells the next
+session what to build and in what order, and says nothing about what to build
+*beside* it. Both J.3 and J.4 are features that were finished except for the
+part that tells a person what happened:
+
+- I's funnel gained a rejection and no way to see it fire.
+- The bar gained controls and no rule for what to do when they stop fitting.
+
+A filter and the message explaining it are one feature. So are a control and the
+rule for hiding it. Shipping the half that says no, without the half that says
+why, produces something indistinguishable from a bug — and in both cases it was
+reported as one.
+
+J.1 is a different lesson and a sharper one. The flag was set by *inference*,
+from a filename convention that identifies a cut-out rather than a card, and the
+inference was wrong for every asset in the engine. Nothing in the geometry can
+tell the two apart either: a crossed-quad billboard is a real card with the same
+normal spread as a modelled tuft that is not one. **A claim that cannot be
+checked has to be asked for**, and a default of `false` is the only safe answer
+when the wrong value silently degrades every frame.
+
+Four earlier phases had attacked the symptoms of J.1 as lighting faults — the
+25M-2 roughness floor, the specular firefly filter, the micro-shadow exclusion,
+the normal-variance widen. All four are defensible on their own terms and none
+of them could have worked, because the input was a texture coordinate and did
+not vary with light, distance or sky. That invariance was the diagnostic, and it
+was visible in the user's own words — *"no matter the lighting conditions"* —
+before any code was read.

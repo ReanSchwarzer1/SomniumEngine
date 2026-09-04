@@ -890,6 +890,19 @@ Four sources fold into that one `shadow_factor`: the cascades, cloud shadow,
 terrain's own horizon shadow, and micro-shadowing. Terrain, water and meshes
 then read a single number instead of four that can disagree.
 
+**That `FILTER` branch decides more than which filter runs.** When ray tracing
+was disabled for one driver release, `restir_sun` went false everywhere and two
+paths that had never executed a frame on that machine began to: the PCSS blocker
+search, and the screen-space contact march. The contact march produced a dense
+field of dark directional dashes that got worse as render resolution fell, and
+is off by default as a result — `SOMNIUM_CONTACT_SHADOWS=1` re-enables it. The
+reasoning is under *Why things are the way they are*.
+
+The consequence worth holding on to is that **a fallback nobody has looked at is
+not a fallback**. These were written, then covered by traced visibility before
+anyone examined them, and the first frame they ever rendered had a visible
+artifact in it.
+
 The horizon shadow exists because `SHADOW_DISTANCE` is a compile-time 100 m.
 Past it, hills were fully lit, and read as shapes with paint on them.
 TSUSHIMA-B bakes a horizon map from the heightfield and cross-fades it in over
@@ -971,6 +984,13 @@ In tree:
   carries its own discarded variance.
 - Heightmap terrain with chunk LOD, stitching, sculpting, texture painting, and
   foliage painting.
+- Four body kinds — lake, ocean, sea, river — separated by optics and sea state
+  rather than by shape. Coverage is a *different* field, because a lake and a
+  sea share a coverage rule and look nothing alike.
+- A river is a ribbon swept along an authored spline. Its centreline rides in
+  the body descriptor, and `ensure_water_body` already rebakes on descriptor
+  inequality, so dragging a control point reshapes the water with no dirty flag
+  to forget.
 - Finite water bodies backed by mask, depth, shoreline SDF, and a shared CPU/GPU
   surface query.
 - The authored water datum follows the shoreline bake, and depth/contact fading
@@ -1789,8 +1809,9 @@ without a valid visual-effect claim.
 
 Terrain photorealism, planned as nine sub-phases in
 [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>). **All nine are in tree
-and ship on.** The one item of the plan not done is H's third, re-injecting
-contrast with distance instead of fading detail out.
+and ship on**, plus an unplanned J that fixes three things the first nine left
+visible. The one item of the plan not done is H's third, re-injecting contrast
+with distance instead of fading detail out.
 
 The phase opened from a question about the BRDF. The audit put the BRDF fifth.
 
@@ -1811,6 +1832,8 @@ geometry rather than material, which is why B through E came before F.
 | G / WEAVE | Splat weights perturbed by world-indexed noise **before** strongest-four selection, so the noise picks the winners |
 | H / INK, second half | Three macro octaves at 1 km / 100 m / 10 m, and a hue shift driven by C's baked sky visibility |
 | I / GRAVEL | Parallax on cliffs, in the projection's own frame; layer-weight rejection and tilt in the foliage funnel |
+| I, editor pass | 25-entry foliage palette, nine Details controls, `Create -> Terrain (Empty)`, and four kinds of water |
+| J / KIRIKO | The curved-card normal split off `FOLIAGE`, vegetation lighting keyed on the material rather than the exporter, a foliage brush that says why it refused, and a viewport bar that drops whole controls instead of halves |
 
 Every one has an environment-variable A/B rail, and the records carry the
 measurement each landed on. Three corrected the plan rather than following it:
@@ -1831,6 +1854,24 @@ measurement each landed on. Three corrected the plan rather than following it:
 - I's plan says the foliage funnel "already does slope, layer-weight, radius and
   distance culling". It did not do layer-weight: `surface_sample` computed the
   weight and `ground_sample` threw it away.
+- I connected that layer test to thirteen of the twenty-five palette entries and
+  did not connect anything to say when it fired. J found the brush being
+  reported as broken for refusing correctly, and there is a rule in that: a
+  filter and the message explaining it are one feature, and shipping the half
+  that says no is worse than shipping neither.
+- The `FOLIAGE` material flag had meant three things since 17E, and only two of
+  them were true of the assets it was set on. J.1 has the measurement; the
+  short version is that the palette's plants are atlased modelled geometry and
+  the flag claimed they were flat cards. Four separate phases had already
+  attacked the symptoms of that as if they were lighting faults.
+- The asset fetch script destroyed the four committed Phase 17E foliage models
+  before anyone read its log. Python emits CRLF on Windows, `read` left the CR
+  on the last field, the last field was the MD5, so every hash compared unequal
+  and every fresh download was deleted as corrupt. `git checkout` got them back.
+  The fix is not a `tr` — a fix spelled with a backslash escape breaks the same
+  way the next time someone edits it — but three plain lines per record written
+  in binary, plus a download that lands in `.part` and is moved into place only
+  once its hash agrees.
 
 Still outstanding:
 
@@ -1842,12 +1883,78 @@ Still outstanding:
   than shading work.
 - H's third item: `terrain_detail_fade` still solves aliasing by removing signal
   rather than re-injecting contrast against E's filtered normal.
-- I's cliff parallax has no capture, and the two CC0 debris meshes the palette's
-  last two entries point at are fetched by `tools/fetch_foliage_rocks.sh` rather
-  than committed — so nothing has been seen with a pebble on it.
+- I's cliff parallax has no capture.
 - The projected parallax has no self-shadow, where the heightfield march does.
 
 ## Planned work that has not started
+
+### Restoring hardware ray tracing
+
+Status: **resolved for the driver that caused it.** Hardware ray tracing is on
+again; the guard that disabled it is now version-specific rather than
+vendor-wide.
+
+The cause was GeForce **616.56** (2026-08-26), whose Vulkan shader compiler
+allocated past 47 GB building ReSTIR-GI's `initial_and_temporal` and never
+finished. Rolling back to the previous driver restored ray tracing on
+**completely unchanged engine code**, which is the cleanest possible proof that
+nothing in this renderer was at fault.
+
+### What was tried first, and why none of it worked
+
+Four hypotheses, each a build plus one capped probe
+(`tools/probe_ray_query.ps1`), all of them variations on "make the ray shader
+smaller":
+
+| Attempt | What it removed from the ray path | Peak private bytes |
+|---|---|---:|
+| Weight-noise call site out of `rt_hit` | a 256-hash unrolled noise loop | ~4.1 GB |
+| `terrain_splat_core.wgsl` split | the whole raster terrain material | 4.27 GB |
+| Drop the scan array and the sort | a 128-byte local, ~256 unrolled branches | 3.95 GB |
+| `rt_trace` hop loop 4 to 1 | **three quarters of the entire hit shader** | 3.79 GB |
+
+**Removing 75% of the ray hit shader moved peak memory by 4%.** That was the
+result that mattered: an allocation independent of what the shader contains is
+not a shader problem, and every one of those four attempts was the same idea
+wearing a different hat. The table is kept so nobody spends a fifth build
+proving it again.
+
+The general lesson is worth more than the specific bug. Four hypotheses in a row
+were plausible, targeted the code we owned, and were wrong, because all four
+shared an unexamined premise — that the fault was ours. The measurement that
+broke the deadlock was not a cleverer fix, it was noticing that the *magnitude
+did not respond* to the variable being changed.
+
+### What is in place now
+
+- `ray_query_compiler_is_safe` names the one broken release
+  (`RAY_QUERY_BROKEN_NVIDIA_DRIVERS`) instead of the vendor. Unknown versions are
+  allowed, because failing closed would restore the blanket ban through the back
+  door on every unparseable string.
+- `nvidia_driver_version` decodes both shapes wgpu reports. Neither is the number
+  NVIDIA publishes, which is why the log line was hard to connect to the public
+  reports: Windows/DX12 gives an INF version like `32.0.16.1656`, whose last five
+  digits are the marketing version (`61656` -> 616.56); Vulkan gives `616.56`
+  directly.
+- `SOMNIUM_NO_RAY_QUERY=1` disables the feature with no rebuild, and beats
+  `SOMNIUM_FORCE_RAY_QUERY=1` deliberately. The real failure here was not a bad
+  driver, it was that recovering from one required editing source.
+- `tools/probe_ray_query.ps1` forces the feature on under a memory ceiling and
+  kills the process at it. Re-testing a driver is now a two-minute job.
+- `SOMNIUM_BACKEND` selects a backend, which is how the DX12 question was closed:
+  it loses `RAY_QUERY` on this adapter *and* fails at
+  `create_shader_module_passthrough` for want of DXIL.
+
+### Still open
+
+- Ship DXIL alongside SPIR-V for the precompiled Slang modules, so DX12 is a real
+  fallback rather than a startup panic.
+- The contact march still needs a resolution-aware step budget before it can be
+  on by default again. It is off (`SOMNIUM_CONTACT_SHADOWS=1` re-enables) and now
+  compiles out entirely wherever ray tracing runs, so this only matters for
+  machines without it.
+- If a future driver repeats this, add its version to
+  `RAY_QUERY_BROKEN_NVIDIA_DRIVERS` rather than widening the guard.
 
 ### PORTAL
 
@@ -2031,6 +2138,44 @@ Each entry is deliberately short. The full argument lives in the phase record
 named at the end of it.
 
 ### The renderer
+
+**"Vegetation" and "a flat card" were one material flag, and the difference was
+every plant in the game.** `MATERIAL_FLAG_FOLIAGE` turned on three things at
+once: two-sided transmitted light, a roughness floor that keeps a leaf from
+reading as wet metal at night, and a curved-*card* normal that rotates the
+shading normal about the blade's long axis by an angle taken from `uv.x`. The
+first two are true of any vegetation. The third is only meaningful when the
+material really is painted on flat cards whose UV runs 0..1 across one blade,
+and **nothing in this engine's palette is**: a Poly Haven grass tuft is
+seventeen modelled clusters sharing one *atlas*, so `uv.x` is the blade's
+address in the texture. Measured, not assumed — `u` spans 0.016 to 0.996 across
+each primitive and vertex-normal coherence runs 0.22 to 0.88, which is curved
+geometry, not a plate.
+
+The rotation is ±60°, so two blades whose art sits at opposite ends of the sheet
+were bent 120° apart from one another. That is a ground plane of scattered
+normals, and it explains a symptom that had resisted every lighting change: dark
+blotches under a low sun, a sheet of white specular sparkle under a moon, wrong
+at every distance and under every sky, because it was never a lighting fault at
+all. `MATERIAL_FLAG_FOLIAGE_CARD` now carries the card claim on its own.
+
+It is **authored, never inferred**, and that is the whole lesson of the entry.
+Inference is what put it here: the flag was set from the `*_alpha_*` sidecar
+convention, which identifies a cut-out — not a card. Geometry cannot separate
+the two either, because a crossed-quad billboard *is* a card and has exactly the
+normal spread of a modelled tuft that is not one. A flag that cannot be checked
+must be asked for. (TSUSHIMA-J)
+
+**Which plants got leaf lighting depended on who exported them.** The palette
+promoted a material to vegetation when its `alphaMode` was `BLEND`, which is
+what Poly Haven's grass and tree leaves happen to be. Ferns, shrubs, dandelions
+and nettles export as `MASK`, and a few arrive `OPAQUE` with the cut-out in a
+sidecar. So a fern was lit as a solid dielectric — no transmission, no
+two-sidedness, so dark, flat, and missing every back face — because of a field
+in a file, and nothing about the plant said so. The test is "not `OPAQUE`" now,
+which still excludes tree bark because on every multi-material tree here the
+bark is the opaque part. A capability test that keys on an exporter's habit is a
+coin toss dressed as a rule. (TSUSHIMA-J)
 
 **Terrain used to shade in its own pass, and it cost more than it looked.**
 `TerrainPass` ran after the visibility pass, after the acceleration-structure
@@ -2503,6 +2648,49 @@ does not shrink; it places the overflow past the edge. The control added most
 recently is the one that goes, and in a bar of viewport options the newest one
 was the button that puts the viewport back in the window. The actions get a
 reserved `auto` column and the content column truncates instead.
+
+**Truncating is not degrading, and "the content column truncates instead" was
+half a fix.** Reserving the actions column saved the two controls at the end and
+left everything before them to be *sliced*: the viewport bar was seen keeping
+"Resoluti" with the combo box it names gone, and nothing on screen to say a
+control had been lost. Only one group in the bar could collapse, and the rest
+were bare siblings of a clipping stack — so the unit of overflow was the pixel
+rather than the control.
+
+Two measurement faults put that in reach of an ordinary window. The width the
+bar needed was cached **once**, the first time the snapping cluster was visible,
+and the day-cycle cluster is hidden until the scene has an Environment — so on
+almost every startup the number was learned without it and under-read the bar by
+that cluster's whole 169 px. The width the bar *had* was the viewport's less the
+actions column, and the bar is inset 12 px on each side, so 24 px of room it
+never had was counted twice over. Together the rule could believe a bar fitted
+with 193 px less space than it needed, and the stack cut the difference off in
+silence.
+
+Now every control sits in a cluster with its own label, each cluster's width is
+learned separately and re-measured every layout rather than frozen, and clusters
+are dropped whole in a fixed order — snapping first because a chevron opens the
+same controls, camera speed next because RMB + wheel still sets it, resolution
+and the day cycle last because neither has a second route. A cluster that has
+never been visible is never dropped, because a hidden node measures to zero and
+hiding it is what would stop its width ever being learned. (TSUSHIMA-J)
+
+**A brush that correctly places nothing still owes an explanation.** Thirteen of
+the twenty-five foliage palette entries carry a `min_layer_weight`: pebbles want
+Gravel under them, moss wants Mossy Rock, nettles want Mud. Pointed at a terrain
+still painted Grass, every candidate is rejected — which is right, and is the
+whole reason a gravel patch reads as gravel rather than fading into a lawn. What
+was wrong is that `paint` returned a count and the caller only spoke when it was
+non-zero, so a refusal was **completely silent**. Click, click, click, no
+instances, no message, and no way to tell a working brush from a broken one; it
+was reported as a broken brush, which is exactly what it looked like.
+
+The rejection stayed. It now comes back as a report — how many were refused, for
+which reason, and the strongest layer weight actually found — so the log can say
+"Pebbles needs Gravel painted here: it wants 0.50 and the ground has at most
+0.03", once per stroke rather than once per dab. **Min layer** is in the Foliage
+Brush section beside it, because being told why is only half an answer if the
+rule cannot be relaxed. (TSUSHIMA-J)
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
 
 **The overlays painted over a window are not widgets, so they do not travel.**
@@ -2591,6 +2779,59 @@ fixed distance ahead does not survive a camera 150 m up, where ten metres ahead
 is empty air and the top view renders black on correct arithmetic. Their extent
 comes from the primary's projection, so they frame what it frames.
 ([MORROWIND-J](<dev records/phase MORROWIND/MORROWIND-J.md>))
+
+**Hardware ray tracing is off on NVIDIA + Vulkan, and DX12 is not the way
+out.** NVIDIA's Vulkan shader compiler (driver 32.0.16.1656) consumed more than
+47 GB compiling ReSTIR-GI's `initial_and_temporal` ray-query pipeline and never
+finished; the editor could not start. Guarding that one pipeline only moved the
+explosion to the next ray-query root. The feature is optional, so
+`ray_query_compiler_is_safe` declines to request it on that pair and the raster
+fallbacks carry the frame.
+
+This is a driver regression, not a standing limitation: the same shaders
+compiled and ran with ray tracing on this machine before it was updated to
+`32.0.16.1656`, which was the newest available. So the usual advice is
+backwards here — there is nothing newer to upgrade to, and rolling back is the
+cheap experiment. `SOMNIUM_FORCE_RAY_QUERY=1` and `tools/probe_ray_query.ps1`
+exist so re-testing a driver costs two minutes and a capped process rather than
+the desktop.
+
+DX12 was the obvious escape and was measured, not assumed: wgpu reports 3 of 13
+features there against Vulkan's larger set, `RAY_QUERY` among the missing — so
+it loses ray tracing anyway — and startup then fails outright in
+`create_shader_module_passthrough`, because the precompiled Slang modules carry
+SPIR-V and no DXIL. `SOMNIUM_BACKEND` exists so that question can be asked
+again rather than argued about.
+
+**The screen-space contact march is off by default because it had never run.**
+`contact` is gated on `!restir_sun`, so on any machine where ReSTIR owned sun
+visibility it executed zero frames — it switched on for the first time when ray
+tracing was disabled above. What it produced was a dense field of dark
+directional dashes across the terrain that got *worse the lower the render
+resolution went*, which is the signature of an untuned screen-space march: it is
+a `min()`, so it can only ever darken, and its step budget is measured in
+pixels. Defaulting it off restores the image every ReSTIR machine has always
+had, and **that is confirmed, not inferred**: the dashes were gone on the next
+run. Tuning it is deferred work, not finished work, and `SOMNIUM_CONTACT_SHADOWS=1`
+is how whoever picks that up turns it back on.
+
+Getting there took two wrong answers first, both cheap to test and both worth
+recording so they are not re-tested. The splat weight noise was ruled out with a
+live slider — the terrain uniform is rebuilt every frame, so a control that
+changes nothing is real evidence and not a broken control. And `Debug view = 9`
+(Albedo) proved useless for the question: albedo is 0..1, auto-exposure is scaled
+to scene radiance in the thousands, so the view clips to white and answers
+nothing. **What actually identified it was that the artifact scaled with render
+resolution** — screen-space, therefore not a material property at all.
+
+**A fallback nobody has looked at is not a fallback.** Both paths that woke up
+here — PCSS and the contact march — were reachable in principle for years and
+exercised on this hardware never, because traced visibility answered first.
+Disabling one optional feature promoted two untested paths into the critical
+one, and the first thing either did was produce a visible artifact. The lesson
+is not about ray tracing: it is that `!some_better_path` is a branch that needs
+its own evidence, and a capability gate is also a decision to ship whatever sits
+behind it.
 
 **Temporal history is keyed to one camera.** TAA, FSR and ReSTIR reproject the
 last frame through the view that built it, so a second viewport reusing that

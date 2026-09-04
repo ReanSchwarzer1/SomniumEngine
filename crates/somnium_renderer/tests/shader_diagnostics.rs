@@ -27,13 +27,17 @@ const MODULES: &[&str] = &[
     "sampling.wgsl",
     "shading.wgsl",
     "terrain_material.wgsl",
+    // The bounded splat helpers the ray-query roots compose instead of the full
+    // raster material. `terrain_material.wgsl` includes it too, so leaving it
+    // out here fails composition outright rather than subtly.
+    "terrain_splat_core.wgsl",
 ];
 
 fn shader_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shaders")
 }
 
-/// Register the shading pass's eight modules, with one line of one of them
+/// Register the shading pass's modules, with one line of one of them
 /// replaced.
 fn system_with(broken: Option<(&str, usize, &str)>) -> ShaderSystem {
     let mut system = ShaderSystem::new();

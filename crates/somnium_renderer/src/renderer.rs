@@ -395,6 +395,22 @@ pub struct SomniumRenderer {
     /// normal run; non-zero deliberately renders a wrong image so one class of
     /// pixel can be timed on its own.
     shade_ablate: u32,
+    /// Whether the screen-space contact-shadow march may run at all.
+    ///
+    /// **Off by default**, which is a deliberate change and not a regression.
+    /// `contact` below is gated on `!restir_sun`, so on any machine where
+    /// ReSTIR owned sun visibility this march has never executed a single
+    /// frame. It only began running when hardware ray tracing was disabled on
+    /// NVIDIA + Vulkan, and what it produced the first time it ran was a dense
+    /// field of dark directional dashes across the terrain that got *worse the
+    /// lower the render resolution went*.
+    ///
+    /// That is the signature of an untuned screen-space march: it is a `min()`,
+    /// so it can only ever darken, and its step budget is measured in pixels.
+    /// Defaulting it off restores the image every ReSTIR machine has always
+    /// had. `SOMNIUM_CONTACT_SHADOWS=1` turns it back on for whoever tunes it,
+    /// which is the work this defers rather than pretends to have done.
+    contact_shadows: bool,
     /// Phase DOOM-F. Scene size the editor asked for, before any dynamic scale.
     base_extent: (u32, u32),
     /// Phase DOOM-F resolution controller. Public: the Camera details drive its
@@ -1156,6 +1172,7 @@ impl SomniumRenderer {
             aerial_hero_bank: std::env::var("SOMNIUM_AERIAL_HERO").as_deref() == Ok("1"),
             aerial_split_active: false,
             shade_ablate: crate::pass::shading::ablate::from_env(),
+            contact_shadows: std::env::var("SOMNIUM_CONTACT_SHADOWS").as_deref() == Ok("1"),
             base_extent: (ctx.config.width.max(1), ctx.config.height.max(1)),
             dynamic_resolution: crate::viewport_resolution::DynamicResolution::default(),
             terrain_material_ids: std::collections::HashSet::new(),
@@ -1391,6 +1408,10 @@ impl SomniumRenderer {
                             0
                         } | if mat.foliage {
                             crate::material::pool::MATERIAL_FLAG_FOLIAGE
+                        } else {
+                            0
+                        } | if mat.foliage_card {
+                            crate::material::pool::MATERIAL_FLAG_FOLIAGE_CARD
                         } else {
                             0
                         },
@@ -4358,7 +4379,7 @@ impl SomniumRenderer {
                 hex: false,
                 pom: false,
                 pcss: (self.shading_mode & 2) != 0 && !restir_sun,
-                contact: (self.shading_mode & 4) != 0 && !restir_sun,
+                contact: (self.shading_mode & 4) != 0 && !restir_sun && self.contact_shadows,
                 clipmap: false,
                 debug: self.shading_debug != 0.0,
                 terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,

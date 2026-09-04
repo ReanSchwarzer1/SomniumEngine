@@ -1552,24 +1552,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
     }
 
-    // ── Foliage: curved card normals (Phase 17E) ─────────────────────────────
+    // ── Foliage: curved card normals (Phase 17E, re-gated in TSUSHIMA-J) ─────
     //
-    // A leaf or blade is modelled as a flat card, so every pixel across it
-    // shares one normal and the whole card lights as a flat plate — the tell
-    // that vegetation is cardboard rather than a plant. Real leaves are curved,
-    // and a curved surface fans its normals across its width.
+    // A leaf or blade drawn as a flat card shares one normal across its whole
+    // width, so it lights as a flat plate — the tell that vegetation is
+    // cardboard rather than a plant. Real leaves are curved, and a curved
+    // surface fans its normals across its width.
     //
     // Ported from `SpartanEngine-master/data/shaders/g_buffer.hlsl`, its
     // "foliage curved normals": rotate the normal about the axis running along
     // the card by an angle taken from how far across the card's *width* the
-    // pixel sits. Spartan carries a `width_percent` vertex attribute for this;
-    // Somnium has no such attribute and does not need one — on a foliage card
-    // `uv.x` **is** the distance across the blade, which is what makes this
-    // free here.
+    // pixel sits. Spartan carries a `width_percent` vertex attribute for this.
+    // Somnium substitutes `uv.x`, and that substitution is only valid when the
+    // material really is painted on cards whose UV runs 0..1 across one blade.
     //
-    // Gated on `MATERIAL_FLAG_FOLIAGE` rather than on `transmission`, because
-    // glass is transmissive too and must not be bent into a leaf.
-    if (material.flags & 2u) != 0u {
+    // # Why the gate is `FOLIAGE_CARD` and not `FOLIAGE`
+    //
+    // It was `FOLIAGE` for six phases, and every scanned plant in the palette
+    // sets `FOLIAGE`. None of them are cards. A Poly Haven grass tuft is
+    // seventeen modelled clusters sharing one *atlas*, so `uv.x` is the blade's
+    // address in the texture — not a position across it — and neighbouring
+    // blades whose art sits at opposite ends of the sheet were being bent up to
+    // 120 degrees apart from one another. The result was a ground plane of
+    // scattered normals: blotchy under a low sun, a sheet of white specular
+    // sparkle under a moon, and wrong at every distance in between, which is
+    // why no lighting change ever made it better.
+    //
+    // The flag is authored rather than detected because geometry cannot answer
+    // it. A crossed-quad billboard *is* a card and has the same normal spread
+    // as a modelled tuft that is not one.
+    if (material.flags & 4u) != 0u {
         // ±60° across the card, matching the reference's 120° span.
         let curve = clamp((uv.x - 0.5) * 2.0943951, -1.5707963, 1.5707963);
         // The axis along the card's length: perpendicular to both the face

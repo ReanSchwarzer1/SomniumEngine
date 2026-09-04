@@ -129,7 +129,59 @@ pub fn spacing_for_density(density: f32) -> f32 {
     (1.0 / density).sqrt() * 0.85
 }
 
-/// Add instances under the brush, returning how many were placed.
+/// What one dab did, and — when it did nothing — why.
+///
+/// # Why a report and not a count
+///
+/// `paint` returned `usize`, and the caller only spoke when it was non-zero.
+/// So a brush that placed nothing was **completely silent**, and thirteen of
+/// the twenty-five palette entries can place nothing for a reason no one can
+/// see: they carry a `min_layer_weight` against a splat layer that has to be
+/// painted on the ground first. Pebbles want gravel, moss wants mossy rock,
+/// nettles want mud. Point one of them at a default grass terrain and the
+/// cursor is over ground the brush will always refuse — and the editor's whole
+/// answer was nothing at all.
+///
+/// The rejection is right. Silence about it is not, so the counts come back and
+/// the caller can name the reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PaintReport {
+    /// Instances actually added.
+    pub placed: usize,
+    /// Candidates on ground steeper than `max_slope_deg`.
+    pub too_steep: usize,
+    /// Candidates where `layer` was painted more weakly than
+    /// `min_layer_weight`.
+    pub wrong_layer: usize,
+    /// Candidates rejected because an instance of the same kind was already
+    /// within the spacing implied by density. This one is *success* for a held
+    /// brush: it is how a stroke settles instead of piling up.
+    pub too_close: usize,
+    /// The strongest `layer` weight seen under any candidate this dab.
+    ///
+    /// The number a message needs: "wants 0.50, the ground here has 0.03" says
+    /// what to do, where "nothing was placed" does not.
+    pub best_layer_weight: f32,
+}
+
+impl PaintReport {
+    /// A dab that placed nothing and was not merely already full.
+    ///
+    /// `too_close` is excluded deliberately — painting over ground that is
+    /// already covered is the brush working, not failing.
+    #[must_use]
+    pub fn refused(&self) -> bool {
+        self.placed == 0 && (self.too_steep > 0 || self.wrong_layer > 0)
+    }
+
+    /// Whether the layer test is what stopped this dab.
+    #[must_use]
+    pub fn blocked_by_layer(&self) -> bool {
+        self.refused() && self.wrong_layer >= self.too_steep
+    }
+}
+
+/// Add instances under the brush, reporting what happened.
 ///
 /// `stroke_seed` should advance between dabs so a held brush keeps producing
 /// new candidates rather than retrying the same rejected points.
@@ -139,22 +191,30 @@ pub fn paint(
     center: [f32; 2],
     stroke_seed: u32,
     sample: impl Fn(f32, f32) -> GroundSample,
-) -> usize {
+) -> PaintReport {
     let slope_limit = brush.max_slope_deg.clamp(0.0, 90.0).to_radians().cos();
     let scale_lo = brush.scale_min.min(brush.scale_max).max(0.01);
     let scale_hi = brush.scale_min.max(brush.scale_max).max(0.01);
     let before = out.len();
 
     let tilt_limit = brush.max_tilt_deg.clamp(0.0, 90.0).to_radians();
-    let place = |x: f32, z: f32, salt: u32, out: &mut Vec<PaintedFoliage>| {
+    let mut report = PaintReport::default();
+    let place = |x: f32,
+                 z: f32,
+                 salt: u32,
+                 out: &mut Vec<PaintedFoliage>,
+                 report: &mut PaintReport| {
         let g = sample(x, z);
+        report.best_layer_weight = report.best_layer_weight.max(g.layer_weight);
         if g.slope_cos < slope_limit || !g.height.is_finite() {
+            report.too_steep += 1;
             return;
         }
         // A hard threshold, not a probability. A probability would scatter a
         // thinning fringe of pebbles out across the grass, and the thing that
         // makes a gravel patch read as gravel is that it *stops*.
         if brush.min_layer_weight > 0.0 && g.layer_weight < brush.min_layer_weight {
+            report.wrong_layer += 1;
             return;
         }
         let spacing = if brush.single {
@@ -168,6 +228,7 @@ pub fn paint(
         if out.iter().any(|p| {
             p.kind == brush.kind && (p.position.x - x).powi(2) + (p.position.z - z).powi(2) < sp_sq
         }) {
+            report.too_close += 1;
             return;
         }
         let jy = unit_from(hash2(salt, 0x51_7C_C1_B7));
@@ -188,12 +249,13 @@ pub fn paint(
     };
 
     if brush.single {
-        place(center[0], center[1], stroke_seed, out);
-        return out.len() - before;
+        place(center[0], center[1], stroke_seed, out, &mut report);
+        report.placed = out.len() - before;
+        return report;
     }
 
     if brush.radius <= 0.0 || brush.density <= 0.0 {
-        return 0;
+        return report;
     }
 
     // Try a number of candidates proportional to the brush area at the target
@@ -208,9 +270,16 @@ pub fn paint(
         // middle and the brush paints a hot spot.
         let r = brush.radius * unit_from(hash2(salt, 0x85EB_CA6B)).sqrt();
         let a = unit_from(hash2(salt, 0xC2B2_AE35)) * std::f32::consts::TAU;
-        place(center[0] + r * a.cos(), center[1] + r * a.sin(), salt, out);
+        place(
+            center[0] + r * a.cos(),
+            center[1] + r * a.sin(),
+            salt,
+            out,
+            &mut report,
+        );
     }
-    out.len() - before
+    report.placed = out.len() - before;
+    report
 }
 
 /// Remove instances within `radius` of `center`, returning how many went.
@@ -275,8 +344,8 @@ mod tests {
     fn a_dab_places_instances_inside_the_brush() {
         let mut v = Vec::new();
         let n = paint(&mut v, &brush(), [10.0, 10.0], 1, flat);
-        assert!(n > 0);
-        assert_eq!(v.len(), n);
+        assert!(n.placed > 0);
+        assert_eq!(v.len(), n.placed);
         for p in &v {
             let d = ((p.position.x - 10.0).powi(2) + (p.position.z - 10.0).powi(2)).sqrt();
             assert!(d <= 5.0 + 1e-3, "instance {d} outside a radius-5 brush");
@@ -362,7 +431,7 @@ mod tests {
             ..brush()
         };
         let n = paint(&mut v, &b, [3.0, -4.0], 1, flat);
-        assert_eq!(n, 1);
+        assert_eq!(n.placed, 1);
         assert_eq!(v[0].position.x, 3.0);
         assert_eq!(v[0].position.z, -4.0);
     }
@@ -406,7 +475,7 @@ mod tests {
             2,
             flat,
         );
-        assert_eq!(n, 1, "a different kind was blocked by an existing instance");
+        assert_eq!(n.placed, 1, "a different kind was blocked by an existing instance");
         assert_eq!(v.len(), 2);
     }
 
@@ -418,7 +487,7 @@ mod tests {
             layer_weight: 1.0,
         };
         let mut v = Vec::new();
-        assert_eq!(paint(&mut v, &brush(), [0.0, 0.0], 1, cliff), 0);
+        assert_eq!(paint(&mut v, &brush(), [0.0, 0.0], 1, cliff).placed, 0);
     }
 
     #[test]
@@ -530,7 +599,8 @@ mod tests {
                 [0.0, 0.0],
                 1,
                 flat
-            ),
+            )
+            .placed,
             0
         );
         assert_eq!(
@@ -543,11 +613,84 @@ mod tests {
                 [0.0, 0.0],
                 1,
                 flat
-            ),
+            )
+            .placed,
             0
         );
         assert_eq!(erase(&mut v, [0.0, 0.0], 0.0, None), 0);
         assert_eq!(spacing_for_density(0.0), f32::MAX);
+    }
+
+    /// A dab that places nothing has to be able to say why.
+    ///
+    /// Thirteen of the twenty-five palette entries carry a layer requirement,
+    /// and pointing one of them at ground that does not satisfy it is the
+    /// ordinary case — not a mistake, and not something the editor may answer
+    /// with silence. The counts are what let the caller name the reason and
+    /// quote the number the ground actually has.
+    #[test]
+    fn a_refused_dab_names_the_layer_that_refused_it() {
+        let sparse = |_x: f32, _z: f32| GroundSample {
+            height: 0.0,
+            slope_cos: 1.0,
+            layer_weight: 0.03,
+        };
+        let b = FoliageBrush {
+            radius: 6.0,
+            density: 2.0,
+            layer: 7,
+            min_layer_weight: 0.5,
+            ..Default::default()
+        };
+        let mut v = Vec::new();
+        let r = paint(&mut v, &b, [0.0, 0.0], 1, sparse);
+
+        assert_eq!(r.placed, 0);
+        assert!(r.wrong_layer > 0, "the layer test rejected nothing");
+        assert_eq!(r.too_steep, 0, "flat ground was called steep");
+        assert!(r.refused() && r.blocked_by_layer());
+        // The measured weight is the actionable half of the message.
+        assert!((r.best_layer_weight - 0.03).abs() < 1.0e-6);
+    }
+
+    /// Steep ground and wrong ground are different answers.
+    #[test]
+    fn a_dab_on_a_cliff_blames_the_slope_and_not_the_layer() {
+        let cliff = |_x: f32, _z: f32| GroundSample {
+            height: 0.0,
+            slope_cos: 0.1,
+            layer_weight: 1.0,
+        };
+        let mut v = Vec::new();
+        let r = paint(&mut v, &brush(), [0.0, 0.0], 1, cliff);
+        assert!(r.refused());
+        assert!(r.too_steep > 0);
+        assert!(!r.blocked_by_layer(), "a cliff was reported as wrong ground");
+    }
+
+    /// Painting over ground that is already full is the brush working.
+    ///
+    /// `refused` has to exclude spacing, or a held stroke would report a
+    /// failure every dab once it had converged — which is exactly when it is
+    /// doing the right thing.
+    #[test]
+    fn a_settled_stroke_is_not_a_refusal() {
+        let mut v = Vec::new();
+        let mut saw_spacing = false;
+        // A held brush over flat, unrestricted ground. Every dab that spacing
+        // alone held back must report itself as working, not as refused —
+        // whether it placed one stray instance into a gap or none at all.
+        for seed in 0..60 {
+            let r = paint(&mut v, &brush(), [0.0, 0.0], seed, flat);
+            if r.too_close > 0 {
+                saw_spacing = true;
+            }
+            assert!(
+                !r.refused(),
+                "dab {seed} on open ground reported a refusal: {r:?}"
+            );
+        }
+        assert!(saw_spacing, "the stroke never packed tightly enough to test");
     }
 
     /// The rejection has to be a *cliff*, not a gradient. A probability would
@@ -573,7 +716,7 @@ mod tests {
         // Centred on the boundary, so a brush that ignored the layer would
         // fill both halves.
         let n = paint(&mut v, &b, [0.0, 0.0], 1, split);
-        assert!(n > 0, "the painted half placed nothing at all");
+        assert!(n.placed > 0, "the painted half placed nothing at all");
         assert!(
             v.iter().all(|p| p.position.x < 0.0),
             "debris landed on ground its layer is not painted on"
@@ -589,7 +732,7 @@ mod tests {
             layer_weight: 0.0,
         };
         let mut v = Vec::new();
-        assert!(paint(&mut v, &brush(), [0.0, 0.0], 1, bare) > 0);
+        assert!(paint(&mut v, &brush(), [0.0, 0.0], 1, bare).placed > 0);
     }
 
     /// A field of pebbles all sitting perfectly flat reads as placed rather
@@ -600,7 +743,10 @@ mod tests {
     fn tilt_is_varied_bounded_and_off_by_default() {
         let mut upright = Vec::new();
         paint(&mut upright, &brush(), [0.0, 0.0], 1, flat);
-        assert!(upright.iter().all(|p| p.tilt == 0.0), "default brush leaned");
+        assert!(
+            upright.iter().all(|p| p.tilt == 0.0),
+            "default brush leaned"
+        );
 
         let b = FoliageBrush {
             max_tilt_deg: 30.0,

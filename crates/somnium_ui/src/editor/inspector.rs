@@ -144,6 +144,18 @@ pub(crate) fn build_inspector(
     let terrain_relief = number(ui, terrain_section, "Relief", 0.05, "");
     let terrain_wetness = number(ui, terrain_section, "Wetness", 0.02, "");
     let terrain_macro = number(ui, terrain_section, "Macro variation", 0.02, "");
+    // Phase TSUSHIMA. Grouped after the older material dials because they are
+    // the landscape-scale ones: what the ground is made of between one texel
+    // and one map, rather than how one layer is drawn.
+    let terrain_horizon_toggle = check(ui, terrain_section, "Horizon shadow", font_id);
+    let terrain_skyvis_toggle = check(ui, terrain_section, "Baked sky visibility", font_id);
+    let terrain_relief_map_toggle = check(ui, terrain_section, "Relief normal", font_id);
+    let terrain_skyvis = number(ui, terrain_section, "Sky visibility", 0.02, "");
+    let terrain_relief_takeover = number(ui, terrain_section, "Relief takeover", 5.0, "m");
+    let terrain_splat_noise = number(ui, terrain_section, "Splat noise", 0.02, "");
+    let terrain_splat_noise_scale = number(ui, terrain_section, "Splat noise scale", 0.02, "/m");
+    let terrain_macro_octaves = number(ui, terrain_section, "Macro octaves", 0.05, "");
+    let terrain_damp_tint = number(ui, terrain_section, "Damp tint", 0.05, "");
     let terrain_debug = number(ui, terrain_section, "Debug view", 1.0, "");
     ui.set_visibility(terrain_section, false);
 
@@ -164,6 +176,10 @@ pub(crate) fn build_inspector(
     let foliage_layer = number(ui, foliage_section, "Kind", 1.0, "");
     let foliage_smin = number(ui, foliage_section, "Scale min", 0.01, "");
     let foliage_smax = number(ui, foliage_section, "Scale max", 0.01, "");
+    // The escape hatch for the layer filter. Next to the rest of the brush
+    // because that is where someone looks after the log tells them a dab was
+    // refused for the ground it was over.
+    let foliage_min_weight = number(ui, foliage_section, "Min layer", 0.05, "");
     ui.set_visibility(foliage_section, false);
 
     let script_section = section(ui, parent, "Scripts");
@@ -200,6 +216,15 @@ pub(crate) fn build_inspector(
         terrain_relief,
         terrain_wetness,
         terrain_macro,
+        terrain_horizon_toggle,
+        terrain_skyvis_toggle,
+        terrain_relief_map_toggle,
+        terrain_skyvis,
+        terrain_relief_takeover,
+        terrain_splat_noise,
+        terrain_splat_noise_scale,
+        terrain_macro_octaves,
+        terrain_damp_tint,
         terrain_debug,
         foliage_section,
         foliage_toggle,
@@ -213,6 +238,7 @@ pub(crate) fn build_inspector(
         foliage_layer,
         foliage_smin,
         foliage_smax,
+        foliage_min_weight,
         script_section,
         script_add,
         script_list,

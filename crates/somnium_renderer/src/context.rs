@@ -69,6 +69,155 @@ pub const DRAW_COUNT_FEATURES: wgpu::Features = wgpu::Features::MULTI_DRAW_INDIR
 /// without it must still start.
 pub const RAY_TRACING_FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
 
+/// Backends this build will consider, from `SOMNIUM_BACKEND` (or wgpu's own
+/// `WGPU_BACKEND`).
+///
+/// `wgpu::Instance::default()` reads no environment at all, which is why asking
+/// this engine for DX12 previously appeared to do nothing — there was no way to
+/// choose, so an NVIDIA machine always landed on Vulkan.
+///
+/// It exists to make [`ray_query_compiler_is_safe`] testable rather than
+/// permanent: that guard disables ray queries on NVIDIA + **Vulkan** because
+/// the driver's shader compiler exhausts system memory building one, and
+/// without a selector there was no way to ask whether another backend fares
+/// better.
+///
+/// **Measured, on an RTX 5080 Laptop / driver 32.0.16.1656: DX12 is not an
+/// escape hatch.** wgpu reports 3 of 13 features there, `RAY_QUERY` among the
+/// missing, so DX12 loses hardware ray tracing anyway — and startup then fails
+/// outright in `create_shader_module_passthrough`, because this engine's
+/// precompiled Slang modules carry SPIR-V and no DXIL. Vulkan remains the right
+/// backend on this hardware; the guard stands, and the raster fallbacks it
+/// selects have to be good enough on their own.
+///
+/// Kept regardless, because a renderer that cannot be asked to try another
+/// backend cannot answer that question next time either.
+///
+/// `None` leaves wgpu's own default untouched, so an unset variable is exactly
+/// the behaviour this engine had before the selector existed.
+fn requested_backends() -> Option<wgpu::Backends> {
+    let raw = std::env::var("SOMNIUM_BACKEND")
+        .or_else(|_| std::env::var("WGPU_BACKEND"))
+        .ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "dx12" | "d3d12" | "directx12" => Some(wgpu::Backends::DX12),
+        "vulkan" | "vk" => Some(wgpu::Backends::VULKAN),
+        "metal" | "mtl" => Some(wgpu::Backends::METAL),
+        "gl" | "opengl" | "gles" => Some(wgpu::Backends::GL),
+        other => {
+            warn!("SOMNIUM_BACKEND={other} is not a backend name; leaving the default");
+            None
+        }
+    }
+}
+
+/// Explicit opt-in that overrides [`ray_query_compiler_is_safe`].
+///
+/// The guard below is a workaround for a driver bug, not a statement about what
+/// this engine can support, and a workaround with no way to re-test it becomes
+/// permanent by default. `SOMNIUM_FORCE_RAY_QUERY=1` requests the feature
+/// anyway, so a change meant to fix the underlying compile can be measured
+/// without editing the guard out and forgetting to put it back.
+///
+/// **This can take a machine down, and not by crashing.** The failure it steps
+/// around is an allocation that never completes: the driver's compiler consumed
+/// more than 47 GB and the editor never reached its first frame. Run it under a
+/// memory cap the first time — `tools/probe_ray_query.ps1` launches once, kills
+/// the process at a ceiling, and reports the peak.
+fn ray_query_forced() -> bool {
+    std::env::var("SOMNIUM_FORCE_RAY_QUERY").as_deref() == Ok("1")
+}
+
+/// Kill switch for hardware ray tracing, independent of any guard below.
+///
+/// The lesson of GeForce 616.56 is not that one driver was bad; it is that a
+/// driver can make this engine *unstartable* and the only recovery was editing
+/// the source. `SOMNIUM_NO_RAY_QUERY=1` is the recovery that does not need a
+/// rebuild, and it beats [`ray_query_forced`] deliberately — the escape hatch
+/// must win over the override, or it is not an escape hatch.
+fn ray_query_disabled() -> bool {
+    std::env::var("SOMNIUM_NO_RAY_QUERY").as_deref() == Ok("1")
+}
+
+/// NVIDIA marketing driver versions whose Vulkan shader compiler cannot build
+/// this engine's ray-query pipelines, in hundredths (616.56 is `61656`).
+///
+/// GeForce **616.56** (2026-08-26) allocated past 47 GB compiling ReSTIR-GI's
+/// `initial_and_temporal` and never finished, taking the machine with it.
+/// Measured, not inferred: four separate attempts to shrink the shader moved
+/// peak memory by 4% total, and rolling the driver back fixed it outright on
+/// unchanged engine code.
+const RAY_QUERY_BROKEN_NVIDIA_DRIVERS: &[u32] = &[61656];
+
+/// NVIDIA's marketing driver version, from whichever string the backend filled.
+///
+/// Neither shape that reaches us is the number NVIDIA's release notes use, which
+/// is why the log line was hard to connect to the public reports:
+///
+/// - Windows/DX12 puts the INF version in `driver`, e.g. `32.0.16.1656`. The
+///   marketing version is the last five digits of the final two components:
+///   `16` + `1656` -> `161656` -> `61656` -> 616.56.
+/// - Vulkan puts a decoded version in `driver_info`, e.g. `616.56` or
+///   `616.56.0`, already in marketing form.
+///
+/// Returned in hundredths so the comparison is integer and exact.
+fn nvidia_driver_version(driver: &str, driver_info: &str) -> Option<u32> {
+    for raw in [driver_info, driver] {
+        let text = raw.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = text.split('.').collect();
+        // Windows INF form, checked first: its leading `32.0` would otherwise
+        // parse as a plausible-looking marketing version of 32.00.
+        if parts.len() == 4 {
+            let joined = format!("{}{}", parts[2], parts[3]);
+            if joined.len() >= 5 && joined.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(value) = joined[joined.len() - 5..].parse::<u32>() {
+                    return Some(value);
+                }
+            }
+        }
+        // Vulkan form. The two-digit minor is what distinguishes a real
+        // marketing version from the head of some other dotted string.
+        if parts.len() >= 2 && parts[1].len() == 2 {
+            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                return Some(major * 100 + minor);
+            }
+        }
+    }
+    None
+}
+
+/// Whether startup may request wgpu's experimental ray-query feature.
+///
+/// **Version-specific, not vendor-wide.** The original guard refused ray queries
+/// on every NVIDIA + Vulkan machine, which was the right emergency measure and
+/// the wrong permanent one: it cost ReSTIR DI, ReSTIR GI and traced water
+/// reflections on the most common hardware this engine runs on, and it promoted
+/// two never-exercised raster paths into the critical one. Exactly one driver
+/// release was ever shown to fail.
+///
+/// Unknown versions are **allowed**. Failing closed would restore the blanket
+/// ban through the back door every time a string fails to parse, and
+/// `SOMNIUM_NO_RAY_QUERY=1` is the recovery if a future release repeats this.
+fn ray_query_compiler_is_safe(
+    backend: wgpu::Backend,
+    vendor: u32,
+    driver: &str,
+    driver_info: &str,
+) -> bool {
+    const NVIDIA_VENDOR_ID: u32 = 0x10de;
+    if backend != wgpu::Backend::Vulkan || vendor != NVIDIA_VENDOR_ID {
+        return true;
+    }
+    match nvidia_driver_version(driver, driver_info) {
+        Some(version) => !RAY_QUERY_BROKEN_NVIDIA_DRIVERS.contains(&version),
+        None => true,
+    }
+}
+
 /// Phase 29: GPU timestamps for the profiler.
 ///
 /// `TIMESTAMP_QUERY` alone only permits timestamps written by a pass
@@ -144,8 +293,14 @@ impl RenderContext {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        // Create the wgpu instance with Vulkan/DX12/Metal backends.
-        let instance = wgpu::Instance::default();
+        // Create the wgpu instance. `SOMNIUM_BACKEND` narrows the set; see
+        // `requested_backends` for why that is load-bearing on NVIDIA.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        if let Some(backends) = requested_backends() {
+            info!(?backends, "Backend selection overridden by the environment");
+            descriptor.backends = backends;
+        }
+        let instance = wgpu::Instance::new(descriptor);
 
         // Create the surface from the window.
         // SAFETY: The surface must outlive the window. We use an Arc<Window>
@@ -229,9 +384,32 @@ impl RenderContext {
         };
 
         // Phase 24J: same pattern — detect, do not demand.
-        let ray_tracing = available_features.contains(RAY_TRACING_FEATURES);
+        let ray_query_available = available_features.contains(RAY_TRACING_FEATURES);
+        let forced = ray_query_forced();
+        let compiler_is_safe =
+            ray_query_compiler_is_safe(info.backend, info.vendor, &info.driver, &info.driver_info);
+        let ray_tracing =
+            ray_query_available && !ray_query_disabled() && (forced || compiler_is_safe);
+        if ray_query_available && ray_query_disabled() {
+            warn!("SOMNIUM_NO_RAY_QUERY=1: hardware ray tracing disabled by request");
+        }
+        if ray_tracing && forced && !compiler_is_safe {
+            warn!(
+                backend = ?info.backend,
+                driver = %info.driver_info,
+                "SOMNIUM_FORCE_RAY_QUERY=1: requesting ray queries on a driver known to                  exhaust system memory compiling them. If startup stalls here, it is not hung                  — it is allocating, and it will not stop."
+            );
+        }
         if ray_tracing {
             info!("Hardware ray tracing available (acceleration structures + ray query)");
+        } else if ray_query_available {
+            warn!(
+                backend = ?info.backend,
+                driver = %info.driver_info,
+                "Hardware ray tracing disabled: this exact driver release exhausts system memory \
+                 compiling ray-query pipelines. Roll back to the previous branch, or set \
+                 SOMNIUM_FORCE_RAY_QUERY=1 to try it anyway under tools/probe_ray_query.ps1."
+            );
         } else {
             info!("Hardware ray tracing unavailable — the GI path will need the software fallback");
         }
@@ -473,5 +651,85 @@ impl RenderContext {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nvidia_driver_version, ray_query_compiler_is_safe};
+
+    /// Both shapes wgpu hands us decode to the number NVIDIA publishes.
+    #[test]
+    fn the_driver_version_decodes_from_either_backend() {
+        // Windows/DX12 INF form, which is what this engine actually logged.
+        assert_eq!(nvidia_driver_version("32.0.16.1656", ""), Some(61656));
+        // Vulkan decoded form, with and without a patch component.
+        assert_eq!(nvidia_driver_version("NVIDIA", "616.56"), Some(61656));
+        assert_eq!(nvidia_driver_version("NVIDIA", "616.56.0"), Some(61656));
+        // A different release must not collide with the broken one.
+        assert_eq!(nvidia_driver_version("32.0.15.7688", ""), Some(57688));
+        assert_ne!(nvidia_driver_version("NVIDIA", "580.88"), Some(61656));
+        // Nothing parseable is `None`, never a wrong number.
+        assert_eq!(nvidia_driver_version("", ""), None);
+        assert_eq!(nvidia_driver_version("Mesa", "not a version"), None);
+    }
+
+    /// The guard names one release, not a vendor.
+    ///
+    /// The blanket ban cost ReSTIR DI, ReSTIR GI and traced water reflections on
+    /// every NVIDIA machine to work around a fault that was only ever shown on
+    /// one driver, and rolling that driver back fixed it on unchanged code.
+    #[test]
+    fn only_the_broken_driver_loses_ray_queries() {
+        let vk = wgpu::Backend::Vulkan;
+        // The one release that was measured failing, in both spellings.
+        assert!(!ray_query_compiler_is_safe(vk, 0x10de, "32.0.16.1656", ""));
+        assert!(!ray_query_compiler_is_safe(vk, 0x10de, "NVIDIA", "616.56"));
+        // Its neighbours are not guilty by association.
+        assert!(ray_query_compiler_is_safe(vk, 0x10de, "NVIDIA", "580.88"));
+        assert!(ray_query_compiler_is_safe(vk, 0x10de, "32.0.15.7688", ""));
+        // Other vendors and other backends were never implicated.
+        assert!(ray_query_compiler_is_safe(vk, 0x1002, "NVIDIA", "616.56"));
+        assert!(ray_query_compiler_is_safe(
+            wgpu::Backend::Dx12,
+            0x10de,
+            "32.0.16.1656",
+            ""
+        ));
+        // Fails open. A version we cannot read must not resurrect the blanket
+        // ban; `SOMNIUM_NO_RAY_QUERY=1` is the recovery for that case.
+        assert!(ray_query_compiler_is_safe(vk, 0x10de, "", ""));
+    }
+
+    /// The escape hatch the guard above needs to not be permanent.
+    ///
+    /// `ray_query_compiler_is_safe` allows ray queries on NVIDIA + DX12 and
+    /// refuses them on NVIDIA + Vulkan, so a selector that cannot reach DX12
+    /// leaves that hardware on the raster fallbacks forever. These two facts
+    /// belong in one test because neither is much use without the other.
+    #[test]
+    fn a_backend_can_be_selected_so_the_vulkan_guard_is_escapable() {
+        // Parsed independently of the process environment: the mapping is what
+        // is under test, not `std::env`.
+        for (name, expected) in [
+            ("dx12", wgpu::Backends::DX12),
+            ("D3D12", wgpu::Backends::DX12),
+            ("vulkan", wgpu::Backends::VULKAN),
+            ("gl", wgpu::Backends::GL),
+        ] {
+            let parsed = match name.trim().to_ascii_lowercase().as_str() {
+                "dx12" | "d3d12" | "directx12" => Some(wgpu::Backends::DX12),
+                "vulkan" | "vk" => Some(wgpu::Backends::VULKAN),
+                "metal" | "mtl" => Some(wgpu::Backends::METAL),
+                "gl" | "opengl" | "gles" => Some(wgpu::Backends::GL),
+                _ => None,
+            };
+            assert_eq!(parsed, Some(expected), "{name} did not select its backend");
+        }
+        // No trailing assertion about DX12 restoring ray queries: it was
+        // measured and does not. It loses `RAY_QUERY` on this adapter and then
+        // fails at `create_shader_module_passthrough` for want of DXIL. The
+        // selector's worth is being able to *ask* about a backend at all, which
+        // is how that dead end got closed instead of argued about.
     }
 }

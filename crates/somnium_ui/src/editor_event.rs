@@ -19,8 +19,25 @@ pub enum CreateKind {
     /// point — a shoreline, a river, a road with traffic on it.
     ShorelineAudio,
     Particle,
+    /// The finished coastline preset: relief, an altitude splat, and a lake.
     Terrain,
+    /// A terrain with nothing on it — flat, one material, no water.
+    ///
+    /// The other half of the pair. `Terrain` is right when someone wants a
+    /// scene in one click and wrong when they want to author one, because the
+    /// first two brush strokes are then spent undoing a preset.
+    EmptyTerrain,
     VoxelTerrain,
+    // Phase TSUSHIMA-I. Four kinds and not one "Water", because what separates
+    // them is optical and dynamic rather than geometric: an ocean carries swell
+    // built over a thousand kilometres of fetch, a river is turbid and almost
+    // flat. Picking that from a menu is one click; dialling eleven coefficients
+    // to reach it from a generic default is not something anyone will do.
+    Lake,
+    Ocean,
+    Sea,
+    /// A channel swept along an authored spline, editable by dragging it.
+    River,
     /// Runtime HUD, world-space panel, or projected overlay root.
     UiCanvas,
     /// CONTROL-L/M/N. One entity carrying the scene's day cycle, sky and
@@ -47,8 +64,13 @@ impl CreateKind {
             Self::Spline => "Spline",
             Self::ShorelineAudio => "Shoreline Audio",
             Self::Particle => "Particle Emitter",
-            Self::Terrain => "Terrain",
+            Self::Terrain => "Landscape",
+            Self::EmptyTerrain => "Terrain (Empty)",
             Self::VoxelTerrain => "Voxel Terrain",
+            Self::Lake => "Lake",
+            Self::Ocean => "Ocean",
+            Self::Sea => "Sea",
+            Self::River => "River",
             Self::UiCanvas => "UI Canvas",
             Self::Environment => "Environment",
         }
@@ -66,6 +88,21 @@ pub enum TerrainToolField {
     MacroStrength,
     DebugView,
     MorphStart,
+    // Phase TSUSHIMA. Every one of these is a strength whose zero is an exact
+    // identity in the shader, so the slider's left end is the pre-phase image
+    // rather than a weak version of the new one.
+    /// G: peak splat-weight displacement in a transition band.
+    SplatNoise,
+    /// G: cycles per metre of the coarse octave.
+    SplatNoiseScale,
+    /// H1: one multiplier over the three macro octaves.
+    MacroOctaves,
+    /// H2: how far the sky-visibility tint pulls sheltered ground.
+    DampTint,
+    /// C: how hard baked sky visibility darkens the ambient term.
+    SkyVisibility,
+    /// E: metres at which the baked relief normal has fully taken over.
+    ReliefTakeover,
 }
 
 /// Brush/runtime controls which deliberately remain outside component schemas.
@@ -77,6 +114,14 @@ pub enum FoliageBrushField {
     Kind,
     ScaleMin,
     ScaleMax,
+    /// How strongly the brush's terrain layer has to be painted under a
+    /// candidate before it will place. `0` switches the test off.
+    ///
+    /// Exposed because it is the one brush setting that can make a palette
+    /// entry place *nothing at all*, and until it was here the only ways to
+    /// change it were to pick a different entry or to edit the palette. Moss on
+    /// a grass hillside is a legitimate thing to want.
+    MinLayerWeight,
 }
 
 // ── Phase 16-D: scripting ───────────────────────────────────────────────────
@@ -377,6 +422,12 @@ pub enum EditorEvent {
     ToggleTerrainPaint,
     /// Hex anti-tiling on the selected terrain. Default on for Coastal.
     ToggleTerrainHex,
+    /// Phase TSUSHIMA-B: the baked horizon shadow map.
+    ToggleTerrainHorizonShadow,
+    /// Phase TSUSHIMA-C: baked sky visibility and the landscape bent normal.
+    ToggleTerrainSkyVisibility,
+    /// Phase TSUSHIMA-E: the mip-chained relief normal.
+    ToggleTerrainReliefNormal,
     /// Parallax occlusion on the selected terrain. The expensive POM march.
     ToggleTerrainParallax,
     /// Nested material clipmaps (Phase DF). Default off until DF-E gates pass.

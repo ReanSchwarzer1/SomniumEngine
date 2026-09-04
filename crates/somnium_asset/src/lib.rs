@@ -87,12 +87,33 @@ pub struct LoadedMaterial {
     /// viewer, which is why real foliage glows when backlit and looks flat and
     /// dead without it — no amount of correcting the albedo substitutes.
     pub transmission: f32,
-    /// Phase 17E: this material is vegetation — a thin, cut-out card.
+    /// Phase 17E: this material is vegetation — thin, translucent, two-sided.
     ///
     /// Inferred from the same `*_alpha_*` sidecar convention that promotes it
     /// to MASK. Kept separate from `transmission` because glass is transmissive
     /// too and must not be treated as a leaf.
+    ///
+    /// **Not** the same claim as [`Self::foliage_card`], and the two were one
+    /// field until the difference cost a phase of grass that looked shattered.
     pub foliage: bool,
+    /// This material is painted on **flat cut-out cards whose `uv.x` runs
+    /// across the blade**, which is what `shading.wgsl`'s curved-card normal
+    /// needs to be true.
+    ///
+    /// Never inferred, and that is the whole point. It was folded into
+    /// [`Self::foliage`], which every scanned plant in the palette sets, and
+    /// those are not cards: a Poly Haven grass tuft is seventeen modelled
+    /// clusters sharing one *atlas*, so `uv.x` is the blade's address in the
+    /// texture rather than the distance across it. Rotating the normal by that
+    /// number bends neighbouring blades up to 60 degrees apart from each other
+    /// — the field reads as blotches in daylight and a sheet of white sparkles
+    /// at night, at every camera distance and under every sky.
+    ///
+    /// Nothing distinguishes the two cases from geometry alone. A crossed-quad
+    /// billboard, which *is* a card, has exactly the normal spread of a modelled
+    /// tuft, which is not one. So this is authored, defaults to `false`, and a
+    /// card asset turns it on in the material.
+    pub foliage_card: bool,
     /// Light the surface emits on its own, linear RGB (Phase 24T).
     ///
     /// Carried in the same photometric scale as everything else since 24A, so
@@ -201,6 +222,9 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission: mat.transmission().map_or(0.0, |t| t.transmission_factor()),
             // Set below, where the sidecar cutout mask identifies vegetation.
             foliage: false,
+            // Authored only: see the field's own note on why no import can
+            // honestly infer it.
+            foliage_card: false,
             emissive: mat.emissive_factor(),
             emissive_intensity: mat.emissive_strength().unwrap_or(1.0),
             emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
@@ -267,6 +291,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             alpha_cutoff: 0.5,
             transmission: 0.0,
             foliage: false,
+            foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
             emissive_map: None,

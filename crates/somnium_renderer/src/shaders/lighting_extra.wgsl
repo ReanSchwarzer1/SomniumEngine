@@ -7,14 +7,13 @@
 //!include "brdf.wgsl"
 //!include "sampling.wgsl"
 //!include "atmosphere.wgsl"
-//!include "hextile.wgsl"
-//!include "terrain_material.wgsl"
+//!include "terrain_splat_core.wgsl"
 
 enable wgpu_ray_query;
 
 // Phase 24M/N/O: world-space radiance cache, scene specular GI, path tracer.
 // Concatenated with rt_hit.wgsl + global_pool + brdf + sampling + atmosphere
-// + hextile + terrain_material, same as ReSTIR GI.
+// + the bounded terrain splat core, same as ReSTIR GI.
 
 struct ExtraParams {
     inv_view_proj: mat4x4<f32>,
