@@ -57,6 +57,10 @@ dev records/*
 # narrower exception below explicitly preserves them.
 !dev records/README.md
 !dev records/phase_*.md
+# Preserve PERSONA's inspected baseline without admitting other scratch evidence.
+!dev records/evidence/
+dev records/evidence/*
+!dev records/evidence/PERSONA_baseline_1600x900.png
 !dev records/phase_CONTROL.md
 !dev records/phase CONTROL/
 dev records/phase CONTROL/*

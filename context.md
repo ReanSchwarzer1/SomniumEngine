@@ -20,7 +20,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Most recent work | TSUSHIMA-K, three foliage lighting-transport fixes, 2026-09-04 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Next planned phases | PORTAL, KENSHI, then STALKER; none has started |
+| Next planned phase | PERSONA (Atlus): editor visual design and QoL, before further work on other phases; implementation has not started |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
 | Generated census | 188,732 Rust/WGSL lines and 1,864 discovered tests |
@@ -32,6 +32,7 @@ The top-level phase status is:
 
 | Phase | Status | Read next |
 |---|---|---|
+| PERSONA / Atlus | Planned; next implementation priority | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
 | TSUSHIMA | A through K in tree | [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>) |
@@ -2100,6 +2101,13 @@ sprite sub-assets, offline actor simulation, faction ledger, gameplay
 inventory, trade, quest system, or anomaly framework.
 
 ### Roadmap order
+
+**Scheduling update, 2026-09-05:** [PERSONA (Atlus)](<dev records/phase_PERSONA.md>)
+is the next implementation phase, before further work on any other phase,
+including the TALOS proposal. It upgrades the editor's Nocturne design system,
+visual composition, and designer workflows. Its survey is written; implementation
+has not started. The dependency order below resumes after PERSONA and does not
+change the completion status of existing work.
 
 ```text
 finish MORROWIND
