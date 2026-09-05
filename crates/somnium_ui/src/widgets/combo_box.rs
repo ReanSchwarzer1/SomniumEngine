@@ -64,12 +64,12 @@ impl Control for ComboBox {
         } else {
             w.max(80.0)
         };
-        Vec2::new(width, theme::ROW_HEIGHT)
+        Vec2::new(width, theme::active().density.row_dense)
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        let header = Rect::new(b.x, b.y, b.w, theme::ROW_HEIGHT);
+        let header = Rect::new(b.x, b.y, b.w, theme::active().density.row_dense);
         // The closed header is a chrome control, so it takes the button recipe:
         // radius, wash and the raised rung. It keeps the hairline outline the
         // pre-Styx header had, because an outline is how a combo says it opens
@@ -305,7 +305,10 @@ impl Control for ComboDropdown {
         } else {
             w
         };
-        Vec2::new(width, (self.items.len().max(1) as f32) * theme::ROW_HEIGHT)
+        Vec2::new(
+            width,
+            (self.items.len().max(1) as f32) * theme::active().density.row_dense,
+        )
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
@@ -316,9 +319,9 @@ impl Control for ComboDropdown {
         for (i, item) in self.items.iter().enumerate() {
             let row = Rect::new(
                 b.x,
-                b.y + theme::ROW_HEIGHT * i as f32,
+                b.y + theme::active().density.row_dense * i as f32,
                 b.w,
-                theme::ROW_HEIGHT,
+                theme::active().density.row_dense,
             );
             if i == self.selected {
                 // Selection is fill *and* rail, so it survives a colour-vision
@@ -383,7 +386,7 @@ impl Control for ComboDropdown {
             if b.w <= 0.0 || b.h <= 0.0 {
                 return;
             }
-            let idx = ((pos.y - b.y) / theme::ROW_HEIGHT).floor() as isize;
+            let idx = ((pos.y - b.y) / theme::active().density.row_dense).floor() as isize;
             if idx >= 0 && (idx as usize) < self.items.len() {
                 self.selected = idx as usize;
                 if self.combo.is_some() {

@@ -48,7 +48,7 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
                 .with_text(text)
                 .with_font_size(16.0)
                 .with_font_id(font_id)
-                .with_color(theme::ACCENT)
+                .with_color(theme::active().semantic.accent.default.bytes())
                 .with_wrap(true)
                 .build();
                 ui.add_node(n, parent);
@@ -63,7 +63,7 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
                 .with_text(text)
                 .with_font_size(13.0)
                 .with_font_id(font_id)
-                .with_color(theme::TEXT_PRIMARY)
+                .with_color(theme::active().semantic.text.primary.bytes())
                 .with_wrap(true)
                 .build();
                 ui.add_node(n, parent);
@@ -78,7 +78,7 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
                 .with_text(format!("• {text}"))
                 .with_font_size(13.0)
                 .with_font_id(font_id)
-                .with_color(theme::TEXT_PRIMARY)
+                .with_color(theme::active().semantic.text.primary.bytes())
                 .with_wrap(true)
                 .build();
                 ui.add_node(n, parent);
@@ -95,7 +95,7 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
         .with_text("Commands")
         .with_font_size(16.0)
         .with_font_id(font_id)
-        .with_color(theme::ACCENT)
+        .with_color(theme::active().semantic.accent.default.bytes())
         .build();
         ui.add_node(heading, parent);
         for command in crate::commands::registry().commands() {
@@ -112,7 +112,7 @@ pub(crate) fn fill_help_body(ui: &mut UserInterface, parent: NodeHandle, font_id
             .with_text(format!("{}{} — {}", command.label, binding, command.help))
             .with_font_size(12.0)
             .with_font_id(font_id)
-            .with_color(theme::TEXT_PRIMARY)
+            .with_color(theme::active().semantic.text.primary.bytes())
             .with_wrap(true)
             .build();
             ui.add_node(row, parent);
@@ -136,8 +136,8 @@ pub(crate) fn build_help_overlay(
             .with_height(540.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_background(theme::BG_PANEL)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.panel.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -154,8 +154,8 @@ pub(crate) fn build_help_overlay(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -207,8 +207,8 @@ pub(crate) fn build_help_overlay(
         WidgetBuilder::new()
             .with_column(0)
             .with_row(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -229,7 +229,7 @@ pub(crate) fn build_help_overlay(
             WidgetBuilder::new()
                 .with_height(28.0)
                 .with_margin(Thickness::axes(6.0, 2.0))
-                .with_background(theme::BG_RAISED),
+                .with_background(theme::active().semantic.surface.raised.bytes()),
         )
         .build();
         let bh = ui.add_node(btn, toc_stack_h);
@@ -237,7 +237,7 @@ pub(crate) fn build_help_overlay(
             .with_text(*title)
             .with_font_size(12.0)
             .with_font_id(font_id)
-            .with_color(theme::TEXT_PRIMARY)
+            .with_color(theme::active().semantic.text.primary.bytes())
             .build();
         ui.add_node(lbl, bh);
         help_toc.push((bh, i as u8));
@@ -247,7 +247,7 @@ pub(crate) fn build_help_overlay(
         WidgetBuilder::new()
             .with_column(1)
             .with_row(0)
-            .with_background(theme::BG_PANEL),
+            .with_background(theme::active().semantic.surface.panel.bytes()),
     )
     .build();
     let scroll_h = ui.add_node(scroll, body_grid_h);

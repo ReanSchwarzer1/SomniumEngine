@@ -53,7 +53,7 @@ pub(crate) fn build_content_drawer(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_PANEL)
+            .with_background(theme::active().semantic.surface.panel.bytes())
             .with_foreground(theme::TRANSPARENT),
     )
     .with_stroke_thickness(Thickness::ZERO)
@@ -73,7 +73,7 @@ pub(crate) fn build_content_drawer(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_INPUT),
+            .with_background(theme::active().semantic.surface.input.bytes()),
     )
     .with_font_id(font_id)
     .build();
@@ -144,7 +144,7 @@ pub(crate) fn build_content_drawer(
         WidgetBuilder::new()
             .with_row(2)
             .with_column(0)
-            .with_background(theme::BG_CONTENT),
+            .with_background(theme::active().semantic.surface.canvas.bytes()),
     )
     .build();
     let list_scroll_h = ui.add_node(list_scroll, grid_h);
@@ -198,8 +198,8 @@ pub(crate) fn build_create_popup(
             .with_width(160.0)
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -231,7 +231,7 @@ pub(crate) fn build_create_popup(
         .with_text(command.menu_label())
         .with_font_size(12.0)
         .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
+        .with_color(theme::active().semantic.text.primary.bytes())
         .build();
         ui.add_node(lbl, btn_h);
         items.push((btn_h, command.id));

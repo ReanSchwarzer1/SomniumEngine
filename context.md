@@ -16,23 +16,23 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | MORROWIND, partially complete |
-| Most recent work | TSUSHIMA-K, three foliage lighting-transport fixes, 2026-09-04 |
+| Active phase | PERSONA A/B implemented; C–H open. MORROWIND remains partially complete. |
+| Most recent work | PERSONA-A/B: editor baseline, Nocturne v2 tokens/recipes and native gallery, 2026-09-05 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Next planned phase | PERSONA (Atlus): editor visual design and QoL, before further work on other phases; implementation has not started |
+| Current implementation priority | PERSONA (Atlus): A/B baseline and Nocturne v2 foundation implemented; C shell composition next, before further work on other phases |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census | 188,732 Rust/WGSL lines and 1,864 discovered tests |
+| Generated census, 2026-09-05 | 215,927 Rust/WGSL lines and 2,193 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
-| Current gate failure | `sculpt-panel` golden image: 5.3333% changed, budget 0.2% |
+| Visual gate | Historical sculpt mismatch: 5.3333%. PERSONA-B changes all three old golden regions; see [A/B evidence](<dev records/phase PERSONA/PERSONA-A_B.md>). References preserved. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
 
 The top-level phase status is:
 
 | Phase | Status | Read next |
 |---|---|---|
-| PERSONA / Atlus | Planned; next implementation priority | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
+| PERSONA / Atlus | A/B implemented; C–H and phase closure open | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
 | TSUSHIMA | A through K in tree | [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>) |
@@ -2105,8 +2105,9 @@ inventory, trade, quest system, or anomaly framework.
 **Scheduling update, 2026-09-05:** [PERSONA (Atlus)](<dev records/phase_PERSONA.md>)
 is the next implementation phase, before further work on any other phase,
 including the TALOS proposal. It upgrades the editor's Nocturne design system,
-visual composition, and designer workflows. Its survey is written; implementation
-has not started. The dependency order below resumes after PERSONA and does not
+visual composition, and designer workflows. A/B baseline and shared visual foundations
+are implemented; see [the A/B record](<dev records/phase PERSONA/PERSONA-A_B.md>)
+for native evidence, validation, known issues and floating-window acceptance limits. The dependency order below resumes after PERSONA and does not
 change the completion status of existing work.
 
 ```text

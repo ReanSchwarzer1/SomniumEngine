@@ -36,7 +36,10 @@ impl Control for ContextMenu {
             .map(|i| ctx.measure_text(&i.label, 12.0, self.font_id).x)
             .fold(120.0_f32, f32::max)
             + 16.0;
-        Vec2::new(w, self.items.len() as f32 * theme::ROW_HEIGHT + 4.0)
+        Vec2::new(
+            w,
+            self.items.len() as f32 * theme::active().density.row_dense + 4.0,
+        )
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
@@ -46,7 +49,7 @@ impl Control for ContextMenu {
         ctx.push_paint(b, &crate::style::popup());
         let _ = t;
         for (i, item) in self.items.iter().enumerate() {
-            let y = b.y + 2.0 + i as f32 * theme::ROW_HEIGHT;
+            let y = b.y + 2.0 + i as f32 * theme::active().density.row_dense;
             let color = if item.enabled {
                 theme::active().semantic.text.primary.bytes()
             } else {
@@ -76,7 +79,7 @@ impl Control for ContextMenu {
         }
         if let Some(WidgetMessage::MouseDown { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
-            let idx = ((pos.y - b.y - 2.0) / theme::ROW_HEIGHT).floor() as isize;
+            let idx = ((pos.y - b.y - 2.0) / theme::active().density.row_dense).floor() as isize;
             if idx >= 0 && (idx as usize) < self.items.len() {
                 let item = &self.items[idx as usize];
                 if item.enabled {

@@ -55,12 +55,12 @@ pub struct RowMetrics {
 }
 
 pub fn row_metrics(width: f32) -> RowMetrics {
-    let d = &theme::NOCTURNE.density;
+    let d = &theme::active().density;
     if width < STACK_BELOW {
         let inner = (width - GUTTER - RIGHT_INSET).max(24.0);
         return RowMetrics {
             stacked: true,
-            height: 40.0,
+            height: theme::active().density.row_dense + 16.0,
             label_x: GUTTER,
             label_w: inner,
             value_x: GUTTER,
@@ -152,7 +152,7 @@ impl PropertyRow {
     fn label_style(&self) -> crate::typography::TextStyle {
         let style = text_style(TextRole::Label);
         if self.read_only {
-            style.with_color(theme::TEXT_DISABLED)
+            style.with_color(theme::active().semantic.text.disabled.bytes())
         } else {
             style
         }
@@ -222,7 +222,7 @@ impl Control for PropertyRow {
             let cx = b.x + GUTTER * 0.5;
             let cy = b.y + (if m.stacked { 12.0 } else { m.height * 0.5 });
             let t = theme::active();
-            let accent = t.semantic.accent.default.bytes();
+            let accent = t.semantic.modified.bytes();
             if self.hover_gutter {
                 let r = 5.0;
                 // A ring, not a square: the pipeline can round it now.

@@ -1671,6 +1671,13 @@ impl UiManager {
     ) -> Self {
         info!("Initializing native UI…");
 
+        if std::env::var("SOMNIUM_UI_THEME").as_deref() == Ok("dawn") {
+            theme::set_active(theme::ThemeId::Dawn);
+        }
+        if std::env::var("SOMNIUM_UI_DENSITY").as_deref() == Ok("comfortable") {
+            theme::set_density(theme::DensityId::Comfortable);
+        }
+
         let size = window.inner_size();
         // The tree lays out in logical units so every density token keeps its
         // apparent size at any DPI. `inner_size()` is device pixels.
@@ -2077,6 +2084,7 @@ impl UiManager {
         };
         match raw.trim().to_ascii_lowercase().as_str() {
             "shell" => {}
+            "persona-gallery" => crate::editor::gallery::show(&mut self.native_ui),
             "menu-file" => self.open_menu(0),
             "menu-create" => self.open_menu(1),
             "menu-edit" => self.open_menu(2),
@@ -4432,8 +4440,11 @@ impl UiManager {
             - self.native_ui.desired_size(self.vp_actions).x
             - inset;
 
-        let show =
-            context_bar_visibility(&self.context_bar_widths, &self.context_bar_wanted, available);
+        let show = context_bar_visibility(
+            &self.context_bar_widths,
+            &self.context_bar_wanted,
+            available,
+        );
         for (i, cluster) in self.context_bar_clusters().into_iter().enumerate() {
             self.native_ui.set_visibility(cluster, show[i]);
         }
@@ -9381,8 +9392,14 @@ mod styx_budget_tests {
         // schema. Keep a floor for real idle-shell strokes without fabricating
         // invisible legacy chrome merely to preserve the old count.
         assert!(rounded >= 40, "corner radius regressed to {rounded}");
-        assert!(gradients >= 20, "chrome wash regressed to {gradients}");
-        assert!(shadows >= 15, "elevation regressed to {shadows}");
+        assert!(
+            gradients <= 4,
+            "ordinary chrome must stay flat: {gradients} washes"
+        );
+        assert!(
+            shadows <= 4,
+            "ordinary controls must not cast: {shadows} shadows"
+        );
         assert!(insets >= 4, "recession regressed to {insets}");
         assert!(borders >= 10, "strokes regressed to {borders}");
 

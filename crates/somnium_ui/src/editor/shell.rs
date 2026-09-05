@@ -90,7 +90,7 @@ fn panel_header(
             bottom: 0.0,
         },
     ))
-    .with_role(TextRole::SectionCaps)
+    .with_role(TextRole::Section)
     .with_text(caption)
     .with_font_id(font_id)
     .build();
@@ -132,15 +132,15 @@ pub(crate) fn build_editor_layout(
     // Menus now live in the application band; the retired menu row remains at
     // index 1 so every existing GridMessage row index stays stable.
     let outer_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(theme::TITLEBAR_HEIGHT))
+        .add_row(Row::strict(theme::active().density.titlebar))
         .add_row(Row::strict(0.0))
-        .add_row(Row::strict(theme::TOOLBAR_HEIGHT))
+        .add_row(Row::strict(theme::active().density.toolbar))
         // Retired: the viewport context scope now floats over the render.
         // The row stays at index 3 so existing GridMessage row indices hold.
         .add_row(Row::strict(0.0))
         .add_row(Row::stretch())
         .add_row(Row::strict(theme::BOTTOM_DRAWER_HEIGHT))
-        .add_row(Row::strict(theme::STATUS_HEIGHT))
+        .add_row(Row::strict(theme::active().density.status))
         .add_column(Column::stretch())
         .build();
     let outer_h = ui.add_node(outer_grid, root);
@@ -150,8 +150,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_VOID)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -186,7 +186,7 @@ pub(crate) fn build_editor_layout(
     let mark = ImageBuilder::new(
         WidgetBuilder::new()
             .with_width(theme::ICON_MARK + 12.0)
-            .with_height(theme::TITLEBAR_HEIGHT)
+            .with_height(theme::active().density.titlebar)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
             .with_margin(Thickness {
@@ -198,7 +198,7 @@ pub(crate) fn build_editor_layout(
     )
     .with_icon(IconId::EngineMark)
     .with_size(theme::ICON_MARK)
-    .with_tint(theme::ACCENT)
+    .with_tint(theme::active().semantic.accent.default.bytes())
     .build();
     ui.add_node(mark, title_left_h);
     let title_lbl = TextBuilder::new(
@@ -337,7 +337,7 @@ pub(crate) fn build_editor_layout(
                 right: 12.0,
                 bottom: 5.0,
             })
-            .with_background(theme::BG_INPUT)
+            .with_background(theme::active().semantic.surface.input.bytes())
             .with_tooltip(format!("{} ({palette_binding})", palette_command.help)),
     )
     .build();
@@ -351,9 +351,9 @@ pub(crate) fn build_editor_layout(
     .with_text(format!(
         "Search commands, entities, assets     {palette_binding}"
     ))
-    .with_font_size(theme::NOCTURNE.typography.caption)
+    .with_font_size(theme::active().typography.caption)
     .with_font_id(font_id)
-    .with_color(theme::TEXT_MUTED)
+    .with_color(theme::active().semantic.text.muted.bytes())
     .build();
     ui.add_node(palette_label, palette_button);
 
@@ -362,8 +362,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(2)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -391,7 +391,7 @@ pub(crate) fn build_editor_layout(
         "Save",
         &command_tooltip("editor.scene.save"),
         font_id,
-        theme::NOCTURNE.density.row_chrome,
+        theme::active().density.row_chrome,
     );
     scope_separator(ui, main_tb_stack_h);
     let (select_button, select_label) = labeled_icon_button(
@@ -401,7 +401,7 @@ pub(crate) fn build_editor_layout(
         "Select",
         "Select and transform entities",
         font_id,
-        theme::NOCTURNE.density.row_chrome,
+        theme::active().density.row_chrome,
     );
     let (landscape_button, landscape_label) = labeled_icon_button(
         ui,
@@ -410,7 +410,7 @@ pub(crate) fn build_editor_layout(
         "Landscape",
         &command_tooltip("editor.terrain.edit"),
         font_id,
-        theme::NOCTURNE.density.row_chrome,
+        theme::active().density.row_chrome,
     );
     let (foliage_toolbar_button, foliage_mode_label) = labeled_icon_button(
         ui,
@@ -419,7 +419,7 @@ pub(crate) fn build_editor_layout(
         "Foliage",
         &command_tooltip("editor.foliage.edit"),
         font_id,
-        theme::NOCTURNE.density.row_chrome,
+        theme::active().density.row_chrome,
     );
     scope_separator(ui, main_tb_stack_h);
     let play_button = icon_tool_button(
@@ -484,8 +484,8 @@ pub(crate) fn build_editor_layout(
     // Left toolbar strip
     let toolbar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -545,7 +545,7 @@ pub(crate) fn build_editor_layout(
                     right: 4.0,
                     bottom: 0.0,
                 })
-                .with_background(theme::BG_RAISED),
+                .with_background(theme::active().semantic.surface.raised.bytes()),
         )
         .build();
         let btn_h = ui.add_node(btn, tool_stack_h);
@@ -565,7 +565,7 @@ pub(crate) fn build_editor_layout(
         )
         .with_icon(icon)
         .with_size(16.0)
-        .with_tint(theme::TEXT_PRIMARY)
+        .with_tint(theme::active().semantic.text.primary.bytes())
         .build();
         ui.add_node(img, row_h);
         let lbl = TextBuilder::new(
@@ -580,7 +580,7 @@ pub(crate) fn build_editor_layout(
         )
         .with_role(TextRole::Label)
         .with_text(label)
-        .with_color(theme::TEXT_PRIMARY)
+        .with_color(theme::active().semantic.text.primary.bytes())
         .build();
         let lbl_h = ui.add_node(lbl, row_h);
         terrain_tool_items.push((btn_h, lbl_h, tool));
@@ -607,13 +607,16 @@ pub(crate) fn build_editor_layout(
     // region around it still passes clicks through to the 3D pick.
     let vp_bar = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::NOCTURNE.density.toolbar)
+            .with_height(theme::active().density.toolbar)
             .with_vertical_alignment(VerticalAlignment::Top)
             .with_margin(Thickness::uniform(crate::CONTEXT_BAR_INSET))
             // Translucent over the render so the scene stays readable behind
             // the bar; the hairline is what keeps it legible on a bright sky.
-            .with_background(theme::with_alpha(theme::BG_VOID, 0xB8))
-            .with_foreground(theme::BORDER_MEDIUM),
+            .with_background(theme::with_alpha(
+                theme::active().semantic.surface.window.bytes(),
+                0xB8,
+            ))
+            .with_foreground(theme::active().semantic.border.default.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(theme::NOCTURNE.geometry.stroke_hairline))
     .build();
@@ -919,8 +922,8 @@ pub(crate) fn build_editor_layout(
             })
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top)
-            .with_background(theme::BG_DARK)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -1004,7 +1007,7 @@ pub(crate) fn build_editor_layout(
         .with_text("")
         .with_font_size(11.0)
         .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
+        .with_color(theme::active().semantic.text.secondary.bytes())
         .build();
         profiler_names.push(ui.add_node(name, row_h));
 
@@ -1019,7 +1022,7 @@ pub(crate) fn build_editor_layout(
         .with_text("")
         .with_font_size(11.0)
         .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
+        .with_color(theme::active().semantic.text.primary.bytes())
         .build();
         profiler_values.push(ui.add_node(value, row_h));
     }
@@ -1129,8 +1132,8 @@ pub(crate) fn build_editor_layout(
     // Right panel: two sections (outliner top, inspector bottom)
     let right_border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_background(theme::BG_DARK)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 1.0,
@@ -1171,8 +1174,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1189,7 +1192,7 @@ pub(crate) fn build_editor_layout(
             WidgetBuilder::new()
                 .with_row(1)
                 .with_column(0)
-                .with_background(theme::BG_INPUT),
+                .with_background(theme::active().semantic.surface.input.bytes()),
         )
         .with_font_id(font_id)
         .build();
@@ -1200,7 +1203,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(2)
             .with_column(0)
-            .with_background(theme::BG_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes()),
     )
     .build();
     let outliner_scroll = ui.add_node(out_scroll, out_grid_h);
@@ -1227,8 +1230,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1245,7 +1248,7 @@ pub(crate) fn build_editor_layout(
             WidgetBuilder::new()
                 .with_row(1)
                 .with_column(0)
-                .with_background(theme::BG_INPUT),
+                .with_background(theme::active().semantic.surface.input.bytes()),
         )
         .with_font_id(font_id)
         .build();
@@ -1256,7 +1259,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(2)
             .with_column(0)
-            .with_background(theme::BG_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes()),
     )
     .build();
     let ins_content_h = ui.add_node(ins_content, ins_grid_h);
@@ -1286,8 +1289,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(5)
             .with_column(0)
-            .with_background(theme::BG_DARK)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1331,8 +1334,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1478,7 +1481,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(1)
             .with_column(0)
-            .with_background(theme::BG_DARK),
+            .with_background(theme::active().semantic.surface.window.bytes()),
     )
     .build();
     let log_scroll_h = ui.add_node(log_scroll, log_panel);
@@ -1517,8 +1520,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1548,7 +1551,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(1)
             .with_column(0)
-            .with_background(theme::BG_CONTENT),
+            .with_background(theme::active().semantic.surface.canvas.bytes()),
     )
     .build();
     let references_scroll = ui.add_node(references_scroll, references_panel);
@@ -1580,8 +1583,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1613,7 +1616,7 @@ pub(crate) fn build_editor_layout(
             .with_width(180.0)
             .with_height(20.0)
             .with_margin(Thickness::axes(4.0, 2.0))
-            .with_background(theme::BG_INPUT),
+            .with_background(theme::active().semantic.surface.input.bytes()),
     )
     .with_font_id(font_id)
     .build();
@@ -1654,7 +1657,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(1)
             .with_column(0)
-            .with_background(theme::BG_CONTENT),
+            .with_background(theme::active().semantic.surface.canvas.bytes()),
     )
     .build();
     let locale_scroll = ui.add_node(locale_scroll, locale_panel);
@@ -1672,8 +1675,8 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_row(6)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -1709,7 +1712,7 @@ pub(crate) fn build_editor_layout(
         "Content Drawer",
         &command_tooltip("editor.view.content_drawer"),
         font_id,
-        theme::STATUS_HEIGHT,
+        theme::active().density.status,
     );
     let (log_button, _) = labeled_icon_button(
         ui,
@@ -1718,7 +1721,7 @@ pub(crate) fn build_editor_layout(
         "Output Log",
         &command_tooltip("editor.window.output_log"),
         font_id,
-        theme::STATUS_HEIGHT,
+        theme::active().density.status,
     );
     let (locale_button, _) = labeled_icon_button(
         ui,
@@ -1727,7 +1730,7 @@ pub(crate) fn build_editor_layout(
         "Localisation",
         &command_tooltip("editor.window.localisation"),
         font_id,
-        theme::STATUS_HEIGHT,
+        theme::active().density.status,
     );
     let (references_button, _) = labeled_icon_button(
         ui,
@@ -1736,7 +1739,7 @@ pub(crate) fn build_editor_layout(
         "References",
         &command_tooltip("editor.window.references"),
         font_id,
-        theme::STATUS_HEIGHT,
+        theme::active().density.status,
     );
     scope_separator(ui, status_stack_h);
     // Save state. Sentinel colour is set by `set_scene_dirty`; the *word*
@@ -1775,7 +1778,7 @@ pub(crate) fn build_editor_layout(
     let status_text = ui.add_node(status_lbl, status_stack_h);
     let status_cancel = ButtonBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::ROW_HEIGHT)
+            .with_height(theme::active().density.row_dense)
             .with_visibility(false),
     )
     .build();
@@ -1894,7 +1897,7 @@ pub(crate) fn build_editor_layout(
     let palette_popup = ui.add_node(palette_popup_node, root);
     let palette_widget_node = CommandPaletteBuilder::new(
         WidgetBuilder::new()
-            .with_background(theme::BG_HEADER)
+            .with_background(theme::active().semantic.surface.header.bytes())
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center),
     )
@@ -1919,8 +1922,8 @@ pub(crate) fn build_editor_layout(
             .with_width(340.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -1946,7 +1949,7 @@ pub(crate) fn build_editor_layout(
                 .with_width(100.0)
                 .with_height(24.0)
                 .with_margin(Thickness::axes(8.0, 8.0))
-                .with_background(theme::BG_RAISED),
+                .with_background(theme::active().semantic.surface.raised.bytes()),
         )
         .build();
         let h = ui.add_node(b, parent);
@@ -1954,7 +1957,7 @@ pub(crate) fn build_editor_layout(
             .with_text(label)
             .with_font_id(font_id)
             .with_font_size(12.0)
-            .with_color(theme::TEXT_PRIMARY)
+            .with_color(theme::active().semantic.text.primary.bytes())
             .build();
         ui.add_node(t, h);
         h
@@ -1981,8 +1984,8 @@ pub(crate) fn build_editor_layout(
             .with_width(360.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -2002,7 +2005,7 @@ pub(crate) fn build_editor_layout(
         WidgetBuilder::new()
             .with_height(26.0)
             .with_margin(Thickness::axes(12.0, 4.0))
-            .with_background(theme::BG_INPUT),
+            .with_background(theme::active().semantic.surface.input.bytes()),
     )
     .with_font_id(font_id)
     .build();
@@ -2021,7 +2024,7 @@ pub(crate) fn build_editor_layout(
     let color_popup = ui.add_node(color_popup_node, root);
     let color_picker_node = ColorPickerBuilder::new(
         WidgetBuilder::new()
-            .with_background(theme::BG_HEADER)
+            .with_background(theme::active().semantic.surface.header.bytes())
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top),
     )

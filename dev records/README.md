@@ -35,7 +35,8 @@ audits can therefore be historically useful and presently false.
 
 **Next implementation priority, 2026-09-05:** [PERSONA (Atlus)](phase_PERSONA.md)
 comes before further work on other phases. Its editor survey and design/QoL plan
-are written; implementation has not started. The dependency graph below describes
+are written; A/B baseline and shared visual foundations are implemented
+([record and captures](<phase PERSONA/PERSONA-A_B.md>)). C–H remain open. The dependency graph below describes
 the subsequent roadmap, not permission to skip PERSONA.
 
 ```mermaid
@@ -61,7 +62,7 @@ its own historical snapshot and revision notes.
 
 | Phase | Focus | Current status | Plan or record |
 |---|---|---|---|
-| PERSONA / Atlus | Nocturne redesign, editor composition, designer QoL | Planned 2026-09-05; next implementation priority | [`phase_PERSONA.md`](phase_PERSONA.md) |
+| PERSONA / Atlus | Nocturne redesign, editor composition, designer QoL | A/B implemented 2026-09-05; C–H open, current priority | [`phase_PERSONA.md`](phase_PERSONA.md) |
 | 16 | Language-neutral scripting and sandboxed Luau | Complete | [`phase_16.md`](phase_16.md) |
 | 25M2 | Renderer milestone close-out | Complete record | [`phase_25m2_completion_report.md`](phase_25m2_completion_report.md) |
 | IV | Great Lakes landscape, finite water, FFT ocean | Complete | [`phase_IV.md`](phase_IV.md) |

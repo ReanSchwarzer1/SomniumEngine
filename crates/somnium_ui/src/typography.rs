@@ -175,8 +175,8 @@ impl TextStyle {
 
 /// Resolve a semantic role against the immutable Nocturne snapshot.
 pub fn text_style(role: TextRole) -> TextStyle {
-    let t = &theme::NOCTURNE.typography;
-    let c = &theme::NOCTURNE.semantic.text;
+    let t = &theme::active().typography;
+    let c = &theme::active().semantic.text;
     let plain = |px: f32, font: FontRole, color: Color| TextStyle {
         px,
         font,

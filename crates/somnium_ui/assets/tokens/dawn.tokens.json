@@ -1,7 +1,7 @@
 {
   "$meta": {
     "name": "Dawn Atelier",
-    "version": "0.2.0-hades",
+    "version": "0.3.0-persona",
     "polarity": "light",
     "authored_space": "sRGB",
     "runtime_contract": "decode authored sRGB to linear exactly once before the sRGB swapchain; alpha is straight",
@@ -17,7 +17,7 @@
     "surface.input": "#FFFFFF",
     "surface.popup": "#FFFFFF",
     "surface.hover": "#DDE0EA",
-    "surface.selected": "rgba(74,86,224,0.161)",
+    "surface.selected": "#E0E2F6",
     "surface.modal_scrim": "rgba(20,22,30,0.451)",
     "text.primary": "#1A1D26",
     "text.emphasis": "#070910",
@@ -33,7 +33,7 @@
     "accent.default": "#3A46C8",
     "accent.hover": "#2E39A8",
     "accent.pressed": "#242D86",
-    "accent.selected_bg": "rgba(58,70,200,0.161)",
+    "accent.selected_bg": "#E0E2F6",
     "accent.selected_rail": "#3A46C8",
     "status.info": "#14627C",
     "status.success": "#15603E",
@@ -41,7 +41,10 @@
     "status.error": "#9B1C1C",
     "status.busy": "#3A46C8",
     "folder": "#8A622C",
-    "ember": "#8A622C"
+    "ember": "#8A622C",
+    "surface.selected_inactive": "#E4E6EC",
+    "border.control": "#7A8193",
+    "modified": "#76500C"
   },
   "typography": {
     "family_ui": "Inter (Geist remains gated by in-engine DPI captures)",
@@ -72,12 +75,20 @@
     "mono": [
       12,
       400
+    ],
+    "body_strong": [
+      13,
+      500
+    ],
+    "mono_strong": [
+      12,
+      500
     ]
   },
   "density": {
     "row_dense": 24,
     "row_tree": 26,
-    "row_chrome": 30,
+    "row_chrome": 28,
     "titlebar": 36,
     "menu": 28,
     "toolbar": 32,
@@ -90,17 +101,19 @@
   "space": {
     "base": 4,
     "inset_panel": 8,
-    "gap_group": 12
+    "gap_group": 12,
+    "gap_section": 16
   },
   "radius": {
-    "input": 2,
-    "chrome": 2,
-    "popup": 4,
-    "modal": 6
+    "input": 4,
+    "chrome": 5,
+    "popup": 8,
+    "modal": 10,
+    "tile": 6
   },
   "stroke": {
     "hairline": 1,
-    "focus": 1,
+    "focus": 2,
     "rail": 2
   },
   "motion_ms": {
@@ -109,5 +122,18 @@
     "popup": 140,
     "drawer": 200,
     "tooltip_delay": 400
+  },
+  "density_comfortable": {
+    "row_dense": 28,
+    "row_tree": 30,
+    "row_chrome": 32,
+    "titlebar": 36,
+    "menu": 32,
+    "toolbar": 36,
+    "status": 26,
+    "icon_row": 16,
+    "icon_toolbar": 20,
+    "icon_action": 24,
+    "hit_min": 24
   }
 }

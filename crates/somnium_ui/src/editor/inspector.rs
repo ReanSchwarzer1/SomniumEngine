@@ -40,9 +40,9 @@ fn section(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> NodeHandl
     let panel = ui.add_node(panel, parent);
     let band = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::NOCTURNE.density.row_tree)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_height(theme::active().density.row_tree)
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -84,15 +84,18 @@ fn number(
 }
 
 fn check(ui: &mut UserInterface, parent: NodeHandle, label: &str, font_id: u8) -> NodeHandle {
-    let node = CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-        .with_label(label)
-        .with_font_id(font_id)
-        .build();
+    let node =
+        CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
+            .with_label(label)
+            .with_font_id(font_id)
+            .build();
     ui.add_node(node, parent)
 }
 
 fn button(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> (NodeHandle, NodeHandle) {
-    let node = ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT)).build();
+    let node =
+        ButtonBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
+            .build();
     let handle = ui.add_node(node, parent);
     let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
         .with_role(TextRole::Caption)
@@ -507,24 +510,26 @@ pub(crate) fn build_generated_details(
                             .build(),
                         row_handle,
                     );
-                    let popup =
-                        PopupBuilder::new(WidgetBuilder::new().with_background(theme::BG_PANEL))
-                            .with_anchor(handle)
-                            .with_placement(PopupPlacement::AnchorBelow)
-                            .build();
+                    let popup = PopupBuilder::new(
+                        WidgetBuilder::new()
+                            .with_background(theme::active().semantic.surface.panel.bytes()),
+                    )
+                    .with_anchor(handle)
+                    .with_placement(PopupPlacement::AnchorBelow)
+                    .build();
                     let popup = ui.add_node(popup, ui.root());
                     let column = StackPanelBuilder::new(
                         WidgetBuilder::new()
                             .with_width(360.0)
-                            .with_background(theme::BG_PANEL),
+                            .with_background(theme::active().semantic.surface.panel.bytes()),
                     )
                     .with_orientation(Orientation::Vertical)
                     .build();
                     let column = ui.add_node(column, popup);
                     let search = SearchBoxBuilder::new(
                         WidgetBuilder::new()
-                            .with_height(theme::ROW_HEIGHT)
-                            .with_background(theme::BG_INPUT),
+                            .with_height(theme::active().density.row_dense)
+                            .with_background(theme::active().semantic.surface.input.bytes()),
                     )
                     .with_font_id(font_id)
                     .build();
@@ -556,9 +561,10 @@ pub(crate) fn build_generated_details(
                         ("Locate", AssetPickerAction::Locate),
                         ("Make Unique", AssetPickerAction::MakeUnique),
                     ] {
-                        let button =
-                            ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-                                .build();
+                        let button = ButtonBuilder::new(
+                            WidgetBuilder::new().with_height(theme::active().density.row_dense),
+                        )
+                        .build();
                         let button = ui.add_node(button, actions);
                         let text = TextBuilder::new(
                             WidgetBuilder::new().with_margin(Thickness::axes(7.0, 4.0)),
@@ -726,7 +732,7 @@ pub(crate) fn build_generated_details(
                     let add = ui.add_node(
                         ButtonBuilder::new(
                             WidgetBuilder::new()
-                                .with_height(theme::ROW_HEIGHT)
+                                .with_height(theme::active().density.row_dense)
                                 .with_margin(Thickness::axes(0.0, 2.0)),
                         )
                         .build(),

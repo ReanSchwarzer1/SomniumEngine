@@ -268,7 +268,8 @@ impl Control for NumericField {
         let min = (sz.x + MIN_FIELD_W - 36.0).max(MIN_FIELD_W);
         Vec2::new(
             available.x.min(220.0).max(min),
-            sz.y.max(self.px + 6.0).max(theme::ROW_HEIGHT),
+            sz.y.max(self.px + 6.0)
+                .max(theme::active().density.row_dense),
         )
     }
 
@@ -380,7 +381,7 @@ impl Control for NumericField {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
             ctx.push_rect_filled(
                 Rect::new(field.x + 4.0, field.y + 3.0, advance, self.px),
-                theme::ACCENT_DIM,
+                theme::active().semantic.accent.selected_bg.bytes(),
             );
         }
         ctx.push_text(&text, origin, self.font_id, self.px, self.color);

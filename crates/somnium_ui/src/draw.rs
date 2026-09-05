@@ -46,6 +46,8 @@ pub struct DrawCommand {
 /// uploads `instances` and issues one instanced draw per command. `font_atlas`
 /// and `icon_atlas` persist across frames (not cleared by `clear()`).
 pub struct DrawingContext {
+    /// Scoped by the retained draw traversal; explicit action recipes color their labels.
+    pub(crate) inherited_foreground: Option<[u8; 4]>,
     /// The frame's primitive instances, in paint order.
     pub instances: Vec<Primitive>,
     pub commands: Vec<DrawCommand>,
@@ -112,6 +114,7 @@ impl DrawingContext {
             shaper: crate::text::ShaperPolicy::from_env(),
             icon_atlas: IconAtlas::new(),
             motion: crate::motion::Animator::new(),
+            inherited_foreground: None,
             thumbnails: crate::thumbnail::ThumbnailCache::new(),
             shaped: crate::shaped::ShapedBuffers::default(),
             transform_stack: Vec::new(),
@@ -448,7 +451,14 @@ impl DrawingContext {
 
         let mut fill = Primitive::fill(rect, paint.background)
             .with_radii(radii)
-            .with_border(paint.border_thickness, paint.border);
+            .with_border(
+                if paint.focus_ring.is_some() {
+                    0.0
+                } else {
+                    paint.border_thickness
+                },
+                paint.border,
+            );
         if let Some(gradient) = paint.gradient {
             fill = fill.with_gradient(gradient.to.bytes(), gradient.axis);
             fill.fill_a = gradient.from.bytes();
@@ -468,6 +478,26 @@ impl DrawingContext {
                 Primitive::fill(Rect::new(rect.x, rect.y, width, rect.h), rail),
                 None,
             );
+        }
+        if let Some(focus) = paint.focus_ring {
+            let width = crate::theme::active().geometry.stroke_focus;
+            // Keep both strokes inside the widget clip. Drawing an expanded
+            // ring outside the bounds made focused fields lose their outline.
+            if paint.border_thickness > 0.0 {
+                let inset = width + 1.0;
+                self.push_round_rect_border(
+                    Rect::new(
+                        rect.x + inset,
+                        rect.y + inset,
+                        (rect.w - inset * 2.0).max(0.0),
+                        (rect.h - inset * 2.0).max(0.0),
+                    ),
+                    (paint.radius - inset).max(0.0),
+                    paint.border_thickness,
+                    paint.border,
+                );
+            }
+            self.push_round_rect_border(rect, paint.radius, width, focus);
         }
     }
 
@@ -963,16 +993,16 @@ mod tests {
         use crate::primitive::FLAG_GRADIENT;
         let mut c = ctx();
         let t = crate::theme::active();
-        let paint = crate::style::button(crate::style::VisualState::rest());
+        let paint = crate::style::primary_button(crate::style::VisualState::rest());
         c.push_paint(Rect::new(0.0, 0.0, 100.0, 32.0), &paint);
 
         let fill = c
             .instances
             .iter()
             .find(|p| p.flags & FLAG_GRADIENT != 0)
-            .expect("a resting button is washed with chrome_wash");
-        assert_eq!(fill.fill_a, t.gradient.chrome_wash.from.bytes());
-        assert_eq!(fill.fill_b, t.gradient.chrome_wash.to.bytes());
+            .expect("an explicit primary action may carry a wash");
+        assert_eq!(fill.fill_a, t.gradient.accent_primary.from.bytes());
+        assert_eq!(fill.fill_b, t.gradient.accent_primary.to.bytes());
         assert_eq!(fill.grad_axis, [0.0, 1.0]);
     }
 
@@ -1002,7 +1032,7 @@ mod tests {
 
     #[test]
     fn pressing_a_button_removes_its_lift() {
-        use crate::style::{Interaction, VisualState, button};
+        use crate::style::{Interaction, VisualState, primary_button as button};
         let rest = button(VisualState::rest());
         let pressed = button(VisualState::with(Interaction::Pressed));
         assert!(
@@ -1016,11 +1046,11 @@ mod tests {
     }
 
     #[test]
-    fn an_input_is_recessed_and_a_button_is_raised() {
+    fn ordinary_controls_do_not_add_elevation() {
         use crate::style::{VisualState, button, input};
         assert!(input(VisualState::rest()).inset.is_some());
         assert!(input(VisualState::rest()).elevation.is_none());
-        assert!(button(VisualState::rest()).elevation.is_some());
+        assert!(button(VisualState::rest()).elevation.is_none());
         assert!(button(VisualState::rest()).inset.is_none());
     }
 

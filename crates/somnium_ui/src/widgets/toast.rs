@@ -124,7 +124,7 @@ impl Control for ToastHost {
                 if toast.sticky {
                     t.semantic.status.error.bytes()
                 } else {
-                    theme::TEXT_PRIMARY
+                    theme::active().semantic.text.primary.bytes()
                 },
             );
         }

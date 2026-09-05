@@ -7,7 +7,7 @@ use crate::{
     draw::DrawingContext,
     message::{MessageDirection, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
-    style::{Interaction, VisualState, button as style_button, icon_button as style_icon_button},
+    style::{ButtonVariant, Interaction, VisualState, action_button},
     theme,
     types::Rect,
     widget::{Widget, WidgetBuilder},
@@ -38,9 +38,10 @@ pub struct Button {
     pub is_pressed: bool,
     pub hovered: bool,
     pub selected: bool,
-    /// Keyboard focus — draws the 1 px ring without changing the fill.
+    /// Keyboard focus — draws the token-sized ring without changing the fill.
     pub focused: bool,
     last_up: Option<Instant>,
+    pub variant: ButtonVariant,
 }
 
 impl Control for Button {
@@ -87,7 +88,11 @@ impl Control for Button {
         // gave it no background is a chrome/icon button — it must stay
         // transparent at rest so a command band reads as one surface — while a
         // button with an explicit background keeps it as its rest fill.
-        let ghost = widget.background[3] == 0;
+        let variant = match self.variant {
+            ButtonVariant::Auto if widget.background[3] == 0 => ButtonVariant::Quiet,
+            ButtonVariant::Auto => ButtonVariant::Secondary,
+            variant => variant,
+        };
         let state = VisualState::with(if !widget.enabled {
             Interaction::Disabled
         } else if self.is_pressed {
@@ -100,23 +105,12 @@ impl Control for Button {
             Interaction::Rest
         })
         .focused(self.focused);
-        let paint = if ghost {
-            style_icon_button(state)
-        } else {
-            style_button(state)
-        };
-        // Phase 27-D. An explicit caller background still wins at rest, but
-        // everything else — radius, the chrome wash, the elevation lift, the
-        // focus glow and the selection rail — now comes from the recipe and is
-        // rendered in one call so the layer order cannot be got wrong here.
-        let mut paint = paint;
-        if !ghost && state.interaction == Interaction::Rest && widget.background[3] > 0 {
+        let mut paint = action_button(variant, state);
+        if self.variant == ButtonVariant::Auto
+            && state.interaction == Interaction::Rest
+            && widget.background[3] > 0
+        {
             paint.background = widget.background;
-            // The caller picked the *hue*, not the flatness. Re-derive the wash
-            // from that base so the button still reads as a lit chrome surface.
-            // Suppressing it here is what left the shell looking unchanged after
-            // the recipes already described the depth.
-            paint.gradient = Some(theme::wash_from(theme::Srgb8(widget.background)));
         }
 
         // Phase 27-C. Cross-fade the hover wash instead of snapping to it. The
@@ -133,21 +127,16 @@ impl Control for Button {
             .start(key, 0.0, target, t.motion.hover_ms as f32, Easing::Standard);
         let wash = ctx.motion.value_or(key, target);
         if wash > 0.0 && wash < 1.0 && state.interaction != Interaction::Pressed {
-            let rest = if ghost {
-                style_icon_button(VisualState::rest())
-            } else {
-                style_button(VisualState::rest())
-            };
-            let hovered = if ghost {
-                style_icon_button(VisualState::with(Interaction::Hover))
-            } else {
-                style_button(VisualState::with(Interaction::Hover))
-            };
+            let rest = action_button(variant, VisualState::rest());
+            let hovered = action_button(variant, VisualState::with(Interaction::Hover));
             paint.background = lerp_color(rest.background, hovered.background, wash);
             paint.foreground = lerp_color(rest.foreground, hovered.foreground, wash);
         }
 
-        if paint.background[3] > 0 || paint.rail.is_some() || paint.glow.is_some() {
+        if self.variant != ButtonVariant::Auto || !widget.enabled {
+            ctx.inherited_foreground = Some(paint.foreground);
+        }
+        if paint.background[3] > 0 || paint.rail.is_some() || paint.focus_ring.is_some() {
             ctx.push_paint(b, &paint);
         }
     }
@@ -226,11 +215,20 @@ impl Control for Button {
 
 pub struct ButtonBuilder {
     widget: WidgetBuilder,
+    variant: ButtonVariant,
 }
 
 impl ButtonBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
-        Self { widget }
+        Self {
+            widget,
+            variant: ButtonVariant::Auto,
+        }
+    }
+
+    pub fn with_variant(mut self, variant: ButtonVariant) -> Self {
+        self.variant = variant;
+        self
     }
 
     pub fn build(self) -> UiNode {
@@ -242,6 +240,7 @@ impl ButtonBuilder {
                 selected: false,
                 focused: false,
                 last_up: None,
+                variant: self.variant,
             }),
         )
     }
@@ -284,6 +283,7 @@ mod tests {
             selected: false,
             focused: false,
             last_up: None,
+            variant: ButtonVariant::Auto,
         };
         let mut widget = Widget::default();
         widget.handle = NodeHandle::NONE;

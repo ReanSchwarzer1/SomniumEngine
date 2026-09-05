@@ -186,8 +186,8 @@ impl TextBoxBuilder {
             mixed: false,
             widget,
             text: String::new(),
-            px: theme::NOCTURNE.typography.body,
-            color: theme::TEXT_PRIMARY,
+            px: theme::active().typography.body,
+            color: theme::active().semantic.text.primary.bytes(),
             font_id: 0,
         }
     }

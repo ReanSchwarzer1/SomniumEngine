@@ -1,6 +1,6 @@
 # Phase PERSONA — Atlus
 
-> **Status:** Survey and implementation plan. Editor redesign not implemented.
+> **Status:** PERSONA-A baseline/redlines and PERSONA-B foundation implemented; C–H remain open. [A/B record and native captures](<phase PERSONA/PERSONA-A_B.md>).
 > **Date:** 2026-09-05. **Source:** `3c4e33a`, branch `dev`.
 > **Priority:** The next implementation phase, before further MORROWIND, TSUSHIMA, DREAMS, TALOS, PORTAL, KENSHI, or STALKER work. Existing completion records remain unchanged.
 > **Purpose:** Make Somnium substantially more beautiful, coherent, and approachable for level, environment, material, lighting, and technical designers.
@@ -111,7 +111,7 @@ The scene remains the visual center. Preserve the familiar Outliner/Details rela
 
 ## 4. Nocturne v2 design specification
 
-All values below are **proposed starting values**, not shipped defaults or an approved rendered theme. Sizes are logical UI units before monitor scaling.
+The specification below records the original starting values. PERSONA-B implements the shared foundation; its [delivery record](<phase PERSONA/PERSONA-A_B.md>) and versioned runtime token sheets identify final values and remaining composition work. Sizes are logical UI units before monitor scaling.
 
 ### Palette and material
 
@@ -266,7 +266,7 @@ Do these in order, with one bounded slice at a time. A pass does not count as co
 | PERSONA-F — Workspace resilience | Float/redock UX, state retention, monitor/DPI changes, small-window overflow, saved layout migration. | Moving/resizing/reopening panels preserves selection, edits, scroll, and focus. Arbitrary cross-slot docking only closes if existing dock-tree integration actually supports it. |
 | PERSONA-G — Finish and accept | Apply the same recipes to remaining authoring surfaces; accessibility and performance pass; matched captures and human sign-off; update context and old phase status references. | All mandatory gates below met. Record remaining optional items by name; no blanket “complete” for unverified states. |
 
-**First implementation task:** PERSONA-B's button/input/property-row recipe changes plus a PERSONA-C slice of populated Details and shell headers. Keep PERSONA-A small: use the capture hooks and golden tools already present. The first delivery should show the redesigned editor, not spend a whole phase building more audit infrastructure.
+**Current delivery:** PERSONA-A/B baseline, recipes, tokens and native gallery are recorded in [PERSONA-A_B.md](<phase PERSONA/PERSONA-A_B.md>). **Next:** PERSONA-C shell composition and populated Details, using this foundation. All later designer-workflow, floating-window and phase-wide bug-closure gates remain binding.
 
 ## 8. Acceptance, not just screenshots
 

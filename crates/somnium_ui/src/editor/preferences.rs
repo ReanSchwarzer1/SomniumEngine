@@ -80,8 +80,8 @@ pub(crate) fn build_preferences_window(
             .with_height(520.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
-            .with_background(theme::BG_PANEL)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.panel.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -100,8 +100,8 @@ pub(crate) fn build_preferences_window(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {
         left: 0.0,
@@ -142,7 +142,7 @@ pub(crate) fn build_preferences_window(
         WidgetBuilder::new()
             .with_row(1)
             .with_column(0)
-            .with_background(theme::BG_HEADER),
+            .with_background(theme::active().semantic.surface.header.bytes()),
     )
     .with_orientation(Orientation::Horizontal)
     .build();
@@ -172,7 +172,7 @@ pub(crate) fn build_preferences_window(
         WidgetBuilder::new()
             .with_row(2)
             .with_column(0)
-            .with_background(theme::BG_PANEL),
+            .with_background(theme::active().semantic.surface.panel.bytes()),
     )
     .build();
     let scroll = ui.add_node(scroll, grid);
@@ -222,7 +222,7 @@ fn labelled_button(
         WidgetBuilder::new()
             .with_height(24.0)
             .with_margin(Thickness::axes(6.0, 5.0))
-            .with_background(theme::BG_RAISED),
+            .with_background(theme::active().semantic.surface.raised.bytes()),
     )
     .build();
     let button = ui.add_node(button, parent);
@@ -230,7 +230,7 @@ fn labelled_button(
         .with_text(label)
         .with_font_size(12.0)
         .with_font_id(font_id)
-        .with_color(theme::TEXT_PRIMARY)
+        .with_color(theme::active().semantic.text.primary.bytes())
         .build();
     ui.add_node(text, button);
     button
@@ -274,7 +274,7 @@ pub(crate) fn build_binding_row(
     .with_color(if conflicted {
         theme::active().semantic.status.error.bytes()
     } else {
-        theme::TEXT_PRIMARY
+        theme::active().semantic.text.primary.bytes()
     })
     .build();
     ui.add_node(name, row);
@@ -285,7 +285,7 @@ pub(crate) fn build_binding_row(
         WidgetBuilder::new()
             .with_column(1)
             .with_margin(Thickness::axes(2.0, 3.0))
-            .with_background(theme::BG_RAISED),
+            .with_background(theme::active().semantic.surface.raised.bytes()),
     )
     .build();
     let capture = ui.add_node(capture, row);
@@ -296,7 +296,7 @@ pub(crate) fn build_binding_row(
         .with_color(if customised {
             theme::active().semantic.accent.default.bytes()
         } else {
-            theme::TEXT_SECONDARY
+            theme::active().semantic.text.secondary.bytes()
         })
         .build();
     ui.add_node(chord_text, capture);
@@ -305,7 +305,7 @@ pub(crate) fn build_binding_row(
         WidgetBuilder::new()
             .with_column(2)
             .with_margin(Thickness::axes(2.0, 3.0))
-            .with_background(theme::BG_RAISED)
+            .with_background(theme::active().semantic.surface.raised.bytes())
             .with_enabled(customised),
     )
     .build();
@@ -314,7 +314,7 @@ pub(crate) fn build_binding_row(
         .with_text("Reset")
         .with_font_size(12.0)
         .with_font_id(font_id)
-        .with_color(theme::TEXT_SECONDARY)
+        .with_color(theme::active().semantic.text.secondary.bytes())
         .build();
     ui.add_node(reset_text, reset);
 

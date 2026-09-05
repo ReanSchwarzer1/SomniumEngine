@@ -33,7 +33,7 @@ impl Control for SearchBox {
     }
 
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
-        Vec2::new(available.x.max(80.0), theme::ROW_HEIGHT)
+        Vec2::new(available.x.max(80.0), theme::active().density.row_dense)
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
@@ -42,16 +42,16 @@ impl Control for SearchBox {
         ctx.push_paint(b, &paint);
         let ic = Rect::new(b.x + 4.0, b.y + 3.0, 16.0, 16.0);
         let (uv, tex) = IconId::Search.draw_quad(ic);
-        ctx.push_textured_rect(ic, uv, theme::TEXT_SECONDARY, tex);
+        ctx.push_textured_rect(ic, uv, theme::active().semantic.text.secondary.bytes(), tex);
         let shown = if self.query.is_empty() {
             "Search"
         } else {
             self.query.as_str()
         };
         let color = if self.query.is_empty() {
-            theme::TEXT_DISABLED
+            theme::active().semantic.text.disabled.bytes()
         } else {
-            theme::TEXT_PRIMARY
+            theme::active().semantic.text.primary.bytes()
         };
         ctx.push_text(
             shown,
@@ -194,7 +194,7 @@ impl Control for Breadcrumb {
                     Vec2::new(x, b.y + 3.0),
                     self.font_id,
                     11.0,
-                    theme::TEXT_SECONDARY,
+                    theme::active().semantic.text.secondary.bytes(),
                 );
                 x += 12.0;
             }
@@ -300,9 +300,10 @@ pub fn build_search_field(
     parent: NodeHandle,
     font_id: u8,
 ) -> NodeHandle {
-    let node = SearchBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-        .with_font_id(font_id)
-        .build();
+    let node =
+        SearchBoxBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
+            .with_font_id(font_id)
+            .build();
     ui.add_node(node, parent)
 }
 
@@ -313,7 +314,9 @@ pub fn build_labelled_text_box(
     parent: NodeHandle,
     font_id: u8,
 ) -> NodeHandle {
-    let box_ = TextBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT)).build();
+    let box_ =
+        TextBoxBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
+            .build();
     let _ = font_id;
     ui.add_node(box_, parent)
 }
@@ -340,7 +343,7 @@ impl Control for Tooltip {
             Vec2::new(b.x + 6.0, b.y + 4.0),
             self.font_id,
             11.0,
-            theme::TEXT_PRIMARY,
+            theme::active().semantic.text.primary.bytes(),
         );
     }
     fn handle_routed_message(

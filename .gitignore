@@ -200,3 +200,9 @@ assets/.somnium/
 
 # Codex's scratch diagnostics. Not evidence; not reviewable.
 .codex-debug/
+
+# PERSONA native review evidence; transient runtime logs stay local.
+!dev records/phase PERSONA/
+dev records/phase PERSONA/*
+!dev records/phase PERSONA/*.md
+!dev records/phase PERSONA/*.png

@@ -90,8 +90,8 @@ pub(crate) fn command_popup_items(
             .with_width(200.0)
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
@@ -113,7 +113,7 @@ pub(crate) fn command_popup_items(
             .with_text(command.menu_label())
             .with_font_size(12.0)
             .with_font_id(font_id)
-            .with_color(theme::TEXT_PRIMARY)
+            .with_color(theme::active().semantic.text.primary.bytes())
             .build();
         ui.add_node(lbl, bh);
         handles.push((bh, command.id));
@@ -130,11 +130,11 @@ pub(crate) fn scope_separator(ui: &mut UserInterface, parent: NodeHandle) -> Nod
     let sep = BorderBuilder::new(
         WidgetBuilder::new()
             .with_width(theme::NOCTURNE.geometry.stroke_hairline)
-            .with_height(theme::NOCTURNE.density.icon_action)
+            .with_height(theme::active().density.icon_action)
             .with_vertical_alignment(VerticalAlignment::Center)
             .with_margin(Thickness::axes(theme::NOCTURNE.geometry.inset_panel, 0.0))
             .with_hit_test_visibility(false)
-            .with_background(theme::BORDER_MEDIUM)
+            .with_background(theme::active().semantic.border.default.bytes())
             .with_foreground(theme::TRANSPARENT),
     )
     .with_stroke_thickness(Thickness::ZERO)
@@ -150,9 +150,9 @@ pub(crate) fn icon_tool_button(
 ) -> NodeHandle {
     let mut wb = WidgetBuilder::new()
         .with_width(36.0)
-        .with_height(theme::TOOLBAR_HEIGHT)
+        .with_height(theme::active().density.toolbar)
         .with_margin(Thickness::axes(2.0, 2.0))
-        .with_background(theme::BG_RAISED);
+        .with_background(theme::active().semantic.surface.raised.bytes());
     if !tooltip.is_empty() {
         wb = wb.with_tooltip(tooltip);
     }
@@ -165,7 +165,7 @@ pub(crate) fn icon_tool_button(
     )
     .with_icon(icon)
     .with_size(theme::ICON_TOOL)
-    .with_tint(theme::TEXT_PRIMARY)
+    .with_tint(theme::active().semantic.text.primary.bytes())
     .build();
     ui.add_node(img, h);
     h
@@ -180,7 +180,7 @@ pub(crate) fn window_chrome_button(
     let btn = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_width(46.0)
-            .with_height(theme::TITLEBAR_HEIGHT)
+            .with_height(theme::active().density.titlebar)
             .with_tooltip(tooltip)
             .with_background(theme::TRANSPARENT),
     )
@@ -189,7 +189,7 @@ pub(crate) fn window_chrome_button(
     let img = ImageBuilder::new(WidgetBuilder::new())
         .with_icon(icon)
         .with_size(16.0)
-        .with_tint(theme::TEXT_PRIMARY)
+        .with_tint(theme::active().semantic.text.primary.bytes())
         .build();
     ui.add_node(img, h);
     h
@@ -212,7 +212,7 @@ pub(crate) fn labeled_icon_button(
             .with_height(height)
             .with_margin(Thickness::axes(2.0, 1.0))
             .with_tooltip(tooltip)
-            .with_background(theme::BG_RAISED),
+            .with_background(theme::active().semantic.surface.raised.bytes()),
     )
     .build();
     let h = ui.add_node(btn, parent);
@@ -237,7 +237,7 @@ pub(crate) fn labeled_icon_button(
     )
     .with_icon(icon)
     .with_size(16.0)
-    .with_tint(theme::TEXT_PRIMARY)
+    .with_tint(theme::active().semantic.text.primary.bytes())
     .build();
     ui.add_node(img, row_h);
     let lbl = TextBuilder::new(
@@ -252,7 +252,7 @@ pub(crate) fn labeled_icon_button(
     )
     .with_role(TextRole::Label)
     .with_text(label)
-    .with_color(theme::TEXT_PRIMARY)
+    .with_color(theme::active().semantic.text.primary.bytes())
     .build();
     let lbl_h = ui.add_node(lbl, row_h);
     (h, lbl_h)
@@ -380,9 +380,9 @@ pub(crate) fn menu_entry(
         .with_font_size(12.0)
         .with_font_id(font_id)
         .with_color(if enabled {
-            theme::TEXT_PRIMARY
+            theme::active().semantic.text.primary.bytes()
         } else {
-            theme::TEXT_DISABLED
+            theme::active().semantic.text.disabled.bytes()
         })
         .build();
     ui.add_node(text, button);
