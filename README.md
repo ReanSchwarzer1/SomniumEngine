@@ -110,6 +110,135 @@ Every capture in this repository comes from a running build.
 `SOMNIUM_CAPTURE_UI_PNG` reads back the swapchain after the UI pass. More
 captures live in [`media/`](media/).
 
+## Highlights
+
+**Rendering**
+- Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
+- GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters, Hi-Z two-phase occlusion culling
+- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode, plus **multiple-scattering energy compensation** on both the direct lobe and the IBL, **Hammon's rough diffuse**, **micro-shadowing**, and geometric **specular antialiasing** with a roughness-scaled bound on every lobe, the sun and the moon both on it
+- **Two-sided foliage transport** — a wrapped, view-scattered transmission lobe so a backlit leaf glows, on the same `shadow_factor` the reflected term uses. Occlusion composes rather than replaces: GTAO, the authored map, baked sky visibility and terrain layer occlusion multiply into one number, and micro-shadowing takes a material-only copy
+- **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster). Cascades stop at 100 m, so terrain also carries a baked heightfield **horizon map** that shadows it at any distance, cross-faded in where the last cascade fades out
+- **Global illumination** — ReSTIR DI/GI on wgpu acceleration structures, with a **portable DDGI tier** (SDF-traced 4×4×4 volume, budgeted temporal SH updates) for hardware without ray query
+- **Atmosphere and sky** — Hillaire scattering LUTs driving both sky and IBL, analytic NOAA sun position, a five-track day cycle, and volumetric clouds (Perlin–Worley, quarter-res adaptive march, cloud shadows folded into one `shadow_factor` every surface reads)
+- **Weather** — coverage → precipitation → wetness on Lagarde's two time constants, porosity as a material channel, rain ripples on water
+- HDR pipeline: `Rgba16Float`, AgX/ACES tone mapping, GTAO, bloom, DoF, motion blur, deferred decals
+- **Anti-aliasing as one authored choice** — Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3, plus SMAA quality presets. (It was three independent booleans until MORROWIND-AC, where the default configuration was measured to run *no* AA pass while showing a checked box.)
+- **Order-independent transparency** — weighted-blended, authored per scene, with the sorted path retained
+- Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps, temporal foam, Beer's-law transport, a shoreline SDF and a depth-faded shore. Reflections blend screen-space tracing, half-res hardware ray tracing, and the environment cube
+- **Terrain** — 32-layer material with strongest-four blending, triplanar cliffs, hex tiling and parallax occlusion; nested material **clipmaps**; **virtual texturing** streaming BC7 source pages into a fixed 64 MiB atlas
+- **Terrain lighting** — three heightfield bakes: horizon angles in eight azimuths for long-range sun shadow, cosine-weighted **sky visibility** with a bent direction so valleys are darker than the ridges above them, and a mip-chained **relief normal** that carries its own discarded variance into roughness
+
+**World & content**
+- glTF 2.0 loading (meshes, PBR materials, textures, skins), importable at runtime
+- **Deterministic asset cook** — versioned, integrity-checked payloads with a SHA-256 recipe key; changing a texture recooks its material's reverse closure while unrelated meshes stay cached
+- **Residency** — typed placeholders returned immediately, resolver I/O through the job system, per-frame upload budget, deterministic LRU, atomic publish
+- **World partition** — double-precision cell hashing, camera/player/volume want-state, transactional unload that persists real ECS components through the schema serializer
+- **Voxel world** — 32³ padded chunks, `block_mesh` face culling, 3 LOD levels, sparse edit overlay
+- **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching, real-time sculpting and texture painting
+- **Foliage painting** — brush over terrain with density, size and single-instance placement. A 25-entry CC0 palette; entries that require a terrain layer underneath them say so in the log when they refuse, and the requirement is a brush setting rather than a fixed property of the entry
+
+**Scripting & simulation**
+- **Luau** (`mlua`, interpreter only) — sandboxed, with a deferred command buffer as the only route into the world, generated type declarations, and acceptance budgets asserted as tests
+- **Animation** — skeletons, four-weight skinning, clips, `Blend1D`/`Blend2D`, masked layers, typed parameters and triggers, sync tracks, state machines with a bounded pose cache
+- **Jobs** — declared priorities and deadlines, cancellation, a budgeted main-thread completion drain, and profiler telemetry. A job whose deadline passed while queued is dropped rather than run
+- Jolt physics integration; Kira audio with buses, attenuation curves, cones, occlusion and Doppler
+- CPU particle system with GPU billboard instancing
+
+**Editor**
+- **Schema-generated Details** — all **267** editable fields across **25** registered component schemas are generated from the schema, with scoped undo, drag coalescing, multi-select intersection and mixed-value rows. The hand-wiring census is **0 identifiers**: there is no hand-written inspector left, and a generated table proves it rather than a claim
+- **One command registry** — 52+ commands generate the menus, Create surfaces, toolbar, tooltips, shortcuts, palette and F1 index
+- **Node graph editor** and **timeline**, both archetype-driven and feature-neutral, with material and animation catalogues as the first consumers
+- Curve and gradient editing as reflected *values* (`FieldType::Curve`), so a curve gets its Details row, undo and round-trip for free
+- Scene lifecycle: format-routed load, retained unknown components and fields (no silent data loss), header thumbnails, autosave and crash recovery, clickable undo history
+- Preferences with a `default → project.toml → editor.toml → SOMNIUM_*` order. All **115** `SOMNIUM_*` variables have a declared, checked route — schema field, setting, command or a stated harness reason — and **0** are unexplained, enforced by `tools/reachability/`
+- Transform gizmos, light gizmos, selection outline, infinite grid, camera bookmarks, statistics overlay, output log with severity chips and jump-to-source
+- Accessibility: roles, names, values, focus announcements, reduced motion, high contrast reusing the theme's certified contrast pairs
+
+**Editor design system — Nocturne Atelier**
+- **Correct colour pipeline.** Authored sRGB decodes to linear exactly once before the sRGB swapchain, straight alpha through the widget API. `#1C1E26` reaches the framebuffer as `#1C1E26`
+- **Layered tokens** — palette → semantic roles → component recipes → interaction state, so a widget asks for `style::button(state)` rather than picking a grey
+- **Typography with actual hierarchy** — Inter Regular/Medium/SemiBold and JetBrains Mono Regular/Medium behind named roles; numeric fields use the mono face so a scrub cannot shift a row
+- **One icon family** — 67 Tabler outline icons plus 16 original Somnium glyphs on the same 24×24 / 2 px grid, rasterized from SVG by `resvg`
+- The full contract is [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md)
+
+## Building
+
+Requires:
+- **Rust 1.88** (edition 2024; pinned in `rust-toolchain.toml` and gated by GHOSTFENCE)
+- A **C++ toolchain** — MSVC Build Tools on Windows, clang/gcc elsewhere. Both
+  the Jolt physics bridge and Luau are built from source
+
+```sh
+cargo build --workspace
+cargo run -p hello_engine        # runnable editor demo
+```
+
+Running the gates:
+
+```sh
+cargo test --workspace -j 1      # -j 1 avoids transient LNK1104 on Windows
+python tools/ghostfence/run.py   # every gate; --fast skips the test row
+python tools/census/generate.py  # regenerate the engine census
+```
+
+A timing run, which is how any frame-time claim is made:
+
+```sh
+SOMNIUM_TIME=after.somtime SOMNIUM_TIME_VIEW=coastal-ground \
+SOMNIUM_MAXIMIZE=1 SOMNIUM_TIME_QUIT=1 \
+cargo run --release -p hello_engine
+```
+
+### Editor controls (demo)
+
+- **Right mouse + WASD/QE** — fly camera (Shift = faster); **RMB + scroll** adjusts speed
+- **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
+- **L** — light gizmos · **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
+- **Ctrl+Space** — Content Drawer · **Ctrl+P** — command palette
+- **Play / Pause / Stop** — simulation transport
+- **F6** — terrain edit mode; then `1`–`6` pick Raise / Lower / Smooth / Flatten / Noise / Paint
+- **F9 / F10** — A/B the GPU-driven indirect path and GPU frustum culling
+- **File > Import Model…** — import any glTF/GLB
+- **Create menu** — primitives, lights, particle emitters, terrain, or a runtime UI Canvas root
+- **Tab / Shift+Tab** — move between shell regions; **Window menu** — switch workspace
+- Click the indigo dot in a Details row's gutter to revert that property in one undo step
+
+## Repository layout
+
+```
+crates/
+  somnium_core/         App lifecycle, events, editor logic, scene schema, scripting host
+  somnium_ecs/          Archetype ECS + reflection (no external deps)
+  somnium_renderer/     wgpu backend, visibility buffer, render passes, terrain, water
+  somnium_shader/       WGSL module registry, //!include composition, variant cache
+  somnium_jobs/         Priorities, deadlines, cancellation, budgeted drain (no deps)
+  somnium_anim/         Skeletons, clips, blend graphs, state machines
+  somnium_asset/        Vertex type, glTF loader, deterministic cook, residency
+  somnium_script/       Language-neutral scripting seam (command buffer, budgets)
+  somnium_script_luau/  Luau backend via mlua
+  somnium_input/        Action maps, control paths, processors, rebinding
+  somnium_i18n/         CLDR plural/gender rules, fallback chains, key extraction
+  somnium_audio/        Kira wrapper — buses, attenuation, occlusion, Doppler
+  somnium_physics/      Jolt high-level wrapper
+  somnium_physics_sys/  Raw Jolt FFI (compiles Jolt C++ at build time)
+  somnium_ui/           Native wgpu widget tree, editor shell, graph, timeline, theme
+  somnium_voxel/        Voxel world (chunks, meshing, async streaming)
+examples/
+  hello_engine/         Runnable editor demo
+  vvardenfell/          Public-API-only sample — exercises the engine boundary
+tools/
+  census/               Generates the engine census (GHOSTFENCE row)
+  ghostfence/           The gate: seven rows, and a standard-library PNG codec
+  shadercook/           Shader variant budget report
+  reachability/         Environment/component/hand-wiring reachability tables
+  assetcook/            Standalone deterministic cook CLI
+context.md              Living architecture document (phase history, GPU layouts)
+dev records/            Phase plans, sub-phase records, and committed evidence
+ATTRIBUTION.md          Provenance: which reference patterns informed which files
+THIRD_PARTY_NOTICES.md  Bundled fonts and icons, their licences and modifications
+example_repo/           Local reference codebases — NOT committed (see below)
+```
+
 ## How this project works
 
 Somnium is developed in codenamed phases. Each phase has a plan, a record of
@@ -248,134 +377,6 @@ diagram because it was removed: there is no moon-direction shadow to multiply it
 by yet, and unshadowed it turned night foliage into green pinpricks. Details in
 [TSUSHIMA-K](dev%20records/phase%20TSUSHIMA/TSUSHIMA-K.md).
 
-## Highlights
-
-**Rendering**
-- Visibility-buffer pipeline with programmable vertex pulling and bindless resources (single global bind group)
-- GPU-driven rendering: `multi_draw_indirect`, compute frustum culling, meshlet clusters, Hi-Z two-phase occlusion culling
-- Physically based shading (Cook-Torrance GGX) with an alternative cel-shading mode, plus **multiple-scattering energy compensation** on both the direct lobe and the IBL, **Hammon's rough diffuse**, **micro-shadowing**, and geometric **specular antialiasing** with a roughness-scaled bound on every lobe, the sun and the moon both on it
-- **Two-sided foliage transport** — a wrapped, view-scattered transmission lobe so a backlit leaf glows, on the same `shadow_factor` the reflected term uses. Occlusion composes rather than replaces: GTAO, the authored map, baked sky visibility and terrain layer occlusion multiply into one number, and micro-shadowing takes a material-only copy
-- **Shadows** — cascaded shadow maps with PCSS and contact shadows, plus **sparse virtual shadow maps** (clipmap page table, persistent physical atlas, per-page raster). Cascades stop at 100 m, so terrain also carries a baked heightfield **horizon map** that shadows it at any distance, cross-faded in where the last cascade fades out
-- **Global illumination** — ReSTIR DI/GI on wgpu acceleration structures, with a **portable DDGI tier** (SDF-traced 4×4×4 volume, budgeted temporal SH updates) for hardware without ray query
-- **Atmosphere and sky** — Hillaire scattering LUTs driving both sky and IBL, analytic NOAA sun position, a five-track day cycle, and volumetric clouds (Perlin–Worley, quarter-res adaptive march, cloud shadows folded into one `shadow_factor` every surface reads)
-- **Weather** — coverage → precipitation → wetness on Lagarde's two time constants, porosity as a material channel, rain ripples on water
-- HDR pipeline: `Rgba16Float`, AgX/ACES tone mapping, GTAO, bloom, DoF, motion blur, deferred decals
-- **Anti-aliasing as one authored choice** — Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3, plus SMAA quality presets. (It was three independent booleans until MORROWIND-AC, where the default configuration was measured to run *no* AA pass while showing a checked box.)
-- **Order-independent transparency** — weighted-blended, authored per scene, with the sorted path retained
-- Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps, temporal foam, Beer's-law transport, a shoreline SDF and a depth-faded shore. Reflections blend screen-space tracing, half-res hardware ray tracing, and the environment cube
-- **Terrain** — 32-layer material with strongest-four blending, triplanar cliffs, hex tiling and parallax occlusion; nested material **clipmaps**; **virtual texturing** streaming BC7 source pages into a fixed 64 MiB atlas
-- **Terrain lighting** — three heightfield bakes: horizon angles in eight azimuths for long-range sun shadow, cosine-weighted **sky visibility** with a bent direction so valleys are darker than the ridges above them, and a mip-chained **relief normal** that carries its own discarded variance into roughness
-
-**World & content**
-- glTF 2.0 loading (meshes, PBR materials, textures, skins), importable at runtime
-- **Deterministic asset cook** — versioned, integrity-checked payloads with a SHA-256 recipe key; changing a texture recooks its material's reverse closure while unrelated meshes stay cached
-- **Residency** — typed placeholders returned immediately, resolver I/O through the job system, per-frame upload budget, deterministic LRU, atomic publish
-- **World partition** — double-precision cell hashing, camera/player/volume want-state, transactional unload that persists real ECS components through the schema serializer
-- **Voxel world** — 32³ padded chunks, `block_mesh` face culling, 3 LOD levels, sparse edit overlay
-- **Heightmap terrain** — chunked CDLOD-style LOD with crack-free stitching, real-time sculpting and texture painting
-- **Foliage painting** — brush over terrain with density, size and single-instance placement. A 25-entry CC0 palette; entries that require a terrain layer underneath them say so in the log when they refuse, and the requirement is a brush setting rather than a fixed property of the entry
-
-**Scripting & simulation**
-- **Luau** (`mlua`, interpreter only) — sandboxed, with a deferred command buffer as the only route into the world, generated type declarations, and acceptance budgets asserted as tests
-- **Animation** — skeletons, four-weight skinning, clips, `Blend1D`/`Blend2D`, masked layers, typed parameters and triggers, sync tracks, state machines with a bounded pose cache
-- **Jobs** — declared priorities and deadlines, cancellation, a budgeted main-thread completion drain, and profiler telemetry. A job whose deadline passed while queued is dropped rather than run
-- Jolt physics integration; Kira audio with buses, attenuation curves, cones, occlusion and Doppler
-- CPU particle system with GPU billboard instancing
-
-**Editor**
-- **Schema-generated Details** — all **267** editable fields across **25** registered component schemas are generated from the schema, with scoped undo, drag coalescing, multi-select intersection and mixed-value rows. The hand-wiring census is **0 identifiers**: there is no hand-written inspector left, and a generated table proves it rather than a claim
-- **One command registry** — 52+ commands generate the menus, Create surfaces, toolbar, tooltips, shortcuts, palette and F1 index
-- **Node graph editor** and **timeline**, both archetype-driven and feature-neutral, with material and animation catalogues as the first consumers
-- Curve and gradient editing as reflected *values* (`FieldType::Curve`), so a curve gets its Details row, undo and round-trip for free
-- Scene lifecycle: format-routed load, retained unknown components and fields (no silent data loss), header thumbnails, autosave and crash recovery, clickable undo history
-- Preferences with a `default → project.toml → editor.toml → SOMNIUM_*` order. All **115** `SOMNIUM_*` variables have a declared, checked route — schema field, setting, command or a stated harness reason — and **0** are unexplained, enforced by `tools/reachability/`
-- Transform gizmos, light gizmos, selection outline, infinite grid, camera bookmarks, statistics overlay, output log with severity chips and jump-to-source
-- Accessibility: roles, names, values, focus announcements, reduced motion, high contrast reusing the theme's certified contrast pairs
-
-**Editor design system — Nocturne Atelier**
-- **Correct colour pipeline.** Authored sRGB decodes to linear exactly once before the sRGB swapchain, straight alpha through the widget API. `#1C1E26` reaches the framebuffer as `#1C1E26`
-- **Layered tokens** — palette → semantic roles → component recipes → interaction state, so a widget asks for `style::button(state)` rather than picking a grey
-- **Typography with actual hierarchy** — Inter Regular/Medium/SemiBold and JetBrains Mono Regular/Medium behind named roles; numeric fields use the mono face so a scrub cannot shift a row
-- **One icon family** — 67 Tabler outline icons plus 16 original Somnium glyphs on the same 24×24 / 2 px grid, rasterized from SVG by `resvg`
-- The full contract is [`dev records/phase_26_Zeta.md`](dev%20records/phase_26_Zeta.md)
-
-## Building
-
-Requires:
-- **Rust 1.88** (edition 2024; pinned in `rust-toolchain.toml` and gated by GHOSTFENCE)
-- A **C++ toolchain** — MSVC Build Tools on Windows, clang/gcc elsewhere. Both
-  the Jolt physics bridge and Luau are built from source
-
-```sh
-cargo build --workspace
-cargo run -p hello_engine        # runnable editor demo
-```
-
-Running the gates:
-
-```sh
-cargo test --workspace -j 1      # -j 1 avoids transient LNK1104 on Windows
-python tools/ghostfence/run.py   # every gate; --fast skips the test row
-python tools/census/generate.py  # regenerate the engine census
-```
-
-A timing run, which is how any frame-time claim is made:
-
-```sh
-SOMNIUM_TIME=after.somtime SOMNIUM_TIME_VIEW=coastal-ground \
-SOMNIUM_MAXIMIZE=1 SOMNIUM_TIME_QUIT=1 \
-cargo run --release -p hello_engine
-```
-
-### Editor controls (demo)
-
-- **Right mouse + WASD/QE** — fly camera (Shift = faster); **RMB + scroll** adjusts speed
-- **T / R / S** — translate / rotate / scale gizmo · **Ctrl+Z/Y** — undo/redo
-- **L** — light gizmos · **F1** — in-editor Help (`docs/editor/`) · **Esc** — close the top overlay
-- **Ctrl+Space** — Content Drawer · **Ctrl+P** — command palette
-- **Play / Pause / Stop** — simulation transport
-- **F6** — terrain edit mode; then `1`–`6` pick Raise / Lower / Smooth / Flatten / Noise / Paint
-- **F9 / F10** — A/B the GPU-driven indirect path and GPU frustum culling
-- **File > Import Model…** — import any glTF/GLB
-- **Create menu** — primitives, lights, particle emitters, terrain, or a runtime UI Canvas root
-- **Tab / Shift+Tab** — move between shell regions; **Window menu** — switch workspace
-- Click the indigo dot in a Details row's gutter to revert that property in one undo step
-
-## Repository layout
-
-```
-crates/
-  somnium_core/         App lifecycle, events, editor logic, scene schema, scripting host
-  somnium_ecs/          Archetype ECS + reflection (no external deps)
-  somnium_renderer/     wgpu backend, visibility buffer, render passes, terrain, water
-  somnium_shader/       WGSL module registry, //!include composition, variant cache
-  somnium_jobs/         Priorities, deadlines, cancellation, budgeted drain (no deps)
-  somnium_anim/         Skeletons, clips, blend graphs, state machines
-  somnium_asset/        Vertex type, glTF loader, deterministic cook, residency
-  somnium_script/       Language-neutral scripting seam (command buffer, budgets)
-  somnium_script_luau/  Luau backend via mlua
-  somnium_input/        Action maps, control paths, processors, rebinding
-  somnium_i18n/         CLDR plural/gender rules, fallback chains, key extraction
-  somnium_audio/        Kira wrapper — buses, attenuation, occlusion, Doppler
-  somnium_physics/      Jolt high-level wrapper
-  somnium_physics_sys/  Raw Jolt FFI (compiles Jolt C++ at build time)
-  somnium_ui/           Native wgpu widget tree, editor shell, graph, timeline, theme
-  somnium_voxel/        Voxel world (chunks, meshing, async streaming)
-examples/
-  hello_engine/         Runnable editor demo
-  vvardenfell/          Public-API-only sample — exercises the engine boundary
-tools/
-  census/               Generates the engine census (GHOSTFENCE row)
-  ghostfence/           The gate: seven rows, and a standard-library PNG codec
-  shadercook/           Shader variant budget report
-  reachability/         Environment/component/hand-wiring reachability tables
-  assetcook/            Standalone deterministic cook CLI
-context.md              Living architecture document (phase history, GPU layouts)
-dev records/            Phase plans, sub-phase records, and committed evidence
-ATTRIBUTION.md          Provenance: which reference patterns informed which files
-THIRD_PARTY_NOTICES.md  Bundled fonts and icons, their licences and modifications
-example_repo/           Local reference codebases — NOT committed (see below)
-```
 
 ## Development with AI assistance
 

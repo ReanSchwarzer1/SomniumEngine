@@ -43,17 +43,17 @@ pub struct ColorSwatch {
 
 impl Control for ColorSwatch {
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
-        Vec2::new(36.0, theme::ROW_HEIGHT)
+        Vec2::new(36.0, theme::active().density.row_dense)
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
         let sw = Rect::new(b.x + 4.0, b.y + 3.0, 28.0, (b.h - 6.0).max(12.0));
         // Checker so alpha is visible.
-        ctx.push_rect_filled(sw, theme::BG_RAISED);
+        ctx.push_rect_filled(sw, theme::active().semantic.surface.raised.bytes());
         let display = linear_rgba_to_srgb_u8(self.color);
         ctx.push_rect_filled(sw, display);
-        ctx.push_rect_border(sw, 1.0, theme::BORDER_MEDIUM);
+        ctx.push_rect_border(sw, 1.0, theme::active().semantic.border.default.bytes());
         if self.locked {
             ctx.push_rect_filled(Rect::new(sw.x, sw.y, sw.w, 3.0), theme::STATUS_WARN);
         }
@@ -192,8 +192,8 @@ impl Control for ColorPicker {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        ctx.push_rect_filled(b, theme::BG_HEADER);
-        ctx.push_rect_border(b, 1.0, theme::BORDER_DARK);
+        ctx.push_rect_filled(b, theme::active().semantic.surface.header.bytes());
+        ctx.push_rect_border(b, 1.0, theme::active().semantic.border.subtle.bytes());
 
         let sv = Self::sv_rect(b);
         // SV square: sample a coarse grid in the current hue.
@@ -217,7 +217,7 @@ impl Control for ColorPicker {
                 );
             }
         }
-        ctx.push_rect_border(sv, 1.0, theme::BORDER_LIGHT);
+        ctx.push_rect_border(sv, 1.0, theme::active().semantic.border.strong.bytes());
         let cx = sv.x + self.hsv.1 * sv.w;
         let cy = sv.y + (1.0 - self.hsv.2) * sv.h;
         ctx.push_rect_border(Rect::new(cx - 4.0, cy - 4.0, 8.0, 8.0), 1.0, theme::WHITE);
@@ -238,14 +238,18 @@ impl Control for ColorPicker {
 
         let preview = Rect::new(b.x + 10.0, b.y + 178.0, 36.0, 22.0);
         ctx.push_rect_filled(preview, linear_rgba_to_srgb_u8(self.linear));
-        ctx.push_rect_border(preview, 1.0, theme::BORDER_MEDIUM);
+        ctx.push_rect_border(
+            preview,
+            1.0,
+            theme::active().semantic.border.default.bytes(),
+        );
 
         ctx.push_text(
             &self.hex,
             Vec2::new(b.x + 52.0, b.y + 182.0),
             self.font_id,
             12.0,
-            theme::TEXT_PRIMARY,
+            theme::active().semantic.text.primary.bytes(),
         );
         let rgb8 = linear_rgba_to_srgb_u8(self.linear);
         ctx.push_text(
@@ -253,24 +257,24 @@ impl Control for ColorPicker {
             Vec2::new(b.x + 10.0, b.y + 206.0),
             self.font_id,
             11.0,
-            theme::TEXT_SECONDARY,
+            theme::active().semantic.text.secondary.bytes(),
         );
 
         for i in 0..self.recent_count.min(8) {
             let r = Rect::new(b.x + 10.0 + i as f32 * 22.0, b.y + 226.0, 18.0, 18.0);
             ctx.push_rect_filled(r, linear_rgba_to_srgb_u8(self.recent[i]));
-            ctx.push_rect_border(r, 1.0, theme::BORDER_DARK);
+            ctx.push_rect_border(r, 1.0, theme::active().semantic.border.subtle.bytes());
         }
 
         let cancel = Self::cancel_rect(b);
-        ctx.push_rect_filled(cancel, theme::BG_RAISED);
-        ctx.push_rect_border(cancel, 1.0, theme::BORDER_MEDIUM);
+        ctx.push_rect_filled(cancel, theme::active().semantic.surface.raised.bytes());
+        ctx.push_rect_border(cancel, 1.0, theme::active().semantic.border.default.bytes());
         ctx.push_text(
             "Cancel",
             Vec2::new(cancel.x + 10.0, cancel.y + 4.0),
             self.font_id,
             11.0,
-            theme::TEXT_PRIMARY,
+            theme::active().semantic.text.primary.bytes(),
         );
     }
 

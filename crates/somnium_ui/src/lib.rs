@@ -46,6 +46,7 @@ pub mod ui;
 /// a device.
 pub use wgpu;
 pub mod floating;
+pub mod floating_layout;
 pub mod viewport_layout;
 pub mod virtual_list;
 pub mod widget;
@@ -258,8 +259,6 @@ pub(crate) enum ContentToolbarAction {
     Forward,
     Up,
     Kind(crate::metaphor::ContentFilterKind),
-    Sort,
-    Density,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -577,6 +576,7 @@ struct EditorLayout {
     outliner_empty: NodeHandle,
     outliner_stack: NodeHandle,
     inspector_stack: NodeHandle,
+    persona: crate::editor::persona::Persona,
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
     log_stack: NodeHandle,
@@ -892,6 +892,7 @@ pub struct UiManager {
     #[allow(dead_code)]
     outliner_stack: NodeHandle,
     inspector_stack: NodeHandle,
+    persona: crate::editor::persona::Persona,
     /// Shown when nothing is selected; hidden the moment something is.
     details_empty: NodeHandle,
     /// Shown when the scene has no entities.
@@ -995,6 +996,7 @@ pub struct UiManager {
     /// it is the one that pairs with the status bar's save state.
     generated_root: NodeHandle,
     generated_entity: Option<somnium_ecs::Entity>,
+    material_target: Option<somnium_ecs::Entity>,
     generated_signature: Vec<(
         somnium_ecs::reflect::StableId,
         somnium_ecs::reflect::FieldId,
@@ -1206,6 +1208,7 @@ pub struct UiManager {
     /// Generated settings rows, mounted in the Preferences window. A separate
     /// map from Details' because the two panels are alive at the same time and
     /// address different objects.
+    settings_presentation: crate::editor::persona::Persona,
     settings_bindings: HashMap<NodeHandle, GeneratedBinding>,
     settings_rows: HashMap<NodeHandle, GeneratedBinding>,
     settings_root: NodeHandle,
@@ -1477,6 +1480,27 @@ impl UiManager {
         self.queue_generated_address(binding.component, binding.field, value, gesture, live);
     }
 
+    fn property_entity(
+        &self,
+        component: somnium_ecs::reflect::StableId,
+    ) -> Option<somnium_ecs::Entity> {
+        if component.as_str() == "somnium.asset.Material" {
+            self.material_target.or(self.selected_entity)
+        } else {
+            self.selected_entity
+        }
+    }
+
+    pub fn set_material_target(&mut self, entity: Option<somnium_ecs::Entity>) {
+        if self.material_target != entity {
+            if self.color_open {
+                self.close_color_picker(true);
+            }
+            self.material_target = entity;
+            self.generated_signature.clear();
+        }
+    }
+
     fn queue_generated_address(
         &mut self,
         component: somnium_ecs::reflect::StableId,
@@ -1485,7 +1509,7 @@ impl UiManager {
         gesture: GestureId,
         live: bool,
     ) {
-        let Some(entity) = self.selected_entity else {
+        let Some(entity) = self.property_entity(component) else {
             return;
         };
         self.editor_events
@@ -1671,6 +1695,13 @@ impl UiManager {
     ) -> Self {
         info!("Initializing native UI…");
 
+        if std::env::var("SOMNIUM_UI_THEME").as_deref() == Ok("dawn") {
+            theme::set_active(theme::ThemeId::Dawn);
+        }
+        if std::env::var("SOMNIUM_UI_DENSITY").as_deref() == Ok("comfortable") {
+            theme::set_density(theme::DensityId::Comfortable);
+        }
+
         let size = window.inner_size();
         // The tree lays out in logical units so every density token keeps its
         // apparent size at any DPI. `inner_size()` is device pixels.
@@ -1706,6 +1737,7 @@ impl UiManager {
             outliner_scroll: layout.outliner_scroll,
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
+            persona: layout.persona,
             details_empty: layout.details_empty,
             outliner_empty: layout.outliner_empty,
             log_empty: layout.log_empty,
@@ -1774,6 +1806,7 @@ impl UiManager {
             status_stats_button: layout.status_stats_button,
             generated_root: NodeHandle::NONE,
             generated_entity: None,
+            material_target: None,
             generated_signature: Vec::new(),
             generated_bindings: HashMap::new(),
             generated_collection_actions: HashMap::new(),
@@ -1918,6 +1951,7 @@ impl UiManager {
             preferences_bindings_tab: false,
             preferences_query: String::new(),
             preferences_modified_only: false,
+            settings_presentation: crate::editor::persona::Persona::default(),
             settings_bindings: HashMap::new(),
             settings_rows: HashMap::new(),
             settings_root: NodeHandle::NONE,
@@ -2027,6 +2061,10 @@ impl UiManager {
         // than a description of the editor a person left behind.
         let reopen = this.chrome_layout.floating.clone();
         this.reopen_floating_panels(&reopen);
+        this.native_ui.set_visibility(
+            this.persona.tools,
+            this.active_workspace == crate::workspace::Workspace::Terrain,
+        );
         this.apply_audit_startup_state();
         this
     }
@@ -2077,6 +2115,23 @@ impl UiManager {
         };
         match raw.trim().to_ascii_lowercase().as_str() {
             "shell" => {}
+            "persona-search" => {
+                self.inspector_filter = "bloom".into();
+                self.native_ui.send(UiMessage::new(
+                    self.inspector_search,
+                    MessageDirection::ToWidget,
+                    SearchBoxMessage::SetText(self.inspector_filter.clone()),
+                ));
+            }
+            "persona-terrain" => {
+                self.set_workspace(crate::workspace::Workspace::Terrain);
+                self.run_command_id("editor.terrain.edit");
+            }
+            "persona-foliage" => {
+                self.set_workspace(crate::workspace::Workspace::Foliage);
+                self.run_command_id("editor.foliage.edit");
+            }
+            "persona-gallery" => crate::editor::gallery::show(&mut self.native_ui),
             "menu-file" => self.open_menu(0),
             "menu-create" => self.open_menu(1),
             "menu-edit" => self.open_menu(2),
@@ -2142,7 +2197,19 @@ impl UiManager {
     /// on an ultrawide or a laptop. The result is persisted like any manual
     /// splitter drag, so the choice survives a restart.
     pub fn set_workspace(&mut self, workspace: crate::workspace::Workspace) {
+        if workspace != self.active_workspace {
+            self.editor_events.push_back(EditorEvent::SetGizmoMode(0));
+        }
         self.active_workspace = workspace;
+        self.native_ui.send(ComboBoxMessage::set_selected(
+            self.persona.workspace,
+            Workspace::ALL
+                .iter()
+                .position(|w| *w == workspace)
+                .unwrap_or(0),
+        ));
+        self.native_ui
+            .set_visibility(self.persona.tools, matches!(workspace, Workspace::Terrain));
         self.native_ui.set_visibility(
             self.animation_workspace,
             workspace == crate::workspace::Workspace::Animation,
@@ -2801,7 +2868,7 @@ impl UiManager {
             self.native_ui.is_under(hit, **row)
                 && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_))
         }) {
-            self.generated_entity.map(|entity| {
+            self.property_entity(binding.component).map(|entity| {
                 (
                     crate::drag_drop::DropTarget::AssetField {
                         entity,
@@ -3078,9 +3145,23 @@ impl UiManager {
         }
         match job {
             Some(job) => {
+                self.native_ui
+                    .nodes
+                    .borrow_mut(self.status_cancel.transmute())
+                    .widget
+                    .tooltip = format!("Cancel {}", job.name);
                 self.native_ui.send(TextMessage::set_text(
                     self.status_text,
-                    format!("{} — {:.0}%", job.name, job.progress * 100.0),
+                    format!(
+                        "{} — {:.0}%{}",
+                        job.name,
+                        job.progress.clamp(0.0, 1.0) * 100.0,
+                        if jobs.len() > 1 {
+                            format!(" · {} more", jobs.len() - 1)
+                        } else {
+                            String::new()
+                        }
+                    ),
                 ));
             }
             // The status line borrowed by a job has to be given back, or it
@@ -3135,6 +3216,13 @@ impl UiManager {
     /// it to "No selection" rather than to an empty gap, so the slot does not
     /// silently vanish.
     pub fn set_status_selection(&mut self, name: Option<&str>) {
+        let identity = if self.outliner_selection.len() > 1 {
+            format!("{} objects selected", self.outliner_selection.len())
+        } else {
+            name.unwrap_or("No selection").to_owned()
+        };
+        self.native_ui
+            .send(TextMessage::set_text(self.persona.identity, identity));
         self.native_ui.send(TextMessage::set_text(
             self.status_selection,
             name.unwrap_or("No selection"),
@@ -3204,6 +3292,11 @@ impl UiManager {
         .build();
         let field = self.native_ui.add_node(field, tile);
         self.native_ui.set_focus(field);
+        self.native_ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
         self.content_inline_rename = Some((field, entry.path));
     }
 
@@ -3661,13 +3754,19 @@ impl UiManager {
         self.native_ui.invalidate_ancestors(self.outer_grid);
     }
 
-    fn combo_entries(&self) -> [(NodeHandle, NodeHandle); 4] {
-        [
+    fn combo_entries(&self) -> Vec<(NodeHandle, NodeHandle)> {
+        let mut entries = vec![
+            (self.persona.workspace, self.persona.workspace_popup),
+            (self.persona.sort, self.persona.sort_popup),
+            (self.persona.size, self.persona.size_popup),
+            (self.persona.places, self.persona.places_popup),
             (self.foliage_kind_combo, self.foliage_kind_popup),
             (self.viewport_res_combo, self.viewport_res_popup),
             (self.snap_grid_combo, self.snap_grid_popup),
             (self.snap_angle_combo, self.snap_angle_popup),
-        ]
+        ];
+        entries.extend_from_slice(&self.persona.tool_panel.popups);
+        entries
     }
 
     fn close_combo_dropdowns(&mut self) {
@@ -3730,6 +3829,15 @@ impl UiManager {
         // 5 — command palette
         if self.palette_open {
             self.close_palette();
+            return true;
+        }
+        if let Some((field, _)) = self.content_inline_rename.take() {
+            let parent = self.native_ui.parent_of(field);
+            self.native_ui.remove_node(field);
+            if let Some(parent) = parent {
+                self.native_ui.set_focus(parent);
+            }
+            self.refresh_content_list();
             return true;
         }
         // 3 — popups: colour, combo lists, menus, then the Help overlay
@@ -4196,6 +4304,7 @@ impl UiManager {
                 self.font_id,
                 &filtered,
                 &self.asset_db,
+                &mut self.settings_presentation,
             );
             self.settings_root = root;
             self.settings_bindings = bindings;
@@ -4432,8 +4541,11 @@ impl UiManager {
             - self.native_ui.desired_size(self.vp_actions).x
             - inset;
 
-        let show =
-            context_bar_visibility(&self.context_bar_widths, &self.context_bar_wanted, available);
+        let show = context_bar_visibility(
+            &self.context_bar_widths,
+            &self.context_bar_wanted,
+            available,
+        );
         for (i, cluster) in self.context_bar_clusters().into_iter().enumerate() {
             self.native_ui.set_visibility(cluster, show[i]);
         }
@@ -4855,7 +4967,9 @@ impl UiManager {
                 .editor_events
                 .push_back(EditorEvent::SetGizmoMode(mode)),
             A::ToggleTerrainEdit => self.editor_events.push_back(EditorEvent::ToggleTerrainEdit),
-            A::ToggleFoliage => self.editor_events.push_back(EditorEvent::ToggleFoliage),
+            A::ToggleFoliagePaint => self
+                .editor_events
+                .push_back(EditorEvent::ToggleFoliagePaint),
             A::ToggleImmersiveViewport => self
                 .editor_events
                 .push_back(EditorEvent::ToggleImmersiveViewport),
@@ -5157,6 +5271,7 @@ impl UiManager {
     /// Every entry point that changes folder goes through here so back/forward
     /// cannot drift out of step with what is on screen.
     pub fn navigate_content(&mut self, path: String) {
+        self.persona.prefs.visit(&path);
         self.content_history.push(path.clone());
         self.content_path = path;
         self.content_selection.clear();
@@ -5224,6 +5339,14 @@ impl UiManager {
     /// Select an asset. `additive` is the Ctrl-click path: it toggles, so a
     /// second Ctrl-click on the same tile removes it from the set.
     pub fn select_content(&mut self, path: std::path::PathBuf, additive: bool) {
+        if !additive
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("sommat"))
+        {
+            self.editor_events
+                .push_back(EditorEvent::InspectMaterial(path.clone()));
+        }
         if additive {
             if !self.content_selection.remove(&path) {
                 self.content_selection.insert(path);
@@ -5435,6 +5558,33 @@ impl UiManager {
         };
         if !changed {
             return;
+        }
+        let button = match kind {
+            FloatingKind::Details => self.details_float,
+            FloatingKind::Outliner => self.outliner_float,
+            FloatingKind::OutputLog => self.log_float,
+            FloatingKind::Viewport => self.viewport_float,
+        };
+        self.native_ui
+            .nodes
+            .borrow_mut(button.transmute())
+            .widget
+            .tooltip = if floating {
+            "Dock panel back into the editor"
+        } else {
+            "Float panel or drag its header"
+        }
+        .into();
+        if let Some((_, label)) = self
+            .persona
+            .floating_labels
+            .iter()
+            .find(|(handle, _)| *handle == button)
+        {
+            self.native_ui.send(TextMessage::set_text(
+                *label,
+                if floating { "Dock" } else { "Float" },
+            ));
         }
         let root = self.panel_root(kind);
         if root.is_none() {
@@ -5922,7 +6072,58 @@ impl UiManager {
         }
     }
 
+    fn refresh_persona_places(&mut self) {
+        let mut paths = vec![String::new()];
+        let mut labels = vec!["Game root".to_owned()];
+        for path in &self.persona.prefs.favorites {
+            paths.push(path.clone());
+            labels.push(format!(
+                "Favorite · {}",
+                if path.is_empty() { "Game root" } else { path }
+            ));
+        }
+        for path in &self.persona.prefs.recent {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+                labels.push(format!("Recent · {path}"));
+            }
+        }
+        let selected = paths.iter().position(|path| path == &self.content_path);
+        self.persona.place_paths = paths;
+        let list = self
+            .native_ui
+            .nodes
+            .borrow(self.persona.places_popup.transmute())
+            .widget
+            .children[0];
+        for handle in [self.persona.places, list] {
+            self.native_ui.send(UiMessage::new(
+                handle,
+                MessageDirection::ToWidget,
+                ComboBoxMessage::SetItems(labels.clone()),
+            ));
+            self.native_ui.send(UiMessage::new(
+                handle,
+                MessageDirection::ToWidget,
+                ComboBoxMessage::SetSelected(selected.unwrap_or(0)),
+            ));
+        }
+        self.native_ui.send(ButtonMessage::set_selected(
+            self.persona.favorite,
+            self.persona.prefs.favorites.contains(&self.content_path),
+        ));
+    }
+
     fn refresh_content_list(&mut self) {
+        self.refresh_persona_places();
+        for (handle, action) in &self.content_toolbar_actions {
+            if let ContentToolbarAction::Kind(kind) = action {
+                self.native_ui.send(ButtonMessage::set_selected(
+                    *handle,
+                    *kind == self.content_kind,
+                ));
+            }
+        }
         let kind_mask = match self.content_kind {
             crate::metaphor::ContentFilterKind::All => u64::MAX,
             crate::metaphor::ContentFilterKind::Folders => {
@@ -6055,7 +6256,7 @@ impl UiManager {
             let tile_bg = if selected {
                 theme::active().semantic.accent.selected_bg.bytes()
             } else {
-                theme::BG_RAISED
+                theme::active().semantic.surface.panel.bytes()
             };
             let btn = ButtonBuilder::new(
                 WidgetBuilder::new()
@@ -6063,8 +6264,11 @@ impl UiManager {
                     .with_height(tile_h)
                     .with_background(tile_bg),
             )
+            .with_hover_animation(false)
             .build();
             let bh = self.native_ui.add_node(btn, parent);
+            self.native_ui
+                .send(ButtonMessage::set_selected(bh, selected));
             let col =
                 StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                     .with_orientation(Orientation::Vertical)
@@ -6171,25 +6375,8 @@ impl UiManager {
     }
 
     fn apply_inspector_filter(&mut self) {
-        let q = self.inspector_filter.to_ascii_lowercase();
-        let h = &self.inspector_handles;
-        let pairs = [
-            (h.post_section, "renderer diagnostics census shade bins"),
-            (
-                h.terrain_section,
-                "terrain paint layer hex aerial lod distance",
-            ),
-            (h.foliage_section, "foliage brush grass tree"),
-        ];
-        if q.is_empty() {
-            return;
-        }
-        for (section, names) in pairs {
-            let hit = names.split_whitespace().any(|w| w.contains(&q));
-            if !hit {
-                self.native_ui.set_visibility(section, false);
-            }
-        }
+        self.persona
+            .search(&mut self.native_ui, &self.inspector_filter);
     }
 
     /// Schema defaults are the durable baseline; rebuilding Details does not
@@ -6200,7 +6387,7 @@ impl UiManager {
         for (row, binding) in &self.generated_rows {
             self.native_ui.send(PropertyRowMessage::set_modified(
                 *row,
-                binding.value != binding.default,
+                binding.value != binding.default && !self.persona.mixed(*row),
             ));
         }
     }
@@ -6400,7 +6587,10 @@ impl UiManager {
         }
         self.last_outliner_state = Some(new_state);
 
-        let filter = crate::outliner_filter::OutlinerFilter::parse(&self.outliner_filter);
+        let filter = crate::outliner_filter::OutlinerFilter::parse(&format!(
+            "{} {}",
+            self.outliner_filter, self.persona.outliner_scope
+        ));
         let mut items = Vec::new();
         for row in entities {
             if !filter.matches(row) {
@@ -6505,10 +6695,9 @@ impl UiManager {
             let column = self.native_ui.add_node(column, card);
 
             // Header: name, state, and the three structural controls.
-            let header =
-                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-                    .with_orientation(Orientation::Horizontal)
-                    .build();
+            let header = crate::widgets::wrap_panel::WrapPanelBuilder::new(WidgetBuilder::new())
+                .with_gap(4.0, 4.0)
+                .build();
             let header = self.native_ui.add_node(header, column);
 
             let enable = crate::widgets::check_box::CheckBoxBuilder::new(
@@ -6679,6 +6868,9 @@ impl UiManager {
             .collect();
         let rebuild = self.generated_entity != entity || self.generated_signature != signature;
         if rebuild {
+            for (_, host) in &self.persona.component_hosts {
+                self.native_ui.reparent(*host, self.generated_root);
+            }
             if self.generated_root.is_some() {
                 self.native_ui.remove_node(self.generated_root);
             }
@@ -6699,10 +6891,11 @@ impl UiManager {
                 collection_actions,
             ) = build_generated_details(
                 &mut self.native_ui,
-                self.inspector_stack,
+                self.persona.generated_host,
                 self.font_id,
                 &panels,
                 &self.asset_db,
+                &mut self.persona,
             );
             self.generated_root = root;
             self.generated_bindings = bindings;
@@ -6716,29 +6909,148 @@ impl UiManager {
             self.native_ui.invalidate_ancestors(self.inspector_stack);
         }
 
+        self.persona
+            .sync(&mut self.native_ui, &panels, &self.inspector_filter);
         let values: HashMap<_, _> = panels
             .iter()
             .flat_map(|panel| panel.rows.iter())
             .map(|row| {
                 (
                     (row.component, row.field),
-                    (row.value.clone(), row.default.clone()),
+                    (row.value.clone(), row.default.clone(), row.mixed),
                 )
             })
             .collect();
+        let mut asset_feedback = Vec::new();
         for (handle, binding) in &mut self.generated_bindings {
-            let Some((value, default)) = values.get(&(binding.component, binding.field)) else {
+            let Some((value, default, mixed)) = values.get(&(binding.component, binding.field))
+            else {
                 continue;
             };
+            if binding.value != *value && !*mixed {
+                if let somnium_ecs::reflect::ReflectValue::Asset(asset) = value {
+                    let name = asset
+                        .and_then(|id| {
+                            self.asset_db
+                                .get(somnium_asset::database::AssetId::from_raw(id.raw()))
+                        })
+                        .map(|record| record.name.clone())
+                        .unwrap_or_else(|| {
+                            if asset.is_some() {
+                                "Missing asset".into()
+                            } else {
+                                "None".into()
+                            }
+                        });
+                    let field = panels
+                        .iter()
+                        .flat_map(|panel| &panel.rows)
+                        .find(|row| {
+                            row.component == binding.component && row.field == binding.field
+                        })
+                        .map(|row| row.label.as_str())
+                        .unwrap_or("Asset");
+                    asset_feedback.push(format!("{field} updated · {name}"));
+                }
+            }
             binding.value = value.clone();
             binding.default = default.clone();
+            self.native_ui.send(UiMessage::new(
+                *handle,
+                MessageDirection::ToWidget,
+                crate::message::MixedValue(*mixed),
+            ));
             match (&binding.value, binding.edit) {
+                (somnium_ecs::reflect::ReflectValue::Asset(current), GeneratedEdit::Whole) => {
+                    if let Some(choices) = self.generated_asset_choices.get_mut(handle) {
+                        let (selected, added) =
+                            crate::editor::persona::retain_asset_choice(choices, *current);
+                        if added {
+                            let labels: Vec<_> = choices
+                                .iter()
+                                .map(|id| {
+                                    id.and_then(|id| {
+                                        self.asset_db.get(
+                                            somnium_asset::database::AssetId::from_raw(id.raw()),
+                                        )
+                                    })
+                                    .map(|record| record.relative_path.clone())
+                                    .unwrap_or_else(|| {
+                                        if id.is_some() {
+                                            "Missing asset".into()
+                                        } else {
+                                            "None".into()
+                                        }
+                                    })
+                                })
+                                .collect();
+                            self.native_ui.send(UiMessage::new(
+                                *handle,
+                                MessageDirection::ToWidget,
+                                ComboBoxMessage::SetItems(labels.clone()),
+                            ));
+                            if let Some(picker) = self
+                                .generated_asset_searches
+                                .values()
+                                .find(|picker| picker.combo == *handle)
+                            {
+                                self.native_ui.send(UiMessage::new(
+                                    picker.list,
+                                    MessageDirection::ToWidget,
+                                    ComboBoxMessage::SetItems(labels),
+                                ));
+                                let paths = choices
+                                    .iter()
+                                    .map(|id| {
+                                        id.and_then(|id| {
+                                            self.asset_db.get(
+                                                somnium_asset::database::AssetId::from_raw(
+                                                    id.raw(),
+                                                ),
+                                            )
+                                        })
+                                        .map(|record| record.absolute_path.clone())
+                                    })
+                                    .collect();
+                                self.native_ui.send(UiMessage::new(
+                                    picker.list,
+                                    MessageDirection::ToWidget,
+                                    ComboBoxMessage::SetAssetPaths(paths),
+                                ));
+                            }
+                        }
+                        self.native_ui
+                            .send(ComboBoxMessage::set_selected(*handle, selected));
+                    }
+                }
+                (somnium_ecs::reflect::ReflectValue::Str(value), GeneratedEdit::Whole) => {
+                    self.native_ui.send(TextMessage::set_text(*handle, value))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec3(v), GeneratedEdit::Whole) => {
+                    self.native_ui.send(UiMessage::new(
+                        *handle,
+                        MessageDirection::ToWidget,
+                        ColorSwatchMessage::SetColor([v[0], v[1], v[2], 1.0]),
+                    ))
+                }
+                (somnium_ecs::reflect::ReflectValue::Vec4(v), GeneratedEdit::Whole) => {
+                    self.native_ui.send(UiMessage::new(
+                        *handle,
+                        MessageDirection::ToWidget,
+                        ColorSwatchMessage::SetColor(*v),
+                    ))
+                }
                 (somnium_ecs::reflect::ReflectValue::Bool(value), GeneratedEdit::Whole) => self
                     .native_ui
                     .send(CheckBoxMessage::set_checked(*handle, *value)),
-                (somnium_ecs::reflect::ReflectValue::I64(value), GeneratedEdit::Whole) => self
-                    .native_ui
-                    .send(NumericFieldMessage::set_value(*handle, *value as f32)),
+                (somnium_ecs::reflect::ReflectValue::I64(value), GeneratedEdit::Whole) => {
+                    self.native_ui
+                        .send(NumericFieldMessage::set_value(*handle, *value as f32));
+                    self.native_ui.send(ComboBoxMessage::set_selected(
+                        *handle,
+                        (*value).max(0) as usize,
+                    ));
+                }
                 (somnium_ecs::reflect::ReflectValue::F64(value), GeneratedEdit::Whole) => self
                     .native_ui
                     .send(NumericFieldMessage::set_value(*handle, *value as f32)),
@@ -6786,8 +7098,11 @@ impl UiManager {
                 _ => {}
             }
         }
+        for feedback in asset_feedback {
+            self.push_toast(&feedback);
+        }
         for binding in self.generated_rows.values_mut() {
-            if let Some((value, default)) = values.get(&(binding.component, binding.field)) {
+            if let Some((value, default, _)) = values.get(&(binding.component, binding.field)) {
                 binding.value = value.clone();
                 binding.default = default.clone();
             }
@@ -6843,6 +7158,83 @@ impl UiManager {
             };
             self.native_ui.send(TextMessage::set_text(names[i], label));
             self.native_ui.send(TextMessage::set_text(values[i], value));
+        }
+    }
+
+    pub fn update_tool_context(&mut self, context: crate::editor::tool_context::ToolContext) {
+        use crate::editor::tool_context::ToolMode;
+        let shown = if context.mode != ToolMode::Select {
+            context.mode
+        } else {
+            match self.active_workspace {
+                crate::workspace::Workspace::Terrain => ToolMode::Landscape,
+                crate::workspace::Workspace::Foliage => ToolMode::Foliage,
+                crate::workspace::Workspace::Lighting => ToolMode::Lighting,
+                crate::workspace::Workspace::Materials => ToolMode::Materials,
+                _ => ToolMode::Select,
+            }
+        };
+        for (component, host) in &self.persona.component_hosts {
+            let in_tools = match shown {
+                ToolMode::Materials => component.as_str() == "somnium.asset.Material",
+                ToolMode::Lighting => matches!(
+                    component.as_str(),
+                    "somnium.Light"
+                        | "somnium.Sky"
+                        | "somnium.TimeOfDay"
+                        | "somnium.PostProcess"
+                        | "somnium.Fog"
+                ),
+                _ => false,
+            };
+            let parent = if in_tools {
+                self.persona.tool_panel.properties
+            } else {
+                self.generated_root
+            };
+            if parent.is_some() && self.native_ui.parent_of(*host) != Some(parent) {
+                self.native_ui.reparent(*host, parent);
+            }
+        }
+        let active = context.mode;
+        if self
+            .persona
+            .tool_panel
+            .refresh(&mut self.native_ui, context, shown)
+        {
+            for (handle, mode) in [
+                (self.select_button, ToolMode::Select),
+                (self.landscape_button, ToolMode::Landscape),
+                (self.foliage_toolbar_button, ToolMode::Foliage),
+            ] {
+                self.native_ui
+                    .send(ButtonMessage::set_selected(handle, mode == active));
+            }
+            let visible = shown != ToolMode::Select;
+            self.native_ui.set_visibility(self.persona.tools, visible);
+            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
+            {
+                320.0
+            } else if visible {
+                280.0
+            } else {
+                48.0
+            };
+            self.chrome_layout.viewport = (self.window_size.0 as f32
+                - self.chrome_layout.tools
+                - self.chrome_layout.details
+                - 12.0)
+                .max(200.0);
+            for (handle, size) in [
+                (self.inner_h, self.chrome_layout.tools),
+                (self.content_split_h, self.chrome_layout.viewport),
+            ] {
+                self.native_ui.send(UiMessage::new(
+                    handle,
+                    MessageDirection::ToWidget,
+                    SplitterMessage::SetFirstSize(size),
+                ));
+            }
         }
     }
 
@@ -7513,7 +7905,92 @@ impl UiManager {
                 }
                 continue;
             }
+            if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+                && let Some((_, command)) = self
+                    .persona
+                    .tool_panel
+                    .commands
+                    .iter()
+                    .find(|(h, _)| *h == msg.destination)
+                    .copied()
+            {
+                self.run_command_id(command);
+                continue;
+            }
+            if let Some(event) = self.persona.tool_panel.event(&msg) {
+                self.editor_events.push_back(event);
+                continue;
+            }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if self.persona.click(&mut self.native_ui, msg.destination)
+                    || self
+                        .settings_presentation
+                        .click(&mut self.native_ui, msg.destination)
+                {
+                    continue;
+                }
+                if msg.destination == self.persona.clear {
+                    self.inspector_filter.clear();
+                    self.persona.clear_filters(&mut self.native_ui);
+                    self.native_ui.send(UiMessage::new(
+                        self.inspector_search,
+                        MessageDirection::ToWidget,
+                        SearchBoxMessage::SetText(String::new()),
+                    ));
+                    continue;
+                }
+                if msg.destination == self.persona.tool_hint {
+                    let visible = !self
+                        .native_ui
+                        .nodes
+                        .borrow(self.persona.tools.transmute())
+                        .widget
+                        .visibility;
+                    self.native_ui.set_visibility(self.persona.tools, visible);
+                    self.chrome_layout.tools = if visible { 280.0 } else { 48.0 };
+                    self.chrome_layout.viewport = (self.window_size.0 as f32
+                        - self.chrome_layout.tools
+                        - self.chrome_layout.details
+                        - 12.0)
+                        .max(200.0);
+                    for (handle, size) in [
+                        (self.inner_h, self.chrome_layout.tools),
+                        (self.content_split_h, self.chrome_layout.viewport),
+                    ] {
+                        self.native_ui.send(UiMessage::new(
+                            handle,
+                            MessageDirection::ToWidget,
+                            SplitterMessage::SetFirstSize(size),
+                        ));
+                    }
+                    crate::layout_persist::save(&self.chrome_layout);
+                    continue;
+                }
+                if msg.destination == self.persona.favorite {
+                    if !self.persona.prefs.favorites.remove(&self.content_path) {
+                        self.persona
+                            .prefs
+                            .favorites
+                            .insert(self.content_path.clone());
+                    }
+                    self.persona.prefs.save();
+                    self.refresh_persona_places();
+                    continue;
+                }
+                if let Some((_, scope)) = self
+                    .persona
+                    .outliner_filters
+                    .iter()
+                    .find(|(h, _)| *h == msg.destination)
+                {
+                    self.persona.outliner_scope = scope;
+                    self.last_outliner_state = None;
+                    for (handle, query) in &self.persona.outliner_filters {
+                        self.native_ui
+                            .send(ButtonMessage::set_selected(*handle, *query == *scope));
+                    }
+                    continue;
+                }
                 if msg.destination == self.status_cancel {
                     if let Some(id) = self.status_cancel_job {
                         self.editor_events.push_back(EditorEvent::CancelJob(id));
@@ -7541,26 +8018,6 @@ impl UiManager {
                             self.navigate_content(up);
                         }
                         ContentToolbarAction::Kind(kind) => self.set_content_kind(kind),
-                        ContentToolbarAction::Sort => {
-                            self.content_sort = match self.content_sort {
-                                somnium_asset::database::AssetSort::Name => {
-                                    somnium_asset::database::AssetSort::Kind
-                                }
-                                somnium_asset::database::AssetSort::Kind => {
-                                    somnium_asset::database::AssetSort::Size
-                                }
-                                somnium_asset::database::AssetSort::Size => {
-                                    somnium_asset::database::AssetSort::Modified
-                                }
-                                somnium_asset::database::AssetSort::Modified => {
-                                    somnium_asset::database::AssetSort::Name
-                                }
-                            };
-                            self.refresh_content_list();
-                        }
-                        ContentToolbarAction::Density => {
-                            self.cycle_content_density();
-                        }
                     }
                     continue;
                 }
@@ -7581,7 +8038,7 @@ impl UiManager {
                         .map(|binding| binding.value.clone());
                     if let Some(current) = current
                         && let Some(next) = Self::collection_result(&current, action)
-                        && let Some(entity) = self.selected_entity
+                        && let Some(entity) = self.property_entity(component)
                     {
                         let gesture = self.allocate_property_gesture();
                         self.editor_events
@@ -7617,7 +8074,7 @@ impl UiManager {
                                     !entry.is_dir && self.content_selection.contains(&entry.path)
                                 })
                                 .and_then(|entry| entry.asset_id);
-                            match (chosen, self.selected_entity) {
+                            match (chosen, self.property_entity(binding.component)) {
                                 (Some(asset), Some(entity)) => {
                                     let accepted = self.asset_db.get(asset).is_some_and(|record| {
                                         record.kind.bit() & binding.asset_kind_mask != 0
@@ -7659,7 +8116,7 @@ impl UiManager {
                             ));
                         }
                         (AssetPickerAction::MakeUnique, Some(binding), Some(record)) => {
-                            if let Some(entity) = self.selected_entity {
+                            if let Some(entity) = self.property_entity(binding.component) {
                                 self.editor_events.push_back(EditorEvent::MakeAssetUnique {
                                     source: record.absolute_path.to_string_lossy().into_owned(),
                                     entity,
@@ -7954,7 +8411,13 @@ impl UiManager {
                 .find(|(handle, _)| *handle == msg.destination)
                 .map(|(_, kind)| kind)
                 {
-                    self.float_panel(kind);
+                    if self.is_panel_floating(kind) {
+                        self.set_panel_floating(kind, false);
+                        self.editor_events
+                            .push_back(EditorEvent::ClosePanelWindow(kind));
+                    } else {
+                        self.float_panel(kind);
+                    }
                     continue;
                 }
                 if msg.destination == self.locale_button {
@@ -8328,6 +8791,38 @@ impl UiManager {
                 }
             } else if let Some(ComboBoxMessage::SelectionChanged(i)) = msg.data::<ComboBoxMessage>()
             {
+                if msg.destination == self.persona.workspace {
+                    if let Some(workspace) = Workspace::ALL.get(*i) {
+                        self.set_workspace(*workspace);
+                    }
+                    continue;
+                }
+                if msg.destination == self.persona.sort {
+                    if let Some(sort) = [
+                        somnium_asset::database::AssetSort::Name,
+                        somnium_asset::database::AssetSort::Kind,
+                        somnium_asset::database::AssetSort::Size,
+                        somnium_asset::database::AssetSort::Modified,
+                    ]
+                    .get(*i)
+                    {
+                        self.set_content_sort(*sort, *i >= 2);
+                    }
+                    continue;
+                }
+                if msg.destination == self.persona.size {
+                    if let Some(density) = crate::metaphor::ContentDensity::ALL.get(*i) {
+                        self.content_density = *density;
+                        self.refresh_content_list();
+                    }
+                    continue;
+                }
+                if msg.destination == self.persona.places {
+                    if let Some(path) = self.persona.place_paths.get(*i).cloned() {
+                        self.navigate_content(path);
+                    }
+                    continue;
+                }
                 if msg.destination == self.inspector_handles.foliage_kind_button
                     || msg.destination == self.foliage_kind_combo
                 {
@@ -8502,6 +8997,15 @@ impl UiManager {
                 }
             }
 
+            if matches!(
+                msg.data::<PropertyRowMessage>(),
+                Some(PropertyRowMessage::PinRequested)
+            ) {
+                self.persona.pin(&mut self.native_ui, msg.destination);
+                self.settings_presentation
+                    .pin(&mut self.native_ui, msg.destination);
+                continue;
+            }
             // — Gutter dot: revert one property ————————
             //
             // The row emits the request; the editor answers it by writing the
@@ -9381,8 +9885,14 @@ mod styx_budget_tests {
         // schema. Keep a floor for real idle-shell strokes without fabricating
         // invisible legacy chrome merely to preserve the old count.
         assert!(rounded >= 40, "corner radius regressed to {rounded}");
-        assert!(gradients >= 20, "chrome wash regressed to {gradients}");
-        assert!(shadows >= 15, "elevation regressed to {shadows}");
+        assert!(
+            gradients <= 4,
+            "ordinary chrome must stay flat: {gradients} washes"
+        );
+        assert!(
+            shadows <= 4,
+            "ordinary controls must not cast: {shadows} shadows"
+        );
         assert!(insets >= 4, "recession regressed to {insets}");
         assert!(borders >= 10, "strokes regressed to {borders}");
 
@@ -9938,6 +10448,15 @@ mod must_not_break {
             0,
             crate::layout_persist::ChromeLayout::default().resolved(1920.0, 1080.0),
         );
+        ui.set_visibility(layout.persona.advanced_body, true);
+        ui.set_visibility(layout.persona.tools, true);
+        ui.set_visibility(layout.persona.tool_panel.foliage, true);
+        ui.send(UiMessage::new(
+            layout.inner_h,
+            MessageDirection::ToWidget,
+            SplitterMessage::SetFirstSize(280.0),
+        ));
+        ui.update();
         let handles = &layout.inspector_handles;
         for section in [
             handles.post_section,

@@ -169,3 +169,7 @@ impl TextMessage {
         UiMessage::new(dest, MessageDirection::ToWidget, Self::SetText(text.into()))
     }
 }
+
+/// Model refresh of mixed selection state; never an authored value change.
+#[derive(Debug, Clone, Copy)]
+pub struct MixedValue(pub bool);

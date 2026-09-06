@@ -401,7 +401,10 @@ fn attachment_from_json(
 /// be referenced, and silently dropping the reference later is worse than
 /// minting the id now.
 pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::Value {
-    let all: Vec<Entity> = world.entities().collect();
+    let all: Vec<Entity> = world
+        .entities()
+        .filter(|e| world.get::<crate::AssetEditSession>(*e).is_none())
+        .collect();
     entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")
 }
 
@@ -1657,5 +1660,21 @@ mod tests {
             "a schema scene must not parse as a map recipe"
         );
         assert!(crate::map::parse_map_kind_json(r#"{ "version": 2, "kind": "coastal" }"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod asset_session_tests {
+    #[test]
+    fn an_unassigned_material_edit_session_never_becomes_a_scene_entity() {
+        let mut world = somnium_ecs::World::new();
+        world.spawn((crate::Name::new("Authored object"),));
+        world.spawn((
+            crate::AssetEditSession,
+            somnium_asset::material::MaterialAsset::default(),
+        ));
+        let registry = crate::reflect_registry::component_registry();
+        let scene = super::scene_to_json(&mut world, &registry);
+        assert_eq!(scene["entities"].as_array().unwrap().len(), 1);
     }
 }

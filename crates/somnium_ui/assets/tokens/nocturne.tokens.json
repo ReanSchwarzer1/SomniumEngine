@@ -1,7 +1,7 @@
 {
   "$meta": {
     "name": "Nocturne Atelier",
-    "version": "0.2.0-hades",
+    "version": "0.3.0-persona",
     "polarity": "dark",
     "authored_space": "sRGB",
     "runtime_contract": "decode authored sRGB to linear exactly once before the sRGB swapchain; alpha is straight",
@@ -9,39 +9,42 @@
     "verified_by": "theme::token_sheet_tests::json_sheets_match_the_shipped_snapshots"
   },
   "semantic": {
-    "surface.window": "#14161C",
-    "surface.canvas": "#181A20",
-    "surface.panel": "#1C1E26",
-    "surface.header": "#22252F",
-    "surface.raised": "#282B36",
-    "surface.input": "#12141A",
-    "surface.popup": "#22252F",
-    "surface.hover": "#313543",
-    "surface.selected": "rgba(122,134,255,0.161)",
+    "surface.window": "#11131A",
+    "surface.canvas": "#151821",
+    "surface.panel": "#1B1E28",
+    "surface.header": "#252A38",
+    "surface.raised": "#303749",
+    "surface.input": "#12151D",
+    "surface.popup": "#252A38",
+    "surface.hover": "#333D52",
+    "surface.selected": "#303451",
     "surface.modal_scrim": "rgba(10,11,15,0.620)",
-    "text.primary": "#D8DCE8",
+    "text.primary": "#E6E9F2",
     "text.emphasis": "#F2F4FF",
-    "text.secondary": "#9AA3B5",
-    "text.muted": "#8C95AA",
-    "text.disabled": "#5C6478",
-    "text.inverse": "#0E1014",
-    "text.link": "#949CFF",
-    "border.subtle": "#22252F",
-    "border.default": "#313543",
-    "border.strong": "#4A4F5E",
-    "border.focus": "#949CFF",
-    "accent.default": "#7A86FF",
-    "accent.hover": "#949CFF",
-    "accent.pressed": "#5C68E0",
-    "accent.selected_bg": "rgba(122,134,255,0.161)",
-    "accent.selected_rail": "#7A86FF",
-    "status.info": "#59B8D6",
-    "status.success": "#5DCE9A",
-    "status.warning": "#E6B04A",
-    "status.error": "#E67070",
-    "status.busy": "#7A86FF",
+    "text.secondary": "#B1B9CB",
+    "text.muted": "#9EABC0",
+    "text.disabled": "#626D85",
+    "text.inverse": "#11131A",
+    "text.link": "#B8B0FF",
+    "border.subtle": "#303646",
+    "border.default": "#303646",
+    "border.strong": "#7C89A1",
+    "border.focus": "#B8B0FF",
+    "accent.default": "#A59AFF",
+    "accent.hover": "#B8B0FF",
+    "accent.pressed": "#8E82EB",
+    "accent.selected_bg": "#303451",
+    "accent.selected_rail": "#A59AFF",
+    "status.info": "#7DCBE3",
+    "status.success": "#7CD5B0",
+    "status.warning": "#EAC17A",
+    "status.error": "#F08D9D",
+    "status.busy": "#A59AFF",
     "folder": "#C4A574",
-    "ember": "#C4A574"
+    "ember": "#C4A574",
+    "surface.selected_inactive": "#2B303D",
+    "border.control": "#626D85",
+    "modified": "#DEBE87"
   },
   "typography": {
     "family_ui": "Inter (Geist remains gated by in-engine DPI captures)",
@@ -72,12 +75,20 @@
     "mono": [
       12,
       400
+    ],
+    "body_strong": [
+      13,
+      500
+    ],
+    "mono_strong": [
+      12,
+      500
     ]
   },
   "density": {
     "row_dense": 24,
     "row_tree": 26,
-    "row_chrome": 30,
+    "row_chrome": 28,
     "titlebar": 36,
     "menu": 28,
     "toolbar": 32,
@@ -90,17 +101,19 @@
   "space": {
     "base": 4,
     "inset_panel": 8,
-    "gap_group": 12
+    "gap_group": 12,
+    "gap_section": 16
   },
   "radius": {
-    "input": 2,
-    "chrome": 2,
-    "popup": 4,
-    "modal": 6
+    "input": 4,
+    "chrome": 5,
+    "popup": 8,
+    "modal": 10,
+    "tile": 6
   },
   "stroke": {
     "hairline": 1,
-    "focus": 1,
+    "focus": 2,
     "rail": 2
   },
   "motion_ms": {
@@ -109,5 +122,18 @@
     "popup": 140,
     "drawer": 200,
     "tooltip_delay": 400
+  },
+  "density_comfortable": {
+    "row_dense": 28,
+    "row_tree": 30,
+    "row_chrome": 32,
+    "titlebar": 36,
+    "menu": 32,
+    "toolbar": 36,
+    "status": 26,
+    "icon_row": 16,
+    "icon_toolbar": 20,
+    "icon_action": 24,
+    "hit_min": 24
   }
 }

@@ -78,7 +78,7 @@ impl ImageBuilder {
             widget,
             icon: IconId::Unknown,
             asset: None,
-            tint: crate::theme::TEXT_PRIMARY,
+            tint: crate::theme::active().semantic.text.primary.bytes(),
             size: 16.0,
         }
     }

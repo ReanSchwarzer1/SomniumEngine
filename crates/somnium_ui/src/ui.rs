@@ -103,6 +103,8 @@ struct DockedFit {
 }
 
 pub struct UserInterface {
+    /// The audit-only full-window component sheet owns the surface.
+    pub(crate) audit_component_gallery: bool,
     pub nodes: NodePool,
     /// MORROWIND-I. Accessibility preferences in force for this interface.
     a11y: crate::a11y::A11ySettings,
@@ -182,6 +184,7 @@ impl UserInterface {
             a11y: crate::a11y::A11ySettings::default(),
             root_ih,
             screen_size: Vec2::new(screen_w, screen_h),
+            audit_component_gallery: false,
             message_queue: VecDeque::new(),
             draw_ctx: DrawingContext::new(screen_w, screen_h),
             cursor_pos: Vec2::ZERO,
@@ -258,6 +261,9 @@ impl UserInterface {
     /// Which axis end a click lands on, if any. `(axis index, positive)`.
     #[must_use]
     pub fn axis_widget_hit(&self, pos: Vec2) -> Option<(u8, bool)> {
+        if self.audit_component_gallery || self.modal_focus.is_some() {
+            return None;
+        }
         if !self.axis_widget_bounds.contains(pos) {
             return None;
         }
@@ -460,6 +466,7 @@ impl UserInterface {
     /// the two modes are two products and only one of them gets tested.
     pub fn set_a11y_settings(&mut self, settings: crate::a11y::A11ySettings) {
         self.a11y = settings;
+        crate::theme::set_high_contrast(settings.high_contrast);
         self.draw_ctx
             .motion
             .set_reduced_motion(settings.reduced_motion);
@@ -1257,6 +1264,9 @@ impl UserInterface {
     /// whichever window the viewport is in; the drag ghost belongs to whichever
     /// window the pointer is in, which is not always the same one.
     fn draw_overlays(&mut self, root: IH) {
+        if self.audit_component_gallery || self.modal_focus.is_some() {
+            return;
+        }
         if to_ih(self.host_for(self.viewport_handle)) == root {
             self.draw_axis_widget();
             self.draw_statistics();
@@ -1488,6 +1498,7 @@ impl UserInterface {
             Ok(n) if n.widget.global_visibility => (n.widget.clip_bounds, n.widget.children.len()),
             _ => return,
         };
+        let inherited_foreground = self.draw_ctx.inherited_foreground;
         self.draw_ctx.push_clip_rect(clip);
         {
             let node = self.nodes.borrow_mut(handle);
@@ -1523,6 +1534,7 @@ impl UserInterface {
             }
         }
         self.draw_ctx.pop_clip_rect();
+        self.draw_ctx.inherited_foreground = inherited_foreground;
     }
 
     // -----------------------------------------------------------------------
@@ -1925,6 +1937,14 @@ impl UserInterface {
             return false;
         };
         self.draw_ctx.clear(size.x, size.y);
+        // Ordinary panels previously relied on dock ancestors for their ground.
+        // A fresh swapchain has no scene behind them; paint an opaque surface.
+        if handle != self.viewport_handle {
+            self.draw_ctx.push_rect_filled(
+                Rect::new(0.0, 0.0, size.x, size.y),
+                crate::theme::active().semantic.surface.window.bytes(),
+            );
+        }
         self.update_global_visibility(to_ih(host), true);
         self.draw_node(to_ih(host));
         self.draw_overlays(to_ih(host));
@@ -3593,5 +3613,33 @@ mod detach_tests {
             !ui.reparent(column, top),
             "a container made to contain its own ancestor never finishes laying out"
         );
+    }
+}
+
+#[cfg(test)]
+mod persona_overlay_tests {
+    use super::*;
+    #[test]
+    fn a_modal_disables_viewport_axis_hit_targets() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        ui.set_axis_widget(
+            Rect::new(0.0, 0.0, 900.0, 600.0),
+            [Vec2::X, Vec2::Y, -Vec2::X],
+        );
+        let point = ui.axis_widget[0].1;
+        assert!(ui.axis_widget_hit(point).is_some());
+        let root = ui.root();
+        let modal =
+            ui.add_node(
+                crate::widgets::stack_panel::StackPanelBuilder::new(
+                    crate::widget::WidgetBuilder::new(),
+                )
+                .build(),
+                root,
+            );
+        ui.enter_modal(modal, NodeHandle::NONE);
+        assert!(ui.axis_widget_hit(point).is_none());
+        ui.exit_modal(modal);
+        assert!(ui.axis_widget_hit(point).is_some());
     }
 }

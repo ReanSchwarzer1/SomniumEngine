@@ -18,6 +18,8 @@ pub struct Text {
     pub wrap: bool,
     /// Extra advance per glyph. Non-zero only for the uppercase header role.
     pub tracking: f32,
+    pub role: Option<TextRole>,
+    color_override: bool,
 }
 
 pub fn wrap_lines(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32) -> Vec<String> {
@@ -109,7 +111,13 @@ impl Control for Text {
                 Vec2::new(origin.x, origin.y + i as f32 * line_h),
                 self.font_id,
                 self.px,
-                self.color,
+                if self.color_override {
+                    self.color
+                } else {
+                    ctx.inherited_foreground
+                        .or_else(|| self.role.map(|role| typography::text_style(role).color))
+                        .unwrap_or(self.color)
+                },
                 self.tracking,
             );
         }
@@ -138,6 +146,7 @@ pub struct TextBuilder {
     wrap: bool,
     tracking: f32,
     role: Option<TextRole>,
+    color_override: bool,
 }
 
 impl TextBuilder {
@@ -145,12 +154,13 @@ impl TextBuilder {
         Self {
             widget,
             text: String::new(),
-            px: theme::NOCTURNE.typography.body,
-            color: theme::TEXT_PRIMARY,
+            px: theme::active().typography.body,
+            color: theme::active().semantic.text.primary.bytes(),
             font_id: 0,
             wrap: false,
             tracking: 0.0,
             role: None,
+            color_override: false,
         }
     }
 
@@ -183,6 +193,7 @@ impl TextBuilder {
 
     pub fn with_color(mut self, color: [u8; 4]) -> Self {
         self.color = color;
+        self.color_override = true;
         self
     }
 
@@ -219,6 +230,8 @@ impl TextBuilder {
                 font_id: self.font_id,
                 wrap: self.wrap,
                 tracking: self.tracking,
+                role: self.role,
+                color_override: self.color_override,
             }),
         )
     }

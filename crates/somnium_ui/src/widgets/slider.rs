@@ -215,7 +215,7 @@ impl SliderBuilder {
         Self {
             widget,
             value: 0.0,
-            track: crate::theme::BORDER_DARK,
+            track: crate::theme::active().semantic.border.subtle.bytes(),
             fill: crate::theme::ACCENT_BLUE,
         }
     }

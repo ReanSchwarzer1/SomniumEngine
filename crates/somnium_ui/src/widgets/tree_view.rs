@@ -73,6 +73,7 @@ pub struct TreeView {
     /// Index of the row under the cursor, so hover is a row wash rather than a
     /// whole-widget one. `None` while the pointer is outside.
     hovered: Option<usize>,
+    focused: bool,
     /// A badge-column drag is in flight; the flag says which column.
     badge_drag: Option<bool>,
 }
@@ -97,16 +98,17 @@ impl Control for TreeView {
             .unwrap_or(0);
         Rect::new(
             b.x,
-            b.y + index as f32 * theme::TREE_ROW_HEIGHT,
+            b.y + index as f32 * theme::active().density.row_tree,
             b.w,
-            theme::TREE_ROW_HEIGHT,
+            theme::active().density.row_tree,
         )
     }
 
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(
             available.x,
-            (self.items.len() as f32 * theme::TREE_ROW_HEIGHT).max(theme::TREE_ROW_HEIGHT),
+            (self.items.len() as f32 * theme::active().density.row_tree)
+                .max(theme::active().density.row_tree),
         )
     }
 
@@ -123,14 +125,14 @@ impl Control for TreeView {
         // is visible.
         let window = crate::virtual_list::RowWindow::new(
             b.y,
-            theme::TREE_ROW_HEIGHT,
+            theme::active().density.row_tree,
             self.items.len(),
             ctx.clip_rect(),
         );
         for i in window.range() {
             let item = &self.items[i];
-            let y = b.y + i as f32 * theme::TREE_ROW_HEIGHT;
-            let row = Rect::new(b.x, y, b.w, theme::TREE_ROW_HEIGHT);
+            let y = b.y + i as f32 * theme::active().density.row_tree;
+            let row = Rect::new(b.x, y, b.w, theme::active().density.row_tree);
             let primary = self.selected == Some(item.id);
             // Binary search, not a scan. `Vec::contains` per row is
             // O(rows x selected) per frame, which is invisible at ten rows and
@@ -143,7 +145,11 @@ impl Control for TreeView {
             } else {
                 Interaction::Rest
             };
-            let mut paint = tree_row(VisualState::with(interaction));
+            let mut paint = tree_row(
+                VisualState::with(interaction)
+                    .inactive(!self.focused)
+                    .focused(primary && self.focused),
+            );
 
             // Phase 27-C: cross-fade the row hover. Keyed per row, so moving the
             // pointer down a list fades each row independently instead of
@@ -182,15 +188,16 @@ impl Control for TreeView {
             if paint.background[3] != 0 || paint.rail.is_some() {
                 ctx.push_paint(row, &paint);
             }
-            let mut style = if primary { selected_style } else { rest_style };
+            let mut style =
+                if primary { selected_style } else { rest_style }.with_color(paint.foreground);
             if item.hidden {
-                style = style.with_color(theme::TEXT_DISABLED);
+                style = style.with_color(theme::active().semantic.text.disabled.bytes());
             }
             // Badges live in a fixed right-hand gutter so the eye is always in
             // the same place, which is what makes click-and-drag down the
             // column a usable bulk toggle rather than a game of hit the target.
             let badge_x = b.x + b.w - BADGE_COLUMN;
-            let mid = y + theme::TREE_ROW_HEIGHT * 0.5;
+            let mid = y + theme::active().density.row_tree * 0.5;
             let t = theme::active();
             if item.script_error {
                 let dot = Rect::new(badge_x - 14.0, mid - 3.0, 6.0, 6.0);
@@ -247,7 +254,7 @@ impl Control for TreeView {
             for level in 0..item.depth {
                 let x = b.x + 8.0 + level as f32 * 14.0 + 7.0;
                 ctx.push_rect_filled(
-                    Rect::new(x, y, 1.0, theme::TREE_ROW_HEIGHT),
+                    Rect::new(x, y, 1.0, theme::active().density.row_tree),
                     theme::active().semantic.border.subtle.bytes(),
                 );
             }
@@ -268,21 +275,31 @@ impl Control for TreeView {
             }
             let ic = Rect::new(
                 b.x + indent + 18.0,
-                y + (theme::TREE_ROW_HEIGHT - theme::ICON_TREE) * 0.5,
+                y + (theme::active().density.row_tree - theme::ICON_TREE) * 0.5,
                 theme::ICON_TREE,
                 theme::ICON_TREE,
             );
             let (uv, tex) = item.icon.draw_quad(ic);
             ctx.push_textured_rect(ic, uv, paint.foreground, tex);
-            ctx.push_text(
+            let label_x = b.x + indent + 18.0 + theme::ICON_TREE + 6.0;
+            let (label, _) = crate::widgets::property_row::ellipsise(
                 &item.label,
+                (badge_x - 18.0 - label_x).max(0.0),
+                |text| {
+                    ctx.font_atlas
+                        .measure_text(text, style.px, style.font_id())
+                        .x
+                },
+            );
+            ctx.push_text(
+                &label,
                 Vec2::new(
                     b.x + indent + 18.0 + theme::ICON_TREE + 6.0,
-                    y + (theme::TREE_ROW_HEIGHT - style.px) * 0.5 - 1.0,
+                    y + (theme::active().density.row_tree - style.px) * 0.5 - 1.0,
                 ),
                 style.font_id(),
                 style.px,
-                paint.foreground,
+                style.color,
             );
         }
     }
@@ -297,6 +314,11 @@ impl Control for TreeView {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        match msg.data::<WidgetMessage>() {
+            Some(WidgetMessage::Focus) => self.focused = true,
+            Some(WidgetMessage::Unfocus) => self.focused = false,
+            _ => {}
+        }
         if let Some(TreeViewMessage::SetItems(items)) = msg.data::<TreeViewMessage>() {
             self.items = items.clone();
             widget.invalidate_layout();
@@ -315,7 +337,7 @@ impl Control for TreeView {
         }
         if let Some(WidgetMessage::MouseMove { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
-            let idx = ((pos.y - b.y) / theme::TREE_ROW_HEIGHT).floor();
+            let idx = ((pos.y - b.y) / theme::active().density.row_tree).floor();
             let row = (idx >= 0.0 && (idx as usize) < self.items.len()).then(|| idx as usize);
             // Godot 4.8's bulk toggle: press in the badge column and drag down
             // to set a run of rows. Each row is reported once, when the drag
@@ -347,7 +369,7 @@ impl Control for TreeView {
         }
         if let Some(WidgetMessage::MouseDown { pos, .. }) = msg.data::<WidgetMessage>() {
             let b = widget.screen_bounds();
-            let idx = ((pos.y - b.y) / theme::TREE_ROW_HEIGHT).floor() as isize;
+            let idx = ((pos.y - b.y) / theme::active().density.row_tree).floor() as isize;
             if idx >= 0 && (idx as usize) < self.items.len() {
                 let item = &self.items[idx as usize];
                 let indent = 8.0 + item.depth as f32 * 12.0;
@@ -491,6 +513,7 @@ impl TreeViewBuilder {
                 font_id: self.font_id,
                 px: self.px,
                 hovered: None,
+                focused: false,
                 badge_drag: None,
             }),
         )
@@ -532,6 +555,7 @@ mod tests {
             font_id: 0,
             px: 12.0,
             hovered: None,
+            focused: false,
             badge_drag: None,
         };
         (widget, view)
@@ -620,6 +644,7 @@ mod tests {
             font_id: 0,
             px: 12.0,
             hovered: None,
+            focused: false,
             badge_drag: None,
         };
         assert!(t.selected.is_none());

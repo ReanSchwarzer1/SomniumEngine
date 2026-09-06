@@ -48,6 +48,7 @@
 pub mod a11y_bridge;
 pub mod app;
 mod audio_scene;
+mod authoring_settings;
 pub mod autosave;
 pub mod character;
 pub mod clipboard;
@@ -2759,3 +2760,8 @@ mod camera_speed_tests {
         }
     }
 }
+
+/// Internal reflected asset editing host; excluded from scene files and selection.
+#[derive(Clone, Copy)]
+pub(crate) struct AssetEditSession;
+impl somnium_ecs::Component for AssetEditSession {}

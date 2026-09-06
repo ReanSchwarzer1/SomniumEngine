@@ -415,6 +415,12 @@ pub enum EditorEvent {
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
+    /// Session-owned brush settings: radius, strength, hardness (0..=2).
+    SetLandscapeBrush {
+        field: u8,
+        value: f32,
+        live: bool,
+    },
     /// Palette click: set the paint layer (XV-I). The engine also arms
     /// terrain paint and turns foliage paint off (XV-Zeta).
     SetTerrainPaintLayer(u8),
@@ -559,6 +565,8 @@ pub enum EditorEvent {
         name: String,
     },
     /// Create an editable `.sommat` asset in `parent`.
+    /// Inspect an authored material without assigning it to a scene object.
+    InspectMaterial(std::path::PathBuf),
     CreateContentMaterial {
         parent: String,
         name: String,

@@ -8,12 +8,11 @@ use crate::{
     editor::parts::*,
     message::NodeHandle,
     theme,
-    types::Thickness,
+    types::{Thickness, VerticalAlignment},
     typography::TextRole,
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{
-        border::BorderBuilder,
         button::ButtonBuilder,
         check_box::CheckBoxBuilder,
         color_picker::ColorSwatchBuilder,
@@ -38,25 +37,16 @@ fn section(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> NodeHandl
         .with_orientation(Orientation::Vertical)
         .build();
     let panel = ui.add_node(panel, parent);
-    let band = BorderBuilder::new(
+    let heading = TextBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::NOCTURNE.density.row_tree)
-            .with_background(theme::BG_HEADER)
-            .with_foreground(theme::BORDER_DARK),
+            .with_height(theme::active().density.row_chrome)
+            .with_margin(Thickness::axes(8.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
     )
-    .with_stroke_thickness(Thickness {
-        left: 0.0,
-        top: 1.0,
-        right: 0.0,
-        bottom: 1.0,
-    })
+    .with_role(TextRole::Label)
+    .with_text(label)
     .build();
-    let band = ui.add_node(band, panel);
-    let heading = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 7.0)))
-        .with_role(TextRole::SectionCaps)
-        .with_text(label)
-        .build();
-    ui.add_node(heading, band);
+    ui.add_node(heading, panel);
     panel
 }
 
@@ -84,20 +74,30 @@ fn number(
 }
 
 fn check(ui: &mut UserInterface, parent: NodeHandle, label: &str, font_id: u8) -> NodeHandle {
-    let node = CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-        .with_label(label)
-        .with_font_id(font_id)
-        .build();
+    let node = CheckBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_height(theme::active().density.row_chrome)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
+    .with_label(label)
+    .with_font_id(font_id)
+    .build();
     ui.add_node(node, parent)
 }
 
 fn button(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> (NodeHandle, NodeHandle) {
-    let node = ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT)).build();
+    let node =
+        ButtonBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
+            .build();
     let handle = ui.add_node(node, parent);
-    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-        .with_role(TextRole::Caption)
-        .with_text(label)
-        .build();
+    let text = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::axes(8.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_role(TextRole::Caption)
+    .with_text(label)
+    .build();
     let text = ui.add_node(text, handle);
     (handle, text)
 }
@@ -254,6 +254,7 @@ pub(crate) fn build_generated_details(
     font_id: u8,
     panels: &[GeneratedComponentPanel],
     assets: &somnium_asset::database::AssetDbSnapshot,
+    presentation: &mut super::persona::Persona,
 ) -> (
     NodeHandle,
     HashMap<NodeHandle, GeneratedBinding>,
@@ -281,13 +282,33 @@ pub(crate) fn build_generated_details(
     let mut asset_actions = HashMap::new();
     let mut collection_actions = HashMap::new();
 
-    for panel in panels {
-        let heading =
-            TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 7.0)))
-                .with_role(TextRole::SectionCaps)
-                .with_text(&panel.label)
-                .build();
-        ui.add_node(heading, root);
+    presentation.begin();
+    // Identity is already sticky above the scroll area. Keep editable Name
+    // metadata available after authored properties, rather than repeating it first.
+    let ordered = panels
+        .iter()
+        .filter(|p| p.component.as_str() != "somnium.Name")
+        .chain(
+            panels
+                .iter()
+                .filter(|p| p.component.as_str() == "somnium.Name"),
+        );
+    for panel in ordered {
+        let container = ui.add_node(
+            StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                .with_orientation(Orientation::Vertical)
+                .build(),
+            root,
+        );
+        presentation
+            .component_hosts
+            .push((panel.component, container));
+        let section_root = presentation.section(
+            ui,
+            container,
+            panel.component.as_str().to_owned(),
+            &panel.label,
+        );
         if let Some(path) = panel.preview_path.clone() {
             ui.draw_ctx.thumbnails.request(&path, true);
             let preview = ImageBuilder::new(
@@ -299,20 +320,22 @@ pub(crate) fn build_generated_details(
             .with_asset(path)
             .with_size(96.0)
             .build();
-            ui.add_node(preview, root);
+            ui.add_node(preview, section_root);
         }
         let mut last_group = None;
+        let mut group_root = section_root;
         for model in &panel.rows {
             if model.group != last_group {
-                if let Some(group) = model.group {
-                    let label = TextBuilder::new(
-                        WidgetBuilder::new().with_margin(Thickness::axes(10.0, 4.0)),
+                group_root = if let Some(group) = model.group {
+                    presentation.section(
+                        ui,
+                        section_root,
+                        format!("{}/group/{group}", panel.component),
+                        group,
                     )
-                    .with_role(TextRole::Caption)
-                    .with_text(group)
-                    .build();
-                    ui.add_node(label, root);
-                }
+                } else {
+                    section_root
+                };
                 last_group = model.group;
             }
             let row = PropertyRowBuilder::new(
@@ -321,10 +344,12 @@ pub(crate) fn build_generated_details(
                     .with_background(theme::TRANSPARENT),
             )
             .with_label(&model.label)
+            .with_pinnable(true)
             .with_modified(model.modified && !model.mixed)
             .with_read_only(model.read_only)
             .build();
-            let row_handle = ui.add_node(row, root);
+            let row_handle = ui.add_node(row, group_root);
+            presentation.register(ui, row_handle, model, &panel.label);
             let base = GeneratedBinding {
                 component: model.component,
                 field: model.field,
@@ -507,24 +532,26 @@ pub(crate) fn build_generated_details(
                             .build(),
                         row_handle,
                     );
-                    let popup =
-                        PopupBuilder::new(WidgetBuilder::new().with_background(theme::BG_PANEL))
-                            .with_anchor(handle)
-                            .with_placement(PopupPlacement::AnchorBelow)
-                            .build();
+                    let popup = PopupBuilder::new(
+                        WidgetBuilder::new()
+                            .with_background(theme::active().semantic.surface.panel.bytes()),
+                    )
+                    .with_anchor(handle)
+                    .with_placement(PopupPlacement::AnchorBelow)
+                    .build();
                     let popup = ui.add_node(popup, ui.root());
                     let column = StackPanelBuilder::new(
                         WidgetBuilder::new()
                             .with_width(360.0)
-                            .with_background(theme::BG_PANEL),
+                            .with_background(theme::active().semantic.surface.panel.bytes()),
                     )
                     .with_orientation(Orientation::Vertical)
                     .build();
                     let column = ui.add_node(column, popup);
                     let search = SearchBoxBuilder::new(
                         WidgetBuilder::new()
-                            .with_height(theme::ROW_HEIGHT)
-                            .with_background(theme::BG_INPUT),
+                            .with_height(theme::active().density.row_dense)
+                            .with_background(theme::active().semantic.surface.input.bytes()),
                     )
                     .with_font_id(font_id)
                     .build();
@@ -556,9 +583,10 @@ pub(crate) fn build_generated_details(
                         ("Locate", AssetPickerAction::Locate),
                         ("Make Unique", AssetPickerAction::MakeUnique),
                     ] {
-                        let button =
-                            ButtonBuilder::new(WidgetBuilder::new().with_height(theme::ROW_HEIGHT))
-                                .build();
+                        let button = ButtonBuilder::new(
+                            WidgetBuilder::new().with_height(theme::active().density.row_dense),
+                        )
+                        .build();
                         let button = ui.add_node(button, actions);
                         let text = TextBuilder::new(
                             WidgetBuilder::new().with_margin(Thickness::axes(7.0, 4.0)),
@@ -726,7 +754,7 @@ pub(crate) fn build_generated_details(
                     let add = ui.add_node(
                         ButtonBuilder::new(
                             WidgetBuilder::new()
-                                .with_height(theme::ROW_HEIGHT)
+                                .with_height(theme::active().density.row_dense)
                                 .with_margin(Thickness::axes(0.0, 2.0)),
                         )
                         .build(),

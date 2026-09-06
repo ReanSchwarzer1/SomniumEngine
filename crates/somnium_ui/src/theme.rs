@@ -53,6 +53,8 @@ pub struct SurfaceTokens {
     pub popup: Srgb8,
     pub hover: Srgb8,
     pub selected: Srgb8,
+    /// Selection retained while another panel owns keyboard focus.
+    pub selected_inactive: Srgb8,
     pub modal_scrim: Srgb8,
 }
 
@@ -76,6 +78,8 @@ pub struct BorderTokens {
     pub default: Srgb8,
     pub strong: Srgb8,
     pub focus: Srgb8,
+    /// Identifies an editable control; separate from decorative separators.
+    pub control: Srgb8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +108,8 @@ pub struct SemanticColors {
     pub accent: AccentTokens,
     pub status: StatusTokens,
     pub folder: Srgb8,
+    /// Default-relative modification, distinct from selection and busy state.
+    pub modified: Srgb8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -301,47 +307,50 @@ pub struct Theme {
 pub const NOCTURNE: Theme = Theme {
     semantic: SemanticColors {
         surface: SurfaceTokens {
-            window: Srgb8::opaque(0x14, 0x16, 0x1C),
-            canvas: Srgb8::opaque(0x18, 0x1A, 0x20),
-            panel: Srgb8::opaque(0x1C, 0x1E, 0x26),
-            header: Srgb8::opaque(0x22, 0x25, 0x2F),
-            raised: Srgb8::opaque(0x28, 0x2B, 0x36),
-            input: Srgb8::opaque(0x12, 0x14, 0x1A),
-            popup: Srgb8::opaque(0x22, 0x25, 0x2F),
-            hover: Srgb8::opaque(0x31, 0x35, 0x43),
-            selected: Srgb8::rgba(0x7A, 0x86, 0xFF, 0x29),
+            window: Srgb8::opaque(0x11, 0x13, 0x1A),
+            canvas: Srgb8::opaque(0x15, 0x18, 0x21),
+            panel: Srgb8::opaque(0x1B, 0x1E, 0x28),
+            header: Srgb8::opaque(0x25, 0x2A, 0x38),
+            raised: Srgb8::opaque(0x30, 0x37, 0x49),
+            input: Srgb8::opaque(0x12, 0x15, 0x1D),
+            popup: Srgb8::opaque(0x25, 0x2A, 0x38),
+            hover: Srgb8::opaque(0x33, 0x3D, 0x52),
+            selected: Srgb8::opaque(0x30, 0x34, 0x51),
+            selected_inactive: Srgb8::opaque(0x2B, 0x30, 0x3D),
             modal_scrim: Srgb8::rgba(0x0A, 0x0B, 0x0F, 0x9E),
         },
         text: TextTokens {
-            primary: Srgb8::opaque(0xD8, 0xDC, 0xE8),
+            primary: Srgb8::opaque(0xE6, 0xE9, 0xF2),
             emphasis: Srgb8::opaque(0xF2, 0xF4, 0xFF),
-            secondary: Srgb8::opaque(0x9A, 0xA3, 0xB5),
-            muted: Srgb8::opaque(0x8C, 0x95, 0xAA),
-            disabled: Srgb8::opaque(0x5C, 0x64, 0x78),
-            inverse: Srgb8::opaque(0x0E, 0x10, 0x14),
-            link: Srgb8::opaque(0x94, 0x9C, 0xFF),
+            secondary: Srgb8::opaque(0xB1, 0xB9, 0xCB),
+            muted: Srgb8::opaque(0x9E, 0xAB, 0xC0),
+            disabled: Srgb8::opaque(0x62, 0x6D, 0x85),
+            inverse: Srgb8::opaque(0x11, 0x13, 0x1A),
+            link: Srgb8::opaque(0xB8, 0xB0, 0xFF),
         },
         border: BorderTokens {
-            subtle: Srgb8::opaque(0x22, 0x25, 0x2F),
-            default: Srgb8::opaque(0x31, 0x35, 0x43),
-            strong: Srgb8::opaque(0x4A, 0x4F, 0x5E),
-            focus: Srgb8::opaque(0x94, 0x9C, 0xFF),
+            subtle: Srgb8::opaque(0x30, 0x36, 0x46),
+            default: Srgb8::opaque(0x30, 0x36, 0x46),
+            strong: Srgb8::opaque(0x7C, 0x89, 0xA1),
+            focus: Srgb8::opaque(0xB8, 0xB0, 0xFF),
+            control: Srgb8::opaque(0x62, 0x6D, 0x85),
         },
         accent: AccentTokens {
-            default: Srgb8::opaque(0x7A, 0x86, 0xFF),
-            hover: Srgb8::opaque(0x94, 0x9C, 0xFF),
-            pressed: Srgb8::opaque(0x5C, 0x68, 0xE0),
-            selected_bg: Srgb8::rgba(0x7A, 0x86, 0xFF, 0x29),
-            selected_rail: Srgb8::opaque(0x7A, 0x86, 0xFF),
+            default: Srgb8::opaque(0xA5, 0x9A, 0xFF),
+            hover: Srgb8::opaque(0xB8, 0xB0, 0xFF),
+            pressed: Srgb8::opaque(0x8E, 0x82, 0xEB),
+            selected_bg: Srgb8::opaque(0x30, 0x34, 0x51),
+            selected_rail: Srgb8::opaque(0xA5, 0x9A, 0xFF),
         },
         status: StatusTokens {
-            info: Srgb8::opaque(0x59, 0xB8, 0xD6),
-            success: Srgb8::opaque(0x5D, 0xCE, 0x9A),
-            warning: Srgb8::opaque(0xE6, 0xB0, 0x4A),
-            error: Srgb8::opaque(0xE6, 0x70, 0x70),
-            busy: Srgb8::opaque(0x7A, 0x86, 0xFF),
+            info: Srgb8::opaque(0x7D, 0xCB, 0xE3),
+            success: Srgb8::opaque(0x7C, 0xD5, 0xB0),
+            warning: Srgb8::opaque(0xEA, 0xC1, 0x7A),
+            error: Srgb8::opaque(0xF0, 0x8D, 0x9D),
+            busy: Srgb8::opaque(0xA5, 0x9A, 0xFF),
         },
         folder: Srgb8::opaque(0xC4, 0xA5, 0x74),
+        modified: Srgb8::opaque(0xDE, 0xBE, 0x87),
     },
     typography: TypographyTokens {
         display: 22.0,
@@ -357,7 +366,7 @@ pub const NOCTURNE: Theme = Theme {
     density: DensityTokens {
         row_dense: 24.0,
         row_tree: 26.0,
-        row_chrome: 30.0,
+        row_chrome: 28.0,
         titlebar: 36.0,
         menu: 28.0,
         toolbar: 32.0,
@@ -372,13 +381,13 @@ pub const NOCTURNE: Theme = Theme {
         inset_panel: 8.0,
         gap_group: 12.0,
         gap_section: 16.0,
-        radius_input: 2.0,
-        radius_chrome: 2.0,
-        radius_popup: 4.0,
-        radius_modal: 6.0,
-        radius_tile: 3.0,
+        radius_input: 4.0,
+        radius_chrome: 5.0,
+        radius_popup: 8.0,
+        radius_modal: 10.0,
+        radius_tile: 6.0,
         stroke_hairline: 1.0,
-        stroke_focus: 1.0,
+        stroke_focus: 2.0,
         stroke_rail: 2.0,
     },
     motion: MotionTokens {
@@ -431,8 +440,8 @@ pub const NOCTURNE: Theme = Theme {
             Srgb8::opaque(0x22, 0x25, 0x2F),
         ),
         accent_primary: Gradient::vertical(
-            Srgb8::opaque(0x86, 0x92, 0xFF),
-            Srgb8::opaque(0x6E, 0x7A, 0xF4),
+            Srgb8::opaque(0xAD, 0xA3, 0xFF),
+            Srgb8::opaque(0xA0, 0x95, 0xF5),
         ),
         rail_accent: Gradient::vertical(
             Srgb8::opaque(0x94, 0x9C, 0xFF),
@@ -477,7 +486,8 @@ pub const DAWN: Theme = Theme {
             input: Srgb8::opaque(0xFF, 0xFF, 0xFF),
             popup: Srgb8::opaque(0xFF, 0xFF, 0xFF),
             hover: Srgb8::opaque(0xDD, 0xE0, 0xEA),
-            selected: Srgb8::rgba(0x4A, 0x56, 0xE0, 0x29),
+            selected: Srgb8::opaque(0xE0, 0xE2, 0xF6),
+            selected_inactive: Srgb8::opaque(0xE4, 0xE6, 0xEC),
             modal_scrim: Srgb8::rgba(0x14, 0x16, 0x1E, 0x73),
         },
         text: TextTokens {
@@ -494,12 +504,13 @@ pub const DAWN: Theme = Theme {
             default: Srgb8::opaque(0xC3, 0xC8, 0xD4),
             strong: Srgb8::opaque(0x9A, 0xA0, 0xAE),
             focus: Srgb8::opaque(0x2E, 0x39, 0xA8),
+            control: Srgb8::opaque(0x7A, 0x81, 0x93),
         },
         accent: AccentTokens {
             default: Srgb8::opaque(0x3A, 0x46, 0xC8),
             hover: Srgb8::opaque(0x2E, 0x39, 0xA8),
             pressed: Srgb8::opaque(0x24, 0x2D, 0x86),
-            selected_bg: Srgb8::rgba(0x3A, 0x46, 0xC8, 0x29),
+            selected_bg: Srgb8::opaque(0xE0, 0xE2, 0xF6),
             selected_rail: Srgb8::opaque(0x3A, 0x46, 0xC8),
         },
         status: StatusTokens {
@@ -510,6 +521,7 @@ pub const DAWN: Theme = Theme {
             busy: Srgb8::opaque(0x3A, 0x46, 0xC8),
         },
         folder: Srgb8::opaque(0x8A, 0x62, 0x2C),
+        modified: Srgb8::opaque(0x76, 0x50, 0x0C),
     },
     typography: NOCTURNE.typography,
     density: NOCTURNE.density,
@@ -597,6 +609,98 @@ pub enum ThemeId {
     Dawn = 1,
 }
 
+/// Density is independent of monitor scale. Select before building a tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DensityId {
+    Compact,
+    Comfortable,
+}
+
+pub const COMFORTABLE_DENSITY: DensityTokens = DensityTokens {
+    row_dense: 28.0,
+    row_tree: 30.0,
+    row_chrome: 32.0,
+    toolbar: 36.0,
+    menu: 32.0,
+    ..NOCTURNE.density
+};
+
+const NOCTURNE_COMFORTABLE: Theme = Theme {
+    density: COMFORTABLE_DENSITY,
+    ..NOCTURNE
+};
+const DAWN_COMFORTABLE: Theme = Theme {
+    density: COMFORTABLE_DENSITY,
+    ..DAWN
+};
+
+fn enhanced(mut t: Theme) -> Theme {
+    // Use the least favorable foreground/background pair, including hover and
+    // selection. Compute once per snapshot, not once per glyph or frame.
+    let s = &mut t.semantic;
+    let surfaces = [
+        s.surface.panel,
+        s.surface.input,
+        s.surface.raised,
+        s.surface.popup,
+        s.surface.hover,
+        s.surface.selected,
+    ];
+    let background = surfaces
+        .into_iter()
+        .reduce(|a, b| {
+            let a_is_brighter = relative_luminance(a) > relative_luminance(b);
+            if a_is_brighter != t.is_light { a } else { b }
+        })
+        .unwrap();
+    let boost = |c: Srgb8| Srgb8(crate::a11y::high_contrast(c.bytes(), background.bytes()));
+    s.text.primary = boost(s.text.primary);
+    s.text.emphasis = boost(s.text.emphasis);
+    s.text.secondary = boost(s.text.secondary);
+    s.text.muted = boost(s.text.muted);
+    s.text.link = boost(s.text.link);
+    s.border.control = boost(s.border.control);
+    s.border.focus = boost(s.border.focus);
+    s.status.info = boost(s.status.info);
+    s.status.success = boost(s.status.success);
+    s.status.warning = boost(s.status.warning);
+    s.status.error = boost(s.status.error);
+    s.modified = boost(s.modified);
+    s.text.inverse = Srgb8(crate::a11y::high_contrast(
+        s.text.inverse.bytes(),
+        s.accent.default.bytes(),
+    ));
+    t
+}
+
+static NOCTURNE_ENHANCED: std::sync::LazyLock<Theme> =
+    std::sync::LazyLock::new(|| enhanced(NOCTURNE));
+static DAWN_ENHANCED: std::sync::LazyLock<Theme> = std::sync::LazyLock::new(|| enhanced(DAWN));
+static NOCTURNE_COMFORTABLE_ENHANCED: std::sync::LazyLock<Theme> =
+    std::sync::LazyLock::new(|| enhanced(NOCTURNE_COMFORTABLE));
+static DAWN_COMFORTABLE_ENHANCED: std::sync::LazyLock<Theme> =
+    std::sync::LazyLock::new(|| enhanced(DAWN_COMFORTABLE));
+
+pub fn set_density(id: DensityId) {
+    store_active((load_active() & !2) | if id == DensityId::Comfortable { 2 } else { 0 });
+}
+
+pub fn density_id() -> DensityId {
+    if load_active() & 2 != 0 {
+        DensityId::Comfortable
+    } else {
+        DensityId::Compact
+    }
+}
+
+pub fn set_high_contrast(enabled: bool) {
+    store_active((load_active() & !4) | if enabled { 4 } else { 0 });
+}
+
+pub fn high_contrast_enabled() -> bool {
+    load_active() & 4 != 0
+}
+
 #[cfg(not(test))]
 static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -644,16 +748,22 @@ fn store_active(v: u8) {
 pub fn active() -> &'static Theme {
     match load_active() {
         1 => &DAWN,
+        2 => &NOCTURNE_COMFORTABLE,
+        3 => &DAWN_COMFORTABLE,
+        4 => &NOCTURNE_ENHANCED,
+        5 => &DAWN_ENHANCED,
+        6 => &NOCTURNE_COMFORTABLE_ENHANCED,
+        7 => &DAWN_COMFORTABLE_ENHANCED,
         _ => &NOCTURNE,
     }
 }
 
 pub fn set_active(id: ThemeId) {
-    store_active(id as u8);
+    store_active((load_active() & !1) | id as u8);
 }
 
 pub fn active_id() -> ThemeId {
-    match load_active() {
+    match load_active() & 1 {
         1 => ThemeId::Dawn,
         _ => ThemeId::Nocturne,
     }
@@ -739,15 +849,15 @@ pub fn ramp_step(base: Srgb8, step: u16) -> Srgb8 {
     ]))
 }
 
-pub const fn frame_theme() -> &'static Theme {
-    &NOCTURNE
+pub fn frame_theme() -> &'static Theme {
+    active()
 }
 
 pub const TRANSPARENT: Color = [0x00, 0x00, 0x00, 0x00];
 pub const BLACK: Color = [0x00, 0x00, 0x00, 0xFF];
 pub const WHITE: Color = [0xFF, 0xFF, 0xFF, 0xFF];
 
-// Compatibility aliases. New component recipes should read from NOCTURNE.
+// Compatibility aliases. New component recipes should read from active().
 pub const BG_VOID: Color = NOCTURNE.semantic.surface.window.bytes();
 pub const BG_CONTENT: Color = NOCTURNE.semantic.surface.canvas.bytes();
 pub const BG_PANEL: Color = NOCTURNE.semantic.surface.panel.bytes();
@@ -831,12 +941,12 @@ mod tests {
 
     #[test]
     fn panel_token_is_the_approved_authored_srgb_value() {
-        assert_eq!(BG_PANEL, [0x1C, 0x1E, 0x26, 0xFF]);
+        assert_eq!(BG_PANEL, [0x1B, 0x1E, 0x28, 0xFF]);
     }
 
     #[test]
-    fn selected_fill_keeps_straight_alpha() {
-        assert_eq!(ACCENT_DIM, [0x7A, 0x86, 0xFF, 0x29]);
+    fn selected_fill_is_an_opaque_surface() {
+        assert_eq!(ACCENT_DIM, [0x30, 0x34, 0x51, 0xFF]);
     }
 }
 
@@ -1178,6 +1288,7 @@ mod token_sheet_tests {
             ("surface.popup", s.surface.popup),
             ("surface.hover", s.surface.hover),
             ("surface.selected", s.surface.selected),
+            ("surface.selected_inactive", s.surface.selected_inactive),
             ("surface.modal_scrim", s.surface.modal_scrim),
             ("text.primary", s.text.primary),
             ("text.emphasis", s.text.emphasis),
@@ -1190,6 +1301,7 @@ mod token_sheet_tests {
             ("border.default", s.border.default),
             ("border.strong", s.border.strong),
             ("border.focus", s.border.focus),
+            ("border.control", s.border.control),
             ("accent.default", s.accent.default),
             ("accent.hover", s.accent.hover),
             ("accent.pressed", s.accent.pressed),
@@ -1201,6 +1313,7 @@ mod token_sheet_tests {
             ("status.error", s.status.error),
             ("status.busy", s.status.busy),
             ("folder", s.folder),
+            ("modified", s.modified),
             ("ember", t.ember),
         ];
         v.drain(..).map(|(k, c)| (k.to_string(), hex(c))).collect()
@@ -1271,3 +1384,6 @@ mod token_sheet_tests {
         }
     }
 }
+#[cfg(test)]
+#[path = "theme_persona_tests.rs"]
+mod persona_tests;

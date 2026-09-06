@@ -271,7 +271,7 @@ pub enum CommandAction {
     ToggleShadingMode,
     SetGizmoMode(u8),
     ToggleTerrainEdit,
-    ToggleFoliage,
+    ToggleFoliagePaint,
     ToggleImmersiveViewport,
     OpenOutputLog,
     /// Open or close the References panel on whatever it last had.
@@ -968,7 +968,7 @@ fn declarations() -> Vec<Command> {
             "Tools",
             Some(Chord::press(CommandKey::Function(8))),
             "Enter or leave foliage painting mode.",
-            A::ToggleFoliage,
+            A::ToggleFoliagePaint,
             TOOLBAR,
             always
         ),
@@ -1875,6 +1875,15 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn foliage_mode_and_f8_use_the_painter_command() {
+        let command = registry().get("editor.foliage.edit").unwrap();
+        assert_eq!(command.action, CommandAction::ToggleFoliagePaint);
+        assert_eq!(
+            KeyBindings::default().command_for(Chord::press(CommandKey::Function(8))),
+            Some("editor.foliage.edit")
+        );
+    }
 
     #[test]
     fn every_viewport_layout_has_a_window_menu_row() {

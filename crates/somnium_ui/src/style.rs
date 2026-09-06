@@ -10,9 +10,9 @@
 //! cues carry every surface in the editor:
 //!
 //! * a **hover wash** (never a border change, which would reflow the row);
-//! * a **1 px focus ring** in `focus.ring`;
+//! * a **2 logical-unit focus ring** in `focus.ring`;
 //! * a **2 px selection rail** in `accent.selected_rail`, always paired with
-//!   the translucent selection fill so selection never relies on colour alone;
+//!   the opaque selection fill so selection never relies on colour alone;
 //! * a **gutter dot** for modified.
 
 use crate::theme::{self, Color};
@@ -44,6 +44,8 @@ pub struct VisualState {
     pub modified: bool,
     /// Validation failed. Recolours the outline, never the fill.
     pub invalid: bool,
+    /// Selected content remains visible after its panel loses focus.
+    pub inactive: bool,
 }
 
 impl VisualState {
@@ -73,6 +75,11 @@ impl VisualState {
         self
     }
 
+    pub fn inactive(mut self, on: bool) -> Self {
+        self.inactive = on;
+        self
+    }
+
     pub fn is_disabled(&self) -> bool {
         self.interaction == Interaction::Disabled
     }
@@ -98,6 +105,8 @@ pub struct Paint {
     pub glow: Option<theme::Glow>,
     /// Phase 27-D. Inner shadow, so an input reads as recessed.
     pub inset: Option<theme::Inset>,
+    /// Separate from the validation border so focused invalid fields keep both.
+    pub focus_ring: Option<Color>,
 }
 
 impl Paint {
@@ -113,6 +122,7 @@ impl Paint {
             elevation: None,
             glow: None,
             inset: None,
+            focus_ring: None,
         }
     }
 
@@ -149,9 +159,8 @@ impl Paint {
             self.border = t.semantic.status.error.bytes();
             self.border_thickness = t.geometry.stroke_hairline;
         }
-        if state.focused {
-            self.border = t.semantic.border.focus.bytes();
-            self.border_thickness = t.geometry.stroke_focus;
+        if state.focused && !state.is_disabled() {
+            self.focus_ring = Some(t.semantic.border.focus.bytes());
             // Phase 27-D: the focus ring is the first of the two roles allowed
             // a glow. A 1 px hairline alone is easy to lose on a dense surface.
             self.glow = Some(t.glow.focus);
@@ -161,6 +170,7 @@ impl Paint {
             // A disabled control is never lit and never lifted.
             self.glow = None;
             self.elevation = None;
+            self.focus_ring = None;
         }
         self
     }
@@ -172,11 +182,8 @@ pub fn button(state: VisualState) -> Paint {
     let t = theme::active();
     let s = &t.semantic;
     let base = match state.interaction {
-        Interaction::Rest => Paint::flat(s.surface.raised.bytes(), s.text.primary.bytes())
-            .with_gradient(t.gradient.chrome_wash)
-            .at_elevation(t.elevation.raised),
-        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), s.text.primary.bytes())
-            .at_elevation(t.elevation.raised),
+        Interaction::Rest => Paint::flat(s.surface.raised.bytes(), s.text.primary.bytes()),
+        Interaction::Hover => Paint::flat(s.surface.hover.bytes(), s.text.primary.bytes()),
         // Press removes the lift as well as darkening the fill, so the control
         // reads as pushed into the surface rather than merely recoloured.
         Interaction::Pressed => Paint::flat(s.surface.input.bytes(), s.text.primary.bytes()),
@@ -209,7 +216,7 @@ pub fn primary_button(state: VisualState) -> Paint {
         theme::active().semantic.text.inverse.bytes()
     };
     let mut paint = Paint::flat(fill, fg);
-    if !state.is_disabled() {
+    if !state.is_disabled() && state.interaction == Interaction::Rest {
         paint = paint
             .with_gradient(t.gradient.accent_primary)
             .at_elevation(t.elevation.raised);
@@ -254,7 +261,7 @@ pub fn input(state: VisualState) -> Paint {
         _ => Paint::outlined(
             s.surface.input.bytes(),
             s.text.primary.bytes(),
-            s.border.default.bytes(),
+            s.border.control.bytes(),
         ),
     };
     Paint {
@@ -291,6 +298,11 @@ pub fn tree_row(state: VisualState) -> Paint {
         ..base
     }
     .finish(&state);
+    if state.inactive && state.interaction == Interaction::Selected {
+        paint.background = s.surface.selected_inactive.bytes();
+        paint.rail = Some(s.text.muted.bytes());
+        paint.foreground = s.text.secondary.bytes();
+    }
     if state.invalid {
         paint.background = theme::with_alpha(t.semantic.status.error.bytes(), 0x1A);
         paint.foreground = t.semantic.status.error.bytes();
@@ -388,6 +400,35 @@ pub enum StatusKind {
     Busy,
 }
 
+/// An explicit action hierarchy. `Auto` only preserves legacy authored backgrounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ButtonVariant {
+    #[default]
+    Auto,
+    Primary,
+    Secondary,
+    Quiet,
+    Toggle,
+    Destructive,
+}
+
+pub fn action_button(variant: ButtonVariant, state: VisualState) -> Paint {
+    match variant {
+        ButtonVariant::Primary => primary_button(state),
+        ButtonVariant::Quiet | ButtonVariant::Toggle => icon_button(state),
+        ButtonVariant::Destructive => {
+            let mut paint = button(state);
+            if !state.is_disabled() {
+                paint.foreground = theme::active().semantic.status.error.bytes();
+                paint.border = paint.foreground;
+                paint.border_thickness = theme::active().geometry.stroke_hairline;
+            }
+            paint
+        }
+        ButtonVariant::Auto | ButtonVariant::Secondary => button(state),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,11 +459,8 @@ mod tests {
     fn focus_draws_the_ring_over_any_interaction() {
         for interaction in [Interaction::Rest, Interaction::Hover, Interaction::Selected] {
             let paint = button(VisualState::with(interaction).focused(true));
-            assert_eq!(paint.border, theme::BORDER_FOCUS);
-            assert_eq!(
-                paint.border_thickness,
-                theme::active().geometry.stroke_focus
-            );
+            assert_eq!(paint.focus_ring, Some(theme::BORDER_FOCUS));
+            assert_eq!(paint.border_thickness, 0.0);
         }
     }
 

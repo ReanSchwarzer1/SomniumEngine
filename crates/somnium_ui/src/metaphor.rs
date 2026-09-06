@@ -511,8 +511,8 @@ impl ContentDensity {
     pub const fn metrics(self) -> (f32, f32, f32) {
         match self {
             // Below the 40 px large-cut threshold, so these sample the 32 px cut.
-            ContentDensity::Compact => (72.0, 78.0, 32.0),
-            ContentDensity::Comfortable => (112.0, 120.0, 80.0),
+            ContentDensity::Compact => (104.0, 84.0, 32.0),
+            ContentDensity::Comfortable => (136.0, 112.0, 56.0),
             ContentDensity::Large => (160.0, 172.0, 120.0),
         }
     }

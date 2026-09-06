@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-09-04 against the current working tree.
+Last verified: 2026-09-06 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -16,22 +16,23 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | MORROWIND, partially complete |
-| Most recent work | TSUSHIMA-K, three foliage lighting-transport fixes, 2026-09-04 |
+| Active phase | PERSONA A–D and first E/F slice in tree; designer journeys, E/F acceptance and G open. MORROWIND remains partially complete. |
+| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): material/lighting tools, browser fixes, Scripts access and saved brush settings, 2026-09-06 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Next planned phases | PORTAL, KENSHI, then STALKER; none has started |
+| Current implementation priority | PERSONA (Atlus): user review of QoL/E resource-settings implementation, designer journeys, F OS/DPI matrix and G visual acceptance before other phases |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census | 188,732 Rust/WGSL lines and 1,864 discovered tests |
+| Generated census, 2026-09-06 | 218,976 Rust/WGSL lines and 2,216 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
-| Current gate failure | `sculpt-panel` golden image: 5.3333% changed, budget 0.2% |
+| Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
 
 The top-level phase status is:
 
 | Phase | Status | Read next |
 |---|---|---|
+| PERSONA / Atlus | A–D and first E/F slice in tree; journey/E/F acceptance, G and phase closure open | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
 | TSUSHIMA | A through K in tree | [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>) |
@@ -2100,6 +2101,13 @@ sprite sub-assets, offline actor simulation, faction ledger, gameplay
 inventory, trade, quest system, or anomaly framework.
 
 ### Roadmap order
+
+**Scheduling update, 2026-09-05:** [PERSONA (Atlus)](<dev records/phase_PERSONA.md>)
+is the next implementation phase, before further work on any other phase,
+including the TALOS proposal. It upgrades the editor's Nocturne design system,
+visual composition, and designer workflows. A/B baseline and shared visual foundations
+are implemented. The [E/F record](<dev records/phase PERSONA/PERSONA-E_F.md>) covers contextual authoring, the missing foliage painter fix, floating placement and narrow-window regressions; E/F acceptance remains open. C/D workspace and QoL changes are in tree; see [the C/D record](<dev records/phase PERSONA/PERSONA-C_D.md>) for native evidence, validation, open designer journeys and floating-window acceptance limits. The dependency order below resumes after PERSONA and does not
+change the completion status of existing work.
 
 ```text
 finish MORROWIND

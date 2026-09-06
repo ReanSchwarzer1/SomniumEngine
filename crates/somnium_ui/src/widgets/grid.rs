@@ -187,9 +187,15 @@ impl Grid {
             for d in rows.iter_mut().chain(cols.iter_mut()) {
                 d.unmeasured_node_count = 0;
                 match d.size_mode {
-                    SizeMode::Auto => d.desired_size = 0.0,
+                    SizeMode::Auto => {
+                        d.desired_size = 0.0;
+                        d.actual_size = 0.0;
+                    }
                     SizeMode::Strict => d.actual_size = d.desired_size,
-                    SizeMode::Stretch => {}
+                    // Empty stretch tracks have no child to remeasure them.
+                    // Keeping their last arranged span makes resized headers
+                    // request the old window width and clip trailing actions.
+                    SizeMode::Stretch => d.actual_size = d.desired_size,
                 }
             }
         }
