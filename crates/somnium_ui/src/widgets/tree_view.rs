@@ -281,8 +281,18 @@ impl Control for TreeView {
             );
             let (uv, tex) = item.icon.draw_quad(ic);
             ctx.push_textured_rect(ic, uv, paint.foreground, tex);
-            ctx.push_text(
+            let label_x = b.x + indent + 18.0 + theme::ICON_TREE + 6.0;
+            let (label, _) = crate::widgets::property_row::ellipsise(
                 &item.label,
+                (badge_x - 18.0 - label_x).max(0.0),
+                |text| {
+                    ctx.font_atlas
+                        .measure_text(text, style.px, style.font_id())
+                        .x
+                },
+            );
+            ctx.push_text(
+                &label,
                 Vec2::new(
                     b.x + indent + 18.0 + theme::ICON_TREE + 6.0,
                     y + (theme::active().density.row_tree - style.px) * 0.5 - 1.0,

@@ -109,6 +109,14 @@ impl Control for CheckBox {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(crate::message::MixedValue(mixed)) = msg.data::<crate::message::MixedValue>() {
+            if true {
+                self.mixed = *mixed;
+            }
+            msg.handled = true;
+            return;
+        }
+
         if let Some(CheckBoxMessage::SetChecked(v)) = msg.data::<CheckBoxMessage>() {
             self.checked = *v;
             msg.handled = true;

@@ -5,7 +5,7 @@
 //! are the approved redline (§06, "Details column grammar"):
 //!
 //! ```text
-//! │← 14 ─→│←──── label 46 % (96…176) ────→│←──── value ────→│ 8 │
+//! │← 48 ─→│←──── label 46 % (96…176) ────→│←──── value ────→│ 8 │
 //!   gutter          ellipsised, tooltip           control     inset
 //! ```
 //!
@@ -17,7 +17,7 @@
 //! * under 240 px of panel width the row **stacks** label above value and
 //!   grows from 24 to 40 px, so a narrow Details is cramped rather than
 //!   truncated into uselessness;
-//! * the 14 px left gutter carries the modified dot. It is the only modified
+//! * the 48 px left gutter carries separate pin and reset targets. It is the only modified
 //!   indicator in the editor — no italics, no colour change on the label.
 
 use crate::{
@@ -31,8 +31,8 @@ use crate::{
 };
 use glam::Vec2;
 
-/// Left gutter reserved for the modified dot.
-pub const GUTTER: f32 = 14.0;
+/// Two 24 px targets: pin and reset/modified indicator.
+pub const GUTTER: f32 = 48.0;
 /// Fraction of the row width given to the label column.
 pub const LABEL_FRACTION: f32 = 0.46;
 pub const LABEL_MIN: f32 = 96.0;
@@ -102,6 +102,9 @@ pub fn ellipsise(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32) 
 pub enum PropertyRowMessage {
     /// Value differs from the row's baseline — show the gutter dot.
     SetModified(bool),
+    SetPinned(bool),
+    SetResettable(bool),
+    PinRequested,
     /// Row is not editable (a preset-locked field, a derived value).
     SetReadOnly(bool),
     /// Sent `FromWidget` when the gutter dot is clicked. The editor answers it
@@ -143,6 +146,10 @@ pub struct PropertyRow {
     /// Cursor is over the gutter — the dot grows a ring so it reads as a
     /// control rather than as decoration.
     hover_gutter: bool,
+    pinned: bool,
+    pinnable: bool,
+    resettable: bool,
+    focused: bool,
     /// Cached from the last arrange so `draw` paints the same columns the
     /// child was arranged into.
     metrics: std::cell::Cell<RowMetrics>,
@@ -160,6 +167,21 @@ impl PropertyRow {
 }
 
 impl Control for PropertyRow {
+    fn is_keyboard_focusable(&self) -> bool {
+        true
+    }
+    fn a11y_name(&self) -> Option<String> {
+        Some(format!(
+            "{}. {}Backspace: reset to default.",
+            self.label,
+            if self.pinnable {
+                "P: pin or unpin. "
+            } else {
+                ""
+            }
+        ))
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let width = if available.x.is_finite() {
             available.x
@@ -218,8 +240,33 @@ impl Control for PropertyRow {
 
         // Modified dot — the single modified cue in the editor, and the click
         // target that reverts the row.
+        if self.focused {
+            ctx.push_round_rect_border(b, 4.0, 2.0, theme::active().semantic.border.focus.bytes());
+        }
+        if self.pinnable {
+            ctx.push_text(
+                if self.pinned { "◆" } else { "◇" },
+                Vec2::new(b.x + 7.0, b.y + 5.0),
+                font_id,
+                12.0,
+                if self.pinned {
+                    theme::active().semantic.accent.hover.bytes()
+                } else {
+                    theme::active().semantic.text.muted.bytes()
+                },
+            );
+        }
+        if self.resettable && !self.modified {
+            ctx.push_text(
+                "↶",
+                Vec2::new(b.x + 29.0, b.y + 5.0),
+                font_id,
+                12.0,
+                theme::active().semantic.text.muted.bytes(),
+            );
+        }
         if self.modified {
-            let cx = b.x + GUTTER * 0.5;
+            let cx = b.x + 36.0;
             let cy = b.y + (if m.stacked { 12.0 } else { m.height * 0.5 });
             let t = theme::active();
             let accent = t.semantic.modified.bytes();
@@ -261,7 +308,13 @@ impl Control for PropertyRow {
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> crate::node::CursorKind {
-        if self.modified && !self.read_only && hit_gutter(widget.screen_bounds(), pos) {
+        let b = widget.screen_bounds();
+        let actionable = if pos.x < b.x + 24.0 {
+            self.pinnable
+        } else {
+            self.resettable && !self.read_only
+        };
+        if actionable && hit_gutter(b, pos) {
             crate::node::CursorKind::Pointer
         } else {
             crate::node::CursorKind::Default
@@ -276,7 +329,13 @@ impl Control for PropertyRow {
     ) {
         if let Some(m) = msg.data::<PropertyRowMessage>() {
             match m {
-                PropertyRowMessage::SetModified(v) => self.modified = *v,
+                PropertyRowMessage::SetModified(v) => {
+                    self.modified = *v;
+                    self.resettable = *v;
+                }
+                PropertyRowMessage::SetPinned(v) => self.pinned = *v,
+                PropertyRowMessage::SetResettable(v) => self.resettable = *v,
+                PropertyRowMessage::PinRequested => {}
                 PropertyRowMessage::SetReadOnly(v) => self.read_only = *v,
                 PropertyRowMessage::RevertRequested => {}
             }
@@ -291,11 +350,61 @@ impl Control for PropertyRow {
         {
             self.hover_gutter = false;
         }
-        if let Some(WidgetMessage::MouseDown { pos, .. }) = msg.data::<WidgetMessage>() {
+        match msg.data::<WidgetMessage>() {
+            Some(WidgetMessage::Focus) if msg.destination == widget.handle => self.focused = true,
+            Some(WidgetMessage::Unfocus) if msg.destination == widget.handle => {
+                self.focused = false
+            }
+            _ => {}
+        }
+        if msg.destination == widget.handle {
+            if let Some(WidgetMessage::KeyDown(key, modifiers)) = msg.data::<WidgetMessage>() {
+                if modifiers.ctrl || modifiers.alt || modifiers.logo {
+                    return;
+                }
+                let request = match key {
+                    crate::message::KeyCode::KeyP if self.pinnable => {
+                        Some(PropertyRowMessage::PinRequested)
+                    }
+                    crate::message::KeyCode::Backspace if self.resettable && !self.read_only => {
+                        Some(PropertyRowMessage::RevertRequested)
+                    }
+                    _ => None,
+                };
+                if let Some(request) = request {
+                    emit.push(UiMessage::new(
+                        widget.handle,
+                        MessageDirection::FromWidget,
+                        request,
+                    ));
+                    msg.handled = true;
+                }
+            }
+        }
+        if let Some(WidgetMessage::MouseDown { pos, button, .. }) = msg.data::<WidgetMessage>() {
+            if self.pinnable
+                && *button == crate::message::MouseButton::Left
+                && pos.x >= widget.screen_bounds().x
+                && pos.x < widget.screen_bounds().x + 24.0
+                && hit_gutter(widget.screen_bounds(), *pos)
+            {
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    PropertyRowMessage::PinRequested,
+                ));
+                msg.handled = true;
+                return;
+            }
             // Only a lit dot is clickable. An unmodified row has nothing to
             // revert to, and swallowing the click there would make the gutter
             // feel broken.
-            if self.modified && !self.read_only && hit_gutter(widget.screen_bounds(), *pos) {
+            if self.resettable
+                && !self.read_only
+                && *button == crate::message::MouseButton::Left
+                && pos.x >= widget.screen_bounds().x + 24.0
+                && hit_gutter(widget.screen_bounds(), *pos)
+            {
                 emit.push(UiMessage::new(
                     widget.handle,
                     MessageDirection::FromWidget,
@@ -318,6 +427,7 @@ pub struct PropertyRowBuilder {
     label: String,
     modified: bool,
     read_only: bool,
+    pinnable: bool,
 }
 
 impl PropertyRowBuilder {
@@ -327,11 +437,17 @@ impl PropertyRowBuilder {
             label: String::new(),
             modified: false,
             read_only: false,
+            pinnable: false,
         }
     }
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    pub fn with_pinnable(mut self, on: bool) -> Self {
+        self.pinnable = on;
         self
     }
 
@@ -349,7 +465,15 @@ impl PropertyRowBuilder {
         // The full label is always the tooltip: a row that fits today can be
         // truncated tomorrow by a splitter drag, and a tooltip that appears
         // only after truncation is a tooltip nobody discovers.
-        let widget = self.widget.with_tooltip(self.label.clone());
+        let widget = self.widget.with_tooltip(format!(
+            "{} · {}Backspace: reset to default",
+            self.label,
+            if self.pinnable {
+                "P: pin/unpin · "
+            } else {
+                ""
+            }
+        ));
         UiNode::new(
             widget.build(),
             Box::new(PropertyRow {
@@ -357,6 +481,10 @@ impl PropertyRowBuilder {
                 modified: self.modified,
                 read_only: self.read_only,
                 hover_gutter: false,
+                pinned: false,
+                pinnable: self.pinnable,
+                resettable: self.modified,
+                focused: false,
                 metrics: std::cell::Cell::new(row_metrics(340.0)),
             }),
         )

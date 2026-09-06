@@ -1004,6 +1004,7 @@ pub struct Engine<G: GameApp> {
     /// handful, they are iterated far more often than they are looked up, and a
     /// linear scan of four is not the thing to optimise.
     floating: Vec<FloatingWindow>,
+    floating_layout: somnium_ui::floating_layout::FloatingLayout,
     next_asset_scan: std::time::Instant,
     /// When shader files were last polled for hot reload (MORROWIND-C).
     last_shader_poll: std::time::Instant,
@@ -1577,6 +1578,7 @@ impl<G: GameApp + 'static> Engine<G> {
             locale_catalog: None,
             pending_float: Vec::new(),
             floating: Vec::new(),
+            floating_layout: somnium_ui::floating_layout::FloatingLayout::load(),
             next_asset_scan: std::time::Instant::now(),
             last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
@@ -3422,6 +3424,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             if key_ev.state == winit::event::ElementState::Pressed && !key_ev.repeat {
                 use winit::keyboard::PhysicalKey;
                 if let PhysicalKey::Code(code) = key_ev.physical_key {
+                    if code == winit::keyboard::KeyCode::Escape && self.terrain_stroke.is_some() {
+                        self.cancel_persona_stroke();
+                        return;
+                    }
                     let action =
                         shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard);
                     use somnium_ui::commands::CommandAction as A;
@@ -3468,8 +3474,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                             self.handle_editor_event(EditorEvent::ToggleTerrainEdit);
                             return;
                         }
-                        Some(A::ToggleFoliage) => {
-                            self.handle_editor_event(EditorEvent::ToggleFoliage);
+                        Some(A::ToggleFoliagePaint) => {
+                            self.handle_editor_event(EditorEvent::ToggleFoliagePaint);
                             return;
                         }
                         Some(A::ReloadScripts) => {
@@ -3814,6 +3820,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.maintain_floating_placement();
         if self.state != LifecycleState::Running {
             return;
         }
@@ -4278,6 +4285,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // Phase 16-D: the Scripts section, built from what each
             // attached script declared. Computed before the `ui` borrow
             // because it reads the world and the script host.
+            let tool_context = self.persona_tool_context();
             let sel_scripts = self.script_inspector_state();
             self.sync_material_sessions();
             self.sync_authored_material_components();
@@ -4465,6 +4473,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_generated_details(self.selection.primary, generated_panels);
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
+                ui.update_tool_context(tool_context);
                 ui.update_script_inspector(sel_scripts);
                 ui.set_scene_dirty(self.scene_dirty);
                 // Phase 26-Zeta-G. Must run after the update_* writes above:
@@ -5567,6 +5576,7 @@ impl<G: GameApp> Engine<G> {
         }
 
         if matches!(engine_event, EngineEvent::WindowCloseRequested) {
+            self.floating_layout.flush(true);
             self.initiate_shutdown(event_loop);
         }
 
@@ -5946,8 +5956,112 @@ impl<G: GameApp> Engine<G> {
         self.announce_brush();
     }
 
-    /// Begin a brush stroke under the cursor. Returns true if a stroke started.
+    /// Explain selection eligibility for both authoring panels and tool input.
+    fn persona_target_reason(&self, foliage: bool) -> Option<&'static str> {
+        let Some(entity) = self.selection.primary else {
+            return Some("Select a Landscape in the Outliner.");
+        };
+        if self
+            .world
+            .get::<EditorFlags>(entity)
+            .is_some_and(|flags| flags.locked || flags.hidden)
+        {
+            return Some("Unlock and show the selected Landscape before painting.");
+        }
+        let Some(terrain) = self.world.get::<TerrainComponent>(entity) else {
+            return Some("Select a Landscape in the Outliner.");
+        };
+        if self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.terrain(terrain.terrain_id))
+            .is_none()
+            || self.selected_terrain_model().is_none()
+        {
+            return Some("The selected Landscape has no editable terrain surface.");
+        }
+        if foliage && self.world.get::<FoliageComponent>(entity).is_none() {
+            return Some("Choose a Landscape with a Foliage component.");
+        }
+        None
+    }
+    fn persona_tool_context(&self) -> somnium_ui::editor::tool_context::ToolContext {
+        use somnium_ui::editor::tool_context::{ToolContext, ToolMode};
+        ToolContext {
+            mode: if self.foliage_paint_active {
+                ToolMode::Foliage
+            } else if self.terrain_edit_active {
+                ToolMode::Landscape
+            } else {
+                ToolMode::Select
+            },
+            target: self
+                .selection
+                .primary
+                .and_then(|e| self.world.get::<Name>(e))
+                .map(|n| n.as_str().to_owned())
+                .unwrap_or_default(),
+            landscape_reason: self.persona_target_reason(false).map(str::to_owned),
+            foliage_reason: self.persona_target_reason(true).map(str::to_owned),
+            foliage_visible: self
+                .selection
+                .primary
+                .and_then(|e| self.world.get::<FoliageComponent>(e))
+                .is_some_and(|f| f.enabled),
+            brush: [
+                self.terrain_brush.radius,
+                self.terrain_brush.strength,
+                self.terrain_brush.hardness,
+            ],
+            operation: match self.terrain_brush.mode {
+                BrushMode::Raise => 0,
+                BrushMode::Lower => 1,
+                BrushMode::Smooth => 2,
+                BrushMode::Flatten => 3,
+                BrushMode::Noise => 4,
+                BrushMode::Paint => 5,
+            },
+            layer: self.terrain_brush.paint_layer,
+            layer_count: self
+                .selected_terrain()
+                .and_then(|tc| self.renderer.as_ref()?.terrain(tc.terrain_id))
+                .map_or(0, |t| t.layers.len()),
+        }
+    }
+    fn cancel_persona_stroke(&mut self) {
+        let Some(stroke) = self.terrain_stroke.take() else {
+            return;
+        };
+        let Some(terrain) = self
+            .renderer
+            .as_mut()
+            .and_then(|r| r.terrain_mut(stroke.terrain_id))
+        else {
+            return;
+        };
+        if stroke.is_paint {
+            terrain.splatmap.data = stroke.start_texels;
+            if let Some((x0, z0, x1, z1)) = stroke.region {
+                terrain.splatmap.mark_dirty(x0, z0, x1, z1);
+            }
+            terrain.invalidate_unique_colour();
+            terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+        } else {
+            terrain.heightmap = stroke.start_heights;
+            if let Some((x0, z0, x1, z1)) = stroke.region {
+                terrain.mark_region_dirty(x0, z0, x1, z1);
+            }
+        }
+        terrain.brush_cursor = [0.0; 4];
+    }
+
     fn begin_terrain_stroke(&mut self) -> bool {
+        if let Some(reason) = self.persona_target_reason(false) {
+            if let Some(ui) = &mut self.ui_manager {
+                ui.push_toast(reason);
+            }
+            return false;
+        }
         let Some(tc) = self.selected_terrain() else {
             return false;
         };
@@ -7502,6 +7616,28 @@ impl<G: GameApp> Engine<G> {
     /// Returns true when a terrain was hit, so the caller knows the click was
     /// consumed by painting rather than falling through to selection.
     fn paint_foliage_dab(&mut self) -> bool {
+        if self
+            .selection
+            .primary
+            .and_then(|e| self.world.get::<FoliageComponent>(e))
+            .is_some_and(|f| !f.enabled)
+        {
+            if !self.foliage_refusal_reported {
+                self.foliage_refusal_reported = true;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast(
+                        "Foliage is hidden. Enable Visible in the Foliage panel before painting.",
+                    );
+                }
+            }
+            return true;
+        }
+        if let Some(reason) = self.persona_target_reason(true) {
+            if let Some(ui) = &mut self.ui_manager {
+                ui.push_toast(reason);
+            }
+            return false;
+        }
         let Some(tc) = self.selected_terrain() else {
             return false;
         };
@@ -7850,6 +7986,92 @@ impl<G: GameApp> Engine<G> {
     /// MORROWIND-J step 2. Created here rather than anywhere else because
     /// `create_window` needs an `ActiveEventLoop`, and this is the point in the
     /// frame that has one *and* has just drained the editor's events.
+    fn floating_monitors(&self) -> Vec<somnium_ui::floating_layout::MonitorBounds> {
+        self.window
+            .as_ref()
+            .map(|w| {
+                w.available_monitors()
+                    .map(|m| {
+                        let p = m.position();
+                        let s = m.size();
+                        somnium_ui::floating_layout::MonitorBounds {
+                            x: p.x,
+                            y: p.y,
+                            width: s.width,
+                            height: s.height,
+                            scale: m.scale_factor(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn remember_floating_placement(&mut self, kind: somnium_ui::floating::FloatingKind) {
+        let Some(w) = self.floating.iter().find(|w| w.kind == kind) else {
+            return;
+        };
+        if w.window.is_maximized() || w.window.is_minimized() == Some(true) {
+            return;
+        }
+        let Ok(p) = w.window.outer_position() else {
+            return;
+        };
+        let size = w.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let scale = w.window.scale_factor().max(0.5);
+        self.floating_layout.record(
+            kind,
+            somnium_ui::floating_layout::Placement {
+                x: p.x,
+                y: p.y,
+                width: size.width as f64 / scale,
+                height: size.height as f64 / scale,
+            },
+        );
+    }
+    fn maintain_floating_placement(&mut self) {
+        self.floating_layout.flush(false);
+        if !self.floating_layout.monitor_check_due() || self.floating.is_empty() {
+            return;
+        }
+        let monitors = self.floating_monitors();
+        for w in &self.floating {
+            if w.window.is_maximized() || w.window.is_minimized() == Some(true) {
+                continue;
+            }
+            let Ok(position) = w.window.outer_position() else {
+                continue;
+            };
+            let size = w.window.inner_size();
+            let scale = w.window.scale_factor().max(0.5);
+            let actual = somnium_ui::floating_layout::Placement {
+                x: position.x,
+                y: position.y,
+                width: size.width as f64 / scale,
+                height: size.height as f64 / scale,
+            };
+            // Do not fight ordinary drags between screens. Recovery while open
+            // applies only when the title bar is completely off every monitor.
+            if monitors.iter().any(|m| {
+                actual.x as i64 + 64 >= m.x as i64
+                    && (actual.x as i64) < m.x as i64 + m.width as i64
+                    && actual.y >= m.y
+                    && actual.y as i64 + 32 < m.y as i64 + m.height as i64
+            }) {
+                continue;
+            }
+            let fixed = actual.recovered(&monitors, w.kind.minimum_size());
+            w.window
+                .set_outer_position(winit::dpi::PhysicalPosition::new(fixed.x, fixed.y));
+            let _ = w
+                .window
+                .request_inner_size(LogicalSize::new(fixed.width, fixed.height));
+            self.floating_layout.record(w.kind, fixed);
+        }
+    }
+
     fn float_panel(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -7865,11 +8087,27 @@ impl<G: GameApp> Engine<G> {
             return;
         };
         let (w, h) = kind.default_size();
+        let mut placement = self.floating_layout.get(kind);
+        if let Some(position) = at.and_then(|at| self.tear_off_position(at)) {
+            placement = Some(somnium_ui::floating_layout::Placement {
+                x: position.x,
+                y: position.y,
+                width: placement.map_or(w as f64, |p| p.width),
+                height: placement.map_or(h as f64, |p| p.height),
+            });
+        }
         let mut attrs = WindowAttributes::default()
             .with_title(kind.title())
-            .with_inner_size(LogicalSize::new(w, h));
-        if let Some(position) = at.and_then(|at| self.tear_off_position(at)) {
-            attrs = attrs.with_position(position);
+            .with_inner_size(LogicalSize::new(w, h))
+            .with_min_inner_size(LogicalSize::new(
+                kind.minimum_size().0,
+                kind.minimum_size().1,
+            ));
+        if let Some(saved) = placement {
+            let restored = saved.recovered(&self.floating_monitors(), kind.minimum_size());
+            attrs = attrs
+                .with_position(winit::dpi::PhysicalPosition::new(restored.x, restored.y))
+                .with_inner_size(LogicalSize::new(restored.width, restored.height));
         }
         attrs = apply_brand_icon(attrs);
         if let Some(owner) = self.window.as_ref() {
@@ -8014,6 +8252,8 @@ impl<G: GameApp> Engine<G> {
             return;
         }
         info!(?kind, "panel dropped over the editor; docking it");
+        self.remember_floating_placement(kind);
+        self.floating_layout.flush(true);
         self.floating.retain(|w| w.kind != kind);
         self.dock_panel(kind);
     }
@@ -8118,9 +8358,20 @@ impl<G: GameApp> Engine<G> {
         let Some(index) = self.floating.iter().position(|w| w.window.id() == id) else {
             return FloatingRoute::Main;
         };
+        if matches!(
+            event,
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::Focused(false)
+        ) {
+            self.remember_floating_placement(self.floating[index].kind);
+            if matches!(event, WindowEvent::Focused(false)) {
+                self.floating_layout.flush(true);
+            }
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // Closing returns the panel to the dock rather than losing it.
+                self.remember_floating_placement(self.floating[index].kind);
+                self.floating_layout.flush(true);
                 let closed = self.floating.remove(index);
                 info!(kind = ?closed.kind, "floating window closed");
                 self.dock_panel(closed.kind);
@@ -9785,6 +10036,21 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::LoadScene(path) => self.load_scene_file(&path),
 
+            EditorEvent::SetLandscapeBrush {
+                field,
+                value,
+                live: _,
+            } => {
+                if value.is_finite() {
+                    match field {
+                        0 => self.terrain_brush.radius = value.clamp(0.5, 128.0),
+                        1 => self.terrain_brush.strength = value.clamp(0.05, 1.0),
+                        2 => self.terrain_brush.hardness = value.clamp(0.0, 1.0),
+                        _ => {}
+                    }
+                }
+            }
+
             EditorEvent::SetTerrainTool(tool) => {
                 self.set_terrain_tool(tool);
             }
@@ -10125,7 +10391,10 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::PanelDropped(kind) => self.panel_dropped(kind),
 
             EditorEvent::ClosePanelWindow(kind) => {
+                self.remember_floating_placement(kind);
+                self.floating_layout.flush(true);
                 self.floating.retain(|w| w.kind != kind);
+                self.dock_panel(kind);
             }
 
             EditorEvent::SaveLocalisation => self.save_localisation(),
@@ -10275,6 +10544,9 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::SetGizmoMode(mode) => {
+                self.end_terrain_stroke();
+                self.terrain_edit_active = false;
+                self.foliage_paint_active = false;
                 if let Some(r) = &mut self.renderer {
                     r.gizmo_mode = match mode {
                         1 => somnium_renderer::pass::gizmo::GizmoMode::Rotate,
@@ -10287,6 +10559,9 @@ impl<G: GameApp> Engine<G> {
             EditorEvent::ToggleTerrainEdit => {
                 if self.selected_terrain().is_some() {
                     self.terrain_edit_active = !self.terrain_edit_active;
+                    if self.terrain_edit_active {
+                        self.foliage_paint_active = false;
+                    }
                     info!(
                         "Terrain edit mode: {}",
                         if self.terrain_edit_active {
@@ -10297,6 +10572,9 @@ impl<G: GameApp> Engine<G> {
                     );
                 } else {
                     info!("Select a terrain entity before pressing F6");
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.push_toast("Select a Landscape in the Outliner first");
+                    }
                 }
             }
 
@@ -10363,10 +10641,21 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleFoliage => {
-                if let Some(entity) = self.selection.primary {
-                    if let Some(f) = self.world.get_mut::<FoliageComponent>(entity) {
-                        f.enabled = !f.enabled;
-                    }
+                let edit = self.selection.primary.and_then(|entity| {
+                    let enabled = !self.world.get::<FoliageComponent>(entity)?.enabled;
+                    let schema = self.type_registry.by_name("somnium.Foliage")?;
+                    let field = schema.fields.iter().find(|field| field.name == "enabled")?;
+                    Some((entity, schema.stable_id, field.id, enabled))
+                });
+                if let Some((entity, component, field, enabled)) = edit {
+                    self.handle_editor_event(EditorEvent::SetComponentField {
+                        entity,
+                        component,
+                        field,
+                        value: somnium_ecs::reflect::ReflectValue::Bool(enabled),
+                        gesture: GestureId(u64::MAX - 3),
+                        live: false,
+                    });
                 }
             }
 

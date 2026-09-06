@@ -109,6 +109,14 @@ impl Control for ComboBox {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(crate::message::MixedValue(mixed)) = msg.data::<crate::message::MixedValue>() {
+            if !self.open {
+                self.mixed = *mixed;
+            }
+            msg.handled = true;
+            return;
+        }
+
         if let Some(ComboBoxMessage::BindPopup { popup, list }) = msg.data::<ComboBoxMessage>() {
             self.popup = *popup;
             self.list = *list;

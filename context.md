@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-09-04 against the current working tree.
+Last verified: 2026-09-06 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -16,23 +16,23 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | PERSONA A/B implemented; C–H open. MORROWIND remains partially complete. |
-| Most recent work | PERSONA-A/B: editor baseline, Nocturne v2 tokens/recipes and native gallery, 2026-09-05 |
+| Active phase | PERSONA A–D and first E/F slice in tree; designer journeys, E/F acceptance and G open. MORROWIND remains partially complete. |
+| Most recent work | PERSONA-E/F: contextual Landscape/Foliage, F8 painter fix, floating placement and narrow-window repairs, 2026-09-06 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Current implementation priority | PERSONA (Atlus): A/B baseline and Nocturne v2 foundation implemented; C shell composition next, before further work on other phases |
+| Current implementation priority | PERSONA (Atlus): verify designer journeys, finish E resource/settings contract and F OS/DPI matrix, then G acceptance before other phases |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-05 | 215,927 Rust/WGSL lines and 2,193 discovered tests |
+| Generated census, 2026-09-06 | 218,374 Rust/WGSL lines and 2,211 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
-| Visual gate | Historical sculpt mismatch: 5.3333%. PERSONA-B changes all three old golden regions; see [A/B evidence](<dev records/phase PERSONA/PERSONA-A_B.md>). References preserved. |
+| Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
 
 The top-level phase status is:
 
 | Phase | Status | Read next |
 |---|---|---|
-| PERSONA / Atlus | A/B implemented; C–H and phase closure open | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
+| PERSONA / Atlus | A–D and first E/F slice in tree; journey/E/F acceptance, G and phase closure open | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
 | TSUSHIMA | A through K in tree | [`phase_TSUSHIMA.md`](<dev records/phase_TSUSHIMA.md>) |
@@ -2106,8 +2106,7 @@ inventory, trade, quest system, or anomaly framework.
 is the next implementation phase, before further work on any other phase,
 including the TALOS proposal. It upgrades the editor's Nocturne design system,
 visual composition, and designer workflows. A/B baseline and shared visual foundations
-are implemented; see [the A/B record](<dev records/phase PERSONA/PERSONA-A_B.md>)
-for native evidence, validation, known issues and floating-window acceptance limits. The dependency order below resumes after PERSONA and does not
+are implemented. The [E/F record](<dev records/phase PERSONA/PERSONA-E_F.md>) covers contextual authoring, the missing foliage painter fix, floating placement and narrow-window regressions; E/F acceptance remains open. C/D workspace and QoL changes are in tree; see [the C/D record](<dev records/phase PERSONA/PERSONA-C_D.md>) for native evidence, validation, open designer journeys and floating-window acceptance limits. The dependency order below resumes after PERSONA and does not
 change the completion status of existing work.
 
 ```text

@@ -257,6 +257,7 @@ pub(crate) fn build_generated_details(
     font_id: u8,
     panels: &[GeneratedComponentPanel],
     assets: &somnium_asset::database::AssetDbSnapshot,
+    presentation: &mut super::persona::Persona,
 ) -> (
     NodeHandle,
     HashMap<NodeHandle, GeneratedBinding>,
@@ -284,13 +285,20 @@ pub(crate) fn build_generated_details(
     let mut asset_actions = HashMap::new();
     let mut collection_actions = HashMap::new();
 
-    for panel in panels {
-        let heading =
-            TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 7.0)))
-                .with_role(TextRole::SectionCaps)
-                .with_text(&panel.label)
-                .build();
-        ui.add_node(heading, root);
+    presentation.begin();
+    // Identity is already sticky above the scroll area. Keep editable Name
+    // metadata available after authored properties, rather than repeating it first.
+    let ordered = panels
+        .iter()
+        .filter(|p| p.component.as_str() != "somnium.Name")
+        .chain(
+            panels
+                .iter()
+                .filter(|p| p.component.as_str() == "somnium.Name"),
+        );
+    for panel in ordered {
+        let section_root =
+            presentation.section(ui, root, panel.component.as_str().to_owned(), &panel.label);
         if let Some(path) = panel.preview_path.clone() {
             ui.draw_ctx.thumbnails.request(&path, true);
             let preview = ImageBuilder::new(
@@ -302,20 +310,22 @@ pub(crate) fn build_generated_details(
             .with_asset(path)
             .with_size(96.0)
             .build();
-            ui.add_node(preview, root);
+            ui.add_node(preview, section_root);
         }
         let mut last_group = None;
+        let mut group_root = section_root;
         for model in &panel.rows {
             if model.group != last_group {
-                if let Some(group) = model.group {
-                    let label = TextBuilder::new(
-                        WidgetBuilder::new().with_margin(Thickness::axes(10.0, 4.0)),
+                group_root = if let Some(group) = model.group {
+                    presentation.section(
+                        ui,
+                        section_root,
+                        format!("{}/group/{group}", panel.component),
+                        group,
                     )
-                    .with_role(TextRole::Caption)
-                    .with_text(group)
-                    .build();
-                    ui.add_node(label, root);
-                }
+                } else {
+                    section_root
+                };
                 last_group = model.group;
             }
             let row = PropertyRowBuilder::new(
@@ -324,10 +334,12 @@ pub(crate) fn build_generated_details(
                     .with_background(theme::TRANSPARENT),
             )
             .with_label(&model.label)
+            .with_pinnable(true)
             .with_modified(model.modified && !model.mixed)
             .with_read_only(model.read_only)
             .build();
-            let row_handle = ui.add_node(row, root);
+            let row_handle = ui.add_node(row, group_root);
+            presentation.register(ui, row_handle, model, &panel.label);
             let base = GeneratedBinding {
                 component: model.component,
                 field: model.field,

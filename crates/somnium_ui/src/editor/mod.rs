@@ -14,3 +14,7 @@ pub mod property_editors;
 pub(crate) mod shell;
 
 pub(crate) mod gallery;
+
+pub(crate) mod persona;
+
+pub mod tool_context;

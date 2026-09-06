@@ -92,13 +92,22 @@ impl Control for TextBox {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(crate::message::MixedValue(mixed)) = msg.data::<crate::message::MixedValue>() {
+            if !self.focused {
+                self.mixed = *mixed;
+            }
+            msg.handled = true;
+            return;
+        }
+
         if let Some(TextMessage::SetText(s)) = msg.data::<TextMessage>() {
             if !self.focused {
                 self.text = s.clone();
                 widget.invalidate_layout();
-                msg.handled = true;
-                return;
             }
+            // A model refresh must not bubble into the row's label while editing.
+            msg.handled = true;
+            return;
         }
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg.clone() {

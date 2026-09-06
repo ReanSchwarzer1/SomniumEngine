@@ -151,7 +151,17 @@ impl FloatingKind {
         }
     }
 
-    /// The size the window opens at, in logical pixels.
+    /// Smallest logical client area that keeps the panel actions reachable.
+    #[must_use]
+    pub const fn minimum_size(self) -> (u32, u32) {
+        match self {
+            Self::Details => (320, 360),
+            Self::Outliner => (300, 240),
+            Self::OutputLog => (480, 240),
+            Self::Viewport => (480, 320),
+        }
+    }
+    /// Initial logical client size when no saved placement exists.
     #[must_use]
     pub const fn default_size(self) -> (u32, u32) {
         match self {

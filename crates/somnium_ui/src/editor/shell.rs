@@ -74,7 +74,7 @@ fn panel_header(
     header: NodeHandle,
     caption: &str,
     font_id: u8,
-) -> NodeHandle {
+) -> (NodeHandle, NodeHandle) {
     let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .add_row(Row::stretch())
         .add_column(Column::stretch())
@@ -100,25 +100,27 @@ fn panel_header(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(1)
-            .with_width(20.0)
-            .with_height(18.0)
+            .with_width(52.0)
+            .with_height(24.0)
             .with_margin(Thickness::axes(4.0, 2.0))
-            .with_background(theme::TRANSPARENT),
+            .with_background(theme::TRANSPARENT)
+            .with_tooltip("Float panel · drag the header to move"),
     )
     .build();
     let button = ui.add_node(button, grid);
-    let glyph = ImageBuilder::new(
-        WidgetBuilder::new()
-            .with_width(12.0)
-            .with_height(12.0)
-            .with_margin(Thickness::uniform(3.0)),
-    )
-    .with_icon(IconId::Float)
-    .with_size(12.0)
-    .with_tint(theme::active().semantic.text.secondary.bytes())
-    .build();
-    ui.add_node(glyph, button);
-    button
+    let label = ui.add_node(
+        TextBuilder::new(
+            WidgetBuilder::new()
+                .with_horizontal_alignment(HorizontalAlignment::Center)
+                .with_vertical_alignment(VerticalAlignment::Center),
+        )
+        .with_text("Float")
+        .with_role(TextRole::Body)
+        .with_font_id(font_id)
+        .build(),
+        button,
+    );
+    (button, label)
 }
 
 pub(crate) fn build_editor_layout(
@@ -127,6 +129,7 @@ pub(crate) fn build_editor_layout(
     layout: crate::layout_persist::ChromeLayout,
 ) -> EditorLayout {
     let root = ui.root();
+    let mut persona = super::persona::Persona::load();
 
     // Zeta shell budget: application 36 | mode 32 | viewport context 32.
     // Menus now live in the application band; the retired menu row remains at
@@ -378,6 +381,22 @@ pub(crate) fn build_editor_layout(
             .with_orientation(Orientation::Horizontal)
             .build();
     let main_tb_stack_h = ui.add_node(main_tb_stack, main_tb_h);
+    (persona.workspace, persona.workspace_popup) = super::persona::combo(
+        ui,
+        main_tb_stack_h,
+        &[
+            "Layout",
+            "Terrain",
+            "Foliage",
+            "Lighting",
+            "Materials",
+            "Animation",
+            "Debug",
+            "Play",
+        ],
+        132.0,
+        font_id,
+    );
     // Nocturne Atelier §01: "icon-only controls without tooltips" is a
     // forbidden motif, and phase_26 §2.4 already required recognition over
     // recall for the mode commands. Save and the three editing modes carry
@@ -476,7 +495,7 @@ pub(crate) fn build_editor_layout(
     )
     .with_orientation(SplitterOrientation::Horizontal)
     .with_first_size(layout.tools)
-    .with_min_first(120.0)
+    .with_min_first(48.0)
     .with_min_second(240.0)
     .build();
     let inner_h = ui.add_node(tools_split, outer_h);
@@ -507,14 +526,34 @@ pub(crate) fn build_editor_layout(
             .build();
     let content_split_h = ui.add_node(content_split, inner_h);
 
-    // Terrain tool palette (Phase 14F): label + 6 brush mode buttons.
-    // Active only while a terrain entity is selected (F6 toggles edit mode).
-    let tool_stack =
+    let tool_grid = ui.add_node(
+        GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .add_row(Row::strict(32.0))
+            .add_row(Row::stretch())
+            .add_column(Column::stretch())
+            .build(),
+        toolbar_h,
+    );
+    persona.tool_hint = super::persona::action(ui, tool_grid, "Tools", 0.0);
+    let tool_scroll = ui.add_node(
+        ScrollViewerBuilder::new(WidgetBuilder::new().with_row(1)).build(),
+        tool_grid,
+    );
+    let tool_stack_h = ui.add_node(
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
             .with_orientation(Orientation::Vertical)
-            .build();
-    let tool_stack_h = ui.add_node(tool_stack, toolbar_h);
-
+            .build(),
+        tool_scroll,
+    );
+    persona.tools = tool_scroll;
+    ui.set_visibility(tool_scroll, false);
+    persona.tool_panel = super::tool_context::ToolPanel::build(ui, tool_stack_h, font_id);
+    let legacy_tools = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new().with_visibility(false))
+            .with_orientation(Orientation::Vertical)
+            .build(),
+        tool_stack_h,
+    );
     let ter_lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
         left: 8.0,
         top: 8.0,
@@ -524,7 +563,7 @@ pub(crate) fn build_editor_layout(
     .with_role(TextRole::SectionCaps)
     .with_text("Sculpt")
     .build();
-    ui.add_node(ter_lbl, tool_stack_h);
+    ui.add_node(ter_lbl, legacy_tools);
 
     const TERRAIN_TOOLS: &[(IconId, &str, u8)] = &[
         (IconId::SculptRaise, "Raise", 0),
@@ -548,7 +587,7 @@ pub(crate) fn build_editor_layout(
                 .with_background(theme::active().semantic.surface.raised.bytes()),
         )
         .build();
-        let btn_h = ui.add_node(btn, tool_stack_h);
+        let btn_h = ui.add_node(btn, legacy_tools);
         let row = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
             .with_orientation(Orientation::Horizontal)
             .build();
@@ -895,7 +934,7 @@ pub(crate) fn build_editor_layout(
 
     // Detaching the viewport takes this bar with it, which is what makes the
     // button in the floating window the way back.
-    let (viewport_float, _) = labeled_icon_button(
+    let (viewport_float, viewport_float_label) = labeled_icon_button(
         ui,
         vp_actions_h,
         IconId::Float,
@@ -1154,16 +1193,19 @@ pub(crate) fn build_editor_layout(
     let right_split_h = ui.add_node(right_split, right_h);
 
     let out_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(24.0))
-        .add_row(Row::strict(22.0))
+        .add_row(Row::strict(28.0))
+        .add_row(Row::strict(28.0))
+        .add_row(Row::strict(26.0))
         .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build();
     let out_grid_h = ui.add_node(out_grid, right_split_h);
 
     let ins_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(24.0))
-        .add_row(Row::strict(22.0))
+        .add_row(Row::strict(28.0))
+        .add_row(Row::strict(28.0))
+        .add_row(Row::strict(30.0))
+        .add_row(Row::strict(28.0))
         .add_row(Row::stretch())
         .add_column(Column::stretch())
         .build();
@@ -1185,7 +1227,7 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let out_hdr_h = ui.add_node(out_hdr, out_grid_h);
-    let outliner_float = panel_header(ui, out_hdr_h, "OUTLINER", font_id);
+    let (outliner_float, outliner_float_label) = panel_header(ui, out_hdr_h, "Outliner", font_id);
 
     let outliner_search = {
         let n = SearchBoxBuilder::new(
@@ -1199,9 +1241,29 @@ pub(crate) fn build_editor_layout(
         ui.add_node(n, out_grid_h)
     };
 
+    let scopes = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_row(2)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(),
+        out_grid_h,
+    );
+    for (label, scope) in [
+        ("All", ""),
+        ("Visible", "hidden:false"),
+        ("Hidden", "hidden:true"),
+        ("Locked", "locked:true"),
+    ] {
+        persona
+            .outliner_filters
+            .push((super::persona::action(ui, scopes, label, 68.0), scope));
+    }
     let out_scroll = ScrollViewerBuilder::new(
         WidgetBuilder::new()
-            .with_row(2)
+            .with_row(3)
             .with_column(0)
             .with_background(theme::active().semantic.surface.window.bytes()),
     )
@@ -1241,7 +1303,11 @@ pub(crate) fn build_editor_layout(
     })
     .build();
     let ins_hdr_h = ui.add_node(ins_hdr, ins_grid_h);
-    let details_float = panel_header(ui, ins_hdr_h, "DETAILS", font_id);
+    let (details_float, details_float_label) = panel_header(ui, ins_hdr_h, "Details", font_id);
+
+    for (handle, scope) in &persona.outliner_filters {
+        ui.send(ButtonMessage::set_selected(*handle, scope.is_empty()));
+    }
 
     let inspector_search = {
         let n = SearchBoxBuilder::new(
@@ -1255,9 +1321,40 @@ pub(crate) fn build_editor_layout(
         ui.add_node(n, ins_grid_h)
     };
 
+    persona.identity = ui.add_node(
+        TextBuilder::new(
+            WidgetBuilder::new()
+                .with_row(2)
+                .with_margin(Thickness::axes(8.0, 6.0)),
+        )
+        .with_role(TextRole::BodyStrong)
+        .with_text("No selection")
+        .build(),
+        ins_grid_h,
+    );
+    let filters = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_row(3)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(),
+        ins_grid_h,
+    );
+    for (label, filter) in [
+        ("All", super::persona::Filter::All),
+        ("Modified", super::persona::Filter::Modified),
+        ("Pinned", super::persona::Filter::Pinned),
+    ] {
+        persona
+            .filters
+            .push((super::persona::action(ui, filters, label, 80.0), filter));
+    }
+    persona.clear = super::persona::action(ui, filters, "Clear", 64.0);
     let ins_content = ScrollViewerBuilder::new(
         WidgetBuilder::new()
-            .with_row(2)
+            .with_row(4)
             .with_column(0)
             .with_background(theme::active().semantic.surface.window.bytes()),
     )
@@ -1270,7 +1367,49 @@ pub(crate) fn build_editor_layout(
             .build();
     let inspector_stack = ui.add_node(inspector_stack, ins_content_h);
 
-    let inspector_handles = build_inspector(ui, inspector_stack, font_id);
+    persona.generated_host = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build(),
+        inspector_stack,
+    );
+    persona.empty = ui.add_node(
+        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(12.0)))
+            .with_role(TextRole::Body)
+            .with_wrap(true)
+            .with_text("No properties match. Clear Search or choose All to show more.")
+            .build(),
+        inspector_stack,
+    );
+    ui.set_visibility(persona.empty, false);
+    persona.advanced = super::persona::action(
+        ui,
+        inspector_stack,
+        "Advanced · renderer and tool diagnostics",
+        0.0,
+    );
+    persona.advanced_body = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build(),
+        inspector_stack,
+    );
+    ui.set_visibility(persona.advanced_body, false);
+    let inspector_handles = build_inspector(ui, persona.advanced_body, font_id);
+    ui.reparent(
+        inspector_handles.foliage_section,
+        persona.tool_panel.foliage,
+    );
+    let foliage_popup = super::parts::attach_combo_popup(
+        ui,
+        inspector_handles.foliage_kind_button,
+        &FOLIAGE_KIND_NAMES,
+        font_id,
+    );
+    persona
+        .tool_panel
+        .popups
+        .push((inspector_handles.foliage_kind_button, foliage_popup));
 
     // Phase 27-G. Sibling of the property stack, not a child: `update_inspector`
     // toggles the two so a selection change is a visibility flip rather than a
@@ -1315,7 +1454,7 @@ pub(crate) fn build_editor_layout(
         content_scroll,
         content_list,
         content_toolbar_actions,
-    ) = build_content_drawer(ui, bottom_swap_h, font_id);
+    ) = build_content_drawer(ui, bottom_swap_h, font_id, &mut persona);
 
     let log_panel = GridBuilder::new(
         WidgetBuilder::new()
@@ -1324,7 +1463,7 @@ pub(crate) fn build_editor_layout(
             .with_background(theme::TRANSPARENT)
             .with_visibility(false),
     )
-    .add_row(Row::strict(22.0))
+    .add_row(Row::auto())
     .add_row(Row::stretch())
     .add_column(Column::stretch())
     .build();
@@ -1350,13 +1489,23 @@ pub(crate) fn build_editor_layout(
     // on top of each other. Invisible while the docked panel is wide enough for
     // the toolbar to sit clear of the title, and not invisible at all in a 900
     // px window, where the first filter chip lands on the word "Output".
-    let log_hdr_grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::stretch())
-        .add_column(Column::auto())
-        .add_column(Column::stretch())
-        .add_column(Column::auto())
-        .build();
-    let log_hdr_grid_h = ui.add_node(log_hdr_grid, log_hdr_h);
+    let log_header_stack = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new())
+            .with_orientation(Orientation::Vertical)
+            .build(),
+        log_hdr_h,
+    );
+    let log_hdr_grid = GridBuilder::new(
+        WidgetBuilder::new()
+            .with_height(28.0)
+            .with_background(theme::TRANSPARENT),
+    )
+    .add_row(Row::stretch())
+    .add_column(Column::auto())
+    .add_column(Column::stretch())
+    .add_column(Column::auto())
+    .build();
+    let log_hdr_grid_h = ui.add_node(log_hdr_grid, log_header_stack);
 
     let log_header = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
         Thickness {
@@ -1376,16 +1525,14 @@ pub(crate) fn build_editor_layout(
     // In the header rather than a second row because the panel is short and
     // Zeta's budget is tight; four chips, a search box and three verbs fit
     // beside a title, and a second 22 px band would cost a line of log.
-    let log_tools = StackPanelBuilder::new(
-        WidgetBuilder::new()
-            .with_row(0)
-            .with_column(1)
-            .with_horizontal_alignment(HorizontalAlignment::Right)
-            .with_background(theme::TRANSPARENT),
-    )
-    .with_orientation(Orientation::Horizontal)
-    .build();
-    let log_tools = ui.add_node(log_tools, log_hdr_grid_h);
+    let log_tools = ui.add_node(
+        crate::widgets::wrap_panel::WrapPanelBuilder::new(
+            WidgetBuilder::new().with_margin(Thickness::axes(4.0, 3.0)),
+        )
+        .with_gap(4.0, 4.0)
+        .build(),
+        log_header_stack,
+    );
 
     let mut log_severity_chips = Vec::new();
     for severity in crate::log::LogSeverity::ALL {
@@ -1396,7 +1543,7 @@ pub(crate) fn build_editor_layout(
             severity.label(),
             "Show or hide this severity.",
             font_id,
-            18.0,
+            24.0,
         );
         log_severity_chips.push((chip, severity));
     }
@@ -1404,6 +1551,7 @@ pub(crate) fn build_editor_layout(
         SearchBoxBuilder::new(
             WidgetBuilder::new()
                 .with_width(160.0)
+                .with_height(24.0)
                 .with_margin(Thickness::axes(6.0, 1.0)),
         )
         .with_font_id(font_id)
@@ -1417,7 +1565,7 @@ pub(crate) fn build_editor_layout(
         "Pinned",
         "Show only pinned lines.",
         font_id,
-        18.0,
+        24.0,
     );
     let (log_copy, _) = labeled_icon_button(
         ui,
@@ -1426,7 +1574,7 @@ pub(crate) fn build_editor_layout(
         "Copy",
         "Copy the visible lines.",
         font_id,
-        18.0,
+        24.0,
     );
     let (log_clear, _) = labeled_icon_button(
         ui,
@@ -1435,7 +1583,7 @@ pub(crate) fn build_editor_layout(
         "Clear",
         "Clear the log. Pinned lines survive.",
         font_id,
-        18.0,
+        24.0,
     );
     let (log_jobs_toggle, _) = labeled_icon_button(
         ui,
@@ -1444,7 +1592,7 @@ pub(crate) fn build_editor_layout(
         "Jobs",
         "Background jobs, including failed and cancelled ones.",
         font_id,
-        18.0,
+        24.0,
     );
     let (log_history_toggle, _) = labeled_icon_button(
         ui,
@@ -1453,7 +1601,7 @@ pub(crate) fn build_editor_layout(
         "History",
         "The undo history. Click a row to go there.",
         font_id,
-        18.0,
+        24.0,
     );
     // Its own column rather than the end of the toolbar. The toolbar is nine
     // controls long and truncates in a narrow window; the control that puts the
@@ -1467,7 +1615,7 @@ pub(crate) fn build_editor_layout(
     .with_orientation(Orientation::Horizontal)
     .build();
     let log_actions = ui.add_node(log_actions, log_hdr_grid_h);
-    let (log_float, _) = labeled_icon_button(
+    let (log_float, log_float_label) = labeled_icon_button(
         ui,
         log_actions,
         IconId::Float,
@@ -1919,7 +2067,7 @@ pub(crate) fn build_editor_layout(
     let unsaved_popup = ui.add_node(unsaved_popup_node, root);
     let unsaved_border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_width(340.0)
+            .with_width(380.0)
             .with_horizontal_alignment(HorizontalAlignment::Center)
             .with_vertical_alignment(VerticalAlignment::Center)
             .with_background(theme::active().semantic.surface.header.bytes())
@@ -1947,7 +2095,7 @@ pub(crate) fn build_editor_layout(
         let b = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_width(100.0)
-                .with_height(24.0)
+                .with_height(28.0)
                 .with_margin(Thickness::axes(8.0, 8.0))
                 .with_background(theme::active().semantic.surface.raised.bytes()),
         )
@@ -2055,11 +2203,18 @@ pub(crate) fn build_editor_layout(
         .chain(help_items)
         .collect();
 
+    persona.floating_labels = vec![
+        (outliner_float, outliner_float_label),
+        (details_float, details_float_label),
+        (viewport_float, viewport_float_label),
+        (log_float, log_float_label),
+    ];
     EditorLayout {
         outliner_scroll,
         outliner_empty,
         outliner_stack,
         inspector_stack,
+        persona,
         details_empty,
         log_stack,
         log_empty,

@@ -50,10 +50,10 @@ pub struct ChromeLayout {
 impl Default for ChromeLayout {
     fn default() -> Self {
         Self {
-            tools: 168.0,
+            tools: 48.0,
             viewport: 0.0,
             details: DETAILS_DEFAULT,
-            outliner: 300.0,
+            outliner: 170.0,
             floating: Vec::new(),
         }
     }
@@ -77,8 +77,10 @@ impl ChromeLayout {
         self.floating.retain(|name| {
             crate::floating::FloatingKind::from_slug(name).is_some() && seen.insert(name.clone())
         });
-        self.tools = self.tools.clamp(120.0, 280.0);
-        self.outliner = self.outliner.clamp(120.0, (window_h * 0.6).max(160.0));
+        self.tools = self.tools.clamp(48.0, 280.0);
+        // Reserve room for sticky Details identity/filter rows and authored fields
+        // above the default drawer at the 720 px target size.
+        self.outliner = self.outliner.clamp(120.0, (window_h - 580.0).max(120.0));
 
         let available = (window_w - self.tools - SPLITTERS).max(DETAILS_MIN);
         // Prefer the stored column width; fall back to deriving it from a

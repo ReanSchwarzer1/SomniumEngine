@@ -501,7 +501,15 @@ fn resolve_node(node: &DockNode, area: Rect, path: &mut NodePath, out: &mut Layo
                 Axis::Vertical => area.h,
             };
             let usable = (span - SPLITTER).max(0.0);
-            let first_span = split_span(usable, *ratio);
+            // The collapsed Tools rail is chrome, not an authoring panel. Preserve
+            // its 48-unit intent while retaining the 80-unit minimum elsewhere.
+            let rail = *axis == Axis::Horizontal
+                && matches!(first.as_ref(), DockNode::Tabs { panels, .. } if panels.len() == 1 && panels[0] == "Tools");
+            let first_span = if rail && usable >= 48.0 + MIN_TILE {
+                (usable * ratio.clamp(0.0, 1.0)).clamp(48.0, usable - MIN_TILE)
+            } else {
+                split_span(usable, *ratio)
+            };
             let second_span = usable - first_span;
 
             let (first_rect, splitter_rect, second_rect) = match axis {
@@ -679,7 +687,8 @@ fn repair_node(node: &mut DockNode) {
     {
         repair_node(first);
         repair_node(second);
-        *ratio = ratio.clamp(MIN_RATIO, MAX_RATIO);
+        let rail = matches!(first.as_ref(), DockNode::Tabs { panels, .. } if panels.len() == 1 && panels[0] == "Tools");
+        *ratio = ratio.clamp(if rail { 0.001 } else { MIN_RATIO }, MAX_RATIO);
 
         let first_empty = is_empty(first);
         let second_empty = is_empty(second);

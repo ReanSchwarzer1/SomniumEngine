@@ -115,9 +115,9 @@ impl Workspace {
         // Redline §06 defaults: rail 168, Details 340, drawer 220.
         let details = 340.0;
         let base = WorkspaceLayout {
-            tools: 168.0,
+            tools: 48.0,
             details,
-            outliner: 300.0,
+            outliner: if window_h < 900.0 { 140.0 } else { 170.0 },
             drawer_height: 220.0,
             bottom: BottomPanel::Content,
         };
@@ -130,44 +130,43 @@ impl Workspace {
                 bottom: BottomPanel::None,
                 ..base
             },
-            // Painting foliage is a drag-from-the-browser workflow, so the
-            // drawer is open and taller than default.
+            // The supported foliage palette lives in the tool panel. Reserve
+            // height for its brush settings; the drawer stays one click away.
             Workspace::Foliage => WorkspaceLayout {
-                tools: 200.0,
-                drawer_height: 280.0,
-                bottom: BottomPanel::Content,
+                tools: 220.0,
+                bottom: BottomPanel::None,
                 ..base
             },
             // Lighting and materials are inspector-heavy and rail-light.
             Workspace::Lighting => WorkspaceLayout {
-                tools: 120.0,
+                tools: 48.0,
                 details: 400.0,
                 outliner: 260.0,
                 bottom: BottomPanel::None,
                 ..base
             },
             Workspace::Materials => WorkspaceLayout {
-                tools: 120.0,
+                tools: 48.0,
                 details: 400.0,
                 bottom: BottomPanel::Content,
                 ..base
             },
             Workspace::Animation => WorkspaceLayout {
-                tools: 120.0,
+                tools: 48.0,
                 details: 400.0,
                 bottom: BottomPanel::None,
                 ..base
             },
             // Debug reads the log, so the bottom row shows it and is tall.
             Workspace::Debug => WorkspaceLayout {
-                tools: 120.0,
+                tools: 48.0,
                 drawer_height: (window_h * 0.35).clamp(140.0, 420.0),
                 bottom: BottomPanel::Log,
                 ..base
             },
             // Play gives the scene everything it can.
             Workspace::Play => WorkspaceLayout {
-                tools: 120.0,
+                tools: 48.0,
                 details: 240.0,
                 bottom: BottomPanel::None,
                 ..base
@@ -202,9 +201,9 @@ impl WorkspaceLayout {
     /// Redline minimums, and the rule that the viewport stays the largest
     /// region in every default workspace (acceptance matrix §10.2).
     pub fn clamped(mut self, window_w: f32, window_h: f32) -> Self {
-        self.tools = self.tools.clamp(120.0, 280.0);
+        self.tools = self.tools.clamp(48.0, 280.0);
         self.details = self.details.clamp(240.0, 520.0);
-        self.outliner = self.outliner.clamp(120.0, (window_h * 0.6).max(160.0));
+        self.outliner = self.outliner.clamp(120.0, (window_h - 580.0).max(120.0));
         self.drawer_height = self.drawer_height.clamp(140.0, (window_h * 0.6).max(160.0));
 
         // If the side panels would leave the viewport smaller than they are,
@@ -214,7 +213,7 @@ impl WorkspaceLayout {
         if viewport < side && window_w > 0.0 {
             let budget = (window_w * 0.45).max(240.0);
             let scale = budget / side.max(1.0);
-            self.tools = (self.tools * scale).max(120.0);
+            self.tools = (self.tools * scale).max(48.0);
             self.details = (self.details * scale).max(240.0);
         }
         self
@@ -254,7 +253,7 @@ mod tests {
         for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0)] {
             for ws in Workspace::ALL {
                 let l = ws.preset(w, h);
-                assert!(l.tools >= 120.0 && l.tools <= 280.0, "{ws:?} rail");
+                assert!(l.tools >= 48.0 && l.tools <= 280.0, "{ws:?} rail");
                 assert!(l.details >= 240.0, "{ws:?} details");
                 assert!(l.drawer_height >= 140.0, "{ws:?} drawer");
                 assert!(l.drawer_height <= h * 0.6 + 0.01, "{ws:?} drawer max");
@@ -281,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_shows_the_log_and_terrain_shows_nothing() {
+    fn debug_shows_the_log_and_authoring_presets_reserve_brush_height() {
         assert_eq!(
             Workspace::Debug.preset(1920.0, 1080.0).bottom,
             BottomPanel::Log
@@ -292,7 +291,7 @@ mod tests {
         );
         assert_eq!(
             Workspace::Foliage.preset(1920.0, 1080.0).bottom,
-            BottomPanel::Content
+            BottomPanel::None
         );
     }
 

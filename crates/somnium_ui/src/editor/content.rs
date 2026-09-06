@@ -40,6 +40,7 @@ pub(crate) fn build_content_drawer(
     ui: &mut UserInterface,
     parent: NodeHandle,
     font_id: u8,
+    persona: &mut super::persona::Persona,
 ) -> (
     NodeHandle,
     NodeHandle,
@@ -49,137 +50,171 @@ pub(crate) fn build_content_drawer(
     NodeHandle,
     Vec<(NodeHandle, crate::ContentToolbarAction)>,
 ) {
-    let panel = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_row(0)
-            .with_column(0)
-            .with_background(theme::active().semantic.surface.panel.bytes())
-            .with_foreground(theme::TRANSPARENT),
-    )
-    .with_stroke_thickness(Thickness::ZERO)
-    .build();
-    let panel_h = ui.add_node(panel, parent);
-
-    let grid = GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .add_row(Row::strict(26.0))
-        .add_row(Row::strict(22.0))
+    use super::persona::{action, combo};
+    let panel = ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_row(0)
+                .with_background(theme::active().semantic.surface.panel.bytes()),
+        )
+        .build(),
+        parent,
+    );
+    let grid = ui.add_node(
+        GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .add_row(Row::strict(30.0))
+            .add_row(Row::strict(30.0))
+            .add_row(Row::strict(30.0))
+            .add_row(Row::stretch())
+            .add_column(Column::stretch())
+            .build(),
+        panel,
+    );
+    let nav = ui.add_node(
+        GridBuilder::new(
+            WidgetBuilder::new()
+                .with_row(0)
+                .with_background(theme::TRANSPARENT),
+        )
         .add_row(Row::stretch())
+        .add_column(Column::strict(108.0))
         .add_column(Column::stretch())
-        .add_column(Column::auto())
-        .build();
-    let grid_h = ui.add_node(grid, panel_h);
-
-    let search = SearchBoxBuilder::new(
-        WidgetBuilder::new()
-            .with_row(0)
-            .with_column(0)
-            .with_background(theme::active().semantic.surface.input.bytes()),
-    )
-    .with_font_id(font_id)
-    .build();
-    let search_h = ui.add_node(search, grid_h);
-
-    let engine = CheckBoxBuilder::new(
-        WidgetBuilder::new()
-            .with_row(0)
-            .with_column(1)
-            .with_margin(Thickness::axes(8.0, 2.0)),
-    )
-    .with_label("Show Engine Content")
-    .with_font_id(font_id)
-    .with_font_size(11.0)
-    .build();
-    let engine_h = ui.add_node(engine, grid_h);
-
-    let toolbar = StackPanelBuilder::new(
-        WidgetBuilder::new()
-            .with_row(1)
-            .with_column(0)
-            .with_background(theme::TRANSPARENT),
-    )
-    .with_orientation(Orientation::Horizontal)
-    .build();
-    let toolbar = ui.add_node(toolbar, grid_h);
-    let mut toolbar_actions = Vec::new();
-    for (label, action) in [
+        .add_column(Column::strict(84.0))
+        .add_column(Column::strict(200.0))
+        .build(),
+        grid,
+    );
+    let arrows = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Horizontal)
+            .build(),
+        nav,
+    );
+    let mut actions = Vec::new();
+    for (label, verb) in [
         ("‹", crate::ContentToolbarAction::Back),
         ("›", crate::ContentToolbarAction::Forward),
         ("↑", crate::ContentToolbarAction::Up),
-        (
-            "All",
-            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::All),
-        ),
-        (
-            "Models",
-            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Models),
-        ),
-        (
-            "Textures",
-            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Textures),
-        ),
-        (
-            "Scripts",
-            crate::ContentToolbarAction::Kind(crate::metaphor::ContentFilterKind::Scripts),
-        ),
-        ("Sort", crate::ContentToolbarAction::Sort),
-        ("Size", crate::ContentToolbarAction::Density),
     ] {
-        let button = ButtonBuilder::new(WidgetBuilder::new().with_height(22.0)).build();
-        let button = ui.add_node(button, toolbar);
-        let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(5.0, 3.0)))
-            .with_text(label)
-            .with_font_id(font_id)
-            .with_font_size(10.0)
-            .build();
-        ui.add_node(text, button);
-        toolbar_actions.push((button, action));
+        actions.push((action(ui, arrows, label, 34.0), verb));
     }
-    let crumb = BreadcrumbBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+    let crumb = ui.add_node(
+        BreadcrumbBuilder::new(
+            WidgetBuilder::new()
+                .with_column(1)
+                .with_background(theme::TRANSPARENT),
+        )
         .with_parts(["Game"])
         .with_font_id(font_id)
-        .build();
-    let crumb_h = ui.add_node(crumb, toolbar);
-
-    let list_scroll = ScrollViewerBuilder::new(
-        WidgetBuilder::new()
-            .with_row(2)
-            .with_column(0)
-            .with_background(theme::active().semantic.surface.canvas.bytes()),
-    )
-    .build();
-    let list_scroll_h = ui.add_node(list_scroll, grid_h);
-    // MORROWIND-M. A canvas, not a wrap panel: the drawer places the tiles it
-    // built at absolute positions, because with a folder of 40,000 assets only
-    // the screenful in view exists as widgets and a flow layout would have to
-    // be handed all of them to know where any of them go.
-    let list = CanvasBuilder::new(
-        WidgetBuilder::new()
-            .with_margin(Thickness::uniform(8.0))
-            // Top, not the default stretch: the canvas is given an explicit
-            // height covering the whole folder, and a stretched child with an
-            // explicit height is *centred* in the space it was handed — which
-            // for a folder shorter than the drawer would float the tiles in
-            // the middle of it.
-            .with_vertical_alignment(VerticalAlignment::Top)
-            // And so it must not clip: an empty folder is nought rows tall, and
-            // a canvas that cropped to its own bounds would build the "this
-            // folder is empty" panel and then crop it out of existence. The
-            // scroll viewer above still clips, which is the clip that matters.
-            .with_clip_to_bounds(false)
-            .with_background(theme::TRANSPARENT),
-    )
-    .build();
-    let list_h = ui.add_node(list, list_scroll_h);
-
-    (
-        panel_h,
-        search_h,
-        crumb_h,
-        engine_h,
-        list_scroll_h,
-        list_h,
-        toolbar_actions,
-    )
+        .build(),
+        nav,
+    );
+    let favorite_host = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_column(2)
+                .with_background(theme::TRANSPARENT),
+        )
+        .build(),
+        nav,
+    );
+    persona.favorite = action(ui, favorite_host, "Favorite", 80.0);
+    let places_host = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_column(3)
+                .with_background(theme::TRANSPARENT),
+        )
+        .build(),
+        nav,
+    );
+    (persona.places, persona.places_popup) = combo(ui, places_host, &["Game root"], 188.0, font_id);
+    let search_row = ui.add_node(
+        GridBuilder::new(
+            WidgetBuilder::new()
+                .with_row(1)
+                .with_background(theme::TRANSPARENT),
+        )
+        .add_row(Row::stretch())
+        .add_column(Column::stretch())
+        .add_column(Column::strict(170.0))
+        .build(),
+        grid,
+    );
+    let search = ui.add_node(
+        SearchBoxBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 1.0)))
+            .with_font_id(font_id)
+            .build(),
+        search_row,
+    );
+    let engine = ui.add_node(
+        CheckBoxBuilder::new(WidgetBuilder::new().with_column(1))
+            .with_label("Engine content")
+            .with_font_id(font_id)
+            .with_font_size(12.0)
+            .build(),
+        search_row,
+    );
+    let toolbar = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_row(2)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(),
+        grid,
+    );
+    for (label, kind) in [
+        ("All", crate::metaphor::ContentFilterKind::All),
+        ("Models", crate::metaphor::ContentFilterKind::Models),
+        ("Textures", crate::metaphor::ContentFilterKind::Textures),
+        ("Scripts", crate::metaphor::ContentFilterKind::Scripts),
+    ] {
+        actions.push((
+            action(ui, toolbar, label, 76.0),
+            crate::ContentToolbarAction::Kind(kind),
+        ));
+    }
+    (persona.sort, persona.sort_popup) = combo(
+        ui,
+        toolbar,
+        &["Name A–Z", "Type", "Largest first", "Newest first"],
+        142.0,
+        font_id,
+    );
+    (persona.size, persona.size_popup) = combo(
+        ui,
+        toolbar,
+        &["Compact tiles", "Comfortable tiles", "Large tiles"],
+        164.0,
+        font_id,
+    );
+    ui.send(crate::widgets::combo_box::ComboBoxMessage::set_selected(
+        persona.size,
+        1,
+    ));
+    let scroll = ui.add_node(
+        ScrollViewerBuilder::new(
+            WidgetBuilder::new()
+                .with_row(3)
+                .with_background(theme::active().semantic.surface.canvas.bytes()),
+        )
+        .build(),
+        grid,
+    );
+    let list = ui.add_node(
+        CanvasBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(8.0))
+                .with_vertical_alignment(VerticalAlignment::Top)
+                .with_clip_to_bounds(false)
+                .with_background(theme::TRANSPARENT),
+        )
+        .build(),
+        scroll,
+    );
+    (panel, search, crumb, engine, scroll, list, actions)
 }
 
 /// Build the Create dropdown popup (initially hidden, child of root).

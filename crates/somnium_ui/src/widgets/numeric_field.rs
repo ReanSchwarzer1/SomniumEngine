@@ -398,6 +398,14 @@ impl Control for NumericField {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(crate::message::MixedValue(mixed)) = msg.data::<crate::message::MixedValue>() {
+            if !self.focused {
+                self.mixed = *mixed;
+            }
+            msg.handled = true;
+            return;
+        }
+
         if let Some(d) = msg.data::<NumericFieldMessage>() {
             if let NumericFieldMessage::SetValue(v) = d {
                 let v = *v;
@@ -949,6 +957,49 @@ mod mixed_tests {
         let mut control = field(true);
         control.mixed = false;
         assert_eq!(control.display_text(), "0.750");
+    }
+
+    #[test]
+    fn mixed_refresh_preserves_values_and_an_active_edit_without_emitting_edits() {
+        let mut control = field(false);
+        let mut widget = WidgetBuilder::new().build();
+        let mut emit = Vec::new();
+        control.handle_routed_message(
+            &mut widget,
+            &mut UiMessage::new(
+                NodeHandle::NONE,
+                MessageDirection::ToWidget,
+                crate::message::MixedValue(true),
+            ),
+            &mut emit,
+        );
+        assert!(control.mixed);
+        assert_eq!(control.value, 0.75);
+        control.focused = true;
+        control.editing_text = Some("0.9".into());
+        control.handle_routed_message(
+            &mut widget,
+            &mut UiMessage::new(
+                NodeHandle::NONE,
+                MessageDirection::ToWidget,
+                crate::message::MixedValue(false),
+            ),
+            &mut emit,
+        );
+        assert!(control.mixed);
+        assert_eq!(control.editing_text.as_deref(), Some("0.9"));
+        assert!(emit.is_empty());
+        control.focused = false;
+        control.handle_routed_message(
+            &mut widget,
+            &mut UiMessage::new(
+                NodeHandle::NONE,
+                MessageDirection::ToWidget,
+                crate::message::MixedValue(false),
+            ),
+            &mut emit,
+        );
+        assert!(!control.mixed);
     }
 
     /// The builder is the only way Details sets it, so it has to carry.

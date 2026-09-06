@@ -189,7 +189,7 @@ impl CommandPalette {
 
 impl Control for CommandPalette {
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
-        Vec2::new(420.0, 280.0)
+        Vec2::new(480.0, 444.0)
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
@@ -253,8 +253,8 @@ impl Control for CommandPalette {
         }
         let sel = self.selected.min(filtered.len().saturating_sub(1));
         for (row, item) in filtered.iter().take(10).enumerate() {
-            let y = b.y + 36.0 + row as f32 * 22.0;
-            let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, 22.0);
+            let y = b.y + 36.0 + row as f32 * 40.0;
+            let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, 40.0);
             if row == sel {
                 let selected = crate::style::tree_row(crate::style::VisualState::with(
                     crate::style::Interaction::Selected,
@@ -266,8 +266,12 @@ impl Control for CommandPalette {
             } else {
                 t.semantic.text.disabled.bytes()
             };
+            let (label, _) =
+                crate::widgets::property_row::ellipsise(&item.label, row_r.w - 112.0, |text| {
+                    ctx.font_atlas.measure_text(text, 12.0, self.font_id).x
+                });
             ctx.push_text(
-                &item.label,
+                &label,
                 Vec2::new(row_r.x + 8.0, y + 4.0),
                 self.font_id,
                 12.0,
@@ -277,7 +281,7 @@ impl Control for CommandPalette {
             // result reads "what it is" before "how to reach it".
             ctx.push_text(
                 item.category.label(),
-                Vec2::new(row_r.x + row_r.w - 150.0, y + 5.0),
+                Vec2::new(row_r.x + row_r.w - 84.0, y + 5.0),
                 self.font_id,
                 11.0,
                 t.semantic.text.muted.bytes(),
@@ -285,7 +289,7 @@ impl Control for CommandPalette {
             if !item.hint.is_empty() {
                 ctx.push_text(
                     &item.hint,
-                    Vec2::new(row_r.x + row_r.w - 80.0, y + 4.0),
+                    Vec2::new(row_r.x + 8.0, y + 22.0),
                     self.font_id,
                     11.0,
                     t.semantic.text.secondary.bytes(),
@@ -354,7 +358,7 @@ impl Control for CommandPalette {
             WidgetMessage::MouseDown { pos, .. } => {
                 let b = widget.screen_bounds();
                 if pos.y > b.y + 36.0 {
-                    let row = ((pos.y - b.y - 36.0) / 22.0).floor() as usize;
+                    let row = ((pos.y - b.y - 36.0) / 40.0).floor() as usize;
                     let filtered = self.filtered();
                     if let Some(item) = filtered.get(row).filter(|item| item.enabled) {
                         emit.push(UiMessage::new(
