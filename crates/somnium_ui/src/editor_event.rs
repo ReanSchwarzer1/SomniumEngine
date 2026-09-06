@@ -565,6 +565,8 @@ pub enum EditorEvent {
         name: String,
     },
     /// Create an editable `.sommat` asset in `parent`.
+    /// Inspect an authored material without assigning it to a scene object.
+    InspectMaterial(std::path::PathBuf),
     CreateContentMaterial {
         parent: String,
         name: String,

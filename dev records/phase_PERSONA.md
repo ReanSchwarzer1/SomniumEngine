@@ -1,6 +1,6 @@
 # Phase PERSONA — Atlus
 
-> **Status:** PERSONA-A baseline/redlines and PERSONA-B foundation implemented; C–H remain open. [A/B record and native captures](<phase PERSONA/PERSONA-A_B.md>).
+> **Status:** A–D and initial E/F implemented, with the [designer QoL follow-up](<phase PERSONA/PERSONA-QoL.md>) in tree; journey, visual and phase acceptance remain open. [A/B record and native captures](<phase PERSONA/PERSONA-A_B.md>).
 > **Date:** 2026-09-05. **Source:** `3c4e33a`, branch `dev`.
 > **Priority:** The next implementation phase, before further MORROWIND, TSUSHIMA, DREAMS, TALOS, PORTAL, KENSHI, or STALKER work. Existing completion records remain unchanged.
 > **Purpose:** Make Somnium substantially more beautiful, coherent, and approachable for level, environment, material, lighting, and technical designers.
@@ -266,7 +266,7 @@ Do these in order, with one bounded slice at a time. A pass does not count as co
 | PERSONA-F — Workspace resilience | Float/redock UX, state retention, monitor/DPI changes, small-window overflow, saved layout migration. | Moving/resizing/reopening panels preserves selection, edits, scroll, and focus. Arbitrary cross-slot docking only closes if existing dock-tree integration actually supports it. |
 | PERSONA-G — Finish and accept | Apply the same recipes to remaining authoring surfaces; accessibility and performance pass; matched captures and human sign-off; update context and old phase status references. | All mandatory gates below met. Record remaining optional items by name; no blanket “complete” for unverified states. |
 
-**Current delivery:** A/B foundation is recorded in [PERSONA-A_B.md](<phase PERSONA/PERSONA-A_B.md>); C/D workspace and QoL implementation, tests and native evidence are in [PERSONA-C_D.md](<phase PERSONA/PERSONA-C_D.md>). C/D designer-journey acceptance remains open; implementation is not full acceptance. The [first E/F slice](<phase PERSONA/PERSONA-E_F.md>) adds contextual authoring, corrects Foliage Mode/F8, and repairs floating geometry and narrow-window clipping. Continue the designer journeys, remaining E resource/settings contract, F OS/DPI matrix and G finish/acceptance. All floating-window and phase-wide bug-closure gates remain binding.
+**Current delivery:** A/B foundation is recorded in [PERSONA-A_B.md](<phase PERSONA/PERSONA-A_B.md>); C/D workspace and QoL implementation, tests and native evidence are in [PERSONA-C_D.md](<phase PERSONA/PERSONA-C_D.md>). C/D designer-journey acceptance remains open; implementation is not full acceptance. The [first E/F slice](<phase PERSONA/PERSONA-E_F.md>) adds contextual authoring, corrects Foliage Mode/F8, and repairs floating geometry and narrow-window clipping. The [designer QoL follow-up](<phase PERSONA/PERSONA-QoL.md>) adds material/lighting tools, browser cancellation/hover fixes, Scripts access and persistent E brush settings. Continue user review, designer journeys, the F OS/DPI matrix and G finish/acceptance; visual-baseline approval remains with the user. All floating-window and phase-wide bug-closure gates remain binding.
 
 ## 8. Acceptance, not just screenshots
 

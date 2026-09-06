@@ -85,6 +85,7 @@ struct Section {
 
 #[derive(Default)]
 pub struct Persona {
+    pub component_hosts: Vec<(somnium_ecs::reflect::StableId, NodeHandle)>,
     pub prefs: Preferences,
     persist: bool,
     indices: HashMap<
@@ -137,6 +138,7 @@ impl Persona {
         }
     }
     pub fn begin(&mut self) {
+        self.component_hosts.clear();
         self.rows.clear();
         self.sections.clear();
         self.indices.clear();
@@ -361,10 +363,14 @@ pub fn action(ui: &mut UserInterface, parent: NodeHandle, label: &str, width: f3
         parent,
     );
     ui.add_node(
-        TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 6.0)))
-            .with_text(label)
-            .with_role(TextRole::Label)
-            .build(),
+        TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(8.0, 0.0))
+                .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+        )
+        .with_text(label)
+        .with_role(TextRole::Label)
+        .build(),
         h,
     );
     h

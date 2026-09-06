@@ -34,6 +34,7 @@ pub struct TextBox {
     pub color: [u8; 4],
     pub font_id: u8,
     pub focused: bool,
+    pub commit_on_blur: bool,
 }
 
 impl Control for TextBox {
@@ -117,10 +118,12 @@ impl Control for TextBox {
                 }
                 WidgetMessage::Unfocus => {
                     self.focused = false;
-                    emit.push(TextBoxMessage::text_commit(
-                        widget.handle,
-                        self.text.clone(),
-                    ));
+                    if self.commit_on_blur {
+                        emit.push(TextBoxMessage::text_commit(
+                            widget.handle,
+                            self.text.clone(),
+                        ));
+                    }
                     msg.handled = true;
                 }
                 WidgetMessage::Text(s) => {
@@ -174,6 +177,7 @@ impl Control for TextBox {
 }
 
 pub struct TextBoxBuilder {
+    commit_on_blur: bool,
     widget: WidgetBuilder,
     mixed: bool,
     text: String,
@@ -193,12 +197,18 @@ impl TextBoxBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
             mixed: false,
+            commit_on_blur: true,
             widget,
             text: String::new(),
             px: theme::active().typography.body,
             color: theme::active().semantic.text.primary.bytes(),
             font_id: 0,
         }
+    }
+
+    pub fn with_commit_on_blur(mut self, commit: bool) -> Self {
+        self.commit_on_blur = commit;
+        self
     }
 
     pub fn with_text(mut self, t: impl Into<String>) -> Self {
@@ -228,7 +238,43 @@ impl TextBoxBuilder {
                 color: self.color,
                 font_id: self.font_id,
                 focused: false,
+                commit_on_blur: self.commit_on_blur,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    #[test]
+    fn modal_name_blur_does_not_submit_but_enter_does() {
+        let mut ui = crate::ui::UserInterface::new(360.0, 160.0);
+        let root = ui.root();
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new())
+                .with_text("NewMaterial")
+                .with_commit_on_blur(false)
+                .build(),
+            root,
+        );
+        for action in [WidgetMessage::Focus, WidgetMessage::Unfocus] {
+            ui.send(UiMessage::new(field, MessageDirection::ToWidget, action));
+        }
+        assert!(!ui.update().iter().any(|m| matches!(
+            m.data::<TextBoxMessage>(),
+            Some(TextBoxMessage::TextCommit(_))
+        )));
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::KeyDown(KeyCode::Enter, Default::default()),
+        ));
+        assert!(ui.update().iter().any(|m| matches!(m.data::<TextBoxMessage>(), Some(TextBoxMessage::TextCommit(value)) if value == "NewMaterial")));
     }
 }

@@ -14,6 +14,8 @@ Date: 2026-09-06. Base: `a51ad30` (`more ui work`) plus the current working tree
 
 ### Resource and settings boundary
 
+**Later on 2026-09-06:** the [designer QoL follow-up](PERSONA-QoL.md) adds versioned persistent brush preferences and stable built-in resource identifiers, superseding the session-only boundary below. Native save/reload acceptance remains open.
+
 This slice exposes the engine's existing built-in foliage kind palette and loaded terrain layer palette. It does not pretend that imported arbitrary assets or brush masks are supported. Brush options remain session-owned core state; authored terrain and foliage use the existing terrain sidecars and scene data. A richer persistent tool-settings/resource contract and its save/reload journey remain required by E before E can be accepted. No second UI authoring model was added.
 
 ## Floating windows

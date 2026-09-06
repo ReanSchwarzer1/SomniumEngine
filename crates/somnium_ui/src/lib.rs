@@ -996,6 +996,7 @@ pub struct UiManager {
     /// it is the one that pairs with the status bar's save state.
     generated_root: NodeHandle,
     generated_entity: Option<somnium_ecs::Entity>,
+    material_target: Option<somnium_ecs::Entity>,
     generated_signature: Vec<(
         somnium_ecs::reflect::StableId,
         somnium_ecs::reflect::FieldId,
@@ -1479,6 +1480,27 @@ impl UiManager {
         self.queue_generated_address(binding.component, binding.field, value, gesture, live);
     }
 
+    fn property_entity(
+        &self,
+        component: somnium_ecs::reflect::StableId,
+    ) -> Option<somnium_ecs::Entity> {
+        if component.as_str() == "somnium.asset.Material" {
+            self.material_target.or(self.selected_entity)
+        } else {
+            self.selected_entity
+        }
+    }
+
+    pub fn set_material_target(&mut self, entity: Option<somnium_ecs::Entity>) {
+        if self.material_target != entity {
+            if self.color_open {
+                self.close_color_picker(true);
+            }
+            self.material_target = entity;
+            self.generated_signature.clear();
+        }
+    }
+
     fn queue_generated_address(
         &mut self,
         component: somnium_ecs::reflect::StableId,
@@ -1487,7 +1509,7 @@ impl UiManager {
         gesture: GestureId,
         live: bool,
     ) {
-        let Some(entity) = self.selected_entity else {
+        let Some(entity) = self.property_entity(component) else {
             return;
         };
         self.editor_events
@@ -1784,6 +1806,7 @@ impl UiManager {
             status_stats_button: layout.status_stats_button,
             generated_root: NodeHandle::NONE,
             generated_entity: None,
+            material_target: None,
             generated_signature: Vec::new(),
             generated_bindings: HashMap::new(),
             generated_collection_actions: HashMap::new(),
@@ -2174,6 +2197,9 @@ impl UiManager {
     /// on an ultrawide or a laptop. The result is persisted like any manual
     /// splitter drag, so the choice survives a restart.
     pub fn set_workspace(&mut self, workspace: crate::workspace::Workspace) {
+        if workspace != self.active_workspace {
+            self.editor_events.push_back(EditorEvent::SetGizmoMode(0));
+        }
         self.active_workspace = workspace;
         self.native_ui.send(ComboBoxMessage::set_selected(
             self.persona.workspace,
@@ -2842,7 +2868,7 @@ impl UiManager {
             self.native_ui.is_under(hit, **row)
                 && matches!(binding.value, somnium_ecs::reflect::ReflectValue::Asset(_))
         }) {
-            self.generated_entity.map(|entity| {
+            self.property_entity(binding.component).map(|entity| {
                 (
                     crate::drag_drop::DropTarget::AssetField {
                         entity,
@@ -3266,6 +3292,11 @@ impl UiManager {
         .build();
         let field = self.native_ui.add_node(field, tile);
         self.native_ui.set_focus(field);
+        self.native_ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
         self.content_inline_rename = Some((field, entry.path));
     }
 
@@ -3798,6 +3829,15 @@ impl UiManager {
         // 5 — command palette
         if self.palette_open {
             self.close_palette();
+            return true;
+        }
+        if let Some((field, _)) = self.content_inline_rename.take() {
+            let parent = self.native_ui.parent_of(field);
+            self.native_ui.remove_node(field);
+            if let Some(parent) = parent {
+                self.native_ui.set_focus(parent);
+            }
+            self.refresh_content_list();
             return true;
         }
         // 3 — popups: colour, combo lists, menus, then the Help overlay
@@ -5299,6 +5339,14 @@ impl UiManager {
     /// Select an asset. `additive` is the Ctrl-click path: it toggles, so a
     /// second Ctrl-click on the same tile removes it from the set.
     pub fn select_content(&mut self, path: std::path::PathBuf, additive: bool) {
+        if !additive
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("sommat"))
+        {
+            self.editor_events
+                .push_back(EditorEvent::InspectMaterial(path.clone()));
+        }
         if additive {
             if !self.content_selection.remove(&path) {
                 self.content_selection.insert(path);
@@ -6216,8 +6264,11 @@ impl UiManager {
                     .with_height(tile_h)
                     .with_background(tile_bg),
             )
+            .with_hover_animation(false)
             .build();
             let bh = self.native_ui.add_node(btn, parent);
+            self.native_ui
+                .send(ButtonMessage::set_selected(bh, selected));
             let col =
                 StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                     .with_orientation(Orientation::Vertical)
@@ -6644,10 +6695,9 @@ impl UiManager {
             let column = self.native_ui.add_node(column, card);
 
             // Header: name, state, and the three structural controls.
-            let header =
-                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-                    .with_orientation(Orientation::Horizontal)
-                    .build();
+            let header = crate::widgets::wrap_panel::WrapPanelBuilder::new(WidgetBuilder::new())
+                .with_gap(4.0, 4.0)
+                .build();
             let header = self.native_ui.add_node(header, column);
 
             let enable = crate::widgets::check_box::CheckBoxBuilder::new(
@@ -6818,6 +6868,9 @@ impl UiManager {
             .collect();
         let rebuild = self.generated_entity != entity || self.generated_signature != signature;
         if rebuild {
+            for (_, host) in &self.persona.component_hosts {
+                self.native_ui.reparent(*host, self.generated_root);
+            }
             if self.generated_root.is_some() {
                 self.native_ui.remove_node(self.generated_root);
             }
@@ -7116,9 +7169,33 @@ impl UiManager {
             match self.active_workspace {
                 crate::workspace::Workspace::Terrain => ToolMode::Landscape,
                 crate::workspace::Workspace::Foliage => ToolMode::Foliage,
+                crate::workspace::Workspace::Lighting => ToolMode::Lighting,
+                crate::workspace::Workspace::Materials => ToolMode::Materials,
                 _ => ToolMode::Select,
             }
         };
+        for (component, host) in &self.persona.component_hosts {
+            let in_tools = match shown {
+                ToolMode::Materials => component.as_str() == "somnium.asset.Material",
+                ToolMode::Lighting => matches!(
+                    component.as_str(),
+                    "somnium.Light"
+                        | "somnium.Sky"
+                        | "somnium.TimeOfDay"
+                        | "somnium.PostProcess"
+                        | "somnium.Fog"
+                ),
+                _ => false,
+            };
+            let parent = if in_tools {
+                self.persona.tool_panel.properties
+            } else {
+                self.generated_root
+            };
+            if parent.is_some() && self.native_ui.parent_of(*host) != Some(parent) {
+                self.native_ui.reparent(*host, parent);
+            }
+        }
         let active = context.mode;
         if self
             .persona
@@ -7135,7 +7212,14 @@ impl UiManager {
             }
             let visible = shown != ToolMode::Select;
             self.native_ui.set_visibility(self.persona.tools, visible);
-            self.chrome_layout.tools = if visible { 280.0 } else { 48.0 };
+            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
+            {
+                320.0
+            } else if visible {
+                280.0
+            } else {
+                48.0
+            };
             self.chrome_layout.viewport = (self.window_size.0 as f32
                 - self.chrome_layout.tools
                 - self.chrome_layout.details
@@ -7821,6 +7905,18 @@ impl UiManager {
                 }
                 continue;
             }
+            if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+                && let Some((_, command)) = self
+                    .persona
+                    .tool_panel
+                    .commands
+                    .iter()
+                    .find(|(h, _)| *h == msg.destination)
+                    .copied()
+            {
+                self.run_command_id(command);
+                continue;
+            }
             if let Some(event) = self.persona.tool_panel.event(&msg) {
                 self.editor_events.push_back(event);
                 continue;
@@ -7942,7 +8038,7 @@ impl UiManager {
                         .map(|binding| binding.value.clone());
                     if let Some(current) = current
                         && let Some(next) = Self::collection_result(&current, action)
-                        && let Some(entity) = self.selected_entity
+                        && let Some(entity) = self.property_entity(component)
                     {
                         let gesture = self.allocate_property_gesture();
                         self.editor_events
@@ -7978,7 +8074,7 @@ impl UiManager {
                                     !entry.is_dir && self.content_selection.contains(&entry.path)
                                 })
                                 .and_then(|entry| entry.asset_id);
-                            match (chosen, self.selected_entity) {
+                            match (chosen, self.property_entity(binding.component)) {
                                 (Some(asset), Some(entity)) => {
                                     let accepted = self.asset_db.get(asset).is_some_and(|record| {
                                         record.kind.bit() & binding.asset_kind_mask != 0
@@ -8020,7 +8116,7 @@ impl UiManager {
                             ));
                         }
                         (AssetPickerAction::MakeUnique, Some(binding), Some(record)) => {
-                            if let Some(entity) = self.selected_entity {
+                            if let Some(entity) = self.property_entity(binding.component) {
                                 self.editor_events.push_back(EditorEvent::MakeAssetUnique {
                                     source: record.absolute_path.to_string_lossy().into_owned(),
                                     entity,

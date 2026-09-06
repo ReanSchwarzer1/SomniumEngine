@@ -8,12 +8,11 @@ use crate::{
     editor::parts::*,
     message::NodeHandle,
     theme,
-    types::Thickness,
+    types::{Thickness, VerticalAlignment},
     typography::TextRole,
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{
-        border::BorderBuilder,
         button::ButtonBuilder,
         check_box::CheckBoxBuilder,
         color_picker::ColorSwatchBuilder,
@@ -38,25 +37,16 @@ fn section(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> NodeHandl
         .with_orientation(Orientation::Vertical)
         .build();
     let panel = ui.add_node(panel, parent);
-    let band = BorderBuilder::new(
+    let heading = TextBuilder::new(
         WidgetBuilder::new()
-            .with_height(theme::active().density.row_tree)
-            .with_background(theme::active().semantic.surface.header.bytes())
-            .with_foreground(theme::active().semantic.border.subtle.bytes()),
+            .with_height(theme::active().density.row_chrome)
+            .with_margin(Thickness::axes(8.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
     )
-    .with_stroke_thickness(Thickness {
-        left: 0.0,
-        top: 1.0,
-        right: 0.0,
-        bottom: 1.0,
-    })
+    .with_role(TextRole::Label)
+    .with_text(label)
     .build();
-    let band = ui.add_node(band, panel);
-    let heading = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 7.0)))
-        .with_role(TextRole::SectionCaps)
-        .with_text(label)
-        .build();
-    ui.add_node(heading, band);
+    ui.add_node(heading, panel);
     panel
 }
 
@@ -84,11 +74,14 @@ fn number(
 }
 
 fn check(ui: &mut UserInterface, parent: NodeHandle, label: &str, font_id: u8) -> NodeHandle {
-    let node =
-        CheckBoxBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
-            .with_label(label)
-            .with_font_id(font_id)
-            .build();
+    let node = CheckBoxBuilder::new(
+        WidgetBuilder::new()
+            .with_height(theme::active().density.row_chrome)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
+    .with_label(label)
+    .with_font_id(font_id)
+    .build();
     ui.add_node(node, parent)
 }
 
@@ -97,10 +90,14 @@ fn button(ui: &mut UserInterface, parent: NodeHandle, label: &str) -> (NodeHandl
         ButtonBuilder::new(WidgetBuilder::new().with_height(theme::active().density.row_dense))
             .build();
     let handle = ui.add_node(node, parent);
-    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-        .with_role(TextRole::Caption)
-        .with_text(label)
-        .build();
+    let text = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::axes(8.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_role(TextRole::Caption)
+    .with_text(label)
+    .build();
     let text = ui.add_node(text, handle);
     (handle, text)
 }
@@ -297,8 +294,21 @@ pub(crate) fn build_generated_details(
                 .filter(|p| p.component.as_str() == "somnium.Name"),
         );
     for panel in ordered {
-        let section_root =
-            presentation.section(ui, root, panel.component.as_str().to_owned(), &panel.label);
+        let container = ui.add_node(
+            StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                .with_orientation(Orientation::Vertical)
+                .build(),
+            root,
+        );
+        presentation
+            .component_hosts
+            .push((panel.component, container));
+        let section_root = presentation.section(
+            ui,
+            container,
+            panel.component.as_str().to_owned(),
+            &panel.label,
+        );
         if let Some(path) = panel.preview_path.clone() {
             ui.draw_ctx.thumbnails.request(&path, true);
             let preview = ImageBuilder::new(

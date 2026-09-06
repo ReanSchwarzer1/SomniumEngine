@@ -36,7 +36,7 @@ audits can therefore be historically useful and presently false.
 **Next implementation priority, 2026-09-06:** [PERSONA (Atlus)](phase_PERSONA.md)
 comes before further work on other phases. Its editor survey and design/QoL plan
 are written; A/B visual foundations and C/D workspace/QoL implementation are in tree
-([C/D record and captures](<phase PERSONA/PERSONA-C_D.md>)). The [first E/F slice](<phase PERSONA/PERSONA-E_F.md>) adds contextual authoring, fixes Foliage/F8, and repairs floating placement and narrow-window clipping. Designer journeys, E/F acceptance and G remain open. The dependency graph below describes
+([C/D record and captures](<phase PERSONA/PERSONA-C_D.md>)). The [first E/F slice](<phase PERSONA/PERSONA-E_F.md>) adds contextual authoring, fixes Foliage/F8, and repairs floating placement and narrow-window clipping. The [designer QoL follow-up](<phase PERSONA/PERSONA-QoL.md>) adds material/lighting tools, browser fixes, Scripts access and saved brush settings. User visual review, designer journeys, E/F acceptance and G remain open. The dependency graph below describes
 the subsequent roadmap, not permission to skip PERSONA.
 
 ```mermaid

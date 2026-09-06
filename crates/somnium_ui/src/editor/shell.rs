@@ -1382,6 +1382,12 @@ pub(crate) fn build_editor_layout(
         inspector_stack,
     );
     ui.set_visibility(persona.empty, false);
+    let script_host = ui.add_node(
+        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_orientation(Orientation::Vertical)
+            .build(),
+        inspector_stack,
+    );
     persona.advanced = super::persona::action(
         ui,
         inspector_stack,
@@ -1396,6 +1402,7 @@ pub(crate) fn build_editor_layout(
     );
     ui.set_visibility(persona.advanced_body, false);
     let inspector_handles = build_inspector(ui, persona.advanced_body, font_id);
+    ui.reparent(inspector_handles.script_section, script_host);
     ui.reparent(
         inspector_handles.foliage_section,
         persona.tool_panel.foliage,
@@ -2155,6 +2162,7 @@ pub(crate) fn build_editor_layout(
             .with_margin(Thickness::axes(12.0, 4.0))
             .with_background(theme::active().semantic.surface.input.bytes()),
     )
+    .with_commit_on_blur(false)
     .with_font_id(font_id)
     .build();
     let name_input = ui.add_node(name_input_node, name_stack_h);

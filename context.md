@@ -17,13 +17,13 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Item | Current state |
 |---|---|
 | Active phase | PERSONA A–D and first E/F slice in tree; designer journeys, E/F acceptance and G open. MORROWIND remains partially complete. |
-| Most recent work | PERSONA-E/F: contextual Landscape/Foliage, F8 painter fix, floating placement and narrow-window repairs, 2026-09-06 |
+| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): material/lighting tools, browser fixes, Scripts access and saved brush settings, 2026-09-06 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Current implementation priority | PERSONA (Atlus): verify designer journeys, finish E resource/settings contract and F OS/DPI matrix, then G acceptance before other phases |
+| Current implementation priority | PERSONA (Atlus): user review of QoL/E resource-settings implementation, designer journeys, F OS/DPI matrix and G visual acceptance before other phases |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-06 | 218,374 Rust/WGSL lines and 2,211 discovered tests |
+| Generated census, 2026-09-06 | 218,976 Rust/WGSL lines and 2,216 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |

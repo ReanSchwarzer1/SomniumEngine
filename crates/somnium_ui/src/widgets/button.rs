@@ -35,6 +35,7 @@ impl ButtonMessage {
 }
 
 pub struct Button {
+    pub animate_hover: bool,
     pub is_pressed: bool,
     pub hovered: bool,
     pub selected: bool,
@@ -123,10 +124,22 @@ impl Control for Button {
         } else {
             0.0
         };
-        ctx.motion
-            .start(key, 0.0, target, t.motion.hover_ms as f32, Easing::Standard);
+        ctx.motion.start(
+            key,
+            0.0,
+            target,
+            if self.animate_hover {
+                t.motion.hover_ms as f32
+            } else {
+                0.0
+            },
+            Easing::Standard,
+        );
         let wash = ctx.motion.value_or(key, target);
-        if wash > 0.0 && wash < 1.0 && state.interaction != Interaction::Pressed {
+        if wash > 0.0
+            && wash < 1.0
+            && matches!(state.interaction, Interaction::Hover | Interaction::Rest)
+        {
             let rest = action_button(variant, VisualState::rest());
             let hovered = action_button(variant, VisualState::with(Interaction::Hover));
             paint.background = lerp_color(rest.background, hovered.background, wash);
@@ -214,6 +227,7 @@ impl Control for Button {
 }
 
 pub struct ButtonBuilder {
+    animate_hover: bool,
     widget: WidgetBuilder,
     variant: ButtonVariant,
 }
@@ -223,7 +237,13 @@ impl ButtonBuilder {
         Self {
             widget,
             variant: ButtonVariant::Auto,
+            animate_hover: true,
         }
+    }
+
+    pub fn with_hover_animation(mut self, animate: bool) -> Self {
+        self.animate_hover = animate;
+        self
     }
 
     pub fn with_variant(mut self, variant: ButtonVariant) -> Self {
@@ -241,6 +261,7 @@ impl ButtonBuilder {
                 focused: false,
                 last_up: None,
                 variant: self.variant,
+                animate_hover: self.animate_hover,
             }),
         )
     }
@@ -284,6 +305,7 @@ mod tests {
             focused: false,
             last_up: None,
             variant: ButtonVariant::Auto,
+            animate_hover: true,
         };
         let mut widget = Widget::default();
         widget.handle = NodeHandle::NONE;

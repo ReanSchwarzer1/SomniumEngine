@@ -7,11 +7,14 @@ pub enum ToolMode {
     Select,
     Landscape,
     Foliage,
+    Lighting,
+    Materials,
 }
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ToolContext {
     pub mode: ToolMode,
     pub target: String,
+    pub material_name: String,
     pub landscape_reason: Option<String>,
     pub foliage_reason: Option<String>,
     pub foliage_visible: bool,
@@ -28,6 +31,10 @@ pub struct ToolPanel {
     hint: NodeHandle,
     pub landscape: NodeHandle,
     pub foliage: NodeHandle,
+    pub properties: NodeHandle,
+    lighting_actions: NodeHandle,
+    material_actions: NodeHandle,
+    pub commands: Vec<(NodeHandle, &'static str)>,
     fields: Vec<NodeHandle>,
     operation: NodeHandle,
     layer: NodeHandle,
@@ -40,7 +47,7 @@ impl ToolPanel {
         use crate::editor::persona::{action, combo};
         let stack = |ui: &mut UserInterface, parent| {
             ui.add_node(
-                StackPanelBuilder::new(WidgetBuilder::new())
+                StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                     .with_orientation(Orientation::Vertical)
                     .build(),
                 parent,
@@ -92,6 +99,40 @@ impl ToolPanel {
         ui.nodes.borrow_mut(layer.transmute()).widget.tooltip =
             "Paint layer from the selected terrain's loaded layer palette".into();
         let foliage = stack(ui, host);
+        let mut commands = Vec::new();
+        let lighting_actions = ui.add_node(
+            crate::widgets::wrap_panel::WrapPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_gap(4.0, 4.0)
+            .build(),
+            host,
+        );
+        for (label, id) in [
+            ("Point light", "editor.create.point_light"),
+            ("Spot light", "editor.create.spot_light"),
+            ("Sun light", "editor.create.directional_light"),
+            ("Area light", "editor.create.area_light"),
+        ] {
+            commands.push((action(ui, lighting_actions, label, 140.0), id));
+        }
+        let material_actions = ui.add_node(
+            crate::widgets::wrap_panel::WrapPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_gap(4.0, 4.0)
+            .build(),
+            host,
+        );
+        commands.push((
+            action(ui, material_actions, "New material", 140.0),
+            "editor.asset.new_material",
+        ));
+        commands.push((
+            action(ui, material_actions, "Save", 100.0),
+            "editor.scene.save",
+        ));
+        let properties = stack(ui, host);
         let finish = action(ui, host, "Finish · return to Select", 0.0);
         Self {
             host,
@@ -100,6 +141,10 @@ impl ToolPanel {
             hint,
             landscape,
             foliage,
+            properties,
+            lighting_actions,
+            material_actions,
+            commands,
             fields,
             operation,
             layer,
@@ -123,7 +168,7 @@ impl ToolPanel {
         let reason = match shown {
             ToolMode::Landscape => state.landscape_reason.as_deref(),
             ToolMode::Foliage => state.foliage_reason.as_deref(),
-            ToolMode::Select => None,
+            ToolMode::Select | ToolMode::Lighting | ToolMode::Materials => None,
         };
         ui.send(TextMessage::set_text(
             self.title,
@@ -131,22 +176,34 @@ impl ToolPanel {
                 ToolMode::Select => "Authoring tools",
                 ToolMode::Landscape => "Landscape",
                 ToolMode::Foliage => "Foliage",
+                ToolMode::Lighting => "Lighting",
+                ToolMode::Materials => "Material",
             },
         ));
         ui.send(TextMessage::set_text(
             self.target,
-            if state.target.is_empty() {
+            if shown == ToolMode::Materials && !state.material_name.is_empty() {
+                &state.material_name
+            } else if state.target.is_empty() {
                 "No target selected"
             } else {
                 &state.target
             },
         ));
         ui.send(TextMessage::set_text(self.hint, reason.unwrap_or(match shown {
+            ToolMode::Lighting => "Select a light or Environment to edit its lighting. Changes use the same Details and undo controls.",
+            ToolMode::Materials => "Select a material in the Content Drawer, or an object using one. Save writes the material asset. Material graphs are planned for a later phase.",
             ToolMode::Select => "Choose Landscape or Foliage in the toolbar.",
             ToolMode::Landscape => "Choose an operation, then drag on terrain. Esc cancels a stroke; Ctrl+Z undoes it.",
             ToolMode::Foliage if !state.foliage_visible => "Foliage is hidden. Enable Visible below before painting.",
             ToolMode::Foliage => "Choose a kind, then paint on terrain. Placement respects slope and layer limits; Ctrl+Z undoes a dab.",
         })));
+        ui.set_visibility(self.lighting_actions, shown == ToolMode::Lighting);
+        ui.set_visibility(self.material_actions, shown == ToolMode::Materials);
+        ui.set_visibility(
+            self.properties,
+            matches!(shown, ToolMode::Lighting | ToolMode::Materials),
+        );
         ui.set_visibility(self.landscape, shown == ToolMode::Landscape);
         ui.set_visibility(self.foliage, shown == ToolMode::Foliage);
         ui.set_visibility(self.finish, state.mode != ToolMode::Select);
@@ -261,6 +318,22 @@ mod tests {
             }
         }
         assert!(explained);
+    }
+    #[test]
+    fn authoring_actions_use_registered_commands_and_keep_their_context() {
+        let mut ui = UserInterface::new(320.0, 600.0);
+        let root = ui.root();
+        let mut panel = ToolPanel::build(&mut ui, root, 0);
+        for (_, id) in &panel.commands {
+            assert!(crate::commands::registry().get(id).is_some(), "{id}");
+        }
+        panel.refresh(&mut ui, ToolContext::default(), ToolMode::Lighting);
+        assert!(ui.visibility(panel.lighting_actions));
+        assert!(!ui.visibility(panel.material_actions));
+        panel.refresh(&mut ui, ToolContext::default(), ToolMode::Materials);
+        assert!(ui.visibility(panel.material_actions));
+        assert!(!ui.visibility(panel.lighting_actions));
+        assert!(ui.visibility(panel.properties));
     }
     #[test]
     fn brush_commands_preserve_live_and_commit_and_ignore_model_refresh() {
