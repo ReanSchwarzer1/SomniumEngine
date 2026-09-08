@@ -1831,6 +1831,48 @@ mod post_process_tests {
 
 // ─── Phase CR: Camera settings ──────────────────────────────────────────────
 
+/// Fixed scene-pixel budgets. Other authored graphics settings remain independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphicsScalability {
+    /// Full resolution, for reference captures and maximum spatial detail.
+    Native,
+    /// Three quarters of each dimension; 56.25% of the scene pixels.
+    #[default]
+    Balanced,
+    /// Two thirds of each dimension; about 44.4% of the scene pixels.
+    Performance,
+}
+
+impl GraphicsScalability {
+    /// Stable schema index.
+    pub fn as_index(self) -> u32 {
+        match self {
+            Self::Native => 0,
+            Self::Balanced => 1,
+            Self::Performance => 2,
+        }
+    }
+
+    /// Scale applied to the existing viewport resolution cap.
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Native => 1.0,
+            Self::Balanced => 0.75,
+            Self::Performance => 2.0 / 3.0,
+        }
+    }
+
+    /// Parse an explicit capture override; unknown values do not replace authoring.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "native" => Some(Self::Native),
+            "balanced" => Some(Self::Balanced),
+            "performance" => Some(Self::Performance),
+            _ => None,
+        }
+    }
+}
+
 /// Scene-wide camera settings, exposed as a selectable "Camera" entity.
 ///
 /// Play possesses this entity's **world** transform (so a later player-parented
@@ -1844,6 +1886,8 @@ mod post_process_tests {
 // compiler would let through.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraSettingsComponent {
+    /// Fixed graphics budget, editable and saved with the Camera.
+    pub graphics_scalability: GraphicsScalability,
     /// Skip terrain chunks whose AABB misses the camera frustum before they
     /// reach `draw_queue`. Default on. Off-screen casters still shadow into
     /// view. `SOMNIUM_CPU_FRUSTUM=0` forces this off.
@@ -1865,6 +1909,7 @@ pub struct CameraSettingsComponent {
 impl Default for CameraSettingsComponent {
     fn default() -> Self {
         Self {
+            graphics_scalability: GraphicsScalability::default(),
             frustum_cull: true,
             dynamic_resolution: false,
             dynamic_target_ms: 1000.0 / 60.0,
@@ -1886,6 +1931,10 @@ impl CameraSettingsComponent {
         };
         let default = Self::default();
         Self {
+            graphics_scalability: std::env::var("SOMNIUM_GRAPHICS_SCALABILITY")
+                .ok()
+                .and_then(|s| GraphicsScalability::from_name(&s))
+                .unwrap_or(default.graphics_scalability),
             frustum_cull: std::env::var("SOMNIUM_CPU_FRUSTUM").as_deref() != Ok("0"),
             // `SOMNIUM_DYNRES=1` exists so a timing run can measure the
             // controller without a human clicking a checkbox first.

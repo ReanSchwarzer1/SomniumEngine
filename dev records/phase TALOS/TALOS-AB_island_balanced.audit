@@ -1,0 +1,68 @@
+scene=1920x1044
+swapchain=2560x1392
+output=2560x1392 dpi=1.000 viewport=(54, 68, 2160, 1078) present_mode=AutoVsync
+resolution base=(2560, 1392) fixed_scale=0.750000 effective_scale=0.750000 dynamic=false target_ms=16.667 floor=0.670
+scene_state time=8.000050 camera=Vec3(0.5, 24.211077, -23.5) view_count=1
+surface_format=Bgra8UnormSrgb
+device_features=Features { features_wgpu: FeaturesWGPU(TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | PIPELINE_STATISTICS_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS | TEXTURE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | MULTI_DRAW_INDIRECT_COUNT | CLEAR_TEXTURE | EXPERIMENTAL_RAY_QUERY | SUBGROUP | PASSTHROUGH_SHADERS), features_webgpu: FeaturesWebGPU(TEXTURE_COMPRESSION_BC | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | FLOAT32_FILTERABLE | PRIMITIVE_INDEX) }
+effective fsr=true taa=false cas=false bloom=true gtao=true volumetrics=true shafts=true water_rt=true water_refract=false restir_di=true restir_gi=true motion_blur=false dof=false lighting_extra_flags=0x0
+lighting_extra_accumulated_frames=0
+sun_direction_y=0.573576
+terrain[0] compressed=true from_assets=true hero=2048 extra=1024 wetness=0.000 hex=false parallax=0.0000
+terrain[0] clipmap=false
+Frame                       21.065 ms
+  Shadows                      0.707 ms
+  Cull (phase 1)               0.020 ms
+  Visibility (phase 1)         0.103 ms
+  Hi-Z                         0.068 ms
+  Cull (phase 2)               0.013 ms
+  Visibility (phase 2)         0.049 ms
+  Hi-Z (phase 2)               0.072 ms
+  TLAS build                   0.129 ms
+  ReSTIR DI                    0.307 ms
+  ReSTIR GI                    2.664 ms
+  Lighting extra               0.004 ms
+  DDGI                         0.003 ms
+  ReSTIR clear                 0.003 ms
+  Velocity                     0.029 ms
+  GTAO                         0.560 ms
+  Volumetrics                  0.165 ms
+  Clouds                       0.003 ms
+  Terrain clipmap              0.003 ms
+  Census                       0.003 ms
+  Shading                      9.940 ms
+  Cloud composite              0.003 ms
+  Water prepass                2.786 ms
+  Water reflection             0.284 ms
+  Water shade                  0.981 ms
+  Transparent                  0.044 ms
+  Motion Blur                  0.003 ms
+  TAA                          0.003 ms
+  Underwater                   0.110 ms
+  Auto exposure                0.059 ms
+  DoF                          0.004 ms
+  Bloom                        0.084 ms
+  FSR                          1.247 ms
+  Post + present               0.090 ms
+  Editor overlays              0.008 ms
+  UI                           0.231 ms
+    Game UI                      0.003 ms
+unattributed                 0.280 ms
+CPU
+Editor panels                0.298 ms
+Jobs & assets                0.505 ms
+  Foliage                      0.000 ms
+Scene submit                 0.009 ms
+Environment                  0.046 ms
+Terrain                      0.020 ms
+Instances                    0.005 ms
+Cluster cull                 0.024 ms
+Lighting extra               0.007 ms
+counters
+  Shading                  2004480 frag / 1 prim / 0 cs
+graph                      Frame → Shadows → Cull (phase 1) → Visibility (phase 1) → Hi-Z → Cull (phase 2) → Visibility (phase 2) → Hi-Z (phase 2) → TLAS build → ReSTIR DI → ReSTIR GI → Lighting extra → DDGI → ReSTIR clear → Velocity → GTAO → Volumetrics → Clouds → Terrain clipmap → Census → Shading → Cloud composite → Water prepass → Water reflection → Water shade → Transparent → Motion Blur → TAA → Underwater → Auto exposure → DoF → Bloom → FSR → Post + present → Editor overlays → UI
+geometry                   22 draws / 44487 tris
+scene                      22 inst / 0 chunks / 46 cpu-cull / 40 tlas
+shadow casters             77 of 22 draws
+shadow cascades            4 of 4
+virtual shadow pages       0 rendered / 0 resident

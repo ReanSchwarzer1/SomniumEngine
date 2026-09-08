@@ -1,286 +1,404 @@
-# Phase TALOS — prove equivalence, then reuse the work
+# Phase TALOS — Coastal performance with a deliberate quality budget
 
-> **Status:** Research and implementation proposal; no renderer changes, device tests, or new performance measurements.
-> **Date:** 2026-09-05. **Source revision:** `3c4e33a`, branch `dev`.
-> **Codename:** The Talos Principle: establish what a mechanism actually guarantees before building on it.
-> **Scope:** An independent thesis responding to `somnium_optimization_prompt_v2.md`, not execution of its example tracks.
-> **Stack checked:** Rust 1.88; manifest `wgpu = "30.0"`; lockfile resolves both wgpu and Naga to **30.0.1** ([Cargo.toml, line 78](../Cargo.toml), [Cargo.lock, lines 2260 and 4925](../Cargo.lock)).
+> **Status, 2026-09-08:** Scope reduced by user request: keep the new graphics scalability controls and small rendering cleanups. The broader C–H optimization program and its 60 FPS acceptance target are deferred, not requirements for the current work. The original plan remains below as reference. See [implementation and evidence](<phase TALOS/README.md>).
+> **Date:** 2026-09-06. **Audited revision:** d51e550 on dev.
+> **Primary workload:** Coastal, at the user's 2K display/viewport, in motion as well as at rest.
+> **Objective:** Substantially improve real frame throughput while retaining approximately 90% of the current visual experience.
+> **Stack verified:** Rust 1.88 / edition 2024; wgpu and Naga 30.0.1 in Cargo.lock.
+> **Supersedes:** This file's 2026-09-05 exact-equivalence-first proposal. Git retains that version.
 
 ## 1. Executive decision
 
-**Somnium's largest opportunity is making expensive material work safely reusable. Its immediate obstacle is semantic equivalence, not a missing compute classifier.** The clipmap has demonstrated substantial speed, but its current representation is not generally equivalent to the live material. This audit identifies a concrete normal-composition mismatch and a cache invalidation gap; neither requires another exploratory engine run to establish the premise.
+**TALOS should buy a large reduction in Coastal frame time by reusing terrain material work and reducing expensive shading resolution where the image tolerates it.** Exact equivalence is no longer the objective. Fix actual rendering defects, preserve the scene's identity, and spend a limited quality budget on texture filtering, indirect-light detail, reconstruction, and small water frequencies.
 
-The next implementation should be a small material-equivalence fixture, followed by a narrowly scoped correction to the clipmap's normal algebra. A cache eligibility/dependency contract comes next. Reconsider the default only after those changes survive component, image, and moving-scene gates. The default decision remains separate.
+The previous plan correctly identified cache defects, but made an exhaustive equivalence exercise the entry ticket to a small FFT optimization. That is the wrong priority for a user reporting roughly 25+ FPS at 2K. A 1% kernel win cannot close that gap. Conversely, accepting some approximation does not make stale wetness, rectangular terrain bands, broken history, or missing objects acceptable.
 
-An independent performance experiment is justified in **the ocean's FFT row kernel**: assign both outputs of a butterfly to the same invocation so their input loads and twiddle lookup can be shared. This changes execution ownership rather than wave resolution, simulation rate, or sample count. It benefits either terrain configuration and has a much smaller correctness surface than a new denoiser or a fullscreen compute resolve. Its speedup is a hypothesis, not a promised result.
+Proceed sequentially:
 
-These are sequential, bounded decisions. TALOS does not commission all four example tracks, migrate the renderer to compute, or turn every uncertainty into a new profiling system.
+1. Establish the actual Coastal 2K baseline and effective settings.
+2. Test the existing FSR/resolution path at fixed scales; repair only the integration defects exposed by those tests.
+3. Correct and qualify the existing terrain clipmap for a performance configuration.
+4. Re-measure. If the frame still misses its budget, choose the largest remaining opportunity: reduced-resolution GI, then ocean simulation or AO if their measured costs justify them.
+5. Package the smallest successful combination into existing settings, verify motion and editing, and stop. A compute material resolve is an escalation if these approaches fail, not mandatory phase infrastructure.
 
-## 2. Evidence and denominators
+**Existing Rust and WGSL may be edited, simplified, or replaced. New standalone files are not required.** Preserve a reproducible baseline for comparison during development, then remove failed experiments and superseded duplication. Do not build a second renderer, cache manager, quality framework, job system, or shader registry.
 
-All GPU values below are milliseconds on the RTX 5080 Laptop / Vulkan at **1920×1032**, with 180 warm-up and 300 measured frames. Values are historical observations, not fresh measurements of this revision. “Off” and “on” in the PORTAL rows identify that experiment's clipmap setting; the DOOM rows identify its recorded defaults.
+### Authority and scope
 
-| Record / map / viewpoint | GPU frame | Shading | ReSTIR GI | Water prepass | Shadows |
-|---|---:|---:|---:|---:|---:|
-| PORTAL-0 final, Coastal ground, clipmap off [R1] | 21.4390 | 11.5340 | 2.9059 | 2.3109 | 0.9370 |
-| PORTAL-0 final, Coastal ground, clipmap on [R2] | 9.0959 | 1.6546 | 1.7976 | 1.9741 | 0.5581 |
-| DOOM-M final, Coastal ground, recorded defaults [R3] | 20.3849 | 11.6107 | 3.0327 | 2.2135 | 0.0023 |
-| DOOM-M final, Island ground, recorded defaults [R4] | 13.1794 | 6.2000 | 1.3807 | 2.2390 | 0.0023 |
+The user's current request controls this revision. The attached optimization brief and older phase records are evidence and historical proposals; their imperative wording does not authorize implementation. Their 100% parity rule, new-files preference, and prohibition on sample/detail reductions do not govern this revised plan. The older TSUSHIMA preference for appearance regardless of cost is likewise superseded for TALOS.
 
-The PORTAL pair gives **6.97× shading throughput and 2.36× frame throughput**, not a 7× frame improvement. Shading falls by 9.8794 ms while frame time falls by 12.3431 ms. The remaining 2.4637 ms is movement in other work; it cannot be booked as direct elimination of terrain instructions. Nor can the later DOOM shadow-cache saving be added to this older clipmap result to manufacture a new baseline.
+The revision above was originally authorized as plan-only work. The subsequent user request on 2026-09-06 explicitly starts TALOS and requests performance-minded defaults and editable graphics scalability, superseding that restriction and the PERSONA-first schedule. The A/B implementation and its remaining acceptance limits are recorded separately; the plan below retains the broader phase contract.
 
-Attribution matters elsewhere too:
+## 2. Success means a faster Coastal scene, not a favorable screenshot
 
-- PORTAL water **reflection** is only 0.1217 ms off / 0.1029 ms on, separately from prepass [R1–R2, line 42]. A reflection denoiser does not attack the 2 ms ocean simulation denominator.
-- On the PORTAL clipmap-on rail, CPU frame body is 3.8587 ms and acquisition is 0.0399 ms; wall time is 16.8980 ms [R2, lines 53–55]. This is presentation-paced, not evidence that the CPU has “no slack.” GPU and CPU budgets are not additive. CPU optimization can still matter for hitches, but these records do not make staging a frame-throughput priority.
-- DOOM-M already measures static shadows at 0.0023 ms. Triangle filtering or another static shadow optimization has essentially no opportunity on that particular workload [R3–R4]. Dynamic casters are a different workload.
-- DOOM-J explicitly says its inventory measures footprint, not bandwidth. Pixel counts and ALU-heavy source justify a priority; they do **not** prove DRAM bandwidth or texture latency irrelevant ([DOOM-J, lines 174–192](<phase DOOM/DOOM-J.md>)).
+Treat “2K” provisionally as **2560×1440 output**, not as a verified current internal resolution. Editor chrome can make the scene viewport shorter. Record physical window size, actual displayed viewport, DPI, internal scene target, and reconstruction output separately. A 2560×1392 scene is a distinct workload; a toolbar label is not its measurement.
 
-For a new optimization, use `saving / matched total GPU frame`, including added passes, cache refresh, copies, and fallback execution. **1% is an admission threshold, not a prediction:** about 0.204 ms on DOOM-M Coastal, 0.132 ms on DOOM-M Island, and 0.091 ms on the historical PORTAL clipmap-on rail.
+### Performance targets
 
-## 3. Corrections to the handoff
+These are proposed engineering targets, not results or a guarantee:
 
-### 3.1 The obvious clipmap specialization already exists
-
-`ShadingSpec` has both `clipmap` and `live_terrain`. Renderer construction starts with both false, marks the cache path for clipmapped terrain, and retains live evaluation only when a queued terrain needs it. The shader tests `!enable_live_terrain` before its per-material cache flag. Thus the all-cached case already removes the live branch; the all-live case can remove the cache branch. A third boolean does not eliminate a newly discovered cost [R5].
-
-The mixed case genuinely needs both behaviors. A single frame-wide constant cannot replace a per-terrain decision unless geometry/material routing changes. Such routing has classification and dispatch costs and would need a new, measured mixed-terrain denominator. It is not an immediate Coastal optimization.
-
-Also, “default off” is not a complete description of effective state. `reconcile_clipmaps` enables caches if either the debug toggle or virtual-texturing ownership requests them, unless the environment forces them off. The default guard test remains meaningful, but does not prove that every default scene executes live terrain [R6]. Future records must log **effective per-terrain state, VT state, and the actual ShadingSpec**, not infer them from an unset environment variable.
-
-### 3.2 Naga's quad restriction is stale for the pinned package
-
-The installed Naga **30.0.1** WGSL frontend lowers `quadSwapX`, `quadSwapY`, `quadSwapDiagonal`, and `quadBroadcast`. Its validator includes `QUAD_FRAGMENT_COMPUTE` under `Capabilities::SUBGROUP`; its SPIR-V backend emits quad operations [T1]. The current WGSL specification also defines quad swaps and `subgroupElect` [L1].
-
-This is a **source-confirmed compiler path**, not a completed device capability test. An implementation still needs the adapter's subgroup operation support, requested wgpu features, valid stage/control flow, and correct pixel-to-lane mapping. Subgroup lanes are not automatically screen neighbors. Nevertheless, “analytic reconstruction is the only door” is false for this pinned source.
-
-The `enable subgroups;` directive remains explicitly unimplemented in Naga's extension parser. `subgroupElect` is absent from the pinned frontend even though it is in the language specification. These are separate questions. The checked v30.0.1 release notes list platform fixes, not a reason to upgrade the engine for this phase [T1, L2]. No claim is made about untested upstream trunk.
-
-### 3.3 Explicit gradients make a port possible, not identical
-
-The existing UV path evaluates perspective-correct barycentrics at neighboring pixels. The same expression can reconstruct world position:
-
-```text
-P(x,y) = sum_i bary_i(x,y) * transformed_vertex_position_i
-Gx = P(x+1,y).xz - P(x,y).xz
-Gy = P(x,y+1).xz - P(x,y).xz
-```
-
-Use the existing NDC Y convention and the same morphed/skinned geometry, perspective division, jitter, and viewport dimensions [R7]. These are finite differences of this triangle's interpolant, not automatically the values returned by fragment `dpdx/dpdy`. Primitive boundaries, fine/coarse derivative selection, degenerate triangles and grazing projections matter. Changing gradients may improve correctness, but it changes texture footprints. It requires a separate fidelity decision before any compute speedup can be credited.
-
-## 4. The material cache does not currently preserve the live function
-
-### 4.1 A reproducible mathematical counterexample: normal strength
-
-Live evaluation accumulates weighted **surface gradients** and resolves against the geometric normal. Cache generation starts `n_ts` at `(0,0,1)`, adds weighted tangent normals, then normalizes. The consumer decodes that normal and converts it to a surface gradient [R8–R10].
-
-Choose a flat surface, one surviving layer of weight 1, constant tangent normal `(0.6,0,0.8)`, no cliffs, and no parallax. Ignore quantization and filtering; they are not needed for the counterexample.
-
-```text
-Live gradient magnitude       = 0.6 / 0.8 = 0.75
-Generated direction           = normalize((0,0,1) + (0.6,0,0.8))
-Decoded cache gradient        = 0.6 / 1.8 = 1/3
-Live resolved world normal    = (-0.6, 0.8, 0)
-Cached resolved world normal  = (-1/sqrt(10), 3/sqrt(10), 0)
-Angular disagreement          = 18.43495 degrees
-```
-
-The generator attenuates even a single layer's bump. Starting the accumulator at zero fixes that single-layer bias but **does not** make weighted normal blending equal weighted gradient blending for multiple layers. The correct intermediate must reproduce the live gradient combination, including its `max(n.z, 0.2)` rule. Mikkelsen's surface-gradient framework supplies the relevant composition model [L3]; the numerical counterexample above is derived from Somnium's code.
-
-This demonstrates non-equivalence. It does **not** establish the cause of the historic rectangular dark band, whose recorded addressing/readiness/uniform-slot defects are distinct.
-
-### 4.2 The cache key omits an input that changes during play
-
-Generation bakes wetness into albedo, roughness, and alpha. The consumer reads that baked wetness for F0. Weather writes `terrain.wetness` every frame, whereas `TerrainClipmap::update` receives camera position and `edit_revision`; its full refresh decision uses initialization/revision. The weather assignment does not bump that revision [R8, R10–R12].
-
-Therefore, a ready stationary cache can retain old wetness until another event regenerates it. This is a statically identified dependency gap, not a reproduced screenshot finding. Paint/sculpt revisions and VT-arrival invalidation already exist and should be reused; a second general cache manager is unnecessary.
-
-Refreshing the entire cache whenever weather changes would restore freshness at the expense of the reuse that made the cache fast. The architectural question is whether to cache **dry material plus moisture response**, applying current weather after sampling. That is not a one-line move: live terrain combines cliff material and moisture before wetness, while the cached path currently mixes projected cliffs after the baked response. Factor the actual equations in their existing order and test them; do not assume the operations commute.
-
-### 4.3 Representation and coverage impose additional limits
-
-The cache stores two `Rgba8Unorm` targets, including packed normal XY, roughness, AO and wetness. Live output has not undergone that cache quantization. Clipmap generation and live shading also use different sampling footprints; strongest-four selection and height blending are nonlinear. In general:
-
-```text
-filter(material_evaluation(inputs)) != material_evaluation(filter(inputs))
-```
-
-Consequently a corrected cache cannot promise general bit identity merely by sharing helper functions. Preserve the existing formats initially and measure their error; format expansion is a separate decision with a memory budget [R8, R9, R13].
-
-POM is another explicit exception: the cache consumer sets `parallax_shadow = 1`, while the live path can march and shadow it [R8, R10]. A cache setting must not silently discard authored POM. Cliff evaluation already exists in the consumer and must be retained.
-
-Finally, exhausted update budgets can intentionally make a ready ring fall back to a coarser ring; complete misses can become constant material [R10, R13]. Those behaviors prevent invalid reads but do not satisfy a no-detail-loss requirement. A warm stationary luminance comparison misses all of them. PORTAL-0 itself limits its evidence to three stationary viewpoints and mean luminance ([PORTAL-0 §F](phase_PORTAL-0.md)).
-
-## 5. Proposed architecture
-
-### 5.1 Cache eligibility follows proof and actual content
-
-Keep the existing clipmap resources, queue order, and shader registry. Add a small renderer-owned companion, provisionally `terrain/cache_contract.rs`, only after the first fixture establishes its needed inputs. Its output should be a decision such as:
-
-```text
-MaterialCacheDecision
-  effective_mode: Live | Cached | Mixed
-  reason: unsupported feature | stale dependency | incomplete coverage | eligible
-  content_epoch: u64
-```
-
-This is proposed CPU metadata, **not an addition to the 2,080-byte GPU material ABI**. The renderer uses the decision consistently when uploading `clipmap_enabled` and selecting existing `ShadingSpec` fields. Begin conservatively at whole-terrain granularity. Per-pixel eligibility would retain both costly shader paths and needs its own occupancy experiment.
-
-Classify dependencies by semantics:
-
-| Dependency | Correct response |
+| Gate | Requirement |
 |---|---|
-| Source maps, tiling, painted weights/noise, height-blend parameters | Invalidate affected cached content; use existing revision/resource events where sufficient |
-| New VT source page | Recompose affected results; current full invalidation is the starting behavior |
-| Camera movement / toroidal remap | Existing dirty rectangles, guards, and readiness; verify producer-before-consumer ordering |
-| Weather / wetness | Initially ineligible if stale; consider a proven dry-material factorization instead of repeated full rebakes |
-| View-dependent POM | Live route until an independently equivalent implementation exists |
-| Light/camera parameters used only after material evaluation | Do not invalidate material content |
+| Main target | Coastal ground and a repeatable Coastal walking route: mean GPU frame at most **16.67 ms**, aiming for **60 real rendered frames/s** under presentation conditions that permit it |
+| Meaningful improvement | At least **40% lower mean GPU frame time** against the matched current baseline; approximately **2× throughput** is the preferred outcome |
+| Motion/pacing | Route frame-wall p95 at most **22.2 ms**, p99 at most **33.3 ms**, with no new recurring compilation, resize, cache-fill, or allocation stalls |
+| Secondary regression | Island and Coastal overview: no repeatable regression above **5%** at matched settings unless an explicit quality gain is documented and accepted |
+| Quality | Pass the appearance and motion contract in §3 at the final combined settings |
+| Honesty | If only a partial improvement lands, publish it as partial. Do not declare TALOS's performance objective met because an individual pass improved |
 
-Selection must never describe a cache as eligible before generation is ordered ahead of its consumers. “Recorded for this frame” and “completed on the GPU” need not require a CPU wait: same-queue ordering is sufficient. Multiple view recordings must preserve distinct uniforms and content interpretation; the per-frame slot fix is a precedent, not proof for arbitrary multi-view reuse.
+Approximately 25 FPS corresponds to 40 ms/frame, but the user's observation is not a matched GPU measurement. Moving from 40 to 16.67 ms would require about 58% less frame time. Use the actual baseline to compute the required saving.
 
-No new global scene bind group is needed. A fixture may use a private layout. Note that the existing standalone ocean compute shader already has its own `@group(0)` layout; the scene-global convention does not mean every shader binds the scene pool [R14].
+A useful change that saves under 1% of the frame can accompany a nearby fix, but does not earn its own optimization project. A new substantial pass should normally demonstrate at least **5% net frame saving** on its admitted configuration; a small in-place kernel or ownership correction can qualify at **1%**. These are prioritization thresholds, not permission to reject correctness fixes.
 
-### 5.2 An independent ocean experiment: own a butterfly pair
+### Historical evidence and its limits
 
-The ocean already runs a shared-memory Stockham transform. Proposing “move FFT into workgroup memory” or “avoid a dispatch per FFT stage” would rebuild existing code. Each row uses 256 invocations, 1,024 complex values and a 16 KiB ping-pong array. The scheduler processes all three cascades on an update; comments claiming one cascade per frame are stale [R14–R15].
+GPU times below are historical RTX 5080 Laptop / Vulkan measurements. They establish where to investigate, not what d51e550 currently achieves.
 
-At each radix-2 stage, the precomputed entries for outputs `w0` and `w1` contain identical input indices and opposite twiddles. Today separate output work reads those inputs and computes their products twice:
+| Record | Actual internal target | GPU frame | Shading | ReSTIR GI | Water prepass |
+|---|---|---:|---:|---:|---:|
+| PORTAL-0 final Coastal ground, cache off [R1] | 1920×1032 | 21.4390 | 11.5340 | 2.9059 | 2.3109 |
+| PORTAL-0 final Coastal ground, cache on [R2] | 1920×1032 | 9.0959 | 1.6546 | 1.7976 | 1.9741 |
+| DOOM-M Coastal ground, recorded defaults [R3] | 1920×1032 | 20.3849 | 11.6107 | 3.0327 | 2.2135 |
+| DOOM-M Island ground, recorded defaults [R4] | 1920×1032 | 13.1794 | 6.2000 | 1.3807 | 2.2390 |
+| PORTAL-0-A Coastal ground, “720” [R5] | 1280×688 | 10.0490 | 4.3894 | 0.9391 | 1.9071 |
+| PORTAL-0-A Coastal ground, “2560” [R6] | **1920×1032** | 21.7695 | 11.7402 | 3.0521 | 2.3126 |
 
-```text
-y0 = upper + complex_mul(lower, twiddle)
-y1 = upper + complex_mul(lower, -twiddle)
-```
+The filename in R6 is misleading: its header is not a 2560-wide render. DOOM-M also explicitly says its earlier DOOM-A baseline was 2560×1392, so the historical 38.392 → 20.385 ms comparison is **not** a measured optimization [R7].
 
-Propose a companion `shaders/water_fft_pair.wgsl`: each invocation owns two butterfly pairs per stage at N=1,024. Read one pair's factors and inputs once; write its two distinct outputs. Preserve the stage barriers, row load/store layout, transform sign and existing transpose orientation. Reuse the current butterfly buffer and scratch allocation. The experiment needs no subgroup feature, new texture, or precision reduction.
+The PORTAL cache pair is **6.97× shading throughput and 2.36× frame throughput**. Shading accounts for 9.8794 ms of the 12.3431 ms frame reduction. Other scopes moved too; do not attribute the entire difference to deleted terrain instructions or add the later shadow-cache gain to it.
 
-First preserve the two signed products explicitly. Only share the complex product as `p` and `-p` if device tests verify equivalence: floating-point contraction, signed zero and reassociation make algebra alone insufficient for byte parity. Mapping both outputs together can still reduce repeated loads without that second change.
+Other useful denominators:
 
-**Exact integration seam:** create the companion pipeline in `WaterSpectrumPass`; choose it at the two existing row dispatches, lines 428–438. Reuse group 0 binding 1 (FFT read/write storage), binding 2 (butterfly storage) and binding 3 (80-byte uniform, 256-byte dynamic stride). Keep the layout's other entries unchanged. Register the new WGSL once in `shaders.rs`. A launch-time experiment selector chooses the baseline unless explicitly enabled [R14].
+- PORTAL's terrain-only shading ablation was 11.461 ms against 11.463 ms unablated. That makes live terrain the first source target, not a general geometry rewrite [R8].
+- DOOM-M static shadows cost 0.0023 ms. Moving casters and camera motion need separate evidence; another static shadow cache has no worthwhile denominator [R3–R4].
+- Water reflection was only 0.1217 ms in R1, separately from the 2.3109 ms prepass. Reducing reflection rays cannot claim the FFT/prepass budget.
+- R2 records Frame CPU 3.8587 ms, Surface acquire 0.0399 ms, and Frame wall 16.8980 ms. It is presentation-paced. CPU/GPU times are not additive, and acquisition is not useful CPU work.
+- DOOM-J measures resource footprint and churn, **not DRAM bandwidth**. No bandwidth-versus-ALU conclusion follows from that inventory alone [R9].
 
-This preserves all three 1,024² cascades, the fixed 50 Hz update policy, tick catch-up, normal/foam output and rendering consumers. It is an original kernel ownership change informed by Stockham/shared-memory FFT literature, not a port of a CUDA implementation [L4].
+Do not multiply all the historical speedups together. Cache reuse, reduced scene resolution, and reduced GI resolution overlap. Re-rank using the **remaining** frame after each accepted change.
 
-**Payoff model:** `net_saving = updated_frame_fraction × row_FFT_saving − overhead`. The water prepass is 10.9% of DOOM-M Coastal and 17.0% of Island; its row-transform share is not separately recorded. A 10% whole-prepass reduction would mean about 0.22 ms, or 1.1% / 1.7% of those frames. That is a useful target, **not evidence that pairing will achieve it**. Two products instead of one, longer register lifetimes, or compiler reuse of existing loads can erase the gain.
+## 3. Replace exact parity with an explicit appearance contract
 
-## 6. Lettered sub-phases and stopping rules
+“Approximately 90%” is the user's tolerance for modest visible compromise in exchange for major speed. It is **not** SSIM ≥ 0.90, 10% arbitrary changed pixels, or permission to remove 10% of the scene. No consulted paper supplies that conversion.
 
-### TALOS-A — make material equivalence testable
+Keep a current **Reference** configuration and one proposed **Coastal Performance** configuration. These are comparison/settings bundles over existing controls, not new rendering backends. Record every changed setting and the visible compromise it buys.
 
-**Deliverable:** A small fixture using composed production WGSL and synthetic constant/patterned inputs. Evaluate live and generated/decoded material from the same immutable inputs; compare albedo, normal, roughness, AO, wetness/F0 and POM shadow separately. An offscreen device test is preferable to repeatedly launching the editor. Use full-precision diagnostic outputs so target quantization cannot hide algebraic errors; also compare actual cache-format outputs.
+| Area | Permitted experiment | Acceptance boundary |
+|---|---|---|
+| Scene reconstruction | Fixed internal scale 0.75 first, then about 0.67 if needed, reconstructed to the same 2K output | Readable near terrain, stable foliage edges, no persistent trails or night-edge failure; UI remains at display resolution |
+| Terrain | Cached material, softer distant normals, filtered small texture detail; POM omission where its depth cue is unimportant | Keep painted material identity, cliffs, macro variation and landscape shape; no hard cache boundaries, missing data bands, or stale weather |
+| GI | Half-width/half-height evaluation, fewer spatial reuse taps, smoother indirect detail; existing IBL/DDGI alternatives may be compared | Preserve important indirect color and contact cues; reject leaks, lagging illumination and black fallback surfaces |
+| Water | Lower FFT resolution or reduced update frequency if the actual wave motion remains convincing | Preserve coastline, body coverage, large waves, reflection/refraction behavior and foam continuity |
+| AO/shadows | Lower evaluation resolution or filter budget when measured worthwhile | Keep foliage grounding and terrain readability; no renewed contact-shadow dashes |
+| Geometry and content | Existing LOD/distance controls may be tuned if geometry becomes a demonstrated bottleneck | No deletion of authored layers, unexplained foliage thinning, missing silhouettes, or shortened coastline to win a benchmark |
 
-Start with the single-layer counterexample, then unequal-normal two-layer blends, four-way height blends, zero strengths, wetness endpoints, steep cliffs, and multiple footprints. Pair scalar analytical checks with execution of real shaders; source-order assertions alone do not prove the math.
+Retain the recent TSUSHIMA fixes for horizon/sky visibility, AO multiplication, foliage transmission visibility, relief variance and specular stability. These preserve large visual cues or prevent defects; disabling them is not the first quality trade.
 
-**Exit:** The current shader produces the predicted single-layer discrepancy, the live oracle matches the analytic case, and repeated fixture evaluation is deterministic. The fixture must fail against the known mismatch. Existing default-off tests remain unchanged.
+Use paired stills and short sequences at identical scene states:
 
-**Falsifier:** If actual shader output disagrees with the counterexample, resolve the setup/coordinate discrepancy before altering code. If deterministic comparison cannot be established, later parity claims stay blocked. A is a correctness gate; it claims no frame saving.
+- Ground: sand/rock/grass junction, looking down and at grazing angles.
+- Shore: water edge, moving boat, foam, bright reflections.
+- Overview/cliff: near-to-far transitions, horizon silhouettes, cache rings.
+- Low sun, overcast/wetness transition, and night.
+- Slow walking, quick pan/turn, teleport/camera cut, paint/sculpt, and resize.
+- Island as a smaller-scene check; keep its authored look as the comparison reference.
 
-### TALOS-B — correct the cached normal algebra
+At normal output size and playback speed, the owner must find the compromise acceptable. Also inspect cropped problem areas and temporal sequences; a small but conspicuous band can hide in a whole-image average.
 
-**Deliverable:** An original companion helper that forms the same weighted gradient as live terrain and encodes a compatible normal for the existing cache consumer. Hook it only into generation; retain existing packing initially. Merely deleting the initial flat normal is insufficient.
+FLIP difference maps can support still-image review; FovVideoVDP can support sequence review if needed. Record display/viewing assumptions and local errors, and use them to locate regressions rather than inventing a universal score [L6–L7]. CHI research on frame-rate variation supports evaluating pacing alongside mean FPS [L8].
 
-**Exit:** Single- and multi-layer gradient tests pass within a predeclared numerical tolerance before encoding; cache-format error is reported separately. Verify normal variance and downstream specular response, not just average colour. A targeted existing-file hook is justified by the proven discrepancy and should be reviewed as such.
+**Keep correctness and quality checks separate.** Existing exact/regression checks continue to apply to invariants and unchanged configurations. The repository's 0.2%/24 golden comparator must not be globally loosened. Intentional Performance image changes receive their own comparison and acceptance record. Current PERSONA UI golden mismatches are separate; the older claim that only sculpt-panel is outstanding is no longer a complete account [R10].
 
-**Falsifier:** If the packed representation loses required gradient range/variance, stop the default recommendation. Do not quietly widen formats, flatten normals, or call the quantization invisible. Specify the smallest additional representation only in a subsequent decision. This fixes fidelity on the opt-in rail; the historic 9.1 ms frame is not guaranteed afterward.
+## 4. Current-code audit: what changes the plan
 
-### TALOS-C — close cache dependencies and eligibility
+### 4.1 Terrain: a valuable existing cache with specific defects
 
-**Deliverable:** The minimal contract in §5.1, a dependency audit covering actual writers, and replay fixtures for cold start, diagonal ring crossing, teleport, paint/undo, weather changes, VT arrival and alternating views. Use current ready masks, pending-texel counters and slot allocator. Add only information they cannot express.
+The complete route is terrain upload → clipmap update/jobs → generation → material resolve → shared lighting. The existing files already own that route [R11–R14].
 
-**Exit:** No stale dependency may be sampled as current. Unsupported POM and unavailable fine coverage retain the correct live behavior. Produce a matrix stating exactly which scene/feature combinations pass structural and motion parity, their effective cache state and their timing. Recommend a default only for a demonstrated supported configuration; do not flip it in this phase.
+- **Specialization already exists.** ShadingSpec carries clipmap and live_terrain. The all-cached case deletes live material evaluation; adding the same override again is not an optimization. Mixed cached/live content keeps both paths and must be measured as such.
+- **VT can own the cache.** reconcile_clipmaps combines the debug toggle with virtual-texturing ownership, subject to forced-off state. VT source placeholders are not a valid live reference. Log actual source residency and effective per-terrain modes.
+- **Normal blending is wrong relative to the live formulation.** terrain_generate_texel starts n_ts at (0,0,1), then adds weighted normals. Live evaluation sums surface gradients. For one layer with normal (0.6,0,0.8), the live gradient is 0.75 while the generated/decoded gradient is 1/3: an 18.435° normal disagreement. Zeroing the accumulator alone still does not fix multilayer composition.
+- **Wetness is cached without a complete dependency key.** Generation bakes wetness into albedo/roughness/alpha. Weather writes terrain.wetness, but TerrainClipmap::update receives camera position and edit_revision. A stationary cache can stay dry while weather changes.
+- **Approximation is inherent.** Two Rgba8Unorm material outputs, differing footprints, nonlinear strongest-four/height blending, and no cached POM cannot generally reproduce live shading exactly. That is now an error budget to evaluate, not a reason to abandon reuse.
+- **Missing coverage is a different problem.** Readiness, ring fallback, toroidal addressing, update ordering and per-record uniform slots remain correctness requirements. The single-layer normal counterexample does not prove the cause of the historical dark band.
+- **Current defaults differ from old notes.** context.md records shipped map hex/POM off. Verify effective values, but do not advertise turning off already-disabled work as a new saving.
 
-**Falsifier:** If maintaining fidelity requires continuous rebakes, excessive live fallback, or a mixed shader that removes the speed advantage, reject general default-on. Keep the live rail and report the constrained cache result. An audit is successful even when the old speedup cannot be retained under the stronger quality contract.
+The current cache uses eight detail and four macro rings at 1024², two four-byte targets per ring: **96 MiB per terrain**, before source VT and other resources. It already has dirty rectangles, readiness, generation order and a shared per-frame texel budget. Extend these owners, not a speculative MaterialCacheDecision service. A small dependency key or decision enum inside the existing terrain module is sufficient until a second real caller demands more.
 
-### TALOS-D — paired-output FFT, one candidate
+### 4.2 Resolution: infrastructure exists; its quality and resize costs matter
 
-**Deliverable:** The complete companion kernel and selector described in §5.2, plus a device test comparing the same input row under both pipelines. Use impulse, DC, conjugate pairs, random finite data and the real spectrum; include the full transform/unpack chain and a matched foam history sequence. Preserve the existing transposed output convention even if its explanatory comment is questionable.
+scene_size_for_preset, DynamicResolution, and FsrPass already exist [R15–R17]. FSR is the authored AA default where supported. At a 1:1 ratio it is reconstruction/AA work, not evidence that pixels were reduced.
 
-**Exit:** No material numerical/image regression; no new GPU allocation; at least **1% matched total GPU-frame reduction** on the admitted primary rail, beyond observed paired-run variation, with no significant regression on the other map/rail. Time row transforms and the whole prepass so movement in the combined scope can be attributed. Recording brackets are part of the completed candidate before timing it.
+The current dynamic-resolution controller has hysteresis, cooldowns and settled-sample handling, but changes allocate scene targets and reset temporal resources. FsrPass::resize replaces textures and previous-depth storage. Therefore:
 
-**Falsifier:** Exact results fail, the paired owner increases stalls/register pressure, or the full-frame gain is below the gate. Stop after this one mapping; retain a measured null record and remove the experimental runtime path. A matrix of workgroup sizes, radices and fused passes is not authorized by this proposal.
+- Start with fixed scale, not an oscillating controller.
+- Use existing resolution caps when they produce the desired dimensions.
+- If another ratio is needed, extend the existing sizing path rather than adding another controller.
+- Admit automatic scale changes only after measuring their hitches. Subrect rendering into persistent maximum-size resources is a later change if allocation stalls are actually the blocker.
 
-D is independent of B/C's cache outcome. If the cache cannot meet the invariant, D remains the first bounded performance implementation worth considering.
+Source review found two reconstruction gaps and one stale description:
 
-## 7. Techniques deliberately not scheduled
+1. FsrDispatchInfo supplies neither reactive_mask nor transparency_and_composition.
+2. The opaque velocity shader reconstructs static-point camera motion from depth. It has no previous object transform or deformation input; its comment that nothing moves is stale. **Water does overwrite velocity in its prepass**, so this is not an absence of all object/surface motion support.
+3. The fsr.rs introductory Karis/RCAS description is stale. Current sanitize/output WGSL uses linear pre-exposed HDR and bounded output sharpening, with backend RCAS disabled. Do not “repair” it back to the old compressed input.
 
-| Technique | Decision and reopening condition |
+These are source-confirmed limitations, not fresh observed ghosting results. Fix the minimum failing class in the moving-scene gate. A reactive mask can reduce accumulation for animated transparency; it cannot replace missing opaque object motion.
+
+### 4.3 GI: resolution and history are a credible second major opportunity
+
+RestirGiPass owns two **48-byte reservoirs per scene pixel**, two full-resolution dispatches and an Rgba16Float output. The shader creates one initial bounce candidate, considers four spatial neighbors, and validates the selected connection. There is no many-samples-per-pixel knob whose simple reduction explains the whole cost [R18].
+
+At an actual 2560×1440 scene target the reservoir pair alone is **337.5 MiB**; half width and half height makes it **84.375 MiB**. This is arithmetic from the allocation, not measured residency or bandwidth. It is a credible reason to investigate cost and working set together.
+
+Temporal reuse currently reads gi_a[index] at the same screen index. It does not consume motion vectors or previous primary-surface guides. The Rust pass resets history for resize, toggles and material lighting changes, but that does not make same-index reuse valid during ordinary movement. Current velocity is also scheduled after GI.
+
+A reduced-rate GI path needs a clear mapping between GI pixels and full-resolution depth/visibility, plus compatible temporal state. Reuse existing motion where valid or use previous matrices for static geometry, validate previous surfaces, and invalidate dynamic/disoccluded samples. Moving velocity earlier is a dependency change to audit, not a free wiring edit. Do not add temporal smoothing on top of invalid history.
+
+The shared shading consumer performs a direct full-resolution textureLoad of restir_gi. Simply allocating a smaller output is incorrect. Initially reconstruct into the existing full-resolution radiance/validity output; keep its interface and lighting composition intact.
+
+### 4.4 Water: distinguish simulation, rasterization, and reflection
+
+Water prepass includes spectrum.record and surface rasterization. It is not a pure FFT timestamp. The spectrum already uses a workgroup-memory Stockham transform, a transpose, four packed spectra, and three 1024² cascades. On an update all cascades run; catch-up advances accumulated time but performs one transform set [R19–R20].
+
+A paired-butterfly kernel is a valid small experiment, but should compete with the now-permitted **512² simulation** and cadence choices. Do not spend weeks proving byte-identical ocean arithmetic while a modest spectral-detail reduction may save much more.
+
+Keep the optical/body definition initially: datum, depth, wave-speed controls and shoreline are scene semantics. Optimize the sampling/simulation budget first. Dropping small frequencies changes normal variance and foam; assess those rather than promising 4× whole-prepass speed from 4× fewer texels.
+
+### 4.5 Geometry, post effects, Rust and system boundaries
+
+Two-phase Hi-Z/visibility, GPU meshlet culling, dense indirect submission, dirty BLAS rebuilds, static shadow caching, existing render scratch and a shader registry already exist. The recorded low geometry and CPU terrain costs do not justify SIMD culling, triangle filtering, or a new staging allocator as the main Coastal intervention [R7–R9, R21].
+
+GTAO currently traces and denoises at scene resolution. It is eligible for half-resolution evaluation if it remains significant after scene-resolution/cache/GI changes. Clouds, volumetrics, bloom, histogram and reflection work should be ranked from actual enabled scopes, not a list of effects the engine supports.
+
+Ponytail/codebase-design conclusion: keep policy with the existing resource owner. SomniumRenderer schedules passes; TerrainClipmap owns material-cache state; RestirGiPass owns GI dimensions/history; WaterSpectrumPass owns spectrum resources; viewport_resolution owns scaling. Avoid adding independent state to EngineContext or a growing quality switch in every central type.
+
+Rust review conclusion: do not introduce unsafe/SIMD, another async runtime, or a custom mapped staging ring without a measured owner-level problem. DOOM-J's Island allocation churn remains a conditional investigation. A mapped buffer is not usable as a GPU copy source indefinitely, and two slots do not prove safety under arbitrary GPU latency. If upload batching becomes material, inspect wgpu's installed StagingBelt first.
+
+Keep the shared scene-global resource layout, Rg32Uint instance/primitive identity, 32 authored terrain layers, and the current 2,080-byte terrain material layout as the starting interfaces. New private pass resources do not require a second scene pool. Any necessary layout change must update producer, consumer and layout tests together; serialized scene/schema changes require compatibility handling. Source-file flexibility is not permission for mismatched GPU layouts or lost scene data.
+
+## 5. Implementation sequence and falsifiers
+
+The entries below define the phase contract; the first A/B slice is now in tree, with remaining acceptance and later stages open. Run one bounded experiment at a time. After each accepted change, refresh the cost table and stop implementing optional stages once §2 and §3 pass.
+
+### TALOS-A — establish the Coastal contract
+
+**Work:** Extend the existing timing/capture path only for missing facts: effective settings, both resolutions, a reproducible walking route, and the required percentile/window summaries. Existing .somtime has p99/hitch information; verify/add p95 rather than claiming it is already emitted. Reuse existing named views for stills. If recording a route is missing, use one small deterministic camera/time sequence, not a benchmark framework.
+
+Prepare current Reference and one fixed-scale candidate. Keep the display viewport identical, DRS off, and scene simulation/time matched. Include the editor state that matters to the user, then distinguish its overhead from scene rendering.
+
+**Exit:** A current, correctly labeled 2K baseline; cost breakdown; reference images/sequence; repeatability envelope; actual feature/capability settings. State whether the complaint is native shading, an existing reduced-resolution path, or a pacing/driver problem.
+
+**Falsifier:** A mismatch in dimensions/settings or strong thermal/session drift invalidates the comparison. Repair the measurement rather than coding against it. No deep profiler extension is required if existing scopes answer the question.
+
+### TALOS-B — use fewer scene pixels without losing the scene
+
+**First experiment:** Existing FSR at fixed 0.75 scale, then approximately 0.67 only if more saving is needed. At 2560×1440 those inputs are 1920×1080 and approximately 1715×965; AMD's exact 1/1.5 Quality ratio is about 1707×960 before implementation rounding. Log actual results rather than using these example dimensions for an editor viewport of a different aspect.
+
+At scale s the pixel count is s². A simple opportunity model is:
+**new cost = fixed work + pixel work × s² + reconstruction/transition overhead.**
+This is a model, not a measured speedup. FFT, CPU work and many shadow costs do not shrink with scene pixels.
+
+Repair concrete reconstruction defects exposed by §3: correct mask wiring for unstable transparency, reset rules, and missing object/deformation motion where it visibly fails. Reuse current instance submission identity for previous state only if it is stable across sorting; otherwise introduce the smallest explicit per-object history mapping. Do not use the previous sorted instance index as identity. Keep jitter/depth conventions and the current linear HDR contract.
+
+**Exit:** A fixed-scale candidate with useful net GPU saving and acceptable still/motion quality. Publish the internal/output sizes and full reconstruction cost. If it already achieves the target, finish acceptance rather than forcing further subsystems to change.
+
+**Falsifier:** The scale was already active, quality fails at the allowed floor, reconstruction overhead erases the gain, or the workload is no longer dominated by pixels. Stop decreasing resolution; continue with material reuse. Do not force a lower floor merely to pass.
+
+### TALOS-C — make the existing terrain cache a performance option
+
+**Work, in this order:**
+
+1. Add only the focused algebra checks needed for the normal fix: one-layer, two differing normals, flat input, and the existing z clamp. Check production composed WGSL with a small device fixture when implementation exists. Do not commission a general material-equivalence laboratory.
+2. Correct generation/decoding to agree on gradient composition. Begin with current formats and compare the decoded result; expand storage only if visible error justifies its memory/bandwidth cost.
+3. Separate slowly changing material content from weather response. Prefer caching **dry albedo/roughness plus material moisture response** and applying current wetness after sampling and cliff mixing. Alpha is a possible moisture channel; check both producer and consumer and the AO validity sentinel. Preserve the actual operation order, including cliff moisture. Paint/material/texture/VT changes invalidate content through existing revisions/events.
+4. Verify coverage and updates during movement, painting, cold load and teleport. Existing generation budgets and readiness are the starting point. Use a valid coarser result while refining; if no valid coverage exists, use a deliberate live fallback with resident sources or complete coarse coverage before exposing the view. Never label a mean-color VT placeholder as a full live material.
+5. Measure warm, moving and edited cache costs. Tune density/update budget only if refresh work or coarse appearance is the limiting issue. State the tradeoff; do not expand every ring to force exact parity.
+6. Admit POM omission and different cache footprints in Performance where §3 passes. Reference remains live for content that needs the stronger detail. Avoid per-pixel live/cached blending that retains the full expensive call graph unless its measured quality benefit pays for it.
+
+**Primary files:** terrain/clipmap.rs, pass/terrain_clipmap.rs, terrain_material.wgsl, clipmap_gen.wgsl, clipmap_shade.wgsl; the existing renderer selection/upload seams.
+
+**Exit:** No stale wetness or invalid coverage; acceptable normal/material appearance in motion; substantial net savings after generation, fallback and VT work. Recommend the cache in the Performance bundle only for content that passed. Record a separate global-default recommendation at closure.
+
+**Falsifier:** Moving refresh/fallback cost erases the saving, recurring seams remain, or quality is unacceptable. Keep the live route and B's independent gains. Do not turn “all terrains must be provably equivalent” into an indefinite blocker; qualify actual content and document unsupported cases.
+
+### TALOS-D — reduce GI work if it is the next bottleneck
+
+**Entry:** GI is a substantial residual cost or source of tail spikes on the accepted B/C settings. Keep ReSTIR DI separate: it is a smaller historical cost and suppresses other shadow work.
+
+**Work:** Compare full GI with an explicit half-width/half-height GI candidate. Start with a stable representative depth/visibility sample per 2×2 block, explicit full↔GI coordinate transforms, GI-sized reservoirs and dispatch bounds, and depth/normal-aware reconstruction to the current output interface. Do not average IDs or interpolate across silhouettes. Use receiver/guide validity to fall back where no compatible sample exists.
+
+Fix history addressing/rejection before relying on temporal reuse. Record previous surface position/normal as needed; correct reservoir transport must know the old receiver, not substitute the new position. Preserve sample accounting, visibility validation, radiance-versus-albedo convention and night/disabled alpha semantics. Clear both stages on cuts, map changes, resizing and invalid history.
+
+Try reducing four spatial taps to two only after the resolution result is known, as a separate measured quality trade. Add a modest spatial/variance filter only if the saved ray/reuse work pays for it. SVGF and Bevy Solari are references for reconstruction/history responsibilities; TALOS does not adopt an entire denoiser SDK or radiance-cache architecture [L4, E2].
+
+If ray-query GI remains too costly, compare the existing IBL and SDF-DDGI configurations as explicit alternatives. They are different illumination models; inspect them in shadowed terrain and near foliage, and never describe the small 4³ probe grid as equivalent full-scene GI.
+
+**Exit:** At least 5% net frame improvement for a substantial new reconstruction path, lower GI working set, and acceptable motion/lighting at the combined settings. Report GI initial, spatial/visibility and reconstruction costs separately if needed to attribute the result.
+
+**Falsifier:** Temporal leaks/lag persist, the upscale/filter consumes the saving, or B already made GI too cheap to matter. Reject the candidate or choose an accepted existing fallback; do not compensate with an ever-larger denoiser.
+
+### TALOS-E — reduce ocean cost when its denominator survives
+
+**Entry:** Water remains a material fraction of the frame after earlier changes. Split its prepass timing just enough to distinguish spectral update from surface rasterization. Record update/no-update frames and catch-up intervals.
+
+**First experiment:** 512² instead of 1024² for the existing three-cascade simulation, at the same 50 Hz schedule and optical/body settings. Parameterize existing resource sizes, butterfly dispatches and row indexing together. Check power-of-two limits, workgroup bounds, transpose orientation, spectrum energy and output bindings. Do not simply change an allocation while leaving hardcoded shader strides.
+
+Keep the same low-frequency sea state and evaluate the lost high-frequency energy, displacement, normal variance, whitecaps and foam. If one cascade visibly suffers, consider a mixed-resolution roster only when that additional scratch/layout complexity is justified; it is not the initial design.
+
+If spatial reduction fails quality, test the existing-size paired-butterfly ownership from the former TALOS plan **in the current kernel**, with a temporary comparison variant. Each pair shares input loads/twiddle work and writes both outputs. Use a small CPU DFT oracle plus production device outputs; numerical tolerance and the appearance contract replace byte identity. No new permanent shader file is required.
+
+A lower cadence, e.g. 25 Hz with interpolation, is another conditional quality experiment, not bundled with the first resolution change. Phase and foam evolution must use elapsed simulation time. Pause/hidden water can skip work only when no render/query consumer needs the updated state.
+
+**Exit:** Meaningful net frame saving, stable wave/foam motion, no shoreline/body change, and bounded update spikes. Include extra interpolation buffers/copies in memory and timing.
+
+**Falsifier:** Optical appearance, low-frequency waves or foam fails, or rasterization—not spectrum—is the actual cost. Reject the spectral change and investigate the measured part. Do not call the separate reflection pass the prepass.
+
+### TALOS-F — finish with the smallest remaining change
+
+This is a decision gate, not a bag of mandatory optimizations.
+
+- If GTAO remains expensive, test half-resolution tracing with depth-aware reconstruction of AO **and bent normal**; retain all existing AO composition rules. Count the filter and full-resolution consumer cost.
+- If live terrain remains dominant because C cannot qualify, test a compiled two-contributing-layer Performance evaluator while retaining all 32 authored layer IDs. Keep the current four-layer route for Reference; record changes at blend boundaries. Reducing the storage ABI or silently discarding the upper bank is not the same experiment.
+- If allocation/resize hitches dominate, fix their existing owner. A reusable buffer or cached view/bind group is preferable to a general upload framework.
+- Only after fixed settings pass, try the existing DynamicResolution controller with the validated floor and target. If it repeatedly resets history or reallocates at visible cost, ship the fixed configuration. Persistent maximum-size targets are an escalation only for a demonstrated transition bottleneck.
+
+**Exit:** Pick at most the next measured opportunity, validate it, and return to the final gate. No implementation is required for a bullet whose entry condition is false.
+
+**Falsifier:** Cost moved elsewhere or the candidate cannot clear noise/quality gates. Stop that experiment and preserve the record.
+
+### TALOS-G — conditional material-compute escalation
+
+**Entry:** Coastal still misses the target, live material evaluation still dominates, and cache/reconstruction/material-budget options have been exhausted or rejected on evidence.
+
+Build one terrain-focused compute material candidate using explicit gradients and the current material logic, with the cheapest viable routing. Do not migrate sky, foliage, lighting, transparency and post simultaneously. Count classification, storage output bandwidth and its consumer pass.
+
+The current analytic UV neighbor-barycentric path can extend to world-position gradients, but it differs from fragment quad derivatives at primitive boundaries. The pinned Naga frontend also recognizes quadSwapX/Y/Diagonal and quadBroadcast. Adapter feature/operation/stage support and pixel-to-lane mapping still require a bounded device probe; existing clipmap comments record a failed compute bindless sampling attempt that must be explained before another port [R22].
+
+**Exit:** At least 10% total-frame saving over the best accepted live-material configuration, within §3. If a smaller shader change achieves it, prefer that.
+
+**Falsifier:** Device/compiler path fails, added traffic consumes the saving, or occupancy does not improve. Keep the fragment implementation; do not ship a second resolver just because the port compiles.
+
+### TALOS-H — accept, integrate and close
+
+Choose the smallest combination meeting §2–§3. Keep a Reference option through existing settings, and expose the accepted Performance values through the existing schema/AA/viewport controls rather than parallel booleans. Distinguish authored map data from renderer quality overrides; preserve saved scene round trips.
+
+Publish a before/after table with actual resolutions, mean/p95/p99, per-pass deltas, memory peak/steady state, effective options and known compromises. Include Coastal moving/ground/overview plus Island and low-light results. Report each optional sub-phase as accepted, rejected, or not needed.
+
+A modest improvement is worth keeping but is not phase completion. If the target is missed, report the best achieved result, the remaining dominant cost and whether G was justified. No invented FPS estimate substitutes for that outcome.
+
+## 6. Measurement and validation contract
+
+No benchmarks run while authoring this plan. The following is the implementation protocol.
+
+1. **Identity first.** Record revision, executable/build profile, adapter/driver, power mode, actual sizes, AA, DRS, clipmap/VT per terrain, ShadingSpec, RT/DI/GI state, view, sun, simulation state and residency. Pin release settings; do not compare debug and release.
+2. **Use existing evidence infrastructure.** .somtime and captures are the baseline. Add missing p95/moving-route/config fields locally. Retain current GPU timestamps; add subscopes only where a combined scope prevents a decision.
+3. **Separate attribution from user experience.** Fixed-scale paired runs isolate algorithms. Final runs use the actual chosen settings. Report GPU time, frame-wall time, Frame CPU and acquisition separately; record VSync/cap/VRR policy. If presentation limits wall FPS, report that fact without pretending reciprocal GPU time is observed display FPS. Frame generation does not count toward the target.
+4. **Bound the run.** Prepare a deliberate editor session, not a loop of hello_engine launches. Release temporary captures and unused targets. Stop on unexpected continuing memory growth. Prior sessions exhausted system memory. New multi-window timing support, if needed, is a small extension—not an existing switch.
+5. **Warm and pair.** After assets/pipelines settle, use the established 180-warmup/300-measured policy for initial static windows. Warm each configuration and repeat matched A/B windows in reversed order, e.g. A/B then B/A. Expand only if uncertainty changes the decision. A 300-frame sample is exploratory for p99; final route acceptance should cover at least 60 seconds per configuration and enough samples to expose recurring stalls.
+6. **Match time, not just frame index.** Use identical camera paths and simulation times. Faster rendering changes ocean update fractions and stochastic histories. Cache edits, VT admissions, foam, exposure and reservoirs must not advance once for one candidate and twice for the other.
+7. **Handle nondeterminism.** Existing unchanged-build captures differed by 2.80% in DOOM-I. Establish self-agreement; distinguish image noise from a candidate's change. Small algebra/device fixtures can be deterministic even when a full editor run is not. Do not raise the old global golden threshold to fit noise.
+8. **Controls and uncertainty.** Report individual paired deltas and spread, not just within-run sigma. Untouched work counts must remain comparable. GPU scopes need not match to three decimals; correlated shifts across all passes suggest a confound. A null is an acceptable outcome, not permission to relabel noise as improvement.
+9. **Count complete cost.** Include cache regeneration, full-resolution reconstruction, memory traffic, copies, fallbacks, compilation/prewarming, resize transitions and update/no-update frames. For micro-optimizations use the current residual frame as denominator.
+10. **Validate changed behavior.** Run focused arithmetic/layout/composition tests as appropriate, then cargo test --workspace -j 1 and python tools/ghostfence/run.py. Report PASS/FAIL/SKIP accurately. GPU-free Naga validation does not prove device layouts, startup or appearance. Perform the bounded device/editor acceptance for any implemented renderer change. A plan-only edit needs link/diff review, not engine tests.
+11. **Separate default decisions.** Leave defaults intact during experiments. At closure, recommend the accepted Performance bundle and any justified default change with evidence. Do not weaken the existing clipmap-off guard merely to make an experiment pass; update its intent only when an actual default change is authorized.
+
+## 7. Research and history: what was used, and what was refused
+
+### Git and Graphify
+
+The renderer source has no changes between the earlier TALOS audit revision 3c4e33a and d51e550; core/editor wiring and context have changed. The old source findings therefore remain relevant, but their priority and constraints do not.
+
+History reviewed includes:
+
+| Commit / record | Consequence for TALOS |
 |---|---|
-| Terrain metadata prepass | Deferred. It moves the same scan into another invocation and adds metadata traffic. Four exact weights plus packed indices are at least 20 B/pixel before other outputs: about 37.8 MiB at 1920×1032, written and read each frame. Reopen only with an occupancy/duplication model that repays the entire extra pass on the relevant rail. |
-| Whole-resolve compute port | Technically less blocked than the brief says, but too large for the first experiment. Reopen after gradient parity and a measured live-terrain shader bottleneck; quad availability alone is not a speedup. |
-| New staging ring | Defer until Island churn is traced to its owner and correlated with a hitch. Texture-view/bind-group churn cannot be fixed by an upload allocator. If warranted, wrap wgpu 30.0.1's existing `StagingBelt`; it already handles suballocation, unmapping and remapping after submission. Two persistently mapped buffers are not automatically safe for arbitrary GPU latency [L5]. |
-| SIMD CPU culling | Retain the existing decision. Portable SIMD is not stable on the pinned toolchain; `Vec3A` is not eight-object SIMD. The recorded terrain CPU scope is 0.034 ms [R1, line 52], below the frame admission threshold even if entirely removed. |
-| Shared bilateral denoiser / fewer rays | No parity-preserving evidence. Reflection and GI have different guides/history and estimators. Reducing samples needs quality and temporal validation; it does not reduce spectral FFT work. |
-| fp16 / texture compression / neural materials | No demonstrated present bottleneck that justifies their representation error and integration surface. DOOM's nulls remain relevant; any renewed experiment needs its own reason and oracle. |
-| Shadow/triangle-filtering redesign | No priority on the static DOOM-M workload. Reopen with geometry-heavy, moving-caster evidence, not the obsolete 0.937 ms row. |
+| DOOM-M close-out, 2026-08-30 | Retain the shadow cache; respect measured nulls, unresolved GI tails and resolution mismatch |
+| b1686fe, 1deee61, c005e27, f15a728, b5ffb1c, b38ac74 | Clipmap toggle/VT ownership, cold fallback, toroidal address and uniform-slot failures are distinct; a checkbox or stationary picture cannot close the cache audit |
+| ef8e5cb through bfdc046 and 673d243 | Landscape visibility, relief/specular variance and macro appearance are recent investments worth preserving |
+| 5c6ee4a, 9cafaaa, eb61dc3 | Ray-query driver/compilation incidents and lightweight hit-material evaluation; keep terrain_splat_core separate from the expensive raster call graph |
+| c4473a5, fba14e0 | Foliage/material-lighting corrections precede this baseline |
+| d51e550 and recent PERSONA records | Native editor context and visual goldens have moved since the original handoff |
 
-## 8. Literature audit and what it actually supports
+Graphify's GRAPH_REPORT.md is dated **2026-08-27**, not current profiling evidence. It reports SomniumRenderer as a 169-edge hub and a major cross-community bridge. Use that to locate ownership and avoid central-type growth; do not infer execution time from graph degree. Current code wins over graph edges and stale comments.
 
-The selected sources answer mechanism questions; their benchmark numbers are not transferred to Somnium.
+### Reference mirror audit
 
-- **Clipmaps:** Asirvatham and Hoppe describe nested, toroidally addressed windows and incremental updates. That supports amortization and border/transition audits, not equivalence of a nonlinear shaded-material cache to per-pixel evaluation [L6].
-- **Normal composition:** Mikkelsen's surface-gradient framework supports composition in a common gradient representation. TALOS uses it to check the representation Somnium already chose for live terrain [L3].
-- **FFT execution:** Govindaraju et al. describe shared-memory Stockham FFTs and data-layout/transpose tradeoffs. Somnium already implements the broad pattern; the proposed paired ownership is a smaller local hypothesis [L4].
-- **Occupancy:** NVIDIA's shader guidance ties register allocation to occupancy/spilling; AMD's occupancy guide distinguishes several resource limits. These do not mean every runtime branch executes both sides or that higher occupancy always wins. Describe union-of-path resource pressure as a compiler/hardware hypothesis until generated-code or profiler evidence establishes it [L7–L8].
-- **Blackwell-specific evidence:** Nsight Graphics documents Blackwell compute hardware-event tracing; NVIDIA's RTX 50 tools article describes expanded counters. If a completed candidate changes timing unexpectedly, a short bounded trace can distinguish register/shared-memory/latency constraints. Do not import data-center Blackwell or AMD register budgets as RTX 5080 Laptop limits [L9–L10].
-- **2026 developments:** The SIGGRAPH 2026 course abstracts include ORCA's within-frame radiance cache and variable-rate ray tracing with disocclusion-aware ray allocation. Those are relevant future GI directions, but change a much larger estimator/reconstruction system than this phase. I reviewed the published abstracts, not their large slide decks, and derive no algorithm or speedup claim from them [L11].
+Read-only root: C:/Users/adhir/Downloads/GE/example_repo. Some archives contain a second nested project directory; the actual paths below reflect that. These are scoped source inspections, not an exhaustive audit of every engine.
 
-No reference-engine source was transcribed or imported. The reference mirror was not exhaustively audited for this document. Repository attribution rules (§14–15) were read; any later adoption must inspect the exact reference file's license and cite the mechanism used. No NRD/RTX SDK licensing assumption is needed for these proposals.
+| ID | Exact local source inspected | What it contributes |
+|---|---|---|
+| E1 | o3de-development/o3de-development/Gems/Terrain/Code/Source/TerrainRenderer/TerrainClipmapManager.cpp | Existing clipmap resource/update ownership and differentiated channel formats. Header: Apache-2.0 OR MIT; root licensing read. Supports reuse; does not prove Somnium's cache quality. |
+| E2 | bevy/bevy-main/crates/bevy_solari/src/realtime/restir_gi.wgsl | Temporal motion/previous-surface inputs and reservoir reuse. MIT root read; inspected shader starts with the ReSTIR course reference and imports. Its G-buffer/world-cache assumptions cannot be transplanted wholesale. |
+| E3 | WickedEngine-master/WickedEngine/shaders/visibility_velocityCS.hlsl and visibility_surfaceCS.hlsl | Previous-surface velocity, wind-aware surface reconstruction and explicit quad organization. MIT root read; inspected file headers carry defines/includes, no separate restriction. |
+| E4 | GodotOceanWaves-main/assets/shaders/compute/fft_compute.glsl | Stockham/workgroup-memory structure already present in Somnium. MIT root read; shader also credits its Stockham source. No need to “discover” shared memory again. |
+| E5 | The-Forge-master/Common_3/Renderer/VisibilityBuffer2/VisibilityBuffer2.cpp | Multi-view/geometry-set filtering and batch ownership. Apache-2.0 root and file header read. Architectural reference only; no Coastal geometry bottleneck demonstrated. |
 
-## 9. Measurement and fidelity contract
+Follow ATTRIBUTION.md §14–15 for any later adopted pattern. No external source was copied or added to the workspace. No SDK adoption is proposed. The handoff's broad NRD/RTX licensing claims were not independently re-audited here; inspect the exact version/license if that decision ever becomes relevant. Published reconstruction methods suffice for the present plan.
 
-**This document runs no engine benchmark.** Existing records are sufficient to select hypotheses. Device correctness fixtures and post-implementation timing belong to the implementation phase.
+### Primary literature and official sources checked 2026-09-06
 
-1. **Identity first.** Record revision, binary/profile, adapter/driver, actual render dimensions, map/view, sun, camera matrices, simulation tick, random seeds, effective clipmap/VT state, ShadingSpec, draw/triangle counts, and scene/resource residency. An environment label alone is insufficient.
-2. **Separate tests by purpose.** Compare material outputs before lighting for algebra, decoded cache outputs for quantization, full HDR/display images for appearance, and sequences for motion/history. Component tests do not replace integrated fidelity checks.
-3. **Establish self-agreement.** DOOM-I reports 2.80% differing pixels between unchanged-build captures, far above the 0.2% gate [R16]. Use identical immutable inputs and independent cloned temporal state for paired evaluation. Do not let one candidate advance foam, reservoirs, VT admission or exposure before the other. Resolve nondeterminism before evaluating a 0.2% claim; never raise the threshold to match the noise.
-4. **Golden gate.** Retain the repository's 0.2% failing-pixel budget and peak channel ceiling of 24 with its existing comparator. Record maximum localized errors and normal/specular behavior too: a thin dark band can be serious even if its global pixel fraction is small. General bit identity and perceptual acceptance are different claims. The known sculpt-panel UI failure is reported separately, never used to excuse terrain or water failures.
-5. **Timing session.** After a complete candidate passes correctness, prepare one bounded editor session with baseline and candidate pipelines precreated. Prefer planned in-process A/B windows to repeated startup; this window-switching/reset support is **proposed harness work**, not an existing `SOMNIUM_*` switch. Warm each rail twice, then collect at least two back-to-back paired 180/300 windows with reversed order. Release temporary captures/resources between windows; stop on memory growth. Do not run an unattended process-launch loop.
-6. **State-dependent cost.** Preserve the 50 Hz ocean schedule. Record updates, skipped frames and catch-up ticks; report both update-frame FFT cost and wall-time-weighted prepass cost. Faster rendering changes the fraction of frames that simulate, so per-frame averages alone can mislead. Cache timing must include cold fills, edits and motion, as well as warm steady state.
-7. **Controls and uncertainty.** Report individual paired deltas, within-run variance and between-pair spread. Require stable untargeted work counts and explain timing movement in control passes. Requiring unrelated GPU timings to match to the third decimal is not a physically credible universal rule—the historical clipmap pair itself violates it. If all passes move together, attribution is inconclusive until the confound is resolved. Do not use within-run sigma as a confidence interval for sessions with different thermal/power state.
-8. **Validation after code.** Run `cargo test --workspace -j 1`, then `python tools/ghostfence/run.py`, reporting PASS/FAIL/SKIP exactly. GPU-free shader validation does not prove bind layouts or engine startup. Perform the device fixture and the deliberate editor acceptance session before claiming end-to-end success. Do not weaken the clipmap default guard or golden thresholds.
+These sources inform mechanisms and evaluation. Their published speedups are not Somnium predictions.
 
-## 10. Final recommendation and scope boundary
+| ID | Source | Decision it supports |
+|---|---|---|
+| L1 | AMD, [FSR 3 quality modes](https://gpuopen.com/fidelityfx-super-resolution-3/) and [FSR upscaler integration](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/) | Compare fixed internal ratios; honor motion, masks, HDR and history. Hardware/SDK/backend compatibility must be checked against the installed wgpu-ffx, not assumed from newer vendor SDKs. |
+| L2 | Mikkelsen, [Surface Gradient–Based Bump Mapping Framework](https://jcgt.org/published/0009/03/04/), JCGT 2020 | Repair normal composition while acknowledging cache filtering/quantization error. |
+| L3 | Turánszki, [Derivatives in compute shader](https://turanszkij.wordpress.com/2022/05/08/derivatives-in-compute-shader/), 2022, and [Wicked Engine graphics in 2024](https://turanszkij.wordpress.com/2024/12/10/wicked-engines-graphics-in-2024/) | Analytic neighbor reconstruction and material/lighting separation for conditional G; compute alone does not imply faster rendering. |
+| L4 | Schied et al., [Spatiotemporal Variance-Guided Filtering](https://research.nvidia.com/labs/rtr/publication/schied2017spatiotemporal/), HPG 2017 | Sparse radiance requires valid temporal state and edge-aware reconstruction; guide a small GI-specific filter only if needed. |
+| L5 | NVIDIA, [Advanced API Performance: Shaders](https://developer.nvidia.com/blog/advanced-api-performance-shaders/) | Investigate register pressure, memory access and generated variants; higher occupancy is not automatically lower time. |
+| L6 | [FLIP research](https://developer.nvidia.com/blog/flip-a-difference-evaluator-for-alternating-images/) and [author implementation](https://github.com/NVlabs/flip), HPG 2020 onward | Localized perceptual difference maps for still-image acceptance; not “percent parity.” |
+| L7 | Mantiuk et al., [FovVideoVDP](https://www.cl.cam.ac.uk/research/rainbow/projects/fovvideovdp/), SIGGRAPH 2021 | Sequence/display-aware quality evaluation when still comparisons miss temporal loss. |
+| L8 | Liu, Kuwahara, Scovell and Claypool, [The Effects of Frame Rate Variation on Game Player Quality of Experience](https://web.cs.wpi.edu/~claypool/papers/frame-variation-chi-23/), CHI 2023 | Mean FPS alone misses experience; measure tails and motion pacing. The study does not establish this phase's exact numerical budgets. |
+| L9 | [SIGGRAPH 2026 Advances course](https://advances.realtimerendering.com/s2026/index.html), ORCA / Variable Rate Ray Tracing abstracts | Current work emphasizes reuse and disocclusion-aware ray allocation. Abstracts reviewed; attempted VRRT PDF retrieval failed. No detailed algorithm or speed claim is attributed to unread slides. |
+| L10 | [wgpu v30.0.1](https://github.com/gfx-rs/wgpu/releases/tag/v30.0.1), [WGSL specification](https://www.w3.org/TR/WGSL/) and installed Naga source | Distinguish language specification, pinned compiler support and actual device features. No dependency upgrade is required by this plan. |
 
-Implement **TALOS-A first**, then the smallest TALOS-B correction the fixture supports. The counterexample is concrete enough to make that work reviewable. Treat cache dependency/coverage closure as the condition for recommending broader reuse; reject unsupported configurations rather than advertising the historical 7× shading ratio as a general solution.
+### Do not repeat these experiments without new evidence
 
-For new throughput work, admit **one paired-output ocean FFT candidate**. Its denominator exists on both maps and either cache setting, its data is deterministic, and it preserves the current simulation and visual model. Its practical expected outcome is either a modest measured win or a cheap, well-explained null.
-
-No runtime file, shader, default, dependency, or golden reference was changed while preparing this document. No subagents were launched. The research skill's primary-source/citation workflow was used directly; its delegation step was overridden by the user's explicit single-agent requirement.
-
-## 11. Evidence index
-
-Repository links are relative for portability. Line numbers refer to `3c4e33a`; historical measurements retain their own recorded dates and conditions.
-
-| ID | Source and exact locator |
+| Idea | Decision |
 |---|---|
-| R1 | [PORTAL-0 final Coastal ground](<phase PORTAL-0/PORTAL-0-final_coastal-ground.somtime>), header lines 1–7; GPU lines 19, 28, 30–31, 41–43; CPU lines 52–55 |
-| R2 | [PORTAL-0 final Coastal ground, clipmap](<phase PORTAL-0/PORTAL-0-final_coastal-ground_clipmap.somtime>), same row locations |
-| R3 | [DOOM-M Coastal final](<phase DOOM/DOOM-M_coastal-ground_final.somtime>), lines 19, 28, 30–31, 41 |
-| R4 | [DOOM-M Island final](<phase DOOM/DOOM-M_island-ground_final.somtime>), lines 19, 28, 30–31, 42 |
-| R5 | [renderer.rs](../crates/somnium_renderer/src/renderer.rs), lines 4377–4429; [shading.wgsl](../crates/somnium_renderer/src/shaders/shading.wgsl), lines 1634–1648; [pass/shading.rs](../crates/somnium_renderer/src/pass/shading.rs), lines 14–98 and test at 1581 |
-| R6 | [renderer.rs](../crates/somnium_renderer/src/renderer.rs), lines 605–636; [default guard](../crates/somnium_renderer/tests/shaders_validate.rs), line 413 |
-| R7 | [shading.wgsl](../crates/somnium_renderer/src/shaders/shading.wgsl), `vis_barycentric` line 354; positions 1329–1331; gradients 1358–1365; hit point 1389; world derivatives 1630–1631 |
-| R8 | [terrain_material.wgsl](../crates/somnium_renderer/src/shaders/terrain_material.wgsl), gradient helpers 222–229; generation 1222–1331; live blend 1476–1488; POM 1397–1426; wetness 1520–1554 |
-| R9 | [clipmap_gen.wgsl](../crates/somnium_renderer/src/shaders/clipmap_gen.wgsl), generation/encoding lines 63–100 |
-| R10 | [clipmap_shade.wgsl](../crates/somnium_renderer/src/shaders/clipmap_shade.wgsl), lines 225–363 |
-| R11 | [app.rs](../crates/somnium_core/src/app.rs), weather assignment 6655–6673; terrain slider assignments 9529–9568 |
-| R12 | [renderer.rs](../crates/somnium_renderer/src/renderer.rs), update inputs 3610–3635; VT arrival invalidation 4290–4295 |
-| R13 | [terrain/clipmap.rs](../crates/somnium_renderer/src/terrain/clipmap.rs), format 68; revision gate 341–353; budget/readiness 378–450; GPU flags 487–516 |
-| R14 | [pass/water_spectrum.rs](../crates/somnium_renderer/src/pass/water_spectrum.rs), parameters 9–46; tick schedule 310–344; cascade dispatches 416–442; layout binding resources 535–570 |
-| R15 | [water_spectrum.wgsl](../crates/somnium_renderer/src/shaders/water_spectrum.wgsl), bindings 61–67; paired outputs 237–255; row transform 258–300; transpose 302–328; unpack/foam 333–378 |
-| R16 | [DOOM-I correctness](<phase DOOM/DOOM-I.md>), paragraph beginning “A tone-mapped capture cannot settle this”; [PORTAL-0](phase_PORTAL-0.md), §F and Gates |
+| DOOM-C raster tile bins | Measured slower at every tested tile size. Compute has different costs, but is G's conditional experiment; classification is never literally free. |
+| DOOM-E / per-pixel near/far sample branches | Prior null/regression remains. New quality permission changes what may be tried, not the hardware cost of divergent paths. Existing hex/POM-off settings may leave nothing to strip. |
+| Atomic indirect compaction | Prior 66-object result was noise; reopen only for a larger actual draw workload. |
+| Blanket f16 conversion | Prior results changed sign across repetitions. Try only a specific measured bottleneck; do not trade stability for an unmeasured register claim. |
+| Subgroup histogram optimization | Historical whole-pass share was about 0.22%; irrelevant to closing a 25-FPS complaint. |
+| New staging ring / SIMD terrain cull | No current major frame denominator. Fix proven owner-level churn when it causes hitches. |
+| Neural texture/radiance cache, NRD integration, hardware VRS/SER, mesh-shader rewrite | Much larger integration/capability surface than the first accepted experiments. Reopen only with a concrete residual bottleneck and supported backend path. |
+| Frame generation | Outside the measured real-render-throughput objective and not implemented by the current FSR wrapper. |
+| Disable all RT/lighting or shrink the map | An ablation may locate cost. A stripped scene is not the requested result. Existing GI alternatives must pass the same appearance contract. |
 
-**T1 — locally inspected dependency source:** under `C:/Users/adhir/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`: `naga-30.0.1/src/front/wgsl/lower/mod.rs:1232,3693,3716,3739`; `src/valid/mod.rs:291,596`; `src/back/spv/subgroup.rs:205`; `src/front/wgsl/parse/directive/enable_extension.rs:166`. Source inspection establishes implemented paths; no fresh compiler/device probe was executed.
+## 8. Repository evidence index and audit limits
 
-| ID | Primary literature / official documentation, checked 2026-09-05 |
+Paths are relative for portability. Symbol names are the stable locators; line numbers below refer to d51e550 and can drift.
+
+| ID | Source / locator |
 |---|---|
-| L1 | [W3C WGSL](https://www.w3.org/TR/WGSL/), §17.12.7 `subgroupElect`, §17.13 quad operations, synchronization/memory semantics. Language specification is distinct from implementation support. |
-| L2 | [wgpu v30.0.1 release notes](https://github.com/gfx-rs/wgpu/releases/tag/v30.0.1) |
-| L3 | Morten S. Mikkelsen, [Surface Gradient–Based Bump Mapping Framework](https://jcgt.org/published/0009/03/04/paper-lowres.pdf), JCGT 9(3), 2020, especially surface-gradient formulation and composition |
-| L4 | Govindaraju, Lloyd, Dotsenko, Smith and Manferdelli, [High Performance Discrete Fourier Transforms on Graphics Processors](https://www.microsoft.com/en-us/research/publication/high-performance-discrete-fourier-transforms-on-graphics-processors/), SC 2008; publication summary reviewed |
-| L5 | [wgpu 30.0.1 StagingBelt](https://docs.rs/wgpu/30.0.1/wgpu/util/struct.StagingBelt.html); local `wgpu-30.0.1/src/util/belt.rs`, especially lifecycle and `finish_and_recall_on_submit` |
-| L6 | Asirvatham and Hoppe, [Terrain Rendering Using GPU-Based Geometry Clipmaps](https://developer.nvidia.com/gpugems/gpugems2/part-i-geometric-complexity/chapter-2-terrain-rendering-using-gpu-based-geometry), GPU Gems 2, chapter 2, 2005 |
-| L7 | NVIDIA, [Advanced API Performance: Shaders](https://developer.nvidia.com/blog/advanced-api-performance-shaders/), register allocation/spilling guidance |
-| L8 | François Guthmann / AMD, [Occupancy explained](https://gpuopen.com/learn/occupancy-explained/), updated 2024; architectural concepts, not NVIDIA numerical limits |
-| L9 | NVIDIA, [Nsight Graphics GPU Trace overview](https://docs.nvidia.com/nsight-graphics/UserGuide/gpu-trace-overview.html), hardware events and bounded trace memory |
-| L10 | NVIDIA, [Nsight tools on GeForce RTX 50](https://developer.nvidia.com/blog/build-apps-with-neural-rendering-using-nvidia-nsight-developer-tools-on-geforce-rtx-50-series-gpus/), Blackwell counter capabilities |
-| L11 | [SIGGRAPH 2026 Advances course](https://advances.realtimerendering.com/s2026/index.html), ORCA and Variable Rate Ray Tracing abstracts; scoped literature update, not an implementation reference |
+| R1 | [PORTAL-0 final Coastal ground](<phase PORTAL-0/PORTAL-0-final_coastal-ground.somtime>), header and GPU/CPU rows |
+| R2 | [PORTAL-0 final Coastal ground, clipmap](<phase PORTAL-0/PORTAL-0-final_coastal-ground_clipmap.somtime>) |
+| R3 | [DOOM-M Coastal final](<phase DOOM/DOOM-M_coastal-ground_final.somtime>) |
+| R4 | [DOOM-M Island final](<phase DOOM/DOOM-M_island-ground_final.somtime>) |
+| R5 | [PORTAL-0-A Coastal 720](<phase PORTAL-0/PORTAL-0-A_coastal-ground_720.somtime>), actual render header |
+| R6 | [PORTAL-0-A Coastal “2560”](<phase PORTAL-0/PORTAL-0-A_coastal-ground_2560.somtime>), actual render header |
+| R7 | [DOOM-M close-out](<phase DOOM/DOOM-M.md>), resolution warning, nulls, GI tails and open work |
+| R8 | [PORTAL-0](phase_PORTAL-0.md), ablations and clipmap audit; [unablated record](<phase PORTAL-0/PORTAL-0-A_coastal-ground.somtime>) |
+| R9 | [DOOM-J](<phase DOOM/DOOM-J.md>), footprint/churn versus bandwidth; [DOOM-I](<phase DOOM/DOOM-I.md>), capture self-agreement |
+| R10 | [context.md](../context.md), current status, architecture, materials and PERSONA gate; [PERSONA E/F](<phase PERSONA/PERSONA-E_F.md>) |
+| R11 | [renderer.rs](../crates/somnium_renderer/src/renderer.rs), reconcile_clipmaps at 623, update inputs at 3624, generation at 4202, ShadingSpec selection at 4378 |
+| R12 | [terrain_material.wgsl](../crates/somnium_renderer/src/shaders/terrain_material.wgsl), ts_to_surfgrad, terrain_generate_texel, evaluate_terrain_material; [clipmap generation](../crates/somnium_renderer/src/shaders/clipmap_gen.wgsl), packing and validity sentinel |
+| R13 | [clipmap_shade.wgsl](../crates/somnium_renderer/src/shaders/clipmap_shade.wgsl), evaluate_clipmap_material at 225; [terrain/clipmap.rs](../crates/somnium_renderer/src/terrain/clipmap.rs), constants, update, take_jobs, fill_gpu, gpu_bytes |
+| R14 | [core/app.rs](../crates/somnium_core/src/app.rs), weather wetness assignment at 6883 and terrain slider at 9904; [terrain clipmap pass](../crates/somnium_renderer/src/pass/terrain_clipmap.rs), begin_frame/record uniform ownership |
+| R15 | [viewport_resolution.rs](../crates/somnium_renderer/src/viewport_resolution.rs), scene_size_for_preset and DynamicResolution; [core/lib.rs](../crates/somnium_core/src/lib.rs), AA and dynamic-resolution defaults |
+| R16 | [fsr.rs](../crates/somnium_renderer/src/pass/fsr.rs), resize, record, FsrDispatchInfo at 229; [sanitize](../crates/somnium_renderer/src/shaders/fsr_sanitize.wgsl) and [output](../crates/somnium_renderer/src/shaders/fsr_untonemap.wgsl) |
+| R17 | [velocity.wgsl](../crates/somnium_renderer/src/shaders/velocity.wgsl), fs_main; [water.rs](../crates/somnium_renderer/src/pass/water.rs), record_prepass writes velocity; [global_pool.wgsl](../crates/somnium_renderer/src/shaders/global_pool.wgsl), Instance |
+| R18 | [restir_gi.rs](../crates/somnium_renderer/src/pass/restir_gi.rs), RESERVOIR_BYTES, allocation at 329, record; [GI shader](../crates/somnium_renderer/src/shaders/restir_gi.wgsl), gi_primary_surface, initial_and_temporal, spatial_and_shade; [shading.wgsl](../crates/somnium_renderer/src/shaders/shading.wgsl), restir_gi consumer |
+| R19 | [water_spectrum.rs](../crates/somnium_renderer/src/pass/water_spectrum.rs), MAP_SIZE, tick schedule and cascade loop; [spectrum shader](../crates/somnium_renderer/src/shaders/water_spectrum.wgsl), butterfly_precompute, fft_row and transpose |
+| R20 | [renderer.rs](../crates/somnium_renderer/src/renderer.rs), Water prepass at 4742; [water.rs](../crates/somnium_renderer/src/pass/water.rs), spectrum.record within record_prepass |
+| R21 | [classify.rs](../crates/somnium_renderer/src/pass/classify.rs), measured null; [shading.rs](../crates/somnium_renderer/src/pass/shading.rs), ShadingSpec; [raytrace.rs](../crates/somnium_renderer/src/pass/raytrace.rs), pending_blas; [shadow/cache.rs](../crates/somnium_renderer/src/shadow/cache.rs), invalidation; [gtao.rs](../crates/somnium_renderer/src/pass/gtao.rs), target sizes; [ddgi.rs](../crates/somnium_renderer/src/pass/ddgi.rs), PROBE_GRID |
+| R22 | Installed Naga at C:/Users/adhir/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/naga-30.0.1/src/front/wgsl/lower/mod.rs:1232,3693,3716,3739; shader generation comments in R12. The enable-subgroups directive remains a separate pinned-compiler issue; language-spec subgroupElect does not prove frontend support. |
+| R23 | [timing.rs](../crates/somnium_renderer/src/timing.rs), wall_samples and hitch output; [shader registry](../crates/somnium_renderer/src/shaders.rs); [shader composition](../crates/somnium_shader/src/compose.rs); [shader tests](../crates/somnium_renderer/tests/shaders_validate.rs) |
+| R24 | [Graphify report](../graphify-out/GRAPH_REPORT.md), 2026-08-27 snapshot, hub listing; [development index](README.md); [attribution](../ATTRIBUTION.md), §14–15 |
+
+The audit traced the central frame sequence and the terrain, cache, shading/BRDF, reconstruction, GI, water, culling/shadow and measurement seams relevant to the proposals. Development records were read for current status, negative experiments and provenance; this is not a claim that every line of every engine or unrelated editor subsystem was reviewed.
+
+Skills applied in one agent: Ponytail from C:/Users/adhir/.codex/plugins/marketplaces/ponytail/skills/ponytail/SKILL.md; rust-pro and code-review-checklist from the Claude plugin marketplace; codebase-design from the installed skill. Their implementation/delegation suggestions were constrained by the user's explicit **plan only / no multiple agents** request.
+
+Only this phase document is revised. The outcome is a performance-first plan with bounded quality tradeoffs, not a claim of achieved frame rate.

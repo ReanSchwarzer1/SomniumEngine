@@ -16,11 +16,11 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | PERSONA A–D and first E/F slice in tree; designer journeys, E/F acceptance and G open. MORROWIND remains partially complete. |
+| Active phase | TALOS scoped down on 2026-09-08: retain graphics scalability and small rendering cleanups. The earlier broad optimization/60 FPS program is deferred by user request. |
 | Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): material/lighting tools, browser fixes, Scripts access and saved brush settings, 2026-09-06 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Current implementation priority | PERSONA (Atlus): user review of QoL/E resource-settings implementation, designer journeys, F OS/DPI matrix and G visual acceptance before other phases |
+| Current implementation priority | Retain the accepted scalability controls; fix only demonstrated, local rendering inefficiencies. See [TALOS evidence](<dev records/phase TALOS/README.md>). |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
 | Generated census, 2026-09-06 | 218,976 Rust/WGSL lines and 2,216 discovered tests |
@@ -32,6 +32,7 @@ The top-level phase status is:
 
 | Phase | Status | Read next |
 |---|---|---|
+| TALOS | Scalability retained; larger optimization stages deferred by user request | [TALOS evidence](<dev records/phase TALOS/README.md>) |
 | PERSONA / Atlus | A–D and first E/F slice in tree; journey/E/F acceptance, G and phase closure open | [`phase_PERSONA.md`](<dev records/phase_PERSONA.md>) |
 | CONTROL | Complete, A through O | [`phase_CONTROL.md`](<dev records/phase_CONTROL.md>) |
 | MORROWIND | In progress | [`phase_MORROWIND.md`](<dev records/phase_MORROWIND.md>) and the ledger below |
@@ -1224,6 +1225,17 @@ approach.
 
 ### Post processing and anti-aliasing
 
+TALOS adds saved **Camera → Graphics Scalability** choices: Native (100%),
+Balanced (75%, the default), and Performance (two-thirds). They scale scene
+dimensions after the viewport resolution cap; FSR reconstructs to the unchanged
+output size. Other AA modes use the existing spatial blit. Other authored
+graphics controls remain independent. Optional dynamic resolution applies on
+top, and disabling it returns to the selected fixed scale. Older Camera records
+without the field receive Balanced; explicitly saved choices round-trip.
+Initial matched Coastal ground runs measured about 36% less GPU time with
+Balanced and 46% with Performance; neither met 16.67 ms. See the
+[measurements and acceptance limits](<dev records/phase TALOS/README.md>).
+
 The HDR chain includes AgX/ACES tone mapping, bloom, depth of field, motion
 blur, GTAO, volumetrics, shafts, decals, sharpening, and reconstruction paths.
 
@@ -2102,9 +2114,9 @@ inventory, trade, quest system, or anomaly framework.
 
 ### Roadmap order
 
-**Scheduling update, 2026-09-05:** [PERSONA (Atlus)](<dev records/phase_PERSONA.md>)
-is the next implementation phase, before further work on any other phase,
-including the TALOS proposal. It upgrades the editor's Nocturne design system,
+**Scheduling update, 2026-09-08:** TALOS now retains scalability and small local
+rendering cleanups; its larger optimization program is deferred by user request. PERSONA acceptance remains open.
+[PERSONA (Atlus)](<dev records/phase_PERSONA.md>) upgrades the editor's Nocturne design system,
 visual composition, and designer workflows. A/B baseline and shared visual foundations
 are implemented. The [E/F record](<dev records/phase PERSONA/PERSONA-E_F.md>) covers contextual authoring, the missing foliage painter fix, floating placement and narrow-window regressions; E/F acceptance remains open. C/D workspace and QoL changes are in tree; see [the C/D record](<dev records/phase PERSONA/PERSONA-C_D.md>) for native evidence, validation, open designer journeys and floating-window acceptance limits. The dependency order below resumes after PERSONA and does not
 change the completion status of existing work.

@@ -1736,7 +1736,7 @@ impl SomniumRenderer {
     /// Apply the Camera Details checkbox. `SOMNIUM_CPU_FRUSTUM=0` wins.
     /// Apply the Camera entity's Phase DOOM-F settings.
     ///
-    /// Switching the controller **off** resizes back to the base extent
+    /// Switching the controller **off** returns to the fixed graphics scale
     /// immediately rather than leaving the last scale frozen — otherwise
     /// unticking the box would appear to do nothing until the next window
     /// resize, which reads as a broken control.
@@ -1757,12 +1757,22 @@ impl SomniumRenderer {
         }
         if was && !enabled {
             self.dynamic_resolution.reset();
-            let (w, h) = self.base_extent;
+            let (w, h) = self
+                .dynamic_resolution
+                .apply(self.base_extent.0, self.base_extent.1);
             self.resize_targets(ctx, w, h);
         }
     }
 
-    /// Current dynamic-resolution scale, 1.0 when the controller is off.
+    /// Apply a fixed scene budget without allocating again on unchanged frames.
+    pub fn set_graphics_scale(&mut self, ctx: &RenderContext, scale: f32) {
+        if self.dynamic_resolution.set_fixed_scale(scale) {
+            self.profiler.reset_smoothing();
+            self.resize(ctx, self.base_extent.0, self.base_extent.1);
+        }
+    }
+
+    /// Effective scene scale, including fixed scalability when DRS is off.
     #[must_use]
     pub fn dynamic_resolution_scale(&self) -> f32 {
         self.dynamic_resolution.scale()
@@ -2068,6 +2078,9 @@ impl SomniumRenderer {
             self.base_extent = (width, height);
         }
         let (width, height) = self.dynamic_resolution.apply(width, height);
+        if self.scene_extent() == (width, height) {
+            return;
+        }
         self.resize_targets(ctx, width, height);
     }
 
@@ -2130,14 +2143,6 @@ impl SomniumRenderer {
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.present_pass
                 .resize(&ctx.device, ctx.config.format, width, height);
-            self.fsr_pass.resize(
-                &ctx.device,
-                &ctx.queue,
-                width,
-                height,
-                ctx.config.width,
-                ctx.config.height,
-            );
             self.ldr_width = 0;
             self.ldr_height = 0;
             self.velocity_pass
@@ -2721,6 +2726,16 @@ impl SomniumRenderer {
         // Whichever surface the scene is going to, not necessarily this
         // window's: FSR upscales to the size of the thing it lands on.
         let present_size = scene_target.map_or((ctx.config.width, ctx.config.height), |t| t.size);
+        // Scene and output sizes vary independently (caps, DPI, floating view).
+        // FSR's owner compares both sizes and allocates only when one changes.
+        self.fsr_pass.resize(
+            &ctx.device,
+            &ctx.queue,
+            self.render_width,
+            self.render_height,
+            present_size.0,
+            present_size.1,
+        );
         let (ldr_w, ldr_h) = if self.fsr_pass.enabled {
             present_size
         } else {
@@ -3042,6 +3057,7 @@ impl SomniumRenderer {
                 &ctx.adapter,
                 &ctx.device,
                 (self.render_width, self.render_height),
+                present_size,
             );
         }
         if stats_draws > 0 {
@@ -3090,6 +3106,29 @@ impl SomniumRenderer {
                 let mut lines = vec![
                     format!("scene={}x{}", self.render_width, self.render_height),
                     format!("swapchain={}x{}", ctx.config.width, ctx.config.height),
+                    format!(
+                        "output={}x{} dpi={:.3} viewport={:?} present_mode={:?}",
+                        present_size.0,
+                        present_size.1,
+                        window.scale_factor(),
+                        ui.viewport_physical_rect(window.scale_factor() as f32),
+                        ctx.config.present_mode
+                    ),
+                    format!(
+                        "resolution base={:?} fixed_scale={:.6} effective_scale={:.6} dynamic={} target_ms={:.3} floor={:.3}",
+                        self.base_extent,
+                        self.dynamic_resolution.fixed_scale(),
+                        self.dynamic_resolution.scale(),
+                        self.dynamic_resolution.enabled,
+                        self.dynamic_resolution.target_ms,
+                        self.dynamic_resolution.min_scale
+                    ),
+                    format!(
+                        "scene_state time={:.6} camera={:?} view_count={}",
+                        self.time,
+                        self.camera_pos,
+                        views.len()
+                    ),
                     format!("surface_format={:?}", ctx.config.format),
                     format!("device_features={:?}", ctx.features),
                     format!(
@@ -3115,9 +3154,9 @@ impl SomniumRenderer {
                     ),
                     format!("sun_direction_y={:.6}", self.light_direction.y),
                 ];
-                if let Some(t) = self.terrains.first() {
+                for (index, t) in self.terrains.iter().enumerate() {
                     lines.push(format!(
-                        "terrain compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} parallax={:.4}",
+                        "terrain[{index}] compressed={} from_assets={} hero={} extra={} wetness={:.3} hex={} parallax={:.4}",
                         t.layer_textures.compressed,
                         t.layer_textures.from_assets,
                         t.layer_textures.resolution,
@@ -3125,6 +3164,10 @@ impl SomniumRenderer {
                         t.wetness,
                         t.hex_tiling,
                         t.parallax_scale,
+                    ));
+                    lines.push(format!(
+                        "terrain[{index}] clipmap={}",
+                        self.clipmaps.get(index).is_some_and(|c| c.enabled)
                     ));
                 }
                 lines.extend(profile_report);

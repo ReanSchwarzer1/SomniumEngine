@@ -20,10 +20,11 @@ use somnium_ecs::{Entity, World};
 
 use crate::{
     AntiAliasing, AudioAttenuationModel, AudioBus, AudioEmitterComponent, BuoyantVessel,
-    CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent, LightShadowTechnique,
-    LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, ParticleEmitter,
-    PostProcessComponent, SmaaPreset, TerrainComponent, Tonemapper, Transform, UiCanvasComponent,
-    UiCanvasSpace, VoxelTerrainComponent, WaterComponent, WorldPartitionComponent,
+    CameraSettingsComponent, EditorFlags, FoliageComponent, GraphicsScalability, LightComponent,
+    LightShadowTechnique, LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent,
+    ParticleEmitter, PostProcessComponent, SmaaPreset, TerrainComponent, Tonemapper, Transform,
+    UiCanvasComponent, UiCanvasSpace, VoxelTerrainComponent, WaterComponent,
+    WorldPartitionComponent,
 };
 
 // `MeshComponent` and `MaterialComponent` derive `Default` at their
@@ -337,6 +338,32 @@ const ANTI_ALIASING_NAMES: &[&str] = &["Off", "FXAA", "SMAA 1x", "SMAA T2x", "TA
 
 /// MORROWIND-AC. Order is [`SmaaPreset::as_index`].
 const SMAA_PRESET_NAMES: &[&str] = &["Low", "Medium", "High", "Ultra"];
+
+impl ReflectField for GraphicsScalability {
+    fn field_type() -> FieldType {
+        FieldType::Enum(&["Native (100%)", "Balanced (75%)", "Performance (67%)"])
+    }
+    fn to_reflect(&self) -> ReflectValue {
+        ReflectValue::I64(i64::from(self.as_index()))
+    }
+    fn from_reflect(value: &ReflectValue, field: &'static str) -> Result<Self, ReflectError> {
+        match value {
+            ReflectValue::I64(0) => Ok(Self::Native),
+            ReflectValue::I64(1) => Ok(Self::Balanced),
+            ReflectValue::I64(2) => Ok(Self::Performance),
+            ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
+                field,
+                min: Some(0.0),
+                max: Some(2.0),
+            }),
+            other => Err(ReflectError::TypeMismatch {
+                field,
+                expected: "enum".into(),
+                found: other.kind(),
+            }),
+        }
+    }
+}
 
 impl ReflectField for AntiAliasing {
     fn field_type() -> FieldType {
@@ -661,10 +688,11 @@ fn camera_settings_schema() -> ComponentSchema {
     component_schema! {
         CameraSettingsComponent as "somnium.CameraSettings", display "Camera", version 1,
         fields {
+            graphics_scalability { group: "Graphics Scalability", doc: "Fixed scene resolution: Native 100%, Balanced 75%, Performance 67%. FSR reconstructs to display size; other AA modes use a spatial blit. Applies after the viewport resolution cap. Other graphics controls stay independent." },
             frustum_cull { group: "Culling", doc: "Skip terrain chunks outside the camera frustum." },
             dynamic_resolution { group: "Dynamic Resolution" },
             dynamic_target_ms { min: 1.0, soft_max: 50.0, step: 0.1, precision: 2, unit: "ms", group: "Dynamic Resolution" },
-            dynamic_floor { min: 0.25, max: 1.0, step: 0.01, precision: 2, group: "Dynamic Resolution" },
+            dynamic_floor { min: 0.25, max: 1.0, step: 0.01, precision: 2, group: "Dynamic Resolution", doc: "Minimum automatic scale relative to the fixed Graphics Scalability resolution." },
         }
     }
 }
@@ -1299,6 +1327,73 @@ mod tests {
             ],
             "iteration is sorted by stable id, not by registration order"
         );
+    }
+
+    #[test]
+    fn scalability_is_editable_undoable_and_saved_without_losing_other_camera_settings() {
+        use crate::editor_commands::{EditorCommand, SetFieldCmd};
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.CameraSettings").unwrap();
+        let field = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "graphics_scalability")
+            .unwrap();
+        let mut world = World::new();
+        let entity = world.spawn((CameraSettingsComponent {
+            dynamic_target_ms: 24.0,
+            ..Default::default()
+        },));
+        let mut selected = Some(entity);
+        for mode in [
+            GraphicsScalability::Native,
+            GraphicsScalability::Performance,
+        ] {
+            let before = *world.get::<CameraSettingsComponent>(entity).unwrap();
+            let mut command = SetFieldCmd::new(
+                &world,
+                entity,
+                schema.stable_id,
+                field.id,
+                mode.to_reflect(),
+                somnium_ui::GestureId(1),
+                None,
+            )
+            .unwrap();
+            command.execute(&mut world, &mut selected);
+            assert_eq!(
+                world
+                    .get::<CameraSettingsComponent>(entity)
+                    .unwrap()
+                    .graphics_scalability,
+                mode
+            );
+            let document = crate::scene_schema::scene_to_json(&mut world, &registry);
+            let mut loaded = World::new();
+            crate::scene_schema::scene_from_json(&mut loaded, &registry, &document).unwrap();
+            assert_eq!(
+                crate::scene_schema::scene_to_json(&mut loaded, &registry),
+                document
+            );
+            command.undo(&mut world, &mut selected);
+            assert_eq!(
+                *world.get::<CameraSettingsComponent>(entity).unwrap(),
+                before
+            );
+        }
+        assert!(
+            GraphicsScalability::from_reflect(&ReflectValue::I64(3), "graphics_scalability")
+                .is_err()
+        );
+        // Older version-1 camera snapshots omit the new field; apply keeps the
+        // new performance-minded default and preserves their authored fields.
+        let mut old = (schema.snapshot)(&world, entity).unwrap();
+        old.remove(&field.id);
+        let restored = world.spawn((CameraSettingsComponent::default(),));
+        (schema.apply)(&mut world, restored, &old).unwrap();
+        let camera = world.get::<CameraSettingsComponent>(restored).unwrap();
+        assert_eq!(camera.graphics_scalability, GraphicsScalability::Balanced);
+        assert_eq!(camera.dynamic_target_ms, 24.0);
     }
 
     #[test]

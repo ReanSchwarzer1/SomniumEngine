@@ -2,7 +2,7 @@
 //!
 //! The editor window (and fullscreen) stay at the display's pixel size so
 //! chrome and gizmos stay sharp. Scene passes render into a smaller target
-//! and bilinear-upscale. Index 0 is Native — no cap.
+//! and reconstruct with FSR (or blit with other AA modes). Index 0 is Native — no cap.
 
 /// Labels for the viewport toolbar combo. Order matches [`scene_size_for_preset`].
 pub const VIEWPORT_RESOLUTION_LABELS: [&str; 5] =
@@ -94,6 +94,8 @@ const GAIN: f32 = 0.5;
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicResolution {
     pub enabled: bool,
+    /// Authored fixed scale relative to the viewport cap. Independent of DRS.
+    fixed_scale: f32,
     /// Frame time being aimed at, in milliseconds. 16.67 is 60 Hz.
     pub target_ms: f32,
     /// Lowest scale the controller may choose. The quality floor the user sets.
@@ -131,6 +133,7 @@ impl Default for DynamicResolution {
     fn default() -> Self {
         Self {
             enabled: false,
+            fixed_scale: 1.0,
             target_ms: 1000.0 / 60.0,
             min_scale: 0.67,
             scale: 1.0,
@@ -147,14 +150,33 @@ impl Default for DynamicResolution {
 const RELEARN_FRACTION: f32 = 0.70;
 
 impl DynamicResolution {
-    /// Current scale, always 1.0 while disabled.
+    /// Effective scale relative to the viewport cap, including fixed scalability.
     #[must_use]
     pub fn scale(&self) -> f32 {
-        if self.enabled { self.scale } else { 1.0 }
+        self.fixed_scale * if self.enabled { self.scale } else { 1.0 }
     }
 
-    /// Reset to native. Called when the controller is switched off, so turning
-    /// it off restores full resolution instead of freezing the last scale.
+    /// Change the fixed quality budget and discard decisions from the old budget.
+    /// Returns whether the scale changed. Invalid input leaves it untouched.
+    pub fn set_fixed_scale(&mut self, scale: f32) -> bool {
+        if !scale.is_finite() {
+            return false;
+        }
+        let scale = scale.clamp(0.25, 1.0);
+        if self.fixed_scale == scale {
+            return false;
+        }
+        self.fixed_scale = scale;
+        self.reset();
+        true
+    }
+
+    /// Fixed scalability scale, before automatic resolution adjustment.
+    pub fn fixed_scale(&self) -> f32 {
+        self.fixed_scale
+    }
+
+    /// Reset automatic adjustment to the authored fixed scale.
     pub fn reset(&mut self) {
         self.scale = 1.0;
         self.cooldown = 0;
@@ -322,6 +344,28 @@ mod tests {
     #[test]
     fn native_matches_the_window() {
         assert_eq!(scene_size_for_preset(2560, 1440, 0), (2560, 1440));
+    }
+
+    #[test]
+    fn fixed_scalability_survives_dynamic_disable_and_repeated_resizes() {
+        let mut dr = DynamicResolution::default();
+        assert!(dr.set_fixed_scale(0.75));
+        assert_eq!(dr.apply(2560, 1392), (1920, 1044));
+        assert_eq!(dr.apply(1920, 1080), (1440, 810));
+        assert!(!dr.set_fixed_scale(0.75));
+        assert!(!dr.set_fixed_scale(f32::NAN));
+        dr.enabled = true;
+        for _ in 0..500 {
+            dr.tick(200.0);
+        }
+        assert!(dr.scale() < 0.75);
+        dr.enabled = false;
+        dr.reset();
+        assert_eq!(dr.apply(2560, 1392), (1920, 1044));
+        assert!(dr.set_fixed_scale(2.0 / 3.0));
+        assert_eq!(dr.apply(2560, 1392), (1706, 928));
+        assert!(dr.set_fixed_scale(1.0));
+        assert_eq!(dr.apply(2560, 1392), (2560, 1392));
     }
 
     #[test]
