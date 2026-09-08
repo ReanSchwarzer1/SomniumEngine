@@ -2,11 +2,11 @@
 //!
 //! Reconstructs the internal HDR target to display resolution. Replaces
 //! Somnium TAA and the bilinear present blit while enabled. RCAS is FSR's
-//! own sharpener — Somnium CAS stays off on this path so they do not stack.
+//! backend sharpener, disabled here in favour of bounded output sharpening.
+//! Somnium CAS stays off on this path so they do not stack.
 //!
-//! Colour is compressed with TAA's exposure-aware Karis curve before FSR and
-//! expanded after. Raw cd/m² makes Lanczos undershoot go black at every
-//! high-contrast edge — the same failure TAA hit before `tonemap_for_blend`.
+//! Input is sanitized linear, pre-exposed HDR. The output pass removes that
+//! exposure and bounds sharpening; it does not invert a Karis curve.
 //!
 //! Frame generation is not here: it needs a DXGI/Vulkan swapchain proxy.
 
@@ -39,6 +39,7 @@ struct FsrGpu {
     sanitize_pipeline: wgpu::ComputePipeline,
     untonemap_bgl: wgpu::BindGroupLayout,
     untonemap_pipeline: wgpu::ComputePipeline,
+    untonemap_bg: wgpu::BindGroup,
     render_size: [u32; 2],
     upscale_size: [u32; 2],
     frame_index: i32,
@@ -141,15 +142,24 @@ impl FsrPass {
             return;
         }
         gpu.view.resize(queue, render, upscale);
-        gpu.compressed = alloc_hdr(device, "FSR Compressed", upscale);
-        let (output, output_view) = alloc_output(device, upscale);
-        gpu.output = output;
-        gpu.output_view = output_view;
-        gpu.dilated_depth = alloc_r32(device, "FSR Dilated Depth", render);
-        gpu.dilated_motion_vectors = alloc_rg16(device, "FSR Dilated Motion", render);
-        gpu.reconstructed_previous_depth = alloc_prev_depth(device, render);
-        gpu.sanitized = alloc_hdr(device, "FSR Sanitized HDR", render);
-        gpu.depth_f32 = alloc_r32(device, "FSR Depth F32", render);
+        if upscale != gpu.upscale_size {
+            gpu.compressed = alloc_hdr(device, "FSR Compressed", upscale);
+            (gpu.output, gpu.output_view) = alloc_output(device, upscale);
+            gpu.untonemap_bg = alloc_untonemap_bind_group(
+                device,
+                &gpu.untonemap_bgl,
+                &gpu.compressed,
+                &gpu.output_view,
+                &gpu.exposure_buf,
+            );
+        }
+        if render != gpu.render_size {
+            gpu.dilated_depth = alloc_r32(device, "FSR Dilated Depth", render);
+            gpu.dilated_motion_vectors = alloc_rg16(device, "FSR Dilated Motion", render);
+            gpu.reconstructed_previous_depth = alloc_prev_depth(device, render);
+            gpu.sanitized = alloc_hdr(device, "FSR Sanitized HDR", render);
+            gpu.depth_f32 = alloc_r32(device, "FSR Depth F32", render);
+        }
         gpu.render_size = render;
         gpu.upscale_size = upscale;
         gpu.frame_index = 0;
@@ -264,27 +274,13 @@ impl FsrPass {
         };
         match gpu.context.dispatch(&mut gpu.view, encoder, &info) {
             Ok(()) => {
-                let compressed_view = gpu.compressed.create_view(&Default::default());
-                let linear_view = gpu.output.create_view(&Default::default());
-                let untonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("FSR Untonemap"),
-                    layout: &gpu.untonemap_bgl,
-                    entries: &[
-                        bind_view(0, &compressed_view),
-                        bind_view(1, &linear_view),
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: gpu.exposure_buf.as_entire_binding(),
-                        },
-                    ],
-                });
                 {
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("FSR Untonemap"),
                         timestamp_writes: None,
                     });
                     pass.set_pipeline(&gpu.untonemap_pipeline);
-                    pass.set_bind_group(0, &untonemap_bg, &[]);
+                    pass.set_bind_group(0, &gpu.untonemap_bg, &[]);
                     pass.dispatch_workgroups(
                         gpu.upscale_size[0].div_ceil(8),
                         gpu.upscale_size[1].div_ceil(8),
@@ -307,6 +303,27 @@ fn bind_view<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEn
         binding,
         resource: wgpu::BindingResource::TextureView(view),
     }
+}
+
+fn alloc_untonemap_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    compressed: &wgpu::Texture,
+    output: &wgpu::TextureView,
+    exposure: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("FSR Untonemap"),
+        layout,
+        entries: &[
+            bind_view(0, &compressed.create_view(&Default::default())),
+            bind_view(1, output),
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: exposure.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn alloc_gpu(
@@ -343,6 +360,13 @@ fn alloc_gpu(
     });
     let (sanitize_bgl, sanitize_pipeline) = alloc_sanitize_pipeline(device, shaders);
     let (untonemap_bgl, untonemap_pipeline) = alloc_untonemap_pipeline(device, shaders);
+    let untonemap_bg = alloc_untonemap_bind_group(
+        device,
+        &untonemap_bgl,
+        &compressed,
+        &output_view,
+        &exposure_buf,
+    );
     FsrGpu {
         context,
         view,
@@ -359,6 +383,7 @@ fn alloc_gpu(
         sanitize_pipeline,
         untonemap_bgl,
         untonemap_pipeline,
+        untonemap_bg,
         render_size: render,
         upscale_size: upscale,
         frame_index: 0,

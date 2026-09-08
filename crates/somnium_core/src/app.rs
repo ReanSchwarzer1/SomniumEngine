@@ -3889,7 +3889,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.pending_steps -= 1;
                 self.simulation_accumulator += fixed_dt;
             } else {
-                self.simulation_accumulator += dt.min(0.1);
+                // TALOS capture override: one simulation step per rendered frame
+                // keeps water, foliage and vessels at matched times across scales.
+                self.simulation_accumulator +=
+                    if std::env::var("SOMNIUM_TIME_FIXED_STEP").as_deref() == Ok("1") {
+                        fixed_dt
+                    } else {
+                        dt.min(0.1)
+                    };
             }
             while self.simulation_accumulator >= fixed_dt {
                 {
@@ -7254,6 +7261,7 @@ impl<G: GameApp> Engine<G> {
         // render context as well — switching the controller off resizes the
         // scene targets back to the base extent there and then.
         if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+            r.set_graphics_scale(c, cam.graphics_scalability.scale());
             r.set_dynamic_resolution(
                 c,
                 cam.dynamic_resolution,
@@ -10334,15 +10342,8 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::SetViewportResolution(idx) => {
                 self.viewport_resolution = idx as usize;
-                let w = self.viewport_size().0.max(1.0) as u32;
-                let h = self.viewport_size().1.max(1.0) as u32;
-                let (sw, sh) =
-                    somnium_renderer::scene_size_for_preset(w, h, self.viewport_resolution);
-                if let (Some(r), Some(c)) = (&mut self.renderer, &self.render_ctx)
-                    && r.scene_extent() != (sw, sh)
-                {
-                    r.resize(c, sw, sh);
-                }
+                self.resize_scene_targets();
+                let (sw, sh) = self.renderer.as_ref().map_or((0, 0), |r| r.scene_extent());
                 let label = somnium_renderer::VIEWPORT_RESOLUTION_LABELS
                     .get(self.viewport_resolution)
                     .copied()

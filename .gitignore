@@ -206,3 +206,11 @@ assets/.somnium/
 dev records/phase PERSONA/*
 !dev records/phase PERSONA/*.md
 !dev records/phase PERSONA/*.png
+
+# TALOS: reproducible scalability measurements and review captures.
+!dev records/phase TALOS/
+!dev records/phase TALOS/README.md
+!dev records/phase TALOS/capture.py
+!dev records/phase TALOS/*.somtime
+!dev records/phase TALOS/*.audit
+!dev records/phase TALOS/*.png

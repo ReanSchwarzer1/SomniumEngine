@@ -80,6 +80,7 @@ export type SomniumBuoyantVessel = {
 
 --- `somnium.CameraSettings` (schema version 1).
 export type SomniumCameraSettings = {
+	graphics_scalability: number --[[ Native (100%) | Balanced (75%) | Performance (67%) ]],
 	frustum_cull: boolean,
 	dynamic_resolution: boolean,
 	dynamic_target_ms: number,

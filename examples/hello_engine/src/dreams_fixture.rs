@@ -95,6 +95,12 @@ impl DreamRail {
                 metres_per_second: 200.0,
                 stop_after,
             },
+            // TALOS: a continuous walking-speed camera route through the
+            // measurement window. Reuses the existing frame-indexed rail.
+            "coastal-walk" | "island-walk" => RailKind::Flyover {
+                metres_per_second: 1.5,
+                stop_after,
+            },
             _ => return None,
         };
         Some(Self {

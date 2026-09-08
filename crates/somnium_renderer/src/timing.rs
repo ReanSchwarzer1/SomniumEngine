@@ -349,6 +349,8 @@ impl AllocationSnapshot {
 pub struct Hitches {
     /// Median presented-frame interval, in milliseconds.
     pub median_ms: f32,
+    /// 95th percentile interval, in milliseconds.
+    pub p95_ms: f32,
     /// 99th percentile interval, in milliseconds.
     pub p99_ms: f32,
     /// Longest interval in the run.
@@ -396,6 +398,7 @@ pub fn hitches(intervals: &[f32]) -> Option<Hitches> {
     }
     Some(Hitches {
         median_ms: median,
+        p95_ms: percentile(&sorted, 0.95),
         p99_ms: percentile(&sorted, 0.99),
         worst_ms: *sorted.last().unwrap_or(&0.0),
         over_2x,
@@ -560,6 +563,7 @@ impl TimingRun {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: (u32, u32),
+        output_size: (u32, u32),
     ) {
         if self.written {
             return;
@@ -708,13 +712,13 @@ impl TimingRun {
         }
 
         if self.rendered >= self.warmup + self.frames {
-            self.finish(adapter, size);
+            self.finish(adapter, size, output_size);
         }
     }
 
-    fn finish(&mut self, adapter: &wgpu::Adapter, size: (u32, u32)) {
+    fn finish(&mut self, adapter: &wgpu::Adapter, size: (u32, u32), output_size: (u32, u32)) {
         self.written = true;
-        let text = self.render(adapter, size);
+        let text = self.render(adapter, size, output_size);
         // A run costs a warm-up plus several hundred frames. Losing it to a
         // missing `dev records/phase DOOM/` is not a trade worth making, and
         // the evidence folders in this project are created by the sub-phase
@@ -770,7 +774,7 @@ impl TimingRun {
         TIMING_FINISHED.store(true, Ordering::Release);
     }
 
-    fn render(&self, adapter: &wgpu::Adapter, size: (u32, u32)) -> String {
+    fn render(&self, adapter: &wgpu::Adapter, size: (u32, u32), output_size: (u32, u32)) -> String {
         let info = adapter.get_info();
         let mut s = String::new();
         let _ = writeln!(s, "# somtime v1");
@@ -783,6 +787,7 @@ impl TimingRun {
         let _ = writeln!(s, "# adapter\t{} / {:?}", info.name, info.backend);
         let _ = writeln!(s, "# driver\t{} {}", info.driver, info.driver_info);
         let _ = writeln!(s, "# render\t{}x{}", size.0, size.1);
+        let _ = writeln!(s, "# output\t{}x{}", output_size.0, output_size.1);
         let _ = writeln!(
             s,
             "# columns\tkind\tname\tdepth\tmean_ms\tstddev_ms\tmin_ms\tmax_ms\tsamples"
@@ -844,6 +849,7 @@ impl TimingRun {
         if let Some(h) = hitches(&self.wall_samples) {
             for (name, v) in [
                 ("median_ms", h.median_ms),
+                ("p95_ms", h.p95_ms),
                 ("p99_ms", h.p99_ms),
                 ("worst_ms", h.worst_ms),
                 ("over_2x_median", h.over_2x as f32),
@@ -1011,6 +1017,16 @@ mod tests {
         assert_eq!(h.over_2x, 0);
         assert!((h.median_ms - 16.7).abs() < 0.2, "median {}", h.median_ms);
         assert!(h.worst_ms < 17.0);
+    }
+
+    #[test]
+    fn pacing_percentiles_use_nearest_rank() {
+        let intervals: Vec<f32> = (1..=100).rev().map(|v| v as f32).collect();
+        let h = hitches(&intervals).unwrap();
+        assert_eq!(
+            (h.median_ms, h.p95_ms, h.p99_ms, h.worst_ms),
+            (50.0, 95.0, 99.0, 100.0)
+        );
     }
 
     #[test]
