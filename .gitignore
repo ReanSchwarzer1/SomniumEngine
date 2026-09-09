@@ -216,3 +216,6 @@ dev records/phase PERSONA/*
 !dev records/phase TALOS/*.somtime
 !dev records/phase TALOS/*.audit
 !dev records/phase TALOS/*.png
+
+# Private game project, story, assets and production records.
+/games/TheSomnusFracture/
