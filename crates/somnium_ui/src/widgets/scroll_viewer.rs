@@ -17,8 +17,14 @@ const MIN_THUMB: f32 = 24.0;
 /// Height of the fade that marks clipped content at a scroll edge.
 const FADE_HEIGHT: f32 = 14.0;
 
+#[derive(Debug, Clone, Copy)]
+pub enum ScrollViewerMessage {
+    /// Content-space offset, clamped after the next layout (which may be new).
+    ScrollTo(f32),
+}
+
 pub struct ScrollViewer {
-    pub scroll_y: f32,
+    scroll_y: Cell<f32>,
     shrink_to_content: bool,
     content_h: Cell<f32>,
     view_h: Cell<f32>,
@@ -40,17 +46,21 @@ impl ScrollViewer {
         let thumb_h = (view_h / content_h * track_h).clamp(min_thumb, track_h);
         let travel = (track_h - thumb_h).max(0.0);
         let max = self.max_scroll();
-        let t = if max > 0.0 { self.scroll_y / max } else { 0.0 };
+        let t = if max > 0.0 {
+            self.scroll_y.get() / max
+        } else {
+            0.0
+        };
         Rect::new(b.x + b.w - BAR, b.y + t * travel, BAR, thumb_h)
     }
 
-    fn clamp_scroll(&mut self) {
+    fn clamp_scroll(&self) {
         let max = self.max_scroll();
-        self.scroll_y = self.scroll_y.clamp(0.0, max);
+        self.scroll_y.set(self.scroll_y.get().clamp(0.0, max));
     }
 
     pub fn scroll_offset(&self) -> f32 {
-        self.scroll_y
+        self.scroll_y.get()
     }
 }
 
@@ -62,14 +72,16 @@ impl Control for ScrollViewer {
 
     fn scroll_into_view(&mut self, widget: &mut Widget, target: Rect) -> bool {
         let viewport = widget.screen_bounds();
-        let old = self.scroll_y;
+        let old = self.scroll_y.get();
         if target.y < viewport.y {
-            self.scroll_y -= viewport.y - target.y;
+            self.scroll_y
+                .set(self.scroll_y.get() - (viewport.y - target.y));
         } else if target.y + target.h > viewport.y + viewport.h {
-            self.scroll_y += target.y + target.h - (viewport.y + viewport.h);
+            self.scroll_y
+                .set(self.scroll_y.get() + target.y + target.h - (viewport.y + viewport.h));
         }
         self.clamp_scroll();
-        if (old - self.scroll_y).abs() > 0.01 {
+        if (old - self.scroll_y.get()).abs() > 0.01 {
             widget.invalidate_layout();
             true
         } else {
@@ -120,8 +132,13 @@ impl Control for ScrollViewer {
             let ds = ctx.desired_size(ch);
             content_h = content_h.max(ds.y.max(final_size.y));
         }
+        self.content_h.set(content_h);
+        self.clamp_scroll();
         for &ch in &widget.children {
-            ctx.arrange_child(ch, Rect::new(ox, oy - self.scroll_y, inner_w, content_h));
+            ctx.arrange_child(
+                ch,
+                Rect::new(ox, oy - self.scroll_y.get(), inner_w, content_h),
+            );
         }
         self.content_h.set(content_h);
         final_size
@@ -169,11 +186,11 @@ impl Control for ScrollViewer {
             let surface = t.semantic.surface.panel.bytes();
             let fade_h = FADE_HEIGHT.min(b.h * 0.25);
             let viewport_w = (b.w - BAR).max(0.0);
-            if self.scroll_y > 0.5 {
+            if self.scroll_y.get() > 0.5 {
                 ctx.push_scroll_fade(Rect::new(b.x, b.y, viewport_w, fade_h), surface, true);
             }
             let max_offset = (self.content_h.get() - self.view_h.get()).max(0.0);
-            if self.scroll_y < max_offset - 0.5 {
+            if self.scroll_y.get() < max_offset - 0.5 {
                 ctx.push_scroll_fade(
                     Rect::new(b.x, b.y + b.h - fade_h, viewport_w, fade_h),
                     surface,
@@ -191,10 +208,16 @@ impl Control for ScrollViewer {
     ) {
         let b = widget.screen_bounds();
         self.view_h.set(b.h.max(1.0));
+        if let Some(ScrollViewerMessage::ScrollTo(offset)) = msg.data::<ScrollViewerMessage>() {
+            self.scroll_y.set(offset.max(0.0));
+            widget.invalidate_layout();
+            msg.handled = true;
+            return;
+        }
         if let Some(wmsg) = msg.data::<WidgetMessage>() {
             match wmsg {
                 WidgetMessage::MouseWheel { delta, .. } => {
-                    self.scroll_y -= *delta;
+                    self.scroll_y.set(self.scroll_y.get() - *delta);
                     self.clamp_scroll();
                     widget.invalidate_layout();
                     msg.handled = true;
@@ -206,10 +229,10 @@ impl Control for ScrollViewer {
                         if thumb.contains(*pos) {
                             self.dragging = true;
                             self.drag_anchor_y = pos.y;
-                            self.drag_scroll0 = self.scroll_y;
+                            self.drag_scroll0 = self.scroll_y.get();
                         } else {
                             let rel = ((pos.y - b.y) / b.h.max(1.0)).clamp(0.0, 1.0);
-                            self.scroll_y = rel * self.max_scroll();
+                            self.scroll_y.set(rel * self.max_scroll());
                             self.clamp_scroll();
                             widget.invalidate_layout();
                         }
@@ -219,9 +242,9 @@ impl Control for ScrollViewer {
                 WidgetMessage::MouseMove { pos, .. } => {
                     if self.dragging {
                         let max = self.max_scroll();
-                        let travel = (b.h - MIN_THUMB).max(1.0);
+                        let travel = (b.h - self.thumb_rect(b).h).max(1.0);
                         let dy = pos.y - self.drag_anchor_y;
-                        self.scroll_y = self.drag_scroll0 + dy / travel * max;
+                        self.scroll_y.set(self.drag_scroll0 + dy / travel * max);
                         self.clamp_scroll();
                         widget.invalidate_layout();
                         msg.handled = true;
@@ -259,7 +282,7 @@ impl ScrollViewerBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(ScrollViewer {
-                scroll_y: 0.0,
+                scroll_y: Cell::new(0.0),
                 shrink_to_content: self.shrink_to_content,
                 content_h: Cell::new(0.0),
                 view_h: Cell::new(0.0),
@@ -278,7 +301,7 @@ mod tests {
     #[test]
     fn empty_viewer_has_no_scroll_range() {
         let v = ScrollViewer {
-            scroll_y: 0.0,
+            scroll_y: Cell::new(0.0),
             shrink_to_content: false,
             content_h: Cell::new(100.0),
             view_h: Cell::new(100.0),
@@ -292,7 +315,7 @@ mod tests {
     #[test]
     fn zero_height_track_does_not_panic() {
         let v = ScrollViewer {
-            scroll_y: 0.0,
+            scroll_y: Cell::new(0.0),
             shrink_to_content: false,
             content_h: Cell::new(200.0),
             view_h: Cell::new(0.0),

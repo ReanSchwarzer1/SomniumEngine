@@ -39,6 +39,7 @@ pub struct Popup {
     pub is_open: bool,
     pub anchor: NodeHandle,
     pub placement: PopupPlacement,
+    pub content_width: f32,
 }
 
 impl Control for Popup {
@@ -77,7 +78,7 @@ impl Control for Popup {
                 } else {
                     available.y - inset * 2.0
                 };
-                Vec2::new(available.x.min(280.0), height.max(1.0))
+                Vec2::new(available.x.min(self.content_width), height.max(1.0))
             }
             PopupPlacement::Center => Vec2::new(available.x.min(920.0), available.y.min(640.0)),
             PopupPlacement::BottomCenter => {
@@ -96,12 +97,12 @@ impl Control for Popup {
         }
         for &ch in &widget.children {
             let ds = ctx.desired_size(ch);
-            let mut w = ds.x.max(1.0);
-            let h = ds.y.max(1.0);
+            let mut w = ds.x.max(1.0).min(final_size.x);
+            let h = ds.y.max(1.0).min(final_size.y);
             let (x, y) = match self.placement {
                 PopupPlacement::AnchorBelow if self.anchor.is_some() => {
                     let b = ctx.screen_bounds(self.anchor);
-                    w = w.max(b.w);
+                    w = w.max(b.w).min(final_size.x);
                     let mut x = b.x;
                     let mut y = b.y + b.h;
                     if x + w > final_size.x {
@@ -189,6 +190,7 @@ pub struct PopupBuilder {
     widget: WidgetBuilder,
     anchor: NodeHandle,
     placement: PopupPlacement,
+    content_width: f32,
 }
 
 impl PopupBuilder {
@@ -197,7 +199,14 @@ impl PopupBuilder {
             widget,
             anchor: NodeHandle::NONE,
             placement: PopupPlacement::AnchorBelow,
+            content_width: 280.0,
         }
+    }
+
+    /// Preferred width of anchored content; always constrained to its window.
+    pub fn with_content_width(mut self, width: f32) -> Self {
+        self.content_width = width.max(1.0);
+        self
     }
 
     pub fn with_anchor(mut self, anchor: NodeHandle) -> Self {
@@ -217,6 +226,7 @@ impl PopupBuilder {
                 is_open: false,
                 anchor: self.anchor,
                 placement: self.placement,
+                content_width: self.content_width,
             }),
         )
     }
@@ -232,6 +242,7 @@ mod tests {
             is_open: false,
             anchor: NodeHandle::NONE,
             placement: PopupPlacement::AnchorBelow,
+            content_width: 280.0,
         };
         assert!(!p.is_open);
     }

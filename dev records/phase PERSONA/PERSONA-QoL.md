@@ -48,3 +48,16 @@ The user clarified that “texel viewer” means **viewport texel-density visual
 Validation: the final UI suite passes **790 tests** (783 unit, 6 shader, 1 doc). Renderer validation passes **499 tests** (468 unit, 31 composed-shader/renderer guards), including all registered view branches and Naga validation. The menu regression covers the actual Create builder and View at 360/720 px height, the last command by wheel and keyboard focus, and compact short menus. Source/automated checks do not constitute native visual acceptance. Generated census: **220,314 Rust/WGSL lines; 2,230 discovered tests**. No screenshots or golden changes were made.
 
 Release verification: `cargo build -p hello_engine --release -j1` passed after the final legend-placement correction (`target/persona-qol-release.log`). `cargo check -p somnium_ui -j1` passed after unused-import cleanup; `git diff --check` is clean. The editor executable is `target/release/hello_engine.exe`. Remaining H–L work and user visual acceptance stay open; no commit or push was made.
+
+
+## Shared picker repair — 2026-09-09
+
+User screenshots showed asset selectors painting over the whole editor and terrain lists extending almost to the bottom of the window. A headless regression reproduced both on base `28b65cc`: the asset popup painted its full-window click catcher, and 200 choices measured 4,800 px tall.
+
+All combo selectors now use `editor::parts::picker_popup`: a transparent click catcher, one raised popup frame, fixed optional search/actions, and the existing ScrollViewer as the body. The cap is twelve dense rows plus the frame (290 px at the standard density), further constrained to the anchor's available window space. Normal selectors prefer 280 px width; asset selectors prefer 360 px, constrained to the host window. Short and filtered lists shrink. Terrain layers, material textures, reflected enums/assets and shell selectors use the same base. The scrollbar supports dragging and the wheel; long labels ellipsize and only visible rows paint.
+
+The scroll offset clamps after content layout, resets when filtering changes results, and reveals the current row on opening. Repeated unchanged model snapshots do not pull the scrollbar back. Thumb dragging uses its actual travel rather than assuming the minimum thumb size.
+
+Popup ownership is now exposed by the ComboBox itself. Editor dismissal discovers generated asset/enum/settings pickers through that link, so they participate in Escape, outside-click and sibling-dropdown handling. Removing a rebuilt Details/settings control also removes its root-parented popup. Content places updates go through the combo's messages instead of assuming its list is the popup's first child. Existing floating-window popup rehoming remains in use.
+
+Validation: **789 UI unit tests passed**, zero failures. The two regression scenarios exercise the real generated asset picker and shared terrain/combo path, including 200 rows, narrow/bottom-right window placement, gutter hit testing, dragging to the final row, wheel return, selection events, stable model updates, pinned asset actions/search, filtering shrink/reset and popup cleanup. No new screenshot or golden replacement was taken. `cargo build -p hello_engine --release -j1` passed; the rebuilt executable contains these fixes (log: `target/persona-picker-build.log`).

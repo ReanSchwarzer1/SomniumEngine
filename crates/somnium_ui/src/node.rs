@@ -209,6 +209,12 @@ pub trait Control: Send + 'static {
         None
     }
 
+    /// A root-parented popup owned by this control. Ownership survives floating
+    /// reparenting and lets removal and editor dismissal use the same link.
+    fn owned_popup(&self) -> Option<crate::message::NodeHandle> {
+        None
+    }
+
     /// The control this one is floating over, if it is an open popup.
     ///
     /// MORROWIND-J step 2. A popup is placed by being a child of a root, and

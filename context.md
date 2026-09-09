@@ -17,13 +17,13 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Item | Current state |
 |---|---|
 | Active phase | PERSONA expansion: Nocturne 0.5 surface finish, H motion and QoL in tree; remaining H–L and G acceptance open. TALOS remains scoped to accepted scalability/rendering cleanups. |
-| Most recent work | [PERSONA-I](<dev records/phase PERSONA/PERSONA-I.md>): Nocturne 0.5 surfaces, component hierarchy, dialog/tab/row feedback and readable toasts, 2026-09-09 |
+| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): compact shared pickers, scrolling, asset-overlay and popup lifecycle repairs; Nocturne 0.5 retained, 2026-09-09 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-09 | 220,744 Rust/WGSL lines and 2,234 discovered tests |
+| Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |

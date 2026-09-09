@@ -40,20 +40,163 @@ pub(crate) fn attach_combo_popup(
     items: &[&str],
     font_id: u8,
 ) -> NodeHandle {
-    let popup = PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .with_anchor(combo)
-        .with_placement(PopupPlacement::AnchorBelow)
-        .build();
-    let popup_h = ui.add_node(popup, ui.root());
+    let picker = picker_popup(ui, combo, 280.0);
     let list = ComboDropdownBuilder::new(WidgetBuilder::new())
         .with_items(items.iter().copied())
         .with_combo(combo)
-        .with_popup(popup_h)
+        .with_popup(picker.popup)
         .with_font_id(font_id)
         .build();
-    let list_h = ui.add_node(list, popup_h);
-    ui.send(ComboBoxMessage::bind_popup(combo, popup_h, list_h));
-    popup_h
+    let list_h = ui.add_node(list, picker.list_host);
+    ui.send(ComboBoxMessage::bind_popup(combo, picker.popup, list_h));
+    picker.popup
+}
+
+/// Shared nonmodal picker: fixed header/footer and a compact, scrolling body.
+/// Callers supply the choices and optional search/actions, not overlay paint.
+pub(crate) struct PickerPopup {
+    pub popup: NodeHandle,
+    pub header: NodeHandle,
+    pub list_host: NodeHandle,
+    pub footer: NodeHandle,
+}
+
+pub(crate) fn picker_popup(ui: &mut UserInterface, anchor: NodeHandle, width: f32) -> PickerPopup {
+    use crate::widgets::border::Surface;
+    let popup = ui.add_node(
+        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_anchor(anchor)
+            .with_content_width(width)
+            .with_placement(PopupPlacement::AnchorBelow)
+            .build(),
+        ui.root(),
+    );
+    let frame = ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_max_size(glam::Vec2::new(
+                    width,
+                    theme::active().density.row_dense * 12.0 + 2.0,
+                ))
+                .with_horizontal_alignment(HorizontalAlignment::Left)
+                .with_vertical_alignment(VerticalAlignment::Top),
+        )
+        .with_surface(Surface::Popup)
+        .with_stroke_thickness(Thickness::uniform(1.0))
+        .build(),
+        popup,
+    );
+    let grid = ui.add_node(
+        crate::node::UiNode::new(
+            WidgetBuilder::new()
+                .with_background(theme::TRANSPARENT)
+                .build(),
+            Box::new(PickerLayout),
+        ),
+        frame,
+    );
+    let header = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_row(0)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Vertical)
+        .build(),
+        grid,
+    );
+    let list_host = ui.add_node(
+        ScrollViewerBuilder::new(
+            WidgetBuilder::new()
+                .with_row(1)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_shrink_to_content(true)
+        .build(),
+        grid,
+    );
+    let footer = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_row(2)
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(),
+        grid,
+    );
+    PickerPopup {
+        popup,
+        header,
+        list_host,
+        footer,
+    }
+}
+
+/// Unlike a stretch Grid, this layout shrinks with filtered results while
+/// reserving the search and actions before it gives remaining height to the list.
+struct PickerLayout;
+
+impl crate::node::Control for PickerLayout {
+    fn measure_override(
+        &self,
+        widget: &crate::widget::Widget,
+        ctx: &mut crate::node::LayoutCtx,
+        available: glam::Vec2,
+    ) -> glam::Vec2 {
+        let mut fixed_height = 0.0;
+        for index in [0, 2] {
+            if let Some(&child) = widget.children.get(index) {
+                ctx.measure_child(child, glam::Vec2::new(available.x, f32::INFINITY));
+                fixed_height += ctx.desired_size(child).y;
+            }
+        }
+        let mut body_height = 0.0;
+        if let Some(&body) = widget.children.get(1) {
+            ctx.measure_child(
+                body,
+                glam::Vec2::new(available.x, (available.y - fixed_height).max(0.0)),
+            );
+            body_height = ctx.desired_size(body).y;
+        }
+        glam::Vec2::new(available.x, fixed_height + body_height)
+    }
+
+    fn arrange_override(
+        &self,
+        widget: &crate::widget::Widget,
+        ctx: &mut crate::node::LayoutCtx,
+        size: glam::Vec2,
+    ) -> glam::Vec2 {
+        let header_h = widget
+            .children
+            .first()
+            .map(|&h| ctx.desired_size(h).y)
+            .unwrap_or(0.0);
+        let footer_h = widget
+            .children
+            .get(2)
+            .map(|&h| ctx.desired_size(h).y)
+            .unwrap_or(0.0);
+        let heights = [header_h, (size.y - header_h - footer_h).max(0.0), footer_h];
+        let mut y = widget.actual_local_position.y;
+        for (&child, height) in widget.children.iter().zip(heights) {
+            ctx.arrange_child(
+                child,
+                crate::types::Rect::new(widget.actual_local_position.x, y, size.x, height),
+            );
+            y += height;
+        }
+        size
+    }
+
+    fn handle_routed_message(
+        &mut self,
+        _: &mut crate::widget::Widget,
+        _: &mut crate::message::UiMessage,
+        _: &mut Vec<crate::message::UiMessage>,
+    ) {
+    }
 }
 
 pub(crate) fn menu_button(
@@ -522,5 +665,159 @@ mod menu_layout_tests {
         ui.perform_layout();
         let bounds = ui.screen_bounds(ui.first_child(popup));
         assert!(bounds.h <= rows.len() as f32 * theme::active().density.row_tree + 4.0);
+    }
+}
+
+#[cfg(test)]
+mod picker_regressions {
+    use super::*;
+    use crate::{
+        message::{MessageDirection, UiMessage},
+        widgets::combo_box::ComboBoxBuilder,
+    };
+
+    #[test]
+    fn long_picker_is_compact_scrolls_and_selects_at_window_edges() {
+        use crate::message::{Modifiers, MouseButton, WidgetMessage};
+        for (width, height) in [(1280.0, 720.0), (480.0, 320.0), (240.0, 240.0)] {
+            let mut ui = UserInterface::new(width, height);
+            let items = (0..200).map(|i| format!("Layer {i}")).collect::<Vec<_>>();
+            let labels = items.iter().map(String::as_str).collect::<Vec<_>>();
+            let combo = ui.add_node(
+                ComboBoxBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(120.0)
+                        .with_height(24.0)
+                        .with_horizontal_alignment(HorizontalAlignment::Left)
+                        .with_vertical_alignment(VerticalAlignment::Top)
+                        .with_desired_position(glam::Vec2::new(width - 130.0, height - 48.0)),
+                )
+                .with_items(labels.iter().copied())
+                .build(),
+                ui.root(),
+            );
+            let popup = attach_combo_popup(&mut ui, combo, &labels, 0);
+            ui.update();
+            ui.perform_layout();
+            ui.send(UiMessage::new(
+                combo,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseDown {
+                    pos: glam::Vec2::ZERO,
+                    button: MouseButton::Left,
+                    mods: Modifiers::default(),
+                },
+            ));
+            ui.update();
+            ui.perform_layout();
+            let panel = ui.first_child(popup);
+            let b = ui.screen_bounds(panel);
+            assert!(
+                b.h <= 320.0 && b.w <= 280.0,
+                "picker must be compact: {b:?}"
+            );
+            assert!(
+                b.x >= 0.0 && b.y >= 0.0 && b.x + b.w <= width && b.y + b.h <= height,
+                "picker must fit its window: {b:?}"
+            );
+            let grid = ui.first_child(panel);
+            let viewer = ui.nodes.borrow(grid.transmute()).widget.children[1];
+            let list = ui.first_child(viewer);
+            let view = ui.screen_bounds(viewer);
+            // The gutter is a hit-testable control, not obscured by list content.
+            let thumb = glam::Vec2::new(view.x + view.w - 5.0, view.y + 3.0);
+            assert_eq!(ui.hit_test(thumb), viewer);
+            ui.send(UiMessage::new(
+                viewer,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseDown {
+                    pos: thumb,
+                    button: MouseButton::Left,
+                    mods: Modifiers::default(),
+                },
+            ));
+            ui.send(UiMessage::new(
+                viewer,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseMove {
+                    pos: glam::Vec2::new(thumb.x, view.y + view.h),
+                    mods: Modifiers::default(),
+                },
+            ));
+            ui.send(UiMessage::new(
+                viewer,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseUp {
+                    pos: thumb,
+                    button: MouseButton::Left,
+                    mods: Modifiers::default(),
+                },
+            ));
+            ui.update();
+            ui.perform_layout();
+            // Editor model snapshots repeat SetSelected every frame. They must
+            // not fight a user's drag when the selected value has not changed.
+            let scrolled = ui.screen_bounds(list);
+            ui.send(UiMessage::new(
+                combo,
+                MessageDirection::ToWidget,
+                ComboBoxMessage::SetSelected(0),
+            ));
+            ui.update();
+            ui.perform_layout();
+            assert_eq!(ui.screen_bounds(list), scrolled);
+            let list_bounds = ui.screen_bounds(list);
+            assert!(
+                (list_bounds.y + list_bounds.h - view.y - view.h).abs() < 1.0,
+                "drag must reach last row"
+            );
+            ui.send(UiMessage::new(
+                list,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseWheel {
+                    pos: thumb,
+                    delta: 100000.0,
+                    mods: Modifiers::default(),
+                },
+            ));
+            ui.update();
+            ui.perform_layout();
+            assert!(
+                (ui.screen_bounds(list).y - view.y).abs() < 1.0,
+                "wheel must reach first row"
+            );
+            ui.send(UiMessage::new(
+                combo,
+                MessageDirection::ToWidget,
+                ComboBoxMessage::SetSelected(199),
+            ));
+            ui.update();
+            ui.perform_layout();
+            let last_y = ui.screen_bounds(list).y + 199.0 * theme::active().density.row_dense;
+            let point = glam::Vec2::new(view.x + 20.0, last_y + 5.0);
+            assert_eq!(
+                ui.hit_test(point),
+                list,
+                "selected row must be revealed on reopening"
+            );
+            ui.send(UiMessage::new(
+                list,
+                MessageDirection::ToWidget,
+                WidgetMessage::MouseDown {
+                    pos: point,
+                    button: MouseButton::Left,
+                    mods: Modifiers::default(),
+                },
+            ));
+            let events = ui.update();
+            assert!(events.iter().any(|m| matches!(
+                m.data::<ComboBoxMessage>(),
+                Some(ComboBoxMessage::SelectionChanged(199))
+            )));
+            assert!(!ui.visibility(popup));
+            // Root-parented popups must disappear when their owner is rebuilt.
+            ui.remove_node(combo);
+            assert!(ui.nodes.try_borrow(popup.transmute()).is_err());
+        }
     }
 }

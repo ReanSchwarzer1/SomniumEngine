@@ -2188,10 +2188,8 @@ pub(crate) fn build_editor_layout(
     let color_picker = ui.add_node(color_picker_node, color_popup);
 
     let foliage_kind_combo = inspector_handles.foliage_kind_button;
-    let foliage_kind_popup =
-        attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
-    let viewport_res_popup =
-        attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
+    attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
+    attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
     // CONTROL-G's snap combos were built without one of these, so pressing
     // them set `open = true` on a `ComboBox` whose popup handle was `NONE` and
     // every branch that would show a list was skipped. Nothing opened, no
@@ -2199,8 +2197,8 @@ pub(crate) fn build_editor_layout(
     // the right label because `set_snap_state` pushes `SetSelected` into it
     // every frame — which is exactly why "Snap does nothing" looked like a
     // handler bug and was not one.
-    let snap_grid_popup = attach_combo_popup(ui, snap_grid_combo, &SNAP_GRID_NAMES, font_id);
-    let snap_angle_popup = attach_combo_popup(ui, snap_angle_combo, &SNAP_ANGLE_NAMES, font_id);
+    attach_combo_popup(ui, snap_grid_combo, &SNAP_GRID_NAMES, font_id);
+    attach_combo_popup(ui, snap_angle_combo, &SNAP_ANGLE_NAMES, font_id);
 
     let menu_command_items = file_items
         .into_iter()
@@ -2340,10 +2338,6 @@ pub(crate) fn build_editor_layout(
         outliner_search,
         inspector_search,
         foliage_kind_combo,
-        snap_grid_popup,
-        snap_angle_popup,
-        foliage_kind_popup,
-        viewport_res_popup,
         save_button,
         palette_button,
         palette_popup,

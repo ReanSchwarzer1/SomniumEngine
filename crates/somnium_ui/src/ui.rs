@@ -529,6 +529,12 @@ impl UserInterface {
         if self.nodes.try_borrow(handle_ih).is_err() {
             return;
         }
+        let popup = self.nodes.borrow(handle_ih).control.owned_popup();
+        if let Some(popup) = popup {
+            if popup != handle {
+                self.remove_node(popup);
+            }
+        }
         self.draw_ctx.motion.forget_node(handle.index());
         let children: Vec<NodeHandle> = self
             .nodes

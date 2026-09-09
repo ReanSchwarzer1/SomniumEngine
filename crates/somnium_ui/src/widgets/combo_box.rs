@@ -18,6 +18,8 @@ use glam::Vec2;
 pub enum ComboBoxMessage {
     SelectionChanged(usize),
     SetSelected(usize),
+    /// Opening reveals the current row without resetting scroll on model refresh.
+    RevealSelected,
     BindPopup {
         popup: NodeHandle,
         list: NodeHandle,
@@ -43,6 +45,10 @@ pub struct ComboBox {
 }
 
 impl Control for ComboBox {
+    fn owned_popup(&self) -> Option<NodeHandle> {
+        self.popup.is_some().then_some(self.popup)
+    }
+
     // MORROWIND-I.
     fn role(&self) -> crate::a11y::Role {
         crate::a11y::Role::ComboBox
@@ -60,7 +66,7 @@ impl Control for ComboBox {
             .fold(80.0_f32, f32::max)
             + 28.0;
         let width = if available.x.is_finite() {
-            available.x.max(w.max(80.0))
+            available.x
         } else {
             w.max(80.0)
         };
@@ -87,8 +93,11 @@ impl Control for ComboBox {
                 .map(|s| s.as_str())
                 .unwrap_or("")
         };
+        let (label, _) = super::property_row::ellipsise(label, (b.w - 32.0).max(0.0), |text| {
+            ctx.font_atlas.measure_text(text, self.px, self.font_id).x
+        });
         ctx.push_text(
-            label,
+            &label,
             Vec2::new(b.x + 6.0, b.y + 4.0),
             self.font_id,
             self.px,
@@ -140,6 +149,14 @@ impl Control for ComboBox {
         if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
             self.items = items.clone();
             self.selected = self.selected.min(self.items.len().saturating_sub(1));
+            widget.invalidate_layout();
+            if self.list.is_some() {
+                emit.push(UiMessage::new(
+                    self.list,
+                    MessageDirection::ToWidget,
+                    ComboBoxMessage::SetItems(items.clone()),
+                ));
+            }
             msg.handled = true;
             return;
         }
@@ -202,6 +219,13 @@ impl Control for ComboBox {
                         self.list,
                         MessageDirection::ToWidget,
                         ComboBoxMessage::SetSelected(self.selected),
+                    ));
+                }
+                if self.list.is_some() {
+                    emit.push(UiMessage::new(
+                        self.list,
+                        MessageDirection::ToWidget,
+                        ComboBoxMessage::RevealSelected,
                     ));
                 }
                 emit.push(UiMessage::new(
@@ -300,6 +324,18 @@ pub struct ComboDropdown {
     pub asset_paths: Vec<Option<std::path::PathBuf>>,
 }
 
+impl ComboDropdown {
+    fn reveal_selected(&self, widget: &Widget, emit: &mut Vec<UiMessage>) {
+        emit.push(UiMessage::new(
+            widget.parent,
+            MessageDirection::ToWidget,
+            super::scroll_viewer::ScrollViewerMessage::ScrollTo(
+                self.selected.saturating_sub(2) as f32 * theme::active().density.row_dense,
+            ),
+        ));
+    }
+}
+
 impl Control for ComboDropdown {
     fn measure_override(&self, _widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         let w = self
@@ -309,7 +345,7 @@ impl Control for ComboDropdown {
             .fold(80.0_f32, f32::max)
             + 16.0;
         let width = if available.x.is_finite() {
-            available.x.max(w)
+            available.x
         } else {
             w
         };
@@ -321,10 +357,16 @@ impl Control for ComboDropdown {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
-        // The open list floats over the inspector, so it takes the popup rung.
+        // The shared picker frame owns the surface. Only visible rows need text
+        // and thumbnail work, even when an asset database has thousands of entries.
         let t = theme::active();
-        ctx.push_paint(b, &crate::style::popup());
-        for (i, item) in self.items.iter().enumerate() {
+        let clip = ctx.clip_rect();
+        let row_h = t.density.row_dense;
+        let first = (((clip.y - b.y) / row_h).floor().max(0.0) as usize).min(self.items.len());
+        let end =
+            (((clip.y + clip.h - b.y) / row_h).ceil().max(0.0) as usize).min(self.items.len());
+        for i in first..end {
+            let item = &self.items[i];
             let row = Rect::new(
                 b.x,
                 b.y + theme::active().density.row_dense * i as f32,
@@ -351,8 +393,13 @@ impl Control for ComboDropdown {
             } else {
                 row.x + 8.0
             };
-            ctx.push_text(
+            let (label, _) = super::property_row::ellipsise(
                 item,
+                (row.x + row.w - text_x - 8.0).max(0.0),
+                |text| ctx.font_atlas.measure_text(text, self.px, self.font_id).x,
+            );
+            ctx.push_text(
+                &label,
                 Vec2::new(text_x, row.y + 4.0),
                 self.font_id,
                 self.px,
@@ -371,9 +418,15 @@ impl Control for ComboDropdown {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(ComboBoxMessage::RevealSelected) = msg.data::<ComboBoxMessage>() {
+            self.reveal_selected(widget, emit);
+            msg.handled = true;
+            return;
+        }
         if let Some(ComboBoxMessage::SetSelected(i)) = msg.data::<ComboBoxMessage>() {
-            if *i < self.items.len() {
+            if *i < self.items.len() && self.selected != *i {
                 self.selected = *i;
+                self.reveal_selected(widget, emit);
             }
             msg.handled = true;
             return;
@@ -381,6 +434,12 @@ impl Control for ComboDropdown {
         if let Some(ComboBoxMessage::SetItems(items)) = msg.data::<ComboBoxMessage>() {
             self.items = items.clone();
             self.selected = self.selected.min(self.items.len().saturating_sub(1));
+            widget.invalidate_layout();
+            emit.push(UiMessage::new(
+                widget.parent,
+                MessageDirection::ToWidget,
+                super::scroll_viewer::ScrollViewerMessage::ScrollTo(0.0),
+            ));
             msg.handled = true;
             return;
         }

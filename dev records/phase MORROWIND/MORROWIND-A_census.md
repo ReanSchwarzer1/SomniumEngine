@@ -18,12 +18,12 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 73,620 | +46,090 | 33.4% | 793 | +578 | 117 | 2 |
-| `somnium_renderer` | 69,708 | +19,502 | 31.6% | 502 | +174 | 96 | 56 |
-| `somnium_core` | 38,316 | +19,096 | 17.4% | 418 | +201 | 47 | 0 |
+| `somnium_ui` | 74,105 | +46,575 | 33.5% | 795 | +580 | 117 | 2 |
+| `somnium_renderer` | 69,708 | +19,502 | 31.5% | 502 | +174 | 96 | 56 |
+| `somnium_core` | 38,316 | +19,096 | 17.3% | 418 | +201 | 47 | 0 |
 | `somnium_asset` | 6,749 | +5,110 | 3.1% | 56 | +50 | 13 | 0 |
 | `somnium_ecs` | 5,227 | +1,209 | 2.4% | 69 | +15 | 9 | 0 |
-| `somnium_script` | 4,969 | +154 | 2.3% | 55 | — | 12 | 0 |
+| `somnium_script` | 4,969 | +154 | 2.2% | 55 | — | 12 | 0 |
 | `somnium_script_luau` | 4,818 | +361 | 2.2% | 59 | +1 | 9 | 0 |
 | `somnium_anim` | 4,380 | +4,380 | 2.0% | 46 | +46 | 4 | 0 |
 | `somnium_input` | 3,177 | +3,177 | 1.4% | 66 | +66 | 6 | 0 |
@@ -34,7 +34,7 @@ None of this is a Rust parser and it does not pretend to be one.
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
 | `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
 | `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **220,744** | +106,852 | | **2234** | +1,289 | | |
+| **Total** | **221,229** | +107,337 | | **2236** | +1,291 | | |
 
 The top three crates are **82.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
@@ -49,7 +49,7 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1344 | 271 | 124 | 8 | 14 | 197 | 113 | **2072** |
+| `somnium_ui` | 1346 | 272 | 125 | 8 | 14 | 197 | 113 | **2076** |
 | `somnium_renderer` | 706 | 164 | 9 | 1 | 3 | 137 | 92 | **1112** |
 | `somnium_core` | 350 | 113 | 25 | 4 | 3 | 47 | 41 | **583** |
 | `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |

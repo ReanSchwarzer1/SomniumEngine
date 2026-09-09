@@ -718,13 +718,9 @@ struct EditorLayout {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    foliage_kind_popup: NodeHandle,
-    viewport_res_popup: NodeHandle,
     /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
     /// the others — a dropdown nothing knows about stays open behind the next
     /// one.
-    snap_grid_popup: NodeHandle,
-    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -1060,13 +1056,9 @@ pub struct UiManager {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    foliage_kind_popup: NodeHandle,
-    viewport_res_popup: NodeHandle,
     /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
     /// the others — a dropdown nothing knows about stays open behind the next
     /// one.
-    snap_grid_popup: NodeHandle,
-    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -1853,10 +1845,6 @@ impl UiManager {
             outliner_search: layout.outliner_search,
             inspector_search: layout.inspector_search,
             foliage_kind_combo: layout.foliage_kind_combo,
-            foliage_kind_popup: layout.foliage_kind_popup,
-            viewport_res_popup: layout.viewport_res_popup,
-            snap_grid_popup: layout.snap_grid_popup,
-            snap_angle_popup: layout.snap_angle_popup,
             save_button: layout.save_button,
             palette_button: layout.palette_button,
             palette_popup: layout.palette_popup,
@@ -3756,18 +3744,15 @@ impl UiManager {
     }
 
     fn combo_entries(&self) -> Vec<(NodeHandle, NodeHandle)> {
-        let mut entries = vec![
-            (self.persona.workspace, self.persona.workspace_popup),
-            (self.persona.sort, self.persona.sort_popup),
-            (self.persona.size, self.persona.size_popup),
-            (self.persona.places, self.persona.places_popup),
-            (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.viewport_res_combo, self.viewport_res_popup),
-            (self.snap_grid_combo, self.snap_grid_popup),
-            (self.snap_angle_combo, self.snap_angle_popup),
-        ];
-        entries.extend_from_slice(&self.persona.tool_panel.popups);
-        entries
+        self.native_ui
+            .nodes
+            .pair_iter()
+            .filter_map(|(handle, node)| {
+                node.control
+                    .owned_popup()
+                    .map(|popup| (handle.transmute(), popup))
+            })
+            .collect()
     }
 
     fn close_combo_dropdowns(&mut self) {
@@ -6093,24 +6078,16 @@ impl UiManager {
         }
         let selected = paths.iter().position(|path| path == &self.content_path);
         self.persona.place_paths = paths;
-        let list = self
-            .native_ui
-            .nodes
-            .borrow(self.persona.places_popup.transmute())
-            .widget
-            .children[0];
-        for handle in [self.persona.places, list] {
-            self.native_ui.send(UiMessage::new(
-                handle,
-                MessageDirection::ToWidget,
-                ComboBoxMessage::SetItems(labels.clone()),
-            ));
-            self.native_ui.send(UiMessage::new(
-                handle,
-                MessageDirection::ToWidget,
-                ComboBoxMessage::SetSelected(selected.unwrap_or(0)),
-            ));
-        }
+        self.native_ui.send(UiMessage::new(
+            self.persona.places,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetItems(labels),
+        ));
+        self.native_ui.send(UiMessage::new(
+            self.persona.places,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetSelected(selected.unwrap_or(0)),
+        ));
         self.native_ui.send(ButtonMessage::set_selected(
             self.persona.favorite,
             self.persona.prefs.favorites.contains(&self.content_path),
