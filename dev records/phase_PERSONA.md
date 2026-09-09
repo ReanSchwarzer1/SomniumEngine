@@ -342,3 +342,6 @@ The new visual specification supersedes older paint prescriptions where explicit
 Leave the pre-existing untracked `phase_TALOS.md` intact. PERSONA changes scheduling priority; it does not invalidate TALOS research or silently mark other phases complete.
 
 Completion means a demonstrably better working editor, reliable everyday actions, and evidence for its important states. The first milestone must make that improvement visible before expansion into optional features.
+
+
+2026-09-09: [Nocturne surface finish](<phase PERSONA/PERSONA-I.md>) advances PERSONA expansion with 0.5 tokens, explicit surface treatments and selected H/J/K feedback work. The finish record distinguishes delivered behavior, declined rendering alternatives and remaining acceptance gates.

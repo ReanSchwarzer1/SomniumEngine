@@ -37,6 +37,10 @@ pub const FLAG_GLOW: u32 = 1 << 3;
 pub const FLAG_INSET: u32 = 1 << 4;
 /// Interpolate `fill_a` → `fill_b` along `grad_axis`.
 pub const FLAG_GRADIENT: u32 = 1 << 5;
+/// Inner highlight; fill-only, reuses the otherwise idle shadow colour slot.
+pub const FLAG_EMBOSS: u32 = 1 << 6;
+/// Deterministic display-space gradient dither; amplitude in shadow.x.
+pub const FLAG_DITHER: u32 = 1 << 7;
 
 /// Bit offset of the texture-layer selector inside [`Primitive::flags`].
 ///
@@ -67,7 +71,8 @@ pub struct Primitive {
     pub uv: [f32; 4],
     /// Corner radii, clockwise from top-left: `tl, tr, br, bl`.
     pub radii: [f32; 4],
-    /// `offset_x, offset_y, blur, spread`. Ignored without `FLAG_SHADOW`.
+    /// `offset_x, offset_y, blur, spread` for shadows. On gradient fills,
+    /// x instead carries the display-space dither amplitude (FLAG_DITHER).
     pub shadow: [f32; 4],
     /// Unit gradient direction in normalised rect space. Ignored without
     /// `FLAG_GRADIENT`.
@@ -156,6 +161,13 @@ impl Primitive {
     /// Two-stop linear gradient. `axis` is a direction in normalised rect
     /// space — `(0, 1)` is the top-to-bottom wash the chrome tokens use.
     /// Interpolation happens in linear space inside the shader, never here.
+    /// Fine inner highlight without another instance or a wider GPU layout.
+    pub fn with_emboss(mut self, color: [u8; 4]) -> Self {
+        self.shadow_color = color;
+        self.flags |= FLAG_EMBOSS;
+        self
+    }
+
     pub fn with_gradient(mut self, to: [u8; 4], axis: [f32; 2]) -> Self {
         self.fill_b = to;
         self.grad_axis = axis;

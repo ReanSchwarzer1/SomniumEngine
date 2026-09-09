@@ -1592,10 +1592,14 @@ impl UserInterface {
             };
         let mut envelope = None;
         let mut exiting = exiting_ancestor;
-        if let Some((open, anchor)) = popup {
+        if let Some((open, anchor, centered)) = popup {
             let open = open && local_visible && !exiting_ancestor;
-            let (opacity, scale) =
-                crate::motion::policy::popup(&mut self.draw_ctx.motion, handle.index(), open);
+            let (opacity, scale) = crate::motion::policy::popup_surface(
+                &mut self.draw_ctx.motion,
+                handle.index(),
+                open,
+                centered,
+            );
             if !open && opacity == 0.0 {
                 return;
             }
@@ -1614,18 +1618,22 @@ impl UserInterface {
                     .try_borrow(to_ih(anchor))
                     .ok()
                     .map(|n| n.widget.screen_bounds());
-                let origin = anchor_bounds
-                    .map(|a| {
-                        Vec2::new(
-                            a.x.clamp(content.x, content.x + content.w),
-                            if content.y < a.y {
-                                content.y + content.h
-                            } else {
-                                content.y
-                            },
-                        )
-                    })
-                    .unwrap_or(Vec2::new(content.x, content.y));
+                let origin = if centered {
+                    Vec2::new(content.x + content.w * 0.5, content.y + content.h * 0.5)
+                } else {
+                    anchor_bounds
+                        .map(|a| {
+                            Vec2::new(
+                                a.x.clamp(content.x, content.x + content.w),
+                                if content.y < a.y {
+                                    content.y + content.h
+                                } else {
+                                    content.y
+                                },
+                            )
+                        })
+                        .unwrap_or(Vec2::new(content.x, content.y))
+                };
                 envelope = Some((opacity, scale, origin));
             }
         }
@@ -1644,7 +1652,7 @@ impl UserInterface {
                 (*control_ptr).draw(&*widget_ptr, &mut self.draw_ctx);
             }
         }
-        if popup.is_some_and(|(open, _)| !open) && background[3] > 0 {
+        if popup.is_some_and(|(open, _, _)| !open) && background[3] > 0 {
             self.draw_ctx.push_rect_filled(bounds, background);
         }
         if let (Some(mark), Some((opacity, _, origin))) = (backdrop_mark, envelope) {

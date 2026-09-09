@@ -98,6 +98,7 @@ pub(crate) fn command_popup_items(
             .with_background(theme::active().semantic.surface.header.bytes())
             .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
+    .with_surface(crate::widgets::border::Surface::Popup)
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
     let border_h = ui.add_node(border, popup_h);

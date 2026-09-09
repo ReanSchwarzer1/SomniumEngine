@@ -82,11 +82,44 @@ pub fn toggle(animator: &mut Animator, node: u32, checked: bool, animate: bool) 
     (opacity, scale)
 }
 
+/// The selected tab's underline moves; its page and hit target change now.
+pub fn tab(animator: &mut Animator, node: u32, selected: usize) -> f32 {
+    state(
+        animator,
+        MotionKey::new(node, MotionProperty::OffsetX),
+        selected as f32,
+        theme::active().motion.tab_ms as f32,
+        Easing::Standard,
+    )
+}
+
+/// Shared effect policy for explicit model-change feedback. Reduced motion
+/// keeps the cue readable for the same time without fading it.
+pub fn change_flash(age_ms: f32, reduced: bool) -> f32 {
+    let duration = theme::active().motion.change_flash_ms as f32;
+    if age_ms >= duration {
+        return 0.0;
+    }
+    if reduced {
+        return 1.0;
+    }
+    let remaining = 1.0 - (age_ms / duration).clamp(0.0, 1.0);
+    remaining * remaining
+}
+
 /// Anchored popup presentation. Visibility/input remain owned by Popup; this
 /// only supplies a paint envelope. Exit holds scale and fades from the current
 /// value, including when an opening is interrupted.
 pub fn popup(animator: &mut Animator, node: u32, open: bool) -> (f32, f32) {
-    let t = theme::active().motion;
+    popup_surface(animator, node, open, false)
+}
+
+pub fn popup_surface(animator: &mut Animator, node: u32, open: bool, centered: bool) -> (f32, f32) {
+    let mut t = theme::active().motion;
+    if centered {
+        t.popup_scale = t.modal_scale;
+        t.popup_ms = t.modal_ms;
+    }
     let opacity_key = MotionKey::new(node, MotionProperty::Opacity);
     let scale_key = MotionKey::new(node, MotionProperty::Scale);
     if animator.target_or(opacity_key, f32::NAN).is_nan() {
@@ -288,5 +321,28 @@ mod widget_tests {
             }
         }
         theme::set_active(theme::ThemeId::Nocturne);
+    }
+}
+
+#[cfg(test)]
+mod finishing_tests {
+    use super::*;
+    #[test]
+    fn tab_interruptions_settle_and_reduced_motion_keeps_change_feedback() {
+        let mut a = Animator::new();
+        assert_eq!(tab(&mut a, 42, 0), 0.0);
+        tab(&mut a, 42, 2);
+        a.tick(70.0);
+        let halfway = tab(&mut a, 42, 2);
+        assert!(halfway > 0.0 && halfway < 2.0);
+        assert_eq!(tab(&mut a, 42, 1), halfway);
+        a.tick(160.0);
+        assert_eq!(tab(&mut a, 42, 1), 1.0);
+        assert!(a.is_idle());
+        a.set_reduced_motion(true);
+        assert_eq!(tab(&mut a, 42, 0), 0.0);
+        assert_eq!(change_flash(239.0, true), 1.0);
+        assert_eq!(change_flash(240.0, true), 0.0);
+        assert!(change_flash(120.0, false) > 0.0 && change_flash(120.0, false) < 1.0);
     }
 }

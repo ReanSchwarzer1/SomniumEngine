@@ -102,6 +102,8 @@ pub fn ellipsise(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32) 
 pub enum PropertyRowMessage {
     /// Value differs from the row's baseline — show the gutter dot.
     SetModified(bool),
+    /// A committed external model update (undo, reset or assignment).
+    Flash,
     SetPinned(bool),
     SetResettable(bool),
     PinRequested,
@@ -140,6 +142,7 @@ pub fn hit_gutter(bounds: Rect, pos: Vec2) -> bool {
 }
 
 pub struct PropertyRow {
+    flash_started: std::cell::Cell<Option<std::time::Instant>>,
     pub label: String,
     pub modified: bool,
     pub read_only: bool,
@@ -233,6 +236,23 @@ impl Control for PropertyRow {
         let b = widget.screen_bounds();
         if widget.background[3] != 0 {
             ctx.push_rect_filled(b, widget.background);
+        }
+        if let Some(started) = self.flash_started.get() {
+            let amount = crate::motion::policy::change_flash(
+                started.elapsed().as_secs_f32() * 1000.0,
+                ctx.motion.reduced_motion(),
+            );
+            if amount > 0.0 {
+                ctx.push_rect_filled(
+                    b,
+                    theme::with_alpha(
+                        theme::active().semantic.accent.default.bytes(),
+                        (amount * 30.0) as u8,
+                    ),
+                );
+            } else {
+                self.flash_started.set(None);
+            }
         }
         let m = self.metrics.get();
         let style = self.label_style();
@@ -332,6 +352,9 @@ impl Control for PropertyRow {
                 PropertyRowMessage::SetModified(v) => {
                     self.modified = *v;
                     self.resettable = *v;
+                }
+                PropertyRowMessage::Flash => {
+                    self.flash_started.set(Some(std::time::Instant::now()))
                 }
                 PropertyRowMessage::SetPinned(v) => self.pinned = *v,
                 PropertyRowMessage::SetResettable(v) => self.resettable = *v,
@@ -477,6 +500,7 @@ impl PropertyRowBuilder {
         UiNode::new(
             widget.build(),
             Box::new(PropertyRow {
+                flash_started: std::cell::Cell::new(None),
                 label: self.label,
                 modified: self.modified,
                 read_only: self.read_only,

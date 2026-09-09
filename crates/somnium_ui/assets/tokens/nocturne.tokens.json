@@ -1,7 +1,7 @@
 {
   "$meta": {
     "name": "Nocturne Atelier",
-    "version": "0.4.0-persona",
+    "version": "0.5.0-persona",
     "polarity": "dark",
     "authored_space": "sRGB",
     "runtime_contract": "decode authored sRGB to linear exactly once before the sRGB swapchain; alpha is straight",
@@ -9,32 +9,32 @@
     "verified_by": "theme::token_sheet_tests::json_sheets_match_the_shipped_snapshots"
   },
   "semantic": {
-    "surface.window": "#11131A",
-    "surface.canvas": "#151821",
+    "surface.window": "#10121A",
+    "surface.canvas": "#141720",
     "surface.panel": "#1B1E28",
-    "surface.header": "#252A38",
-    "surface.raised": "#303749",
+    "surface.header": "#202432",
+    "surface.raised": "#282D3D",
     "surface.input": "#12151D",
-    "surface.popup": "#252A38",
-    "surface.hover": "#333D52",
-    "surface.selected": "#303451",
+    "surface.popup": "#222635",
+    "surface.hover": "#32384B",
+    "surface.selected": "#363151",
     "surface.modal_scrim": "rgba(10,11,15,0.620)",
-    "text.primary": "#E6E9F2",
-    "text.emphasis": "#F2F4FF",
-    "text.secondary": "#B1B9CB",
-    "text.muted": "#9EABC0",
-    "text.disabled": "#626D85",
-    "text.inverse": "#11131A",
-    "text.link": "#B8B0FF",
-    "border.subtle": "#303646",
-    "border.default": "#303646",
-    "border.strong": "#7C89A1",
-    "border.focus": "#B8B0FF",
-    "accent.default": "#A59AFF",
-    "accent.hover": "#B8B0FF",
-    "accent.pressed": "#8E82EB",
-    "accent.selected_bg": "#303451",
-    "accent.selected_rail": "#A59AFF",
+    "text.primary": "#E9ECF5",
+    "text.emphasis": "#F7F6FF",
+    "text.secondary": "#BCC4D6",
+    "text.muted": "#A3AFC4",
+    "text.disabled": "#69738A",
+    "text.inverse": "#10121A",
+    "text.link": "#C3B6FF",
+    "border.subtle": "#2B3041",
+    "border.default": "#363D50",
+    "border.strong": "#8290AC",
+    "border.focus": "#C3B6FF",
+    "accent.default": "#B2A1FF",
+    "accent.hover": "#C3B6FF",
+    "accent.pressed": "#9D8AE8",
+    "accent.selected_bg": "#363151",
+    "accent.selected_rail": "#B2A1FF",
     "status.info": "#7DCBE3",
     "status.success": "#7CD5B0",
     "status.warning": "#EAC17A",
@@ -42,9 +42,10 @@
     "status.busy": "#A59AFF",
     "folder": "#C4A574",
     "ember": "#C4A574",
-    "surface.selected_inactive": "#2B303D",
-    "border.control": "#626D85",
-    "modified": "#DEBE87"
+    "surface.selected_inactive": "#292D3C",
+    "border.control": "#69758E",
+    "modified": "#DEBE87",
+    "border.emboss": "rgba(220,225,255,0.125)"
   },
   "typography": {
     "family_ui": "Inter (Geist remains gated by in-engine DPI captures)",
@@ -106,10 +107,10 @@
   },
   "radius": {
     "input": 4,
-    "chrome": 5,
-    "popup": 8,
+    "chrome": 4,
+    "popup": 7,
     "modal": 10,
-    "tile": 6
+    "tile": 5
   },
   "stroke": {
     "hairline": 1,
@@ -119,7 +120,8 @@
   "motion_scale": {
     "press": 0.985,
     "toggle": 0.6,
-    "popup": 0.96
+    "popup": 0.96,
+    "modal": 0.98
   },
   "motion_ms": {
     "press": 90,
@@ -128,7 +130,10 @@
     "popup": 140,
     "popup_close": 100,
     "drawer": 200,
-    "tooltip_delay": 400
+    "tooltip_delay": 400,
+    "modal": 180,
+    "change_flash": 240,
+    "tab": 160
   },
   "density_comfortable": {
     "row_dense": 28,
@@ -142,5 +147,43 @@
     "icon_toolbar": 20,
     "icon_action": 24,
     "hit_min": 24
+  },
+  "material": {
+    "gradient_dither_lsb": 0.5,
+    "emboss_width_px": 1.0
+  },
+  "gradient": {
+    "chrome_wash": {
+      "from": "#292E3E",
+      "to": "#1E2230",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "header_wash": {
+      "from": "#2A2F40",
+      "to": "#1E2230",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "accent_primary": {
+      "from": "#B7A8FF",
+      "to": "#A99AEC",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "rail_accent": {
+      "from": "#B2A1FF",
+      "to": "#9A8ADF",
+      "axis": [
+        0,
+        1
+      ]
+    }
   }
 }

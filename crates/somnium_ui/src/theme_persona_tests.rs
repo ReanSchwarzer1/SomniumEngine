@@ -59,17 +59,21 @@ fn exported_metrics_match_both_densities_and_themes() {
             ("toggle", m.toggle_ms),
             ("hover", m.hover_ms),
             ("popup", m.popup_ms),
+            ("modal", m.modal_ms),
+            ("change_flash", m.change_flash_ms),
+            ("tab", m.tab_ms),
             ("popup_close", m.popup_close_ms),
             ("drawer", m.drawer_ms),
             ("tooltip_delay", m.tooltip_delay_ms),
         ] {
             assert_eq!(sheet["motion_ms"][key].as_u64(), Some(v));
         }
-        assert_eq!(sheet["$meta"]["version"], "0.4.0-persona");
+        assert_eq!(sheet["$meta"]["version"], "0.5.0-persona");
         for (key, value) in [
             ("press", m.press_scale),
             ("toggle", m.toggle_scale),
             ("popup", m.popup_scale),
+            ("modal", m.modal_scale),
         ] {
             assert_eq!(sheet["motion_scale"][key].as_f64().unwrap() as f32, value);
         }
@@ -238,4 +242,70 @@ fn action_label_color_is_scoped_to_its_button_subtree() {
     );
     assert_eq!(ui.draw_ctx.instances.last().unwrap().fill_a, [1, 2, 3, 255]);
     assert!(ui.draw_ctx.inherited_foreground.is_none());
+}
+
+#[test]
+fn surface_materials_are_exported_and_high_contrast_removes_decoration() {
+    use crate::{
+        draw::DrawingContext,
+        primitive::{FLAG_DITHER, FLAG_EMBOSS, Primitive},
+        types::Rect,
+    };
+    for (id, sheet) in [
+        (
+            ThemeId::Nocturne,
+            include_str!("../assets/tokens/nocturne.tokens.json"),
+        ),
+        (
+            ThemeId::Dawn,
+            include_str!("../assets/tokens/dawn.tokens.json"),
+        ),
+    ] {
+        set_active(id);
+        set_high_contrast(false);
+        let t = active();
+        let sheet: serde_json::Value = serde_json::from_str(sheet).unwrap();
+        assert_eq!(
+            sheet["material"]["gradient_dither_lsb"].as_f64().unwrap() as f32,
+            t.opacity.gradient_dither_lsb
+        );
+        for (name, gradient) in [
+            ("chrome_wash", t.gradient.chrome_wash),
+            ("header_wash", t.gradient.header_wash),
+            ("accent_primary", t.gradient.accent_primary),
+            ("rail_accent", t.gradient.rail_accent),
+        ] {
+            for (stop, c) in [("from", gradient.from.bytes()), ("to", gradient.to.bytes())] {
+                assert_eq!(
+                    sheet["gradient"][name][stop],
+                    format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
+                );
+            }
+        }
+        for hc in [false, true] {
+            set_high_contrast(hc);
+            let t = active();
+            let mut ctx = DrawingContext::new(120.0, 40.0);
+            ctx.push_paint(
+                Rect::new(0.0, 0.0, 80.0, 28.0),
+                &style::button(VisualState::rest()),
+            );
+            assert_eq!(ctx.instances.len(), 1, "emboss must not add geometry");
+            assert_eq!(ctx.instances[0].flags & FLAG_EMBOSS != 0, !hc);
+            ctx.push_primitive(
+                Primitive::fill(
+                    Rect::new(0.0, 0.0, 80.0, 28.0),
+                    t.gradient.header_wash.from.bytes(),
+                )
+                .with_gradient(t.gradient.header_wash.to.bytes(), [0.0, 1.0]),
+                None,
+            );
+            assert_eq!(ctx.instances[1].flags & FLAG_DITHER != 0, !hc);
+            assert!(style::input(VisualState::rest()).emboss.is_none());
+            assert!(style::tree_row(VisualState::rest()).emboss.is_none());
+            assert!(wash_for_surface(t.semantic.surface.panel.bytes()).is_none());
+        }
+    }
+    set_active(ThemeId::Nocturne);
+    set_high_contrast(false);
 }

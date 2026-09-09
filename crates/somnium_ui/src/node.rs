@@ -223,7 +223,7 @@ pub trait Control: Send + 'static {
 
     /// Anchored popup's logical open state and anchor, including while closed.
     /// Used only for paint continuity; visibility remains the input/a11y truth.
-    fn popup_presentation(&self) -> Option<(bool, NodeHandle)> {
+    fn popup_presentation(&self) -> Option<(bool, NodeHandle, bool)> {
         None
     }
 

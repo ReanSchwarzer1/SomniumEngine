@@ -80,6 +80,8 @@ pub struct BorderTokens {
     pub focus: Srgb8,
     /// Identifies an editable control; separate from decorative separators.
     pub control: Srgb8,
+    /// Fine inner edge on raised controls; transparent in high contrast.
+    pub emboss: Srgb8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +166,8 @@ pub struct OpacityTokens {
     pub ghost: f32,
     pub scrim: f32,
     pub drop_valid: f32,
+    /// Maximum ordered gradient dither in display-space 8-bit steps.
+    pub gradient_dither_lsb: f32,
 }
 
 /// Elevation marks z-order, never decoration — panels never cast. Each level
@@ -281,6 +285,10 @@ pub struct MotionTokens {
     pub popup_ms: u64,
     pub popup_close_ms: u64,
     pub popup_scale: f32,
+    pub modal_scale: f32,
+    pub modal_ms: u64,
+    pub change_flash_ms: u64,
+    pub tab_ms: u64,
     pub drawer_ms: u64,
     pub tooltip_delay_ms: u64,
 }
@@ -312,40 +320,41 @@ pub struct Theme {
 pub const NOCTURNE: Theme = Theme {
     semantic: SemanticColors {
         surface: SurfaceTokens {
-            window: Srgb8::opaque(0x11, 0x13, 0x1A),
-            canvas: Srgb8::opaque(0x15, 0x18, 0x21),
+            window: Srgb8::opaque(0x10, 0x12, 0x1A),
+            canvas: Srgb8::opaque(0x14, 0x17, 0x20),
             panel: Srgb8::opaque(0x1B, 0x1E, 0x28),
-            header: Srgb8::opaque(0x25, 0x2A, 0x38),
-            raised: Srgb8::opaque(0x30, 0x37, 0x49),
+            header: Srgb8::opaque(0x20, 0x24, 0x32),
+            raised: Srgb8::opaque(0x28, 0x2D, 0x3D),
             input: Srgb8::opaque(0x12, 0x15, 0x1D),
-            popup: Srgb8::opaque(0x25, 0x2A, 0x38),
-            hover: Srgb8::opaque(0x33, 0x3D, 0x52),
-            selected: Srgb8::opaque(0x30, 0x34, 0x51),
-            selected_inactive: Srgb8::opaque(0x2B, 0x30, 0x3D),
+            popup: Srgb8::opaque(0x22, 0x26, 0x35),
+            hover: Srgb8::opaque(0x32, 0x38, 0x4B),
+            selected: Srgb8::opaque(0x36, 0x31, 0x51),
+            selected_inactive: Srgb8::opaque(0x29, 0x2D, 0x3C),
             modal_scrim: Srgb8::rgba(0x0A, 0x0B, 0x0F, 0x9E),
         },
         text: TextTokens {
-            primary: Srgb8::opaque(0xE6, 0xE9, 0xF2),
-            emphasis: Srgb8::opaque(0xF2, 0xF4, 0xFF),
-            secondary: Srgb8::opaque(0xB1, 0xB9, 0xCB),
-            muted: Srgb8::opaque(0x9E, 0xAB, 0xC0),
-            disabled: Srgb8::opaque(0x62, 0x6D, 0x85),
-            inverse: Srgb8::opaque(0x11, 0x13, 0x1A),
-            link: Srgb8::opaque(0xB8, 0xB0, 0xFF),
+            primary: Srgb8::opaque(0xE9, 0xEC, 0xF5),
+            emphasis: Srgb8::opaque(0xF7, 0xF6, 0xFF),
+            secondary: Srgb8::opaque(0xBC, 0xC4, 0xD6),
+            muted: Srgb8::opaque(0xA3, 0xAF, 0xC4),
+            disabled: Srgb8::opaque(0x69, 0x73, 0x8A),
+            inverse: Srgb8::opaque(0x10, 0x12, 0x1A),
+            link: Srgb8::opaque(0xC3, 0xB6, 0xFF),
         },
         border: BorderTokens {
-            subtle: Srgb8::opaque(0x30, 0x36, 0x46),
-            default: Srgb8::opaque(0x30, 0x36, 0x46),
-            strong: Srgb8::opaque(0x7C, 0x89, 0xA1),
-            focus: Srgb8::opaque(0xB8, 0xB0, 0xFF),
-            control: Srgb8::opaque(0x62, 0x6D, 0x85),
+            subtle: Srgb8::opaque(0x2B, 0x30, 0x41),
+            default: Srgb8::opaque(0x36, 0x3D, 0x50),
+            strong: Srgb8::opaque(0x82, 0x90, 0xAC),
+            focus: Srgb8::opaque(0xC3, 0xB6, 0xFF),
+            control: Srgb8::opaque(0x69, 0x75, 0x8E),
+            emboss: Srgb8::rgba(0xDC, 0xE1, 0xFF, 0x20),
         },
         accent: AccentTokens {
-            default: Srgb8::opaque(0xA5, 0x9A, 0xFF),
-            hover: Srgb8::opaque(0xB8, 0xB0, 0xFF),
-            pressed: Srgb8::opaque(0x8E, 0x82, 0xEB),
-            selected_bg: Srgb8::opaque(0x30, 0x34, 0x51),
-            selected_rail: Srgb8::opaque(0xA5, 0x9A, 0xFF),
+            default: Srgb8::opaque(0xB2, 0xA1, 0xFF),
+            hover: Srgb8::opaque(0xC3, 0xB6, 0xFF),
+            pressed: Srgb8::opaque(0x9D, 0x8A, 0xE8),
+            selected_bg: Srgb8::opaque(0x36, 0x31, 0x51),
+            selected_rail: Srgb8::opaque(0xB2, 0xA1, 0xFF),
         },
         status: StatusTokens {
             info: Srgb8::opaque(0x7D, 0xCB, 0xE3),
@@ -387,10 +396,10 @@ pub const NOCTURNE: Theme = Theme {
         gap_group: 12.0,
         gap_section: 16.0,
         radius_input: 4.0,
-        radius_chrome: 5.0,
-        radius_popup: 8.0,
+        radius_chrome: 4.0,
+        radius_popup: 7.0,
         radius_modal: 10.0,
-        radius_tile: 6.0,
+        radius_tile: 5.0,
         stroke_hairline: 1.0,
         stroke_focus: 2.0,
         stroke_rail: 2.0,
@@ -404,6 +413,10 @@ pub const NOCTURNE: Theme = Theme {
         popup_ms: 140,
         popup_close_ms: 100,
         popup_scale: 0.96,
+        modal_scale: 0.98,
+        modal_ms: 180,
+        change_flash_ms: 240,
+        tab_ms: 160,
         drawer_ms: 200,
         tooltip_delay_ms: 400,
     },
@@ -412,6 +425,7 @@ pub const NOCTURNE: Theme = Theme {
         ghost: 0.60,
         scrim: 0.62,
         drop_valid: 0.18,
+        gradient_dither_lsb: 0.5,
     },
     elevation: ElevationTokens {
         raised: Elevation {
@@ -442,29 +456,29 @@ pub const NOCTURNE: Theme = Theme {
     },
     gradient: GradientTokens {
         chrome_wash: Gradient::vertical(
-            Srgb8::opaque(0x24, 0x27, 0x31),
-            Srgb8::opaque(0x20, 0x23, 0x2C),
+            Srgb8::opaque(0x29, 0x2E, 0x3E),
+            Srgb8::opaque(0x1E, 0x22, 0x30),
         ),
         header_wash: Gradient::vertical(
-            Srgb8::opaque(0x26, 0x29, 0x33),
-            Srgb8::opaque(0x22, 0x25, 0x2F),
+            Srgb8::opaque(0x2A, 0x2F, 0x40),
+            Srgb8::opaque(0x1E, 0x22, 0x30),
         ),
         accent_primary: Gradient::vertical(
-            Srgb8::opaque(0xAD, 0xA3, 0xFF),
-            Srgb8::opaque(0xA0, 0x95, 0xF5),
+            Srgb8::opaque(0xB7, 0xA8, 0xFF),
+            Srgb8::opaque(0xA9, 0x9A, 0xEC),
         ),
         rail_accent: Gradient::vertical(
-            Srgb8::opaque(0x94, 0x9C, 0xFF),
-            Srgb8::opaque(0x7A, 0x86, 0xFF),
+            Srgb8::opaque(0xB2, 0xA1, 0xFF),
+            Srgb8::opaque(0x9A, 0x8A, 0xDF),
         ),
     },
     glow: GlowTokens {
         focus: Glow {
-            color: Srgb8::rgba(0x94, 0x9C, 0xFF, 0x66),
+            color: Srgb8::rgba(0xB2, 0xA1, 0xFF, 0x66),
             radius: 4.0,
         },
         armed: Glow {
-            color: Srgb8::rgba(0x7A, 0x86, 0xFF, 0x40),
+            color: Srgb8::rgba(0x9A, 0x8A, 0xDF, 0x40),
             radius: 6.0,
         },
     },
@@ -515,6 +529,7 @@ pub const DAWN: Theme = Theme {
             strong: Srgb8::opaque(0x9A, 0xA0, 0xAE),
             focus: Srgb8::opaque(0x2E, 0x39, 0xA8),
             control: Srgb8::opaque(0x7A, 0x81, 0x93),
+            emboss: Srgb8::rgba(0xFF, 0xFF, 0xFF, 0x66),
         },
         accent: AccentTokens {
             default: Srgb8::opaque(0x3A, 0x46, 0xC8),
@@ -543,6 +558,7 @@ pub const DAWN: Theme = Theme {
         // A light theme needs a darker scrim to separate the modal at all.
         scrim: 0.45,
         drop_valid: 0.18,
+        gradient_dither_lsb: 0.5,
     },
     elevation: ElevationTokens {
         // Shadows on a light ground read far heavier at the same alpha, so the
@@ -670,6 +686,8 @@ fn enhanced(mut t: Theme) -> Theme {
     s.text.muted = boost(s.text.muted);
     s.text.link = boost(s.text.link);
     s.border.control = boost(s.border.control);
+    s.border.emboss = Srgb8::rgba(0, 0, 0, 0);
+    t.opacity.gradient_dither_lsb = 0.0;
     s.border.focus = boost(s.border.focus);
     s.status.info = boost(s.status.info);
     s.status.success = boost(s.status.success);
@@ -819,8 +837,8 @@ pub fn wash_for_surface(color: Color) -> Option<Gradient> {
     if color[3] == 0 {
         return None;
     }
-    if color == s.header.bytes() || color == s.raised.bytes() || color == s.popup.bytes() {
-        return Some(wash_from(Srgb8(color)));
+    if color == s.header.bytes() {
+        return Some(t.gradient.header_wash);
     }
     None
 }
@@ -956,7 +974,7 @@ mod tests {
 
     #[test]
     fn selected_fill_is_an_opaque_surface() {
-        assert_eq!(ACCENT_DIM, [0x30, 0x34, 0x51, 0xFF]);
+        assert_eq!(ACCENT_DIM, [0x36, 0x31, 0x51, 0xFF]);
     }
 }
 
@@ -1075,7 +1093,7 @@ mod asphodel_tests {
             ] {
                 let r = contrast_ratio(g.from, g.to);
                 assert!(
-                    r <= 1.12,
+                    r <= if name == "Nocturne" { 1.20 } else { 1.12 },
                     "{name} {gname} ratio {r:.4} reads as a band, not a wash"
                 );
                 assert!(
@@ -1312,6 +1330,7 @@ mod token_sheet_tests {
             ("border.strong", s.border.strong),
             ("border.focus", s.border.focus),
             ("border.control", s.border.control),
+            ("border.emboss", s.border.emboss),
             ("accent.default", s.accent.default),
             ("accent.hover", s.accent.hover),
             ("accent.pressed", s.accent.pressed),

@@ -107,6 +107,7 @@ pub struct Paint {
     pub inset: Option<theme::Inset>,
     /// Separate from the validation border so focused invalid fields keep both.
     pub focus_ring: Option<Color>,
+    pub emboss: Option<Color>,
 }
 
 impl Paint {
@@ -123,6 +124,7 @@ impl Paint {
             glow: None,
             inset: None,
             focus_ring: None,
+            emboss: None,
         }
     }
 
@@ -201,6 +203,7 @@ impl Paint {
             self.glow = None;
             self.elevation = None;
             self.focus_ring = None;
+            self.emboss = None;
         }
         self
     }
@@ -226,7 +229,15 @@ pub fn button(state: VisualState) -> Paint {
         },
         Interaction::Disabled => Paint::flat(s.surface.panel.bytes(), s.text.disabled.bytes()),
     };
-    base.finish(&state)
+    Paint {
+        emboss: (!matches!(
+            state.interaction,
+            Interaction::Pressed | Interaction::Disabled
+        ))
+        .then_some(s.border.emboss.bytes()),
+        ..base
+    }
+    .finish(&state)
 }
 
 /// The one primary action on a surface — Save scene, Save and continue.
@@ -250,6 +261,9 @@ pub fn primary_button(state: VisualState) -> Paint {
         paint = paint
             .with_gradient(t.gradient.accent_primary)
             .at_elevation(t.elevation.raised);
+    }
+    if !state.is_disabled() && state.interaction != Interaction::Pressed {
+        paint.emboss = Some(t.semantic.border.emboss.bytes());
     }
     paint.finish(&state)
 }

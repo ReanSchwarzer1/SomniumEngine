@@ -35,6 +35,22 @@ pub fn wrap_lines(text: &str, max_w: f32, mut width_of: impl FnMut(&str) -> f32)
         }
         let mut current = String::new();
         for word in para.split_whitespace() {
+            // Asset paths and identifiers often have no spaces. Preserve all
+            // characters and split at Unicode boundaries instead of clipping.
+            if width_of(word) > max_w {
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                for ch in word.chars() {
+                    let mut candidate = current.clone();
+                    candidate.push(ch);
+                    if !current.is_empty() && width_of(&candidate) > max_w {
+                        lines.push(std::mem::take(&mut current));
+                    }
+                    current.push(ch);
+                }
+                continue;
+            }
             let candidate = if current.is_empty() {
                 word.to_string()
             } else {
@@ -247,5 +263,16 @@ mod tests {
         assert!(lines.len() >= 2);
         let nl = wrap_lines("a\nb", 1000.0, |s| s.len() as f32);
         assert_eq!(nl, vec!["a".to_string(), "b".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod path_wrap_tests {
+    #[test]
+    fn long_unicode_identifiers_remain_complete_and_fit() {
+        let path = "assets/环境/shoreline_normal_texture.png";
+        let lines = super::wrap_lines(path, 40.0, |s| s.chars().count() as f32 * 8.0);
+        assert_eq!(lines.concat(), path);
+        assert!(lines.iter().all(|line| line.chars().count() <= 5));
     }
 }

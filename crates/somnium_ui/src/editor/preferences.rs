@@ -69,9 +69,11 @@ pub(crate) fn build_preferences_window(
     root: NodeHandle,
     font_id: u8,
 ) -> PreferencesHandles {
-    let overlay = PopupBuilder::new(WidgetBuilder::new().with_background([0x0E, 0x10, 0x14, 0xE0]))
-        .with_placement(PopupPlacement::Center)
-        .build();
+    let overlay = PopupBuilder::new(
+        WidgetBuilder::new().with_background(theme::active().semantic.surface.modal_scrim.bytes()),
+    )
+    .with_placement(PopupPlacement::Center)
+    .build();
     let overlay = ui.add_node(overlay, root);
 
     let card = BorderBuilder::new(
@@ -83,6 +85,7 @@ pub(crate) fn build_preferences_window(
             .with_background(theme::active().semantic.surface.panel.bytes())
             .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
+    .with_surface(crate::widgets::border::Surface::Modal)
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
     let card = ui.add_node(card, overlay);
@@ -100,7 +103,7 @@ pub(crate) fn build_preferences_window(
         WidgetBuilder::new()
             .with_row(0)
             .with_column(0)
-            .with_background(theme::active().semantic.surface.header.bytes())
+            .with_background(theme::TRANSPARENT)
             .with_foreground(theme::active().semantic.border.subtle.bytes()),
     )
     .with_stroke_thickness(Thickness {

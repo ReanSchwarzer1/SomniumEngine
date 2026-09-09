@@ -1683,3 +1683,6 @@ class of breakage a builder would have absorbed.
 **27-G is now complete except the project picker**, which is deferred by decision
 and recorded in `context.md`. Suite at **215 green**, clippy at the 20-warning
 baseline, workspace clean.
+
+
+PERSONA-I implementation note (2026-09-09): [Nocturne 0.5](<phase PERSONA/PERSONA-I.md>) adds tokenised inner-edge emboss on raised controls and deterministic gradient-only dither, both disabled in high contrast. The primitive ABI is unchanged and all authored colours retain the single-decode route. Content grounds remain flat. Centered-dialog/tab presentation and finite row-change feedback use the existing UI path; numeric values and drag-following controls stay immediate. Three final native screenshots were expressly allowed by the user for this pass; golden/phase acceptance remains user-owned.

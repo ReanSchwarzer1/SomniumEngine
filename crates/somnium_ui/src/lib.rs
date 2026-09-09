@@ -2132,6 +2132,7 @@ impl UiManager {
                 self.run_command_id("editor.foliage.edit");
             }
             "persona-gallery" => crate::editor::gallery::show(&mut self.native_ui),
+            "preferences" => self.toggle_preferences(),
             "menu-file" => self.open_menu(0),
             "menu-create" => self.open_menu(1),
             "menu-edit" => self.open_menu(2),
@@ -7103,8 +7104,17 @@ impl UiManager {
         for feedback in asset_feedback {
             self.push_toast(&feedback);
         }
-        for binding in self.generated_rows.values_mut() {
-            if let Some((value, default, _)) = values.get(&(binding.component, binding.field)) {
+        let show_change =
+            self.native_ui.active_gesture().is_none() && !self.native_ui.has_text_focus();
+        for (row, binding) in &mut self.generated_rows {
+            if let Some((value, default, mixed)) = values.get(&(binding.component, binding.field)) {
+                if show_change && !*mixed && binding.value != *value {
+                    self.native_ui.send(UiMessage::new(
+                        *row,
+                        MessageDirection::ToWidget,
+                        PropertyRowMessage::Flash,
+                    ));
+                }
                 binding.value = value.clone();
                 binding.default = default.clone();
             }

@@ -54,8 +54,12 @@ impl Control for Popup {
         self.is_open.then_some(self.anchor)
     }
 
-    fn popup_presentation(&self) -> Option<(bool, NodeHandle)> {
-        (self.placement == PopupPlacement::AnchorBelow).then_some((self.is_open, self.anchor))
+    fn popup_presentation(&self) -> Option<(bool, NodeHandle, bool)> {
+        (self.placement != PopupPlacement::BottomCenter).then_some((
+            self.is_open,
+            self.anchor,
+            self.placement == PopupPlacement::Center,
+        ))
     }
 
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
@@ -248,6 +252,12 @@ mod motion_tests {
     };
 
     fn fixture(reduced: bool) -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
+        fixture_at(reduced, PopupPlacement::AnchorBelow)
+    }
+    fn fixture_at(
+        reduced: bool,
+        placement: PopupPlacement,
+    ) -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
         let mut ui = UserInterface::new(480.0, 320.0);
         ui.draw_ctx.motion.set_reduced_motion(reduced);
         let anchor = ui.add_node(
@@ -257,6 +267,7 @@ mod motion_tests {
         let popup = ui.add_node(
             PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                 .with_anchor(anchor)
+                .with_placement(placement)
                 .build(),
             ui.root(),
         );
@@ -284,6 +295,27 @@ mod motion_tests {
         ui.perform_layout();
         ui.draw();
     }
+    #[test]
+    fn centered_dialog_keeps_input_live_and_reduced_motion_settles() {
+        for reduced in [false, true] {
+            let (mut ui, popup, panel, field) = fixture_at(reduced, PopupPlacement::Center);
+            send(&mut ui, popup, PopupMessage::Open);
+            let bounds = ui.screen_bounds(panel);
+            let field_bounds = ui.screen_bounds(field);
+            let point = Vec2::new(field_bounds.x + 4.0, field_bounds.y + 4.0);
+            assert_eq!(ui.hit_test(point), field);
+            ui.draw_ctx.motion.tick(180.0);
+            ui.draw();
+            assert_eq!(ui.screen_bounds(panel), bounds);
+            assert!(ui.draw_ctx.motion.is_idle());
+            send(&mut ui, popup, PopupMessage::Close);
+            assert_ne!(ui.hit_test(point), field);
+            ui.draw_ctx.motion.tick(100.0);
+            ui.draw();
+            assert!(ui.draw_ctx.motion.is_idle());
+        }
+    }
+
     #[test]
     fn popup_input_is_immediate_and_close_paint_never_catches_clicks() {
         let (mut ui, popup, panel, field) = fixture(false);

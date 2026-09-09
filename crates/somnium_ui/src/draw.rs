@@ -237,8 +237,10 @@ impl DrawingContext {
             for v in &mut p.radii {
                 *v *= scale;
             }
-            for v in &mut p.shadow {
-                *v *= scale;
+            if p.flags & crate::primitive::FLAG_SHADOW != 0 {
+                for v in &mut p.shadow {
+                    *v *= scale;
+                }
             }
             p.border_width *= scale;
             p.expand *= scale;
@@ -268,7 +270,14 @@ impl DrawingContext {
     ///
     /// `texture_id` selects the atlas sampled when the primitive carries
     /// `FLAG_TEXTURED`; it no longer breaks the batch.
-    pub fn push_primitive(&mut self, primitive: Primitive, texture_id: Option<u32>) {
+    pub fn push_primitive(&mut self, mut primitive: Primitive, texture_id: Option<u32>) {
+        if primitive.flags & crate::primitive::FLAG_GRADIENT != 0 {
+            let amplitude = crate::theme::active().opacity.gradient_dither_lsb;
+            if amplitude > 0.0 {
+                primitive.flags |= crate::primitive::FLAG_DITHER;
+                primitive.shadow[0] = amplitude;
+            }
+        }
         self.begin_command();
         let primitive = match texture_id {
             Some(id) => primitive.with_texture_layer(id),
@@ -538,6 +547,9 @@ impl DrawingContext {
         if let Some(gradient) = paint.gradient {
             fill = fill.with_gradient(gradient.to.bytes(), gradient.axis);
             fill.fill_a = gradient.from.bytes();
+        }
+        if let Some(emboss) = paint.emboss.filter(|c| c[3] > 0) {
+            fill = fill.with_emboss(emboss);
         }
         self.push_primitive(fill, None);
 

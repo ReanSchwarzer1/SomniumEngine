@@ -1,7 +1,7 @@
 {
   "$meta": {
     "name": "Dawn Atelier",
-    "version": "0.4.0-persona",
+    "version": "0.5.0-persona",
     "polarity": "light",
     "authored_space": "sRGB",
     "runtime_contract": "decode authored sRGB to linear exactly once before the sRGB swapchain; alpha is straight",
@@ -44,7 +44,8 @@
     "ember": "#8A622C",
     "surface.selected_inactive": "#E4E6EC",
     "border.control": "#7A8193",
-    "modified": "#76500C"
+    "modified": "#76500C",
+    "border.emboss": "rgba(255,255,255,0.400)"
   },
   "typography": {
     "family_ui": "Inter (Geist remains gated by in-engine DPI captures)",
@@ -106,10 +107,10 @@
   },
   "radius": {
     "input": 4,
-    "chrome": 5,
-    "popup": 8,
+    "chrome": 4,
+    "popup": 7,
     "modal": 10,
-    "tile": 6
+    "tile": 5
   },
   "stroke": {
     "hairline": 1,
@@ -119,7 +120,8 @@
   "motion_scale": {
     "press": 0.985,
     "toggle": 0.6,
-    "popup": 0.96
+    "popup": 0.96,
+    "modal": 0.98
   },
   "motion_ms": {
     "press": 90,
@@ -128,7 +130,10 @@
     "popup": 140,
     "popup_close": 100,
     "drawer": 200,
-    "tooltip_delay": 400
+    "tooltip_delay": 400,
+    "modal": 180,
+    "change_flash": 240,
+    "tab": 160
   },
   "density_comfortable": {
     "row_dense": 28,
@@ -142,5 +147,43 @@
     "icon_toolbar": 20,
     "icon_action": 24,
     "hit_min": 24
+  },
+  "material": {
+    "gradient_dither_lsb": 0.5,
+    "emboss_width_px": 1.0
+  },
+  "gradient": {
+    "chrome_wash": {
+      "from": "#ECEEF4",
+      "to": "#E4E6ED",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "header_wash": {
+      "from": "#EEF0F6",
+      "to": "#E8EAF1",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "accent_primary": {
+      "from": "#4451D8",
+      "to": "#333EB4",
+      "axis": [
+        0,
+        1
+      ]
+    },
+    "rail_accent": {
+      "from": "#4A56E0",
+      "to": "#3A46C8",
+      "axis": [
+        0,
+        1
+      ]
+    }
   }
 }
