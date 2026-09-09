@@ -27,6 +27,8 @@
 
 use std::collections::HashMap;
 
+pub mod policy;
+
 /// Hard ceiling on any single track, from §5.5. The longest token the design
 /// ships is `drawer_ms` at 200.
 pub const MAX_DURATION_MS: f32 = 200.0;
@@ -47,6 +49,14 @@ pub enum MotionProperty {
     OffsetY,
     /// Popup scale-from-anchor, 0 = collapsed, 1 = full size.
     Scale,
+    /// Workspace travel and validation shake; never numeric value interpolation.
+    OffsetX,
+    /// Button press face, selection rail and fold presentation; never hit bounds.
+    ScaleY,
+    /// One-shot property change acknowledgement (PERSONA-J).
+    Flash,
+    /// Focus and valid-drop border width; never layout geometry.
+    Stroke,
 }
 
 /// Identifies one animating property on one node.
@@ -692,6 +702,16 @@ impl Animator {
             return track.value();
         }
         self.settled.get(&key).copied().unwrap_or(default)
+    }
+
+    /// Requested destination, including settled values. Presentation policies use
+    /// this to avoid restarting a live transition on every redraw.
+    pub fn target_or(&self, key: MotionKey, default: f32) -> f32 {
+        self.tracks
+            .get(&key)
+            .map(|track| track.to)
+            .or_else(|| self.settled.get(&key).copied())
+            .unwrap_or(default)
     }
 
     /// Advance every track by `dt_ms`.

@@ -377,6 +377,10 @@ UI that would make a screenshot resemble a Supergiant product.
 
 These extend Zeta §4's ten interface principles; they do not replace them.
 
+> **Amended by PERSONA-H (2026-09-09):** see [the expansion contract](<phase PERSONA/PERSONA-EXPANSION.md#4-the-contract-you-must-amend-not-violate>) and [H delivery](<phase PERSONA/PERSONA-H.md>). Small radii and flat panel bodies remain binding. A1 permits loops only for a named indeterminate job, active recording or pending thumbnail, ending within one frame of the condition. A2 keeps direct feedback at 200 ms and permits a separate 320 ms travel ceiling only for modal entry, drawers, workspace changes and floating dock/undock. A3 chooses a border for valid drops and reserves only one additional glow role, busy (three total), for J. A4 permits off-chrome gradients only for scroll fades, backdrop veils and dither. A5 permits OffsetX, ScaleY, Flash and Stroke as closed, named motion properties. No idle decoration, numeric interpolation, scrubbing overshoot or reduced-motion layout differences are permitted. These are bounded permissions, not claims of implementation; H's first delivery introduces no loops, glow or longer travel.
+
+
+
 1. **Depth over decoration.** New capability is spent on making hierarchy
    readable — elevation, recession, separation — never on ornament.
 2. **Radius stays small.** Tokens remain 2 / 2 / 4 / 6 / tile. The beauty comes
@@ -585,6 +589,9 @@ technical layer.
 recorded; no regression in `measure_text_tracked` layout results.
 
 ### 9.3 — 27-C Charon: motion
+
+> **Amended by PERSONA-H (2026-09-09):** see [the expansion contract](<phase PERSONA/PERSONA-EXPANSION.md#4-the-contract-you-must-amend-not-violate>) and [H delivery](<phase PERSONA/PERSONA-H.md>). Small radii and flat panel bodies remain binding. A1 permits loops only for a named indeterminate job, active recording or pending thumbnail, ending within one frame of the condition. A2 keeps direct feedback at 200 ms and permits a separate 320 ms travel ceiling only for modal entry, drawers, workspace changes and floating dock/undock. A3 chooses a border for valid drops and reserves only one additional glow role, busy (three total), for J. A4 permits off-chrome gradients only for scroll fades, backdrop veils and dither. A5 permits OffsetX, ScaleY, Flash and Stroke as closed, named motion properties. No idle decoration, numeric interpolation, scrubbing overshoot or reduced-motion layout differences are permitted. These are bounded permissions, not claims of implementation; H's first delivery introduces no loops, glow or longer travel.
+
 
 **Work**
 

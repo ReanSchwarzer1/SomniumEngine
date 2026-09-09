@@ -1514,14 +1514,13 @@ pub(crate) fn build_editor_layout(
     .build();
     let log_hdr_grid_h = ui.add_node(log_hdr_grid, log_header_stack);
 
-    let log_header = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
-        Thickness {
-            left: 8.0,
-            top: 4.0,
-            right: 0.0,
-            bottom: 0.0,
-        },
-    ))
+    let log_header = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
     .with_role(TextRole::SectionCaps)
     .with_text("Output Log")
     .build();

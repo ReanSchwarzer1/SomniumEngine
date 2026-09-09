@@ -182,7 +182,10 @@ impl Control for Breadcrumb {
         for (i, part) in self.parts.iter().enumerate() {
             ctx.push_text(
                 part,
-                Vec2::new(x, b.y + 3.0),
+                Vec2::new(
+                    x,
+                    b.y + (b.h - ctx.font_atlas.measure_text("Mg", 11.0, self.font_id).y) * 0.5,
+                ),
                 self.font_id,
                 11.0,
                 theme::TEXT_LINK,
@@ -191,7 +194,10 @@ impl Control for Breadcrumb {
             if i + 1 < self.parts.len() {
                 ctx.push_text(
                     "/",
-                    Vec2::new(x, b.y + 3.0),
+                    Vec2::new(
+                        x,
+                        b.y + (b.h - ctx.font_atlas.measure_text("Mg", 11.0, self.font_id).y) * 0.5,
+                    ),
                     self.font_id,
                     11.0,
                     theme::active().semantic.text.secondary.bytes(),

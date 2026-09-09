@@ -247,6 +247,12 @@ pub const DEBUG_VIEWS: &[DebugView] = &[
         code: 34.0,
         help: "Which stage of the clipmap stack shaded the pixel: green a detail                ring, blue a macro ring, RED the flat macro-map fallback, yellow                the constant colour. Red is terrain with no cache data and no                normal, which is what the band artifact looks like.",
     },
+    DebugView {
+        id: "texel_density",
+        label: "Texel Density",
+        code: 35.0,
+        help: "Base-colour texels per metre: blue 128, cyan 256, green 512, yellow 1024, red 2048. Grey: no map or degenerate UVs. Terrain shows the dominant painted layer's authored tiling, not cache residency.",
+    },
 ];
 
 /// Look up a view by id.

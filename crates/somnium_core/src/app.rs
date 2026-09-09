@@ -9868,9 +9868,17 @@ impl<G: GameApp> Engine<G> {
                         );
                     }
                     TT::DebugView => {
-                        self.terrain_debug_view = value.round().clamp(0.0, 34.0);
+                        self.terrain_debug_view = value.round().clamp(0.0, 35.0);
                         if let Some(renderer) = self.renderer.as_mut() {
                             renderer.shading_debug = self.terrain_debug_view;
+                        }
+                        if let Some(view) = somnium_ui::debug::DEBUG_VIEWS
+                            .iter()
+                            .find(|view| view.code == self.terrain_debug_view)
+                        {
+                            if let Some(ui) = self.ui_manager.as_mut() {
+                                ui.set_active_debug_view(view.id);
+                            }
                         }
                     }
                     TT::TileScale

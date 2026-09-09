@@ -463,7 +463,15 @@ const fn ctrl(letter: char) -> Option<Chord> {
 /// renderer's, so the menu cannot describe a view the shader does not have.
 fn view_mode_commands() -> Vec<Command> {
     let mut commands = Vec::new();
-    for view in crate::debug::DEBUG_VIEWS {
+    for view in crate::debug::DEBUG_VIEWS
+        .iter()
+        .filter(|view| matches!(view.id, "lit" | "texel_density"))
+        .chain(
+            crate::debug::DEBUG_VIEWS
+                .iter()
+                .filter(|view| !matches!(view.id, "lit" | "texel_density")),
+        )
+    {
         commands.push(Command {
             id: leak_id("editor.view.debug.", view.id),
             label: view.label,

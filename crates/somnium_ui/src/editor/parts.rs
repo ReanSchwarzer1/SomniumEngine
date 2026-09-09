@@ -24,6 +24,7 @@ use crate::{
         image::ImageBuilder,
         menu::MenuBuilder,
         popup::{PopupBuilder, PopupPlacement},
+        scroll_viewer::ScrollViewerBuilder,
         stack_panel::{Orientation, StackPanelBuilder},
         text::TextBuilder,
     },
@@ -87,7 +88,11 @@ pub(crate) fn command_popup_items(
     let popup_h = ui.add_node(popup, root);
     let border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_width(200.0)
+            .with_width(280.0)
+            .with_max_size(glam::Vec2::new(
+                280.0,
+                theme::active().density.row_tree * 16.0,
+            ))
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top)
             .with_background(theme::active().semantic.surface.header.bytes())
@@ -96,25 +101,35 @@ pub(crate) fn command_popup_items(
     .with_stroke_thickness(Thickness::uniform(1.0))
     .build();
     let border_h = ui.add_node(border, popup_h);
+    let scroll_h = ui.add_node(
+        ScrollViewerBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_shrink_to_content(true)
+            .build(),
+        border_h,
+    );
     let stack = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
         .with_orientation(Orientation::Vertical)
         .build();
-    let stack_h = ui.add_node(stack, border_h);
+    let stack_h = ui.add_node(stack, scroll_h);
     let mut handles = Vec::with_capacity(commands.len());
     for command in commands {
         let btn = ButtonBuilder::new(
             WidgetBuilder::new()
-                .with_height(22.0)
+                .with_height(theme::active().density.row_tree)
                 .with_background(theme::TRANSPARENT),
         )
         .build();
         let bh = ui.add_node(btn, stack_h);
-        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-            .with_text(command.menu_label())
-            .with_font_size(12.0)
-            .with_font_id(font_id)
-            .with_color(theme::active().semantic.text.primary.bytes())
-            .build();
+        let lbl = TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(8.0, 0.0))
+                .with_vertical_alignment(VerticalAlignment::Center),
+        )
+        .with_text(command.menu_label())
+        .with_font_size(12.0)
+        .with_font_id(font_id)
+        .with_color(theme::active().semantic.text.primary.bytes())
+        .build();
         ui.add_node(lbl, bh);
         handles.push((bh, command.id));
     }
@@ -150,8 +165,9 @@ pub(crate) fn icon_tool_button(
 ) -> NodeHandle {
     let mut wb = WidgetBuilder::new()
         .with_width(36.0)
-        .with_height(theme::active().density.toolbar)
-        .with_margin(Thickness::axes(2.0, 2.0))
+        .with_height(theme::active().density.row_chrome)
+        .with_vertical_alignment(VerticalAlignment::Center)
+        .with_margin(Thickness::axes(2.0, 1.0))
         .with_background(theme::active().semantic.surface.raised.bytes());
     if !tooltip.is_empty() {
         wb = wb.with_tooltip(tooltip);
@@ -210,15 +226,21 @@ pub(crate) fn labeled_icon_button(
     let btn = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_height(height)
+            .with_vertical_alignment(VerticalAlignment::Center)
             .with_margin(Thickness::axes(2.0, 1.0))
             .with_tooltip(tooltip)
             .with_background(theme::active().semantic.surface.raised.bytes()),
     )
     .build();
     let h = ui.add_node(btn, parent);
-    let row = StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-        .with_orientation(Orientation::Horizontal)
-        .build();
+    let row = StackPanelBuilder::new(
+        WidgetBuilder::new()
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_horizontal_alignment(HorizontalAlignment::Center)
+            .with_background(theme::TRANSPARENT),
+    )
+    .with_orientation(Orientation::Horizontal)
+    .build();
     let row_h = ui.add_node(row, h);
     // Centre both the glyph and the word on the button's axis rather than
     // computing a top margin from an assumed line height. The assumption was
@@ -368,23 +390,136 @@ pub(crate) fn menu_entry(
 ) -> NodeHandle {
     let button = ButtonBuilder::new(
         WidgetBuilder::new()
-            .with_height(22.0)
+            .with_height(theme::active().density.row_tree)
             .with_enabled(enabled)
             .with_tooltip(tooltip)
             .with_background(theme::TRANSPARENT),
     )
     .build();
     let button = ui.add_node(button, parent);
-    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 4.0)))
-        .with_text(label)
-        .with_font_size(12.0)
-        .with_font_id(font_id)
-        .with_color(if enabled {
-            theme::active().semantic.text.primary.bytes()
-        } else {
-            theme::active().semantic.text.disabled.bytes()
-        })
-        .build();
+    let text = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::axes(8.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_text(label)
+    .with_font_size(12.0)
+    .with_font_id(font_id)
+    .with_color(if enabled {
+        theme::active().semantic.text.primary.bytes()
+    } else {
+        theme::active().semantic.text.disabled.bytes()
+    })
+    .build();
     ui.add_node(text, button);
     button
+}
+
+#[cfg(test)]
+mod menu_layout_tests {
+    use super::*;
+    use crate::{
+        commands::Menu,
+        message::{MessageDirection, Modifiers, UiMessage, WidgetMessage},
+        widgets::popup::PopupMessage,
+    };
+
+    #[test]
+    fn long_menus_fit_small_windows_and_the_last_command_is_reachable() {
+        for height in [360.0, 720.0] {
+            for menu in [Menu::Create, Menu::View] {
+                let mut ui = UserInterface::new(800.0, height);
+                let root = ui.root();
+                let bar = ui.add_node(
+                    StackPanelBuilder::new(
+                        WidgetBuilder::new()
+                            .with_height(28.0)
+                            .with_vertical_alignment(VerticalAlignment::Top),
+                    )
+                    .with_orientation(Orientation::Horizontal)
+                    .build(),
+                    root,
+                );
+                let anchor = menu_button(&mut ui, bar, "Menu", 0);
+                let (popup, stack, rows) = if menu == Menu::Create {
+                    let (popup, rows) =
+                        crate::editor::content::build_create_popup(&mut ui, root, 0);
+                    let stack = ui.parent_of(rows[0].0).unwrap();
+                    (popup, stack, rows)
+                } else {
+                    command_popup_items(&mut ui, root, 0, menu)
+                };
+                ui.perform_layout();
+                ui.send(UiMessage::new(
+                    popup,
+                    MessageDirection::ToWidget,
+                    PopupMessage::SetAnchor(anchor),
+                ));
+                ui.send(UiMessage::new(
+                    popup,
+                    MessageDirection::ToWidget,
+                    PopupMessage::Open,
+                ));
+                ui.update();
+                ui.perform_layout();
+                let panel = ui.screen_bounds(ui.first_child(popup));
+                assert!(
+                    panel.y >= 0.0 && panel.y + panel.h <= height,
+                    "menu extends beyond window: {panel:?}, height {height}"
+                );
+                assert!(panel.h <= theme::active().density.row_tree * 16.0 + 0.1);
+                let last = rows.last().unwrap().0;
+                ui.send(UiMessage::new(
+                    stack,
+                    MessageDirection::ToWidget,
+                    WidgetMessage::MouseWheel {
+                        pos: glam::Vec2::new(panel.x + 10.0, panel.y + 10.0),
+                        delta: -10000.0,
+                        mods: Modifiers::default(),
+                    },
+                ));
+                ui.update();
+                ui.perform_layout();
+                let last_bounds = ui.screen_bounds(last);
+                assert!(
+                    last_bounds.y >= panel.y && last_bounds.y + last_bounds.h <= panel.y + panel.h,
+                    "last menu command must scroll into view: {last_bounds:?} in {panel:?}"
+                );
+                ui.send(UiMessage::new(
+                    stack,
+                    MessageDirection::ToWidget,
+                    WidgetMessage::MouseWheel {
+                        pos: glam::Vec2::ZERO,
+                        delta: 10000.0,
+                        mods: Modifiers::default(),
+                    },
+                ));
+                ui.update();
+                ui.perform_layout();
+                ui.set_focus(last);
+                ui.perform_layout();
+                let focused = ui.screen_bounds(last);
+                assert!(
+                    focused.y >= panel.y && focused.y + focused.h <= panel.y + panel.h,
+                    "keyboard focus must reveal the command"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_menu_does_not_reserve_sixteen_empty_rows() {
+        let mut ui = UserInterface::new(800.0, 720.0);
+        let root = ui.root();
+        let (popup, _, rows) = command_popup_items(&mut ui, root, 0, Menu::Help);
+        ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        ui.update();
+        ui.perform_layout();
+        let bounds = ui.screen_bounds(ui.first_child(popup));
+        assert!(bounds.h <= rows.len() as f32 * theme::active().density.row_tree + 4.0);
+    }
 }

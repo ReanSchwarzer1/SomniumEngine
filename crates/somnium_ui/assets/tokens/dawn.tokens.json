@@ -1,7 +1,7 @@
 {
   "$meta": {
     "name": "Dawn Atelier",
-    "version": "0.3.0-persona",
+    "version": "0.4.0-persona",
     "polarity": "light",
     "authored_space": "sRGB",
     "runtime_contract": "decode authored sRGB to linear exactly once before the sRGB swapchain; alpha is straight",
@@ -116,10 +116,17 @@
     "focus": 2,
     "rail": 2
   },
+  "motion_scale": {
+    "press": 0.985,
+    "toggle": 0.6,
+    "popup": 0.96
+  },
   "motion_ms": {
     "press": 90,
+    "toggle": 140,
     "hover": 120,
     "popup": 140,
+    "popup_close": 100,
     "drawer": 200,
     "tooltip_delay": 400
   },

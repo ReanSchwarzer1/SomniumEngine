@@ -67,10 +67,14 @@ impl Control for CheckBox {
             theme::ICON_CHECK,
         );
         // A checkbox is a tiny input: same recession and radius as the fields.
-        let t = theme::active();
         let paint = crate::style::input(crate::style::VisualState::rest());
         ctx.push_paint(box_r, &paint);
-        let _ = t;
+        let (opacity, scale) = crate::motion::policy::toggle(
+            &mut ctx.motion,
+            widget.handle.index(),
+            self.checked && !self.mixed,
+            widget.enabled && !self.mixed,
+        );
         if self.mixed {
             // Tri-state. A dash across the box, not a tick and not empty:
             // either of those would claim a value the selection does not have.
@@ -81,14 +85,17 @@ impl Control for CheckBox {
                 2.0,
             );
             ctx.push_rect_filled(bar, theme::active().semantic.text.secondary.bytes());
-        } else if self.checked {
-            let (uv, tex) = IconId::Check.draw_quad(box_r);
-            ctx.push_textured_rect(
-                box_r,
-                uv,
-                theme::active().semantic.accent.default.bytes(),
-                tex,
+        } else if opacity > 0.0 {
+            let glyph = Rect::new(
+                box_r.x + box_r.w * (1.0 - scale) * 0.5,
+                box_r.y + box_r.h * (1.0 - scale) * 0.5,
+                box_r.w * scale,
+                box_r.h * scale,
             );
+            let (uv, tex) = IconId::Check.draw_quad(glyph);
+            let mut color = theme::active().semantic.accent.default.bytes();
+            color[3] = (color[3] as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
+            ctx.push_textured_rect(glyph, uv, color, tex);
         }
         ctx.push_text(
             &self.label,

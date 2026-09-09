@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-09-06 against the current working tree.
+Last verified: 2026-09-09 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -16,14 +16,14 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | TALOS scoped down on 2026-09-08: retain graphics scalability and small rendering cleanups. The earlier broad optimization/60 FPS program is deferred by user request. |
-| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): material/lighting tools, browser fixes, Scripts access and saved brush settings, 2026-09-06 |
+| Active phase | PERSONA expansion: H interaction/popup motion and screenshot-driven QoL in tree; remaining H–L and G acceptance open. TALOS remains scoped to accepted scalability/rendering cleanups. |
+| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): scrolling menus, control alignment and viewport texel density; [H motion](<dev records/phase PERSONA/PERSONA-H.md>), 2026-09-09 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Current implementation priority | Retain the accepted scalability controls; fix only demonstrated, local rendering inefficiencies. See [TALOS evidence](<dev records/phase TALOS/README.md>). |
+| Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-06 | 218,976 Rust/WGSL lines and 2,216 discovered tests |
+| Generated census, 2026-09-09 | 220,314 Rust/WGSL lines and 2,230 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |

@@ -274,8 +274,13 @@ pub struct ElevationTokens {
 #[derive(Clone, Copy, Debug)]
 pub struct MotionTokens {
     pub press_ms: u64,
+    pub toggle_ms: u64,
+    pub press_scale: f32,
+    pub toggle_scale: f32,
     pub hover_ms: u64,
     pub popup_ms: u64,
+    pub popup_close_ms: u64,
+    pub popup_scale: f32,
     pub drawer_ms: u64,
     pub tooltip_delay_ms: u64,
 }
@@ -392,8 +397,13 @@ pub const NOCTURNE: Theme = Theme {
     },
     motion: MotionTokens {
         press_ms: 90,
+        toggle_ms: 140,
+        press_scale: 0.985,
+        toggle_scale: 0.6,
         hover_ms: 120,
         popup_ms: 140,
+        popup_close_ms: 100,
+        popup_scale: 0.96,
         drawer_ms: 200,
         tooltip_delay_ms: 400,
     },

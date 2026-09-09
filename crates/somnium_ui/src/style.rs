@@ -126,6 +126,36 @@ impl Paint {
         }
     }
 
+    /// Blend fill stops as well as flat colors, so a primary gradient cannot
+    /// hide press feedback. Semantic rails/focus remain owned by the recipe.
+    pub(crate) fn blend_fill(&mut self, from: &Self, to: &Self, amount: f32) {
+        use crate::motion::lerp_color;
+        let t = amount.clamp(0.0, 1.0);
+        self.background = lerp_color(from.background, to.background, t);
+        self.foreground = lerp_color(from.foreground, to.foreground, t);
+        self.gradient = if t == 0.0 {
+            from.gradient
+        } else if t == 1.0 {
+            to.gradient
+        } else {
+            from.gradient.or(to.gradient).map(|axis_source| {
+                let ends = |paint: &Self| {
+                    paint
+                        .gradient
+                        .map(|g| (g.from.bytes(), g.to.bytes()))
+                        .unwrap_or((paint.background, paint.background))
+                };
+                let (a, b) = ends(from);
+                let (c, d) = ends(to);
+                theme::Gradient {
+                    from: theme::Srgb8(lerp_color(a, c, t)),
+                    to: theme::Srgb8(lerp_color(b, d, t)),
+                    axis: axis_source.axis,
+                }
+            })
+        };
+    }
+
     /// Wash the fill with a chrome gradient.
     pub fn with_gradient(mut self, gradient: theme::Gradient) -> Self {
         self.gradient = Some(gradient);

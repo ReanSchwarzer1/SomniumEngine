@@ -5153,7 +5153,8 @@ impl SomniumRenderer {
         // A TAA debug view must reach the screen unmodified: exposure would
         // crush a 0/1 flag image to black, and a tone curve would grade the
         // very values being inspected.
-        let debugging = self.taa_pass.debugging();
+        let debugging = self.taa_pass.debugging()
+            || (self.shading_debug > 34.5 && self.shading_debug < 35.5);
         self.postprocess_pass.set_params(
             &ctx.queue,
             if debugging { 1.0 } else { self.exposure },

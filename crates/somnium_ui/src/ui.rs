@@ -144,6 +144,7 @@ pub struct UserInterface {
     marquee: Option<Rect>,
     /// CONTROL-G's statistics overlay: its lines, and where they go.
     statistics: Option<(Rect, Vec<String>)>,
+    texel_density_legend: bool,
     /// The corner axis widget's screen-space axis endpoints, recomputed each
     /// frame from the live view matrix: `(axis index, tip, positive)`.
     axis_widget: Vec<(u8, Vec2, bool)>,
@@ -199,6 +200,7 @@ impl UserInterface {
             drop_highlight: None,
             marquee: None,
             statistics: None,
+            texel_density_legend: false,
             axis_widget: Vec::new(),
             axis_widget_bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
             modal_focus: None,
@@ -523,6 +525,11 @@ impl UserInterface {
 
     pub fn remove_node(&mut self, handle: NodeHandle) {
         let handle_ih = to_ih(handle);
+        // A stale generational handle must not erase a recycled node's motion.
+        if self.nodes.try_borrow(handle_ih).is_err() {
+            return;
+        }
+        self.draw_ctx.motion.forget_node(handle.index());
         let children: Vec<NodeHandle> = self
             .nodes
             .try_borrow(handle_ih)
@@ -1337,6 +1344,79 @@ impl UserInterface {
         }
     }
 
+    /// The diagnostic belongs to the viewport, including its detached host.
+    pub fn set_texel_density_legend(&mut self, visible: bool) {
+        self.texel_density_legend = visible;
+    }
+
+    fn draw_texel_density_legend(&mut self) {
+        if !self.texel_density_legend || !self.viewport_handle.is_some() {
+            return;
+        }
+        let viewport = self.screen_bounds(self.viewport_handle);
+        let style = crate::typography::text_style(crate::typography::TextRole::Caption);
+        let theme = crate::theme::active();
+        let line_h = style.px + 6.0;
+        let panel_height = line_h * 5.0 + 16.0;
+        // Bottom-left, above the selection badge. The top belongs to the
+        // viewport toolbar; never cover its camera and snap controls.
+        let panel = Rect::new(
+            viewport.x + 12.0,
+            viewport.y + (viewport.h - panel_height - 48.0).max(theme.density.toolbar + 24.0),
+            340.0f32.min((viewport.w - 24.0).max(0.0)),
+            panel_height,
+        );
+        self.draw_ctx.push_clip_rect(viewport);
+        self.draw_ctx.push_round_rect(
+            panel,
+            theme.geometry.radius_popup,
+            theme.semantic.surface.panel.bytes(),
+        );
+        self.draw_ctx.push_clip_rect(panel);
+        for (i, line) in [
+            "Texel Density · base colour texels/metre",
+            "Blue to red: each step doubles resolution",
+            "",
+            "Grey: no texture / degenerate UVs",
+            "Terrain: dominant layer, authored tiling",
+        ]
+        .iter()
+        .enumerate()
+        {
+            self.draw_ctx.push_text(
+                line,
+                Vec2::new(panel.x + 8.0, panel.y + 8.0 + i as f32 * line_h),
+                style.font_id(),
+                style.px,
+                theme.semantic.text.primary.bytes(),
+            );
+        }
+        for (i, (label, colour)) in [
+            ("128", [40, 80, 255, 255]),
+            ("256", [0, 255, 255, 255]),
+            ("512", [60, 255, 40, 255]),
+            ("1024", [255, 255, 0, 255]),
+            ("2048", [255, 40, 25, 255]),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let x = panel.x + 8.0 + i as f32 * 65.0;
+            let y = panel.y + 8.0 + 2.0 * line_h;
+            self.draw_ctx
+                .push_rect_filled(Rect::new(x, y + 2.0, 10.0, 10.0), *colour);
+            self.draw_ctx.push_text(
+                label,
+                Vec2::new(x + 14.0, y),
+                style.font_id(),
+                style.px,
+                theme.semantic.text.primary.bytes(),
+            );
+        }
+        self.draw_ctx.pop_clip_rect();
+        self.draw_ctx.pop_clip_rect();
+    }
+
     /// The statistics overlay, in the viewport's top-right corner.
     ///
     /// Top-*right* because the floating context bar owns the top-centre and
@@ -1493,22 +1573,85 @@ impl UserInterface {
     }
 
     fn draw_node(&mut self, handle: IH) {
-        // PORTAL-0-D: see `update_global_visibility` above.
-        let (clip, count) = match self.nodes.try_borrow(handle) {
-            Ok(n) if n.widget.global_visibility => (n.widget.clip_bounds, n.widget.children.len()),
-            _ => return,
-        };
+        self.draw_node_present(handle, false);
+    }
+
+    fn draw_node_present(&mut self, handle: IH, exiting_ancestor: bool) {
+        let (clip, count, visible, local_visible, popup, background, bounds) =
+            match self.nodes.try_borrow(handle) {
+                Ok(n) => (
+                    n.widget.clip_bounds,
+                    n.widget.children.len(),
+                    n.widget.global_visibility,
+                    n.widget.visibility,
+                    n.control.popup_presentation(),
+                    n.widget.background,
+                    n.widget.screen_bounds(),
+                ),
+                _ => return,
+            };
+        let mut envelope = None;
+        let mut exiting = exiting_ancestor;
+        if let Some((open, anchor)) = popup {
+            let open = open && local_visible && !exiting_ancestor;
+            let (opacity, scale) =
+                crate::motion::policy::popup(&mut self.draw_ctx.motion, handle.index(), open);
+            if !open && opacity == 0.0 {
+                return;
+            }
+            exiting |= !open;
+            if opacity != 1.0 || scale != 1.0 {
+                let content = self
+                    .nodes
+                    .try_borrow(handle)
+                    .ok()
+                    .and_then(|n| n.widget.children.first().copied())
+                    .and_then(|h| self.nodes.try_borrow(to_ih(h)).ok())
+                    .map(|n| n.widget.screen_bounds())
+                    .unwrap_or(bounds);
+                let anchor_bounds = self
+                    .nodes
+                    .try_borrow(to_ih(anchor))
+                    .ok()
+                    .map(|n| n.widget.screen_bounds());
+                let origin = anchor_bounds
+                    .map(|a| {
+                        Vec2::new(
+                            a.x.clamp(content.x, content.x + content.w),
+                            if content.y < a.y {
+                                content.y + content.h
+                            } else {
+                                content.y
+                            },
+                        )
+                    })
+                    .unwrap_or(Vec2::new(content.x, content.y));
+                envelope = Some((opacity, scale, origin));
+            }
+        }
+        if !visible && !(exiting && (local_visible || popup.is_some())) {
+            return;
+        }
         let inherited_foreground = self.draw_ctx.inherited_foreground;
         self.draw_ctx.push_clip_rect(clip);
+        let backdrop_mark = envelope.map(|_| self.draw_ctx.begin_presentation());
         {
             let node = self.nodes.borrow_mut(handle);
             let widget_ptr = &node.widget as *const Widget;
             let control_ptr = node.control.as_ref() as *const dyn Control;
-            // SAFETY: widget lives in pool record, draw_ctx is a separate allocation.
+            // SAFETY: widget lives in the pool; draw_ctx is a separate allocation.
             unsafe {
                 (*control_ptr).draw(&*widget_ptr, &mut self.draw_ctx);
             }
         }
+        if popup.is_some_and(|(open, _)| !open) && background[3] > 0 {
+            self.draw_ctx.push_rect_filled(bounds, background);
+        }
+        if let (Some(mark), Some((opacity, _, origin))) = (backdrop_mark, envelope) {
+            self.draw_ctx
+                .finish_presentation(mark, origin, 1.0, opacity);
+        }
+        let content_mark = envelope.map(|_| self.draw_ctx.begin_presentation());
         for i in 0..count {
             let Some(ch) = self
                 .nodes
@@ -1518,20 +1661,29 @@ impl UserInterface {
             else {
                 break;
             };
-            self.draw_node(to_ih(ch));
+            self.draw_node_present(to_ih(ch), exiting);
         }
-        // Overlay pass, still inside this node's clip: whatever a container
-        // needs to paint on top of its own content.
         {
             let node = self.nodes.borrow_mut(handle);
             let widget_ptr = &node.widget as *const Widget;
             let control_ptr = node.control.as_ref() as *const dyn Control;
-            // SAFETY: as above — the widget lives in the pool record and
-            // `draw_ctx` is a separate allocation, so the two borrows cannot
-            // alias.
+            // SAFETY: as above; overlay stays within this subtree's paint scope.
             unsafe {
                 (*control_ptr).draw_over(&*widget_ptr, &mut self.draw_ctx);
             }
+        }
+        // Keep the legend below menus/dialogs and inside the viewport subtree
+        // so it travels naturally with a detached viewport.
+        if self.texel_density_legend
+            && handle == to_ih(self.viewport_handle)
+            && !self.audit_component_gallery
+            && self.modal_focus.is_none()
+        {
+            self.draw_texel_density_legend();
+        }
+        if let (Some(mark), Some((opacity, scale, origin))) = (content_mark, envelope) {
+            self.draw_ctx
+                .finish_presentation(mark, origin, scale, opacity);
         }
         self.draw_ctx.pop_clip_rect();
         self.draw_ctx.inherited_foreground = inherited_foreground;
@@ -3123,6 +3275,21 @@ mod input_contract_tests {
         ui.update();
         ui.perform_layout();
         ui.draw();
+        let key = crate::motion::MotionKey::row(
+            tv_h.index(),
+            1,
+            crate::motion::MotionProperty::HoverWash,
+        );
+        ui.draw_ctx.motion.tick(60.0);
+        ui.draw();
+        let mid = ui.draw_ctx.motion.value_or(key, 0.0);
+        assert!(mid > 0.0 && mid < 1.0, "correct row must be transitioning");
+        ui.draw_ctx.motion.tick(60.0);
+        ui.draw();
+        assert!(
+            ui.draw_ctx.motion.is_idle(),
+            "redraw must not restart the hover"
+        );
         assert!(
             painted(&ui),
             "the row under the pointer must paint a hover fill"

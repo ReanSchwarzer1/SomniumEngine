@@ -1388,6 +1388,52 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let hit_point = p0 * bary.x + p1 * bary.y + p2 * bary.z;
 
+    let dbg = select(0.0, light._pad2_z, enable_debug);
+    // Source texels per world metre, independent of camera distance, render
+    // resolution and mip selection. Evaluate before lighting/normal maps.
+    if dbg > 34.5 && dbg < 35.5 {
+        var density = 0.0;
+        if material.terrain_index >= 0 {
+            // Terrain UVs address splats, not layer textures. Report nominal
+            // authored density of the dominant painted layer, including when
+            // the visible colour comes from a clipmap. This is deliberately
+            // not a claim about cache residency or cliff-projection stretch.
+            let tm = terrain_materials[u32(material.terrain_index)];
+            let splats = terrain_fetch_splats(tm, uv,
+                dpdx(hit_point.xz) * tm.inv_world_size,
+                dpdy(hit_point.xz) * tm.inv_world_size);
+            var weights = terrain_unpack_splats_painted(splats, tm, hit_point.xz - tm.terrain_origin);
+            let dominant = terrain_strongest_four(&weights)[0];
+            let map = tm.albedo_maps[dominant / 4u][dominant % 4u];
+            if map >= 0 && weights[dominant] > 0.0 {
+                let dims = vec2<f32>(textureDimensions(textures[map], 0));
+                density = sqrt(dims.x * dims.y) * abs(terrain_layer_tiling(tm, dominant));
+            }
+        } else if material.albedo_map >= 0 {
+            let world_area = length(face_cross);
+            let du = uv1 - uv0;
+            let dv = uv2 - uv0;
+            let uv_area = abs(du.x * dv.y - du.y * dv.x);
+            if world_area > 1.0e-12 && uv_area > 1.0e-12 {
+                let dims = vec2<f32>(textureDimensions(textures[material.albedo_map], 0));
+                // Both areas omit 1/2, which cancels. Model scaling is already
+                // in face_cross; rectangular maps and mirrored UVs are valid.
+                density = sqrt(uv_area * dims.x * dims.y / world_area);
+            }
+        }
+        if density <= 0.0 {
+            return vec4<f32>(0.18, 0.18, 0.18, 1.0);
+        }
+        // Continuous logarithmic scale: each colour stop doubles resolution.
+        let stops = array<vec3<f32>, 5>(
+            vec3<f32>(0.02, 0.08, 1.0), vec3<f32>(0.0, 1.0, 1.0),
+            vec3<f32>(0.05, 1.0, 0.02), vec3<f32>(1.0, 1.0, 0.0),
+            vec3<f32>(1.0, 0.02, 0.01));
+        let level = clamp(log2(density / 128.0), 0.0, 4.0);
+        let band = min(u32(level), 3u);
+        return vec4<f32>(mix(stops[band], stops[band + 1u], level - f32(band)), 1.0);
+    }
+
     // Phase 17D: a double-sided surface can be seen from behind, where its
     // authored normal points away and every lighting term comes out dark. Flip
     // it toward the viewer. Only for materials flagged double-sided — doing it
@@ -1938,7 +1984,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
     // Material-path probes: a surface that renders black is either unlit or
     // untextured, and only looking at the channels separately tells which.
-    let dbg = select(0.0, light._pad2_z, enable_debug);
     if dbg > 8.5 && dbg < 9.5 {
         return vec4<f32>(surface.albedo, 1.0);
     }

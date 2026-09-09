@@ -117,12 +117,12 @@ pub(crate) fn build_preferences_window(
         .add_column(Column::auto())
         .build();
     let header_grid = ui.add_node(header_grid, header);
-    let title = TextBuilder::new(WidgetBuilder::new().with_column(0).with_margin(Thickness {
-        left: 12.0,
-        top: 10.0,
-        right: 0.0,
-        bottom: 0.0,
-    }))
+    let title = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_column(0)
+            .with_margin(Thickness::axes(12.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
     .with_role(TextRole::Title)
     .with_text("Preferences")
     .build();
@@ -153,16 +153,23 @@ pub(crate) fn build_preferences_window(
     let search = SearchBoxBuilder::new(
         WidgetBuilder::new()
             .with_width(240.0)
-            .with_margin(Thickness::axes(8.0, 5.0)),
+            .with_height(24.0)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
     )
     .with_font_id(font_id)
     .build();
     let search = ui.add_node(search, bar);
     let modified_only = ui.add_node(
-        CheckBoxBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(8.0, 9.0)))
-            .with_label("Modified only")
-            .with_font_id(font_id)
-            .build(),
+        CheckBoxBuilder::new(
+            WidgetBuilder::new()
+                .with_height(24.0)
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_margin(Thickness::axes(8.0, 0.0)),
+        )
+        .with_label("Modified only")
+        .with_font_id(font_id)
+        .build(),
         bar,
     );
     let reset_all = labelled_button(ui, bar, font_id, "Reset All");
@@ -221,17 +228,22 @@ fn labelled_button(
     let button = ButtonBuilder::new(
         WidgetBuilder::new()
             .with_height(24.0)
-            .with_margin(Thickness::axes(6.0, 5.0))
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(6.0, 0.0))
             .with_background(theme::active().semantic.surface.raised.bytes()),
     )
     .build();
     let button = ui.add_node(button, parent);
-    let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(10.0, 4.0)))
-        .with_text(label)
-        .with_font_size(12.0)
-        .with_font_id(font_id)
-        .with_color(theme::active().semantic.text.primary.bytes())
-        .build();
+    let text = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_margin(Thickness::axes(10.0, 0.0))
+            .with_vertical_alignment(VerticalAlignment::Center),
+    )
+    .with_text(label)
+    .with_font_size(12.0)
+    .with_font_id(font_id)
+    .with_color(theme::active().semantic.text.primary.bytes())
+    .build();
     ui.add_node(text, button);
     button
 }

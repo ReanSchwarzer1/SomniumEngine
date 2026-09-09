@@ -4581,6 +4581,8 @@ impl UiManager {
     /// the status bar can say so. `"lit"` means the ordinary image.
     pub fn set_active_debug_view(&mut self, id: &'static str) {
         self.active_debug_view = id;
+        self.native_ui
+            .set_texel_density_legend(id == "texel_density");
     }
 
     /// The active debug visualisation.
@@ -9974,6 +9976,16 @@ mod styx_budget_tests {
             "{:.0}% of the draw list paints nothing — a surface was likely lost",
             ratio * 100.0
         );
+    }
+
+    #[test]
+    fn an_idle_shell_has_zero_live_motion_tracks() {
+        let mut ui = shell_frame(1920.0, 1080.0);
+        for _ in 0..60 {
+            ui.draw_ctx.motion.tick(16.0);
+            ui.draw();
+            assert!(ui.draw_ctx.motion.is_idle(), "idle shell started motion");
+        }
     }
 
     #[test]

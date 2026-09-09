@@ -2,13 +2,12 @@
 // Button: captures mouse on MouseDown; emits ButtonMessage::Click on MouseUp within bounds.
 // Hover / press / selected fills so chrome controls read as buttons, not dead labels.
 
-use crate::motion::{Easing, MotionKey, MotionProperty, lerp_color};
+use crate::motion::{MotionKey, MotionProperty, policy};
 use crate::{
     draw::DrawingContext,
     message::{MessageDirection, UiMessage, WidgetMessage},
     node::{Control, LayoutCtx, UiNode},
     style::{ButtonVariant, Interaction, VisualState, action_button},
-    theme,
     types::Rect,
     widget::{Widget, WidgetBuilder},
 };
@@ -96,8 +95,6 @@ impl Control for Button {
         };
         let state = VisualState::with(if !widget.enabled {
             Interaction::Disabled
-        } else if self.is_pressed {
-            Interaction::Pressed
         } else if self.selected {
             Interaction::Selected
         } else if self.hovered {
@@ -117,34 +114,38 @@ impl Control for Button {
         // Phase 27-C. Cross-fade the hover wash instead of snapping to it. The
         // track is keyed on this node, so two buttons hovered in sequence do not
         // share state, and it retires the moment it completes.
-        let t = theme::active();
         let key = MotionKey::new(widget.handle.index(), MotionProperty::HoverWash);
-        let target = if state.interaction == Interaction::Hover {
-            1.0
-        } else {
-            0.0
-        };
-        ctx.motion.start(
+        let wash = policy::hover(
+            &mut ctx.motion,
             key,
-            0.0,
-            target,
-            if self.animate_hover {
-                t.motion.hover_ms as f32
-            } else {
-                0.0
-            },
-            Easing::Standard,
+            state.interaction == Interaction::Hover,
+            self.animate_hover && widget.enabled,
         );
-        let wash = ctx.motion.value_or(key, target);
-        if wash > 0.0
-            && wash < 1.0
-            && matches!(state.interaction, Interaction::Hover | Interaction::Rest)
-        {
-            let rest = action_button(variant, VisualState::rest());
+        if matches!(state.interaction, Interaction::Hover | Interaction::Rest) {
+            let mut rest = action_button(variant, VisualState::rest());
+            if self.variant == ButtonVariant::Auto && widget.background[3] > 0 {
+                rest.background = widget.background;
+            }
             let hovered = action_button(variant, VisualState::with(Interaction::Hover));
-            paint.background = lerp_color(rest.background, hovered.background, wash);
-            paint.foreground = lerp_color(rest.foreground, hovered.foreground, wash);
+            paint.blend_fill(&rest, &hovered, wash);
         }
+
+        let (pressed, scale_y) = policy::press(
+            &mut ctx.motion,
+            widget.handle.index(),
+            self.is_pressed,
+            widget.enabled,
+        );
+        if pressed > 0.0 {
+            let down = action_button(variant, VisualState::with(Interaction::Pressed));
+            let base = paint;
+            paint.blend_fill(&base, &down, pressed);
+            if pressed == 1.0 {
+                paint.elevation = down.elevation;
+            }
+        }
+        // Paint-only compression: the label and pointer target do not shift.
+        let b = Rect::new(b.x, b.y + b.h * (1.0 - scale_y) * 0.5, b.w, b.h * scale_y);
 
         if self.variant != ButtonVariant::Auto || !widget.enabled {
             ctx.inherited_foreground = Some(paint.foreground);

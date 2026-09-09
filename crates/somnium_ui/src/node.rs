@@ -221,6 +221,12 @@ pub trait Control: Send + 'static {
         None
     }
 
+    /// Anchored popup's logical open state and anchor, including while closed.
+    /// Used only for paint continuity; visibility remains the input/a11y truth.
+    fn popup_presentation(&self) -> Option<(bool, NodeHandle)> {
+        None
+    }
+
     /// Bottom-up measure: return desired size given available space.
     /// Containers must call `ctx.measure_child()` for each child here.
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {

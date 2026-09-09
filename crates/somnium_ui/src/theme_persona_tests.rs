@@ -56,12 +56,22 @@ fn exported_metrics_match_both_densities_and_themes() {
         let m = t.motion;
         for (key, v) in [
             ("press", m.press_ms),
+            ("toggle", m.toggle_ms),
             ("hover", m.hover_ms),
             ("popup", m.popup_ms),
+            ("popup_close", m.popup_close_ms),
             ("drawer", m.drawer_ms),
             ("tooltip_delay", m.tooltip_delay_ms),
         ] {
             assert_eq!(sheet["motion_ms"][key].as_u64(), Some(v));
+        }
+        assert_eq!(sheet["$meta"]["version"], "0.4.0-persona");
+        for (key, value) in [
+            ("press", m.press_scale),
+            ("toggle", m.toggle_scale),
+            ("popup", m.popup_scale),
+        ] {
+            assert_eq!(sheet["motion_scale"][key].as_f64().unwrap() as f32, value);
         }
         let ty = t.typography;
         for (key, v, w) in [
