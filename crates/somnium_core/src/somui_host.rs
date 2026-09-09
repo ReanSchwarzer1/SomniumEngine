@@ -61,6 +61,7 @@ pub struct UiDocuments {
 }
 
 impl UiDocuments {
+    /// Create an empty game-owned document collection.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -118,6 +119,7 @@ impl UiDocuments {
     }
 
     #[must_use]
+    /// Whether the game has registered no UI documents.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

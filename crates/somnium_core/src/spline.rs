@@ -20,8 +20,9 @@
 //! Control points are what an author places; a Catmull-Rom spline through
 //! them is what they mean. It interpolates its control points — the curve
 //! passes exactly through what was placed, which a Bezier does not — and it
-//! needs no tangent handles, which is the whole reason it is the usual choice
-//! for level-editor paths.
+//! supplies automatic tangents for level-editor paths. Optional authored
+//! derivatives use the same Hermite form when a road or rail needs tighter
+//! control, while existing paths retain their original shape.
 //!
 //! Nearest-point queries against the analytic curve would need a numerical
 //! solve per segment per query. Sampling to a polyline and taking the nearest
@@ -54,6 +55,9 @@ pub struct SplineComponent {
     /// Join the last point back to the first. A shoreline around an island is
     /// closed; a river is not.
     pub closed: bool,
+    /// Optional local derivatives per control point. Missing entries use the
+    /// Catmull-Rom derivative; authors can add handles without changing points.
+    pub tangents: Vec<Vec3>,
 }
 
 impl Component for SplineComponent {}
@@ -74,6 +78,7 @@ impl SplineComponent {
                 .map(|i| Vec3::new(i as f32 * spacing - half, 0.0, 0.0))
                 .collect(),
             closed: false,
+            tangents: Vec::new(),
         }
     }
 
@@ -120,10 +125,43 @@ impl SplineComponent {
         );
         let t = t.clamp(0.0, 1.0);
         let (t2, t3) = (t * t, t * t * t);
-        0.5 * ((2.0 * p1)
-            + (-p0 + p2) * t
-            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+        let m1 = self.authored_tangent(segment).unwrap_or((p2 - p0) * 0.5);
+        let m2 = self
+            .authored_tangent(segment + 1)
+            .unwrap_or((p3 - p1) * 0.5);
+        p1 * (2.0 * t3 - 3.0 * t2 + 1.0)
+            + m1 * (t3 - 2.0 * t2 + t)
+            + p2 * (-2.0 * t3 + 3.0 * t2)
+            + m2 * (t3 - t2)
+    }
+
+    fn authored_tangent(&self, index: usize) -> Option<Vec3> {
+        let index = if self.closed && !self.points.is_empty() {
+            index % self.points.len()
+        } else {
+            index
+        };
+        self.tangents.get(index).copied().filter(|v| v.is_finite())
+    }
+
+    /// Build an arc-length table in world metres. Consumers retain this table
+    /// until the spline or transform changes instead of resampling each query.
+    #[must_use]
+    pub fn arc_length(&self, model: glam::Mat4) -> SplineArcLength {
+        let points: Vec<_> = self
+            .polyline()
+            .into_iter()
+            .map(|p| model.transform_point3(p))
+            .collect();
+        let mut cumulative = vec![0.0; points.len()];
+        for i in 1..points.len() {
+            cumulative[i] = cumulative[i - 1] + points[i].distance(points[i - 1]);
+        }
+        SplineArcLength {
+            points,
+            cumulative,
+            closed: self.closed,
+        }
     }
 
     /// The whole curve as a local-space polyline.
@@ -192,11 +230,63 @@ fn closest_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
 /// The schema. Both fields are authored and both are saved.
 pub(crate) fn spline_schema() -> ComponentSchema {
     component_schema! {
-        SplineComponent as "somnium.Spline", display "Spline", version 1,
+        SplineComponent as "somnium.Spline", display "Spline", version 2,
         fields {
             points { doc: "Control points in entity-local space. The curve passes through every one." },
             closed { doc: "Join the last point back to the first." },
+            tangents { doc: "Optional local derivatives, one per point. Missing entries use automatic Catmull-Rom tangents." },
         }
+    }
+}
+
+/// Arc-length parameterisation of the same sampled path the viewport draws.
+#[derive(Clone, Debug)]
+pub struct SplineArcLength {
+    points: Vec<Vec3>,
+    cumulative: Vec<f32>,
+    closed: bool,
+}
+
+impl SplineArcLength {
+    /// World-space length in metres.
+    #[must_use]
+    pub fn length(&self) -> f32 {
+        self.cumulative.last().copied().unwrap_or(0.0)
+    }
+
+    /// Position and unit tangent at a travelled distance. Open paths clamp;
+    /// closed paths wrap, including negative distances. Degenerate paths
+    /// return a zero tangent and empty paths return `None`.
+    #[must_use]
+    pub fn sample(&self, distance: f32) -> Option<(Vec3, Vec3)> {
+        let first = *self.points.first()?;
+        let length = self.length();
+        if !distance.is_finite() || !length.is_finite() {
+            return None;
+        }
+        if length <= f32::EPSILON {
+            return Some((first, Vec3::ZERO));
+        }
+        let distance = if self.closed {
+            distance.rem_euclid(length)
+        } else {
+            distance.clamp(0.0, length)
+        };
+        let end = self
+            .cumulative
+            .partition_point(|d| *d <= distance)
+            .clamp(1, self.points.len() - 1);
+        let delta = self.points[end] - self.points[end - 1];
+        let span = self.cumulative[end] - self.cumulative[end - 1];
+        let t = if span > f32::EPSILON {
+            (distance - self.cumulative[end - 1]) / span
+        } else {
+            0.0
+        };
+        Some((
+            self.points[end - 1].lerp(self.points[end], t),
+            delta.normalize_or_zero(),
+        ))
     }
 }
 
@@ -227,6 +317,41 @@ pub fn audible_position(world: &World, entity: Entity, model: glam::Mat4, listen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arc_length_moves_uniformly_in_world_metres_and_wraps_closed_paths() {
+        let spline = line();
+        let arc = spline.arc_length(glam::Mat4::from_scale(Vec3::splat(2.0)));
+        assert!((arc.length() - 40.0).abs() < 1e-4);
+        for distance in [0.0, 5.0, 20.0, 35.0, 40.0] {
+            let (position, tangent) = arc.sample(distance).unwrap();
+            assert!((position.x - (-20.0 + distance)).abs() < 1e-4);
+            assert!(tangent.distance(Vec3::X) < 1e-4);
+        }
+        assert_eq!(arc.sample(50.0), arc.sample(40.0));
+        let closed = SplineComponent {
+            closed: true,
+            ..spline
+        }
+        .arc_length(glam::Mat4::IDENTITY);
+        assert_eq!(closed.sample(closed.length() + 2.0), closed.sample(2.0));
+    }
+
+    #[test]
+    fn authored_tangents_change_shape_but_keep_endpoints() {
+        let mut spline = SplineComponent::straight(2, 10.0);
+        let before = spline.sample_segment(0, 0.25);
+        spline.tangents = vec![Vec3::new(10.0, 20.0, 0.0), Vec3::new(10.0, -20.0, 0.0)];
+        assert!(spline.sample_segment(0, 0.25).y > before.y + 1.0);
+        assert_eq!(spline.sample_segment(0, 0.0), spline.points[0]);
+        assert_eq!(spline.sample_segment(0, 1.0), spline.points[1]);
+        assert!(
+            SplineComponent::default()
+                .arc_length(glam::Mat4::IDENTITY)
+                .sample(0.0)
+                .is_none()
+        );
+    }
     use somnium_ecs::reflect::{FieldFlags, StableId};
 
     fn line() -> SplineComponent {
@@ -237,6 +362,7 @@ mod tests {
                 Vec3::new(10.0, 0.0, 0.0),
             ],
             closed: false,
+            tangents: Vec::new(),
         }
     }
 
@@ -253,6 +379,7 @@ mod tests {
                 Vec3::new(12.0, 0.0, -3.0),
             ],
             closed: false,
+            tangents: Vec::new(),
         };
         for (index, point) in spline.points.iter().enumerate() {
             let sampled = if index == 0 {
@@ -289,6 +416,7 @@ mod tests {
         let single = SplineComponent {
             points: vec![Vec3::new(1.0, 2.0, 3.0)],
             closed: false,
+            tangents: Vec::new(),
         };
         assert_eq!(single.segment_count(), 0);
         assert_eq!(
@@ -366,6 +494,7 @@ mod tests {
                 })
                 .collect(),
             closed: true,
+            tangents: Vec::new(),
         };
         let inside = ring
             .closest_point(glam::Mat4::IDENTITY, Vec3::ZERO)

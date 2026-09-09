@@ -246,6 +246,11 @@ pub enum CommandSurface {
 /// Stable execution meaning of a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandAction {
+    CreateComponent(&'static str),
+    DesignerTool(crate::editor_event::DesignerTool),
+    Prefab(crate::editor_event::PrefabAction),
+    GraphTool(crate::editor_event::GraphToolAction),
+    ExportBlockout,
     NewScene,
     SaveScene,
     ImportModel,
@@ -660,6 +665,336 @@ fn declarations() -> Vec<Command> {
     use CreateKind as C;
     use Workspace as W;
     vec![
+        command!(
+            "editor.create.navigation_link",
+            "Create Navigation Link",
+            "Create",
+            None,
+            "Create a ladder or jump connection; edit endpoints in Details.",
+            A::CreateComponent("somnium.NavigationLink"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.animation.save_events",
+            "Save Animation Events",
+            "Designer",
+            None,
+            "Save edited timeline markers to the rig event asset and reload playback.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationSaveEvents),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.prefab.nest",
+            "Add Nested Prefab",
+            "Prefab",
+            None,
+            "Mount another prefab under the selected instance; refresh all instances of its template.",
+            A::Prefab(crate::editor_event::PrefabAction::Nest),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.create.navigation_profile",
+            "Create Navigation Volume",
+            "Create",
+            None,
+            "Create Navigation Volume; configure it in Details.",
+            A::CreateComponent("somnium.NavigationProfile"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.navigation_agent",
+            "Create Navigation Agent",
+            "Create",
+            None,
+            "Create Navigation Agent; configure it in Details.",
+            A::CreateComponent("somnium.NavigationAgent"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.navigation_obstacle",
+            "Create Navigation Obstacle",
+            "Create",
+            None,
+            "Create Navigation Obstacle; configure it in Details.",
+            A::CreateComponent("somnium.NavigationObstacle"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.perception",
+            "Create Perception Sensor",
+            "Create",
+            None,
+            "Create Perception Sensor; configure it in Details.",
+            A::CreateComponent("somnium.Perception"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.scatter_settings",
+            "Create Scatter Settings",
+            "Create",
+            None,
+            "Create Scatter Settings; configure it in Details.",
+            A::CreateComponent("somnium.ScatterSettings"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.save_settings",
+            "Create Save Game Slot",
+            "Create",
+            None,
+            "Create Save Game Slot; configure it in Details.",
+            A::CreateComponent("somnium.SaveSettings"),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.navigation.bake",
+            "Bake Navigation",
+            "Designer",
+            None,
+            "Bake the selected volume from scene meshes and terrain; status appears in Details.",
+            A::DesignerTool(crate::editor_event::DesignerTool::NavigationBake),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.navigation.clear",
+            "Clear Navigation",
+            "Designer",
+            None,
+            "Cancel bakes and remove derived navigation.",
+            A::DesignerTool(crate::editor_event::DesignerTool::NavigationClear),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.behavior.edit",
+            "Edit Selected Behavior",
+            "Designer",
+            None,
+            "Reopen the selected entity behavior document in the shared graph editor.",
+            A::DesignerTool(crate::editor_event::DesignerTool::BehaviorEdit),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.animation.rig",
+            "Create Animation Preview Rig",
+            "Designer",
+            None,
+            "Create visible joints and draggable IK/look targets. Configure all animation controls in Details.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationRig),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.animation.reset",
+            "Reset Animation Preview",
+            "Designer",
+            None,
+            "Rewind playback and release physical preview bodies.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationReset),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.animation.reload",
+            "Reload Animation Events",
+            "Designer",
+            None,
+            "Reload the selected animation event timeline and preview settings.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationReload),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.animation.events",
+            "Edit Animation Events",
+            "Designer",
+            None,
+            "Open the selected rig event markers in the timeline editor.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationEvents),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.save.play",
+            "Save Play Slot",
+            "Designer",
+            None,
+            "Save the active Play-session changes using the Save Game Slot profile.",
+            A::DesignerTool(crate::editor_event::DesignerTool::SavePlay),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.save.load",
+            "Load Play Slot",
+            "Designer",
+            None,
+            "Load player changes into the active Play session. Stop returns to authored values.",
+            A::DesignerTool(crate::editor_event::DesignerTool::LoadPlay),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.save.thumbnail",
+            "Choose Save Slot Thumbnail",
+            "Designer",
+            None,
+            "Attach a PNG thumbnail to the selected Save Game Slot profile.",
+            A::DesignerTool(crate::editor_event::DesignerTool::SaveThumbnail),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.prefab.create",
+            "Create Prefab from Selection",
+            "Prefab",
+            None,
+            "Create Prefab from Selection.",
+            A::Prefab(crate::editor_event::PrefabAction::Create),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.prefab.instantiate",
+            "Instantiate Prefab",
+            "Prefab",
+            None,
+            "Instantiate Prefab.",
+            A::Prefab(crate::editor_event::PrefabAction::Instantiate),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.prefab.enter",
+            "Edit Prefab Instance",
+            "Prefab",
+            None,
+            "Edit Prefab Instance.",
+            A::Prefab(crate::editor_event::PrefabAction::Enter),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.prefab.exit",
+            "Exit Prefab Editing",
+            "Prefab",
+            None,
+            "Exit Prefab Editing.",
+            A::Prefab(crate::editor_event::PrefabAction::Exit),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.prefab.propagate",
+            "Propagate Prefab Edits",
+            "Prefab",
+            None,
+            "Propagate Prefab Edits.",
+            A::Prefab(crate::editor_event::PrefabAction::Propagate),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.prefab.revert",
+            "Revert Prefab Overrides",
+            "Prefab",
+            None,
+            "Revert Prefab Overrides.",
+            A::Prefab(crate::editor_event::PrefabAction::Revert),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.prefab.break_link",
+            "Break Prefab Link",
+            "Prefab",
+            None,
+            "Break Prefab Link.",
+            A::Prefab(crate::editor_event::PrefabAction::BreakLink),
+            CREATE,
+            selection
+        ),
+        command!(
+            "editor.authoring.scatter",
+            "Scatter Graph",
+            "Graph",
+            None,
+            "Scatter Graph.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Scatter),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.authoring.behavior",
+            "Behavior Graph",
+            "Graph",
+            None,
+            "Behavior Graph.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Behavior),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.authoring.open",
+            "Open Authoring Graph",
+            "Graph",
+            None,
+            "Open Authoring Graph.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Open),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.authoring.save",
+            "Save Authoring Graph",
+            "Graph",
+            None,
+            "Save Authoring Graph.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Save),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.authoring.apply",
+            "Apply Authoring Graph",
+            "Graph",
+            None,
+            "Apply Authoring Graph.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Apply),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.create.blockout",
+            "Create Blockout",
+            "Create",
+            None,
+            "Create editable box, ramp, stairs or cylinder geometry.",
+            A::CreateEntity(C::Blockout),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.blockout.export",
+            "Export Blockout Mesh",
+            "Create",
+            None,
+            "Export selected blockout to a reusable glTF mesh.",
+            A::ExportBlockout,
+            CREATE,
+            selection
+        ),
         command!(
             "editor.scene.new",
             "New Scene",

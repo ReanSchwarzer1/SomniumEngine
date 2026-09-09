@@ -28,10 +28,10 @@ it was planned. Read it before the source.
 
 | | |
 |---|---|
-| [Core ideas](context.md#core-ideas-illustrated) | How the renderer works, in five diagrams |
-| [Frame cost](context.md#where-the-frame-actually-goes) | Where the milliseconds go, measured |
-| [Why things are this way](context.md#why-things-are-the-way-they-are) | The decisions, and what they cost to learn |
-| [Phase ledger](context.md#phase-ledger) | Shipped, open, deferred, refused |
+| [Architecture](context.md#architectural-rules) | Runtime boundaries and data flow |
+| [Rendering](context.md#renderer-and-simulation-contracts) | Current rendering and simulation contracts |
+| [Authoring model](context.md#scene-and-authoring-model) | Schemas, prefab overrides and saves |
+| [Phase ledger](context.md#phase-ledger-and-remaining-work) | Shipped, open, deferred, refused |
 
 The engine is organized around three deliberate commitments:
 
@@ -46,15 +46,16 @@ The engine is organized around three deliberate commitments:
 >
 > **Current phase:** [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse),
 > covering runtime UI, animation, asset cooking, world partition, input, audio,
-> localisation, and remaining rendering gaps. Seven of its nine tracks contain
-> shipped work; the phase is not complete.
+> localisation, and remaining rendering gaps. All nine tracks contain implementation work; the phase is not complete.
+> This session adds O/P/P2/W/W2/X/Y/AF with native designer controls; see
+> [acceptance evidence](dev%20records/phase%20MORROWIND/MORROWIND-2026-09-09.md).
 >
 > **Architecture reference:** [`context.md`](context.md) — living, continuously
 > updated, and the file to read before the source.
 
 ## What is in here
 
-Sixteen engine crates, two example games, and the tools that keep the
+Seventeen engine crates, two example games, and the tools that keep the
 documentation honest. `somnium_core` is deliberately the widest: it coordinates
 subsystems without absorbing their internals.
 
@@ -67,6 +68,7 @@ flowchart TB
         JOBS["somnium_jobs<br/>priorities and deadlines"]
         SHADER["somnium_shader<br/>WGSL composition"]
         ANIM["somnium_anim"]
+        AI["somnium_ai<br/>navigation and behavior"]
         INPUT["somnium_input"]
         I18N["somnium_i18n"]
     end
@@ -295,12 +297,12 @@ Roughly chronological. Detailed records live in [`dev records/`](dev%20records/)
 | 0 | BALMORA | Census, **job system** (priorities, deadlines, cancellation), **shader system** (`//!include` composition, variant cache, hot reload), wgpu 30 | — |
 | 1 | VIVEC | **Runtime UI framework** — canvases, anchors, paths and gradients, directional navigation, rich text and IME, motion/springs, accessibility tree (AccessKit) | Text shaping (`cosmic-text`, decided, behind a flag) |
 | 2 | CONSTRUCTION SET | **Node graph editor** (material + animation catalogues), **timeline** with embedded curve editor | Docking, virtualisation, play-in-editor, GUI layout editor |
-| 3 | HLAALU | — | Prefabs, splines, rule-driven scattering |
+| 3 | HLAALU | **Prefabs**, splines/blockout, rule-driven scattering; generated Details and shared graph authoring | — |
 | 4 | SILT STRIDER | **Deterministic asset cook** with content-hashed incremental cache, **budgeted residency** + hot reload, **world partition** with cell-owned entity streaming, **HLOD/impostors** and a floating origin | — |
-| 5 | DWEMER | **Skeletal animation** — GPU skinning into the shared geometry pool, clips, blend trees, state machines, sync tracks | Root motion, IK, compression |
-| 6 | SIXTH HOUSE | — | Navmesh, behaviour trees |
+| 5 | DWEMER | **Skeletal animation** — GPU skinning into the shared geometry pool, clips, blend trees, state machines, sync tracks, **root motion/IK/events/ragdolls**, compression and pose jobs | — |
+| 6 | SIXTH HOUSE | **Tiled navigation**, pathfinding, obstacles/agents/links, behavior graphs, Luau tasks and perception | — |
 | 7 | RED MOUNTAIN | **Virtual shadow maps**, **portable DDGI** (SDF-traced, no ray query), **virtual texturing** for terrain, **OIT + SMAA** | GPU particles |
-| 8 | ALMSIVI | **Input actions** (control paths, processors, rebinding), **audio** (buses, attenuation, occlusion, Doppler), **localisation** (CLDR plurals, fallback chains) | Save games, video, the playable slice |
+| 8 | ALMSIVI | **Input actions** (control paths, processors, rebinding), **audio** (buses, attenuation, occlusion, Doppler), **localisation** (CLDR plurals, fallback chains), **save games/state stack** | Video, final playable slice |
 
 ### Planned phases
 
@@ -336,7 +338,7 @@ flowchart LR
 Measured on the default Coastal view at 1920x1032, the shading pass reports
 exactly 1,981,440 fragment invocations for 1,981,440 pixels. No overdraw, by
 construction. Where the rest of the frame goes is in
-[context.md](context.md#where-the-frame-actually-goes).
+[context.md](context.md#renderer-and-simulation-contracts).
 
 ### What one pixel of that shading pass does
 

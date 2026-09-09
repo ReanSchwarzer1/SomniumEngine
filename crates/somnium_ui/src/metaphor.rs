@@ -12,6 +12,7 @@ pub const HELP_OUTLINER: &str = include_str!("../../../docs/editor/outliner.md")
 pub const HELP_TERRAIN: &str = include_str!("../../../docs/editor/terrain.md");
 pub const HELP_WATER: &str = include_str!("../../../docs/editor/water.md");
 pub const HELP_LIGHTING: &str = include_str!("../../../docs/editor/lighting.md");
+pub const HELP_MORROWIND: &str = include_str!("../../../docs/editor/morrowind.md");
 pub const HELP_SCRIPTING: &str = include_str!("../../../docs/editor/scripting.md");
 
 pub fn help_page(id: u8) -> &'static str {
@@ -25,6 +26,7 @@ pub fn help_page(id: u8) -> &'static str {
         7 => HELP_WATER,
         8 => HELP_LIGHTING,
         9 => HELP_SCRIPTING,
+        10 => HELP_MORROWIND,
         _ => HELP_WELCOME,
     }
 }
@@ -41,6 +43,7 @@ pub fn help_titles() -> &'static [&'static str] {
         "Water",
         "Lighting",
         "Scripting",
+        "Designer Tools",
     ]
 }
 
@@ -69,8 +72,20 @@ pub fn parse_help_markdown(src: &str) -> Vec<HelpBlock> {
         }
         para.clear();
     };
+    let mut diagram = false;
     for line in src.lines() {
         let t = line.trim();
+        if t == "```mermaid" {
+            flush_para(&mut para, &mut out);
+            diagram = true;
+            continue;
+        }
+        if diagram {
+            if t == "```" {
+                diagram = false;
+            }
+            continue;
+        }
         if t.is_empty() {
             flush_para(&mut para, &mut out);
         } else if let Some(rest) = t.strip_prefix("## ") {
@@ -258,7 +273,7 @@ pub fn icon_for_entity_name(name: &str) -> IconId {
 pub fn create_icon(kind: crate::editor_event::CreateKind) -> IconId {
     use crate::editor_event::CreateKind::*;
     match kind {
-        Cube => IconId::Cube,
+        Cube | Blockout => IconId::Cube,
         Sphere => IconId::Sphere,
         Plane => IconId::Plane,
         Cylinder => IconId::Cylinder,
@@ -298,7 +313,13 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 10);
+        assert_eq!(help_titles().len(), 11);
+        assert_eq!(help_page(10), HELP_MORROWIND);
+        assert!(
+            help_blocks(10)
+                .iter()
+                .all(|block| !format!("{block:?}").contains("flowchart LR"))
+        );
         assert_eq!(help_page(4), HELP_ABOUT);
         assert_eq!(help_page(9), HELP_SCRIPTING);
         // Phase 16-D: the two rules an author most needs and is most

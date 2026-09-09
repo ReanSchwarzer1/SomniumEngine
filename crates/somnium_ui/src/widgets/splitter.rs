@@ -23,6 +23,9 @@ pub enum SplitterMessage {
     Changed(f32),
     /// Apply a persisted width/height without emitting Changed.
     SetFirstSize(f32),
+    /// Temporarily give the first child the full area without losing the
+    /// authored divider position. The host hides the secondary child.
+    SetSinglePane(bool),
 }
 
 pub struct Splitter {
@@ -30,6 +33,7 @@ pub struct Splitter {
     pub first_size: f32,
     pub min_first: f32,
     pub min_second: f32,
+    single_pane: bool,
     dragging: bool,
     drag_origin: Option<(f32, f32)>,
 }
@@ -41,7 +45,7 @@ impl Control for Splitter {
         // for its own window leaves its neighbour alone in here, and a
         // neighbour still measured against half the space renders as a panel
         // with a hole beside it.
-        if widget.children.len() < 2 {
+        if self.single_pane || widget.children.len() < 2 {
             if let Some(&only) = widget.children.first() {
                 ctx.measure_child(only, available);
             }
@@ -80,7 +84,7 @@ impl Control for Splitter {
 
     fn arrange_override(&self, widget: &Widget, ctx: &mut LayoutCtx, final_size: Vec2) -> Vec2 {
         let bar = theme::SPLITTER_THICKNESS;
-        if widget.children.len() < 2 {
+        if self.single_pane || widget.children.len() < 2 {
             if let Some(&only) = widget.children.first() {
                 ctx.arrange_child(
                     only,
@@ -144,7 +148,7 @@ impl Control for Splitter {
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         // Nothing to divide, so no divider: a hairline across a panel that
         // reaches both edges is a line with nothing on one side of it.
-        if widget.children.len() < 2 {
+        if self.single_pane || widget.children.len() < 2 {
             return;
         }
         let b = widget.screen_bounds();
@@ -187,6 +191,14 @@ impl Control for Splitter {
         msg: &mut UiMessage,
         emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(SplitterMessage::SetSinglePane(value)) = msg.data::<SplitterMessage>() {
+            self.single_pane = *value;
+            self.dragging = false;
+            self.drag_origin = None;
+            widget.invalidate_layout();
+            msg.handled = true;
+            return;
+        }
         if let Some(SplitterMessage::SetFirstSize(v)) = msg.data::<SplitterMessage>() {
             self.first_size = *v;
             widget.invalidate_layout();
@@ -237,6 +249,9 @@ impl Control for Splitter {
 
 impl Splitter {
     fn hit_rect(&self, widget: &Widget) -> Rect {
+        if self.single_pane {
+            return Rect::default();
+        }
         // A divider that is not drawn must not be draggable either, or the
         // panel filling a one-child splitter has an invisible resize cursor
         // running down the middle of it.
@@ -317,6 +332,7 @@ impl SplitterBuilder {
                 first_size: self.first_size,
                 min_first: self.min_first,
                 min_second: self.min_second,
+                single_pane: false,
                 dragging: false,
                 drag_origin: None,
             }),
@@ -335,6 +351,7 @@ mod tests {
             first_size: 10.0,
             min_first: 40.0,
             min_second: 80.0,
+            single_pane: false,
             dragging: false,
             drag_origin: None,
         };

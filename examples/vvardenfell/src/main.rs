@@ -55,6 +55,7 @@
 //! lines of `on_render_ui` below are what four sub-phases were for.
 
 mod hud;
+mod morrowind;
 
 use hud::{Hud, HudTree};
 use somnium_asset::cook::{
@@ -126,6 +127,8 @@ struct Vvardenfell {
     /// MORROWIND-L. Stable digest of animation and UI-motion timeline assets
     /// authored and round-tripped solely through `somnium_ui`'s public API.
     timeline_evidence: u64,
+    /// Public composition, motion and navigation acceptance slice.
+    morrowind: Option<morrowind::Slice>,
 }
 
 impl GameApp for Vvardenfell {
@@ -141,6 +144,28 @@ impl GameApp for Vvardenfell {
     }
 
     fn on_init(&mut self, ctx: &mut EngineContext) {
+        let slice = morrowind::exercise(ctx.world, ctx.jobs, ctx.navigation)
+            .expect("MORROWIND public game interfaces must compose");
+        let patrol_asset = somnium_script::ids::ScriptAssetId::mint();
+        ctx.scripts
+            .load_script(
+                patrol_asset,
+                "scripts/morrowind_ai_patrol.luau",
+                include_str!("../../../assets/scripts/morrowind_ai_patrol.luau"),
+            )
+            .expect("The shipped navigation patrol compiles");
+        let mut scripts = somnium_script::attachment::ScriptSet::new();
+        scripts.attach(somnium_script::attachment::ScriptAttachment::new(
+            patrol_asset,
+        ));
+        ctx.world
+            .insert_component(slice.actor, scripts)
+            .expect("The patrol actor remains alive");
+        println!(
+            "  navigation profile {:?}, animation rig {:?}, {} scattered stones",
+            slice.profile, slice.rig, slice.scattered
+        );
+        self.morrowind = Some(slice);
         // MORROWIND-AB. The game selects the portable GI tier through the
         // public reflected scene component, exactly as an editor-authored
         // Post Processing entity does. No renderer/pass access is required.

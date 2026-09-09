@@ -33,11 +33,11 @@ audits can therefore be historically useful and presently false.
 
 ## Current roadmap
 
-**Next implementation priority, 2026-09-06:** [PERSONA (Atlus)](phase_PERSONA.md)
-comes before further work on other phases. Its editor survey and design/QoL plan
-are written; A/B visual foundations and C/D workspace/QoL implementation are in tree
-([C/D record and captures](<phase PERSONA/PERSONA-C_D.md>)). The [first E/F slice](<phase PERSONA/PERSONA-E_F.md>) adds contextual authoring, fixes Foliage/F8, and repairs floating placement and narrow-window clipping. The [designer QoL follow-up](<phase PERSONA/PERSONA-QoL.md>) adds material/lighting tools, browser fixes, Scripts access and saved brush settings. User visual review, designer journeys, E/F acceptance and G remain open. The dependency graph below describes
-the subsequent roadmap, not permission to skip PERSONA.
+**Session priority, 2026-09-09:** the user requested eight MORROWIND sub-phases
+and complete designer access. O, P, P2, W, W2, X, Y and AF are implemented;
+[the session record](<phase MORROWIND/MORROWIND-2026-09-09.md>) records the
+executed acceptance checks. PERSONA's remaining visual/journey acceptance and
+later expansion remain open; this session does not close that phase.
 
 ```mermaid
 flowchart LR
@@ -57,7 +57,7 @@ work does not overlap. STALKER waits for the relevant outputs of both.
 
 ## Phase index
 
-The status column is current as of 2026-09-03. The linked file still contains
+The status column is current as of 2026-09-09. The linked file still contains
 its own historical snapshot and revision notes.
 
 | Phase | Focus | Current status | Plan or record |

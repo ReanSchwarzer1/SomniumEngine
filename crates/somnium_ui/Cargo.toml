@@ -14,6 +14,7 @@ tracing    = { workspace = true }
 somnium_ecs = { path = "../somnium_ecs" }
 somnium_asset = { path = "../somnium_asset" }
 somnium_anim = { path = "../somnium_anim" }
+somnium_ai = { workspace = true }
 somnium_shader = { path = "../somnium_shader" }
 glam       = { workspace = true }
 bytemuck   = { workspace = true }

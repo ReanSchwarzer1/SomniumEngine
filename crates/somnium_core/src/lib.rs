@@ -46,10 +46,13 @@
 
 /// Core application lifecycle and event loop management.
 pub mod a11y_bridge;
+pub mod ai;
+pub mod animation_motion;
 pub mod app;
 mod audio_scene;
 mod authoring_settings;
 pub mod autosave;
+pub mod blockout;
 pub mod character;
 pub mod clipboard;
 pub mod config;
@@ -67,7 +70,11 @@ pub mod landscape;
 pub mod light_units;
 pub mod log_capture;
 pub mod map;
+pub mod prefab;
 pub mod reflect_registry;
+pub mod save_game;
+pub mod scatter_scene;
+mod scene_delta;
 pub mod spline;
 /// The `.somnium` container: a framed header the Content Drawer can read
 /// without parsing the scene, and the three-format routing that goes with it.
@@ -2378,6 +2385,7 @@ pub enum WaterBodyKind {
 }
 
 impl WaterBodyKind {
+    /// Decode persisted water kind, retaining Lake as the compatibility default.
     #[must_use]
     pub fn from_u32(raw: u32) -> Self {
         match raw {
@@ -2388,6 +2396,7 @@ impl WaterBodyKind {
         }
     }
 
+    /// Designer-facing water kind name.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -2814,3 +2823,8 @@ mod camera_speed_tests {
 #[derive(Clone, Copy)]
 pub(crate) struct AssetEditSession;
 impl somnium_ecs::Component for AssetEditSession {}
+
+/// Native animation preview controls, visible rigs and runtime clip binding.
+pub mod animation_authoring;
+
+mod prefab_details;

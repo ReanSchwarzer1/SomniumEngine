@@ -18,25 +18,26 @@ None of this is a Rust parser and it does not pretend to be one.
 
 | Crate | Lines | Δ plan | Share | Tests | Δ plan | `.rs` | `.wgsl` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `somnium_ui` | 74,105 | +46,575 | 33.5% | 795 | +580 | 117 | 2 |
-| `somnium_renderer` | 69,708 | +19,502 | 31.5% | 502 | +174 | 96 | 56 |
-| `somnium_core` | 38,316 | +19,096 | 17.3% | 418 | +201 | 47 | 0 |
-| `somnium_asset` | 6,749 | +5,110 | 3.1% | 56 | +50 | 13 | 0 |
-| `somnium_ecs` | 5,227 | +1,209 | 2.4% | 69 | +15 | 9 | 0 |
-| `somnium_script` | 4,969 | +154 | 2.2% | 55 | — | 12 | 0 |
-| `somnium_script_luau` | 4,818 | +361 | 2.2% | 59 | +1 | 9 | 0 |
-| `somnium_anim` | 4,380 | +4,380 | 2.0% | 46 | +46 | 4 | 0 |
-| `somnium_input` | 3,177 | +3,177 | 1.4% | 66 | +66 | 6 | 0 |
+| `somnium_ui` | 75,926 | +48,396 | 32.1% | 801 | +586 | 120 | 2 |
+| `somnium_renderer` | 69,715 | +19,509 | 29.5% | 502 | +174 | 96 | 56 |
+| `somnium_core` | 46,840 | +27,620 | 19.8% | 457 | +240 | 64 | 0 |
+| `somnium_asset` | 7,273 | +5,634 | 3.1% | 59 | +53 | 14 | 0 |
+| `somnium_anim` | 5,981 | +5,981 | 2.5% | 56 | +56 | 9 | 0 |
+| `somnium_ecs` | 5,227 | +1,209 | 2.2% | 69 | +15 | 9 | 0 |
+| `somnium_script` | 5,041 | +226 | 2.1% | 55 | — | 12 | 0 |
+| `somnium_script_luau` | 4,818 | +361 | 2.0% | 59 | +1 | 9 | 0 |
+| `somnium_input` | 3,177 | +3,177 | 1.3% | 66 | +66 | 6 | 0 |
 | `somnium_shader` | 2,517 | +2,517 | 1.1% | 41 | +41 | 6 | 0 |
-| `somnium_i18n` | 1,964 | +1,964 | 0.9% | 57 | +57 | 5 | 0 |
-| `somnium_jobs` | 1,697 | +1,697 | 0.8% | 18 | +18 | 5 | 0 |
+| `somnium_ai` | 2,271 | +2,271 | 1.0% | 11 | +11 | 7 | 0 |
+| `somnium_i18n` | 1,964 | +1,964 | 0.8% | 57 | +57 | 5 | 0 |
+| `somnium_jobs` | 1,697 | +1,697 | 0.7% | 18 | +18 | 5 | 0 |
 | `somnium_audio` | 1,581 | +1,488 | 0.7% | 40 | +40 | 6 | 0 |
 | `somnium_voxel` | 1,096 | +96 | 0.5% | 13 | +2 | 6 | 0 |
-| `somnium_physics` | 591 | +11 | 0.3% | 1 | — | 8 | 0 |
-| `somnium_physics_sys` | 334 | — | 0.2% | 0 | — | 2 | 0 |
-| **Total** | **221,229** | +107,337 | | **2236** | +1,291 | | |
+| `somnium_physics` | 905 | +325 | 0.4% | 2 | +1 | 10 | 0 |
+| `somnium_physics_sys` | 376 | +42 | 0.2% | 0 | — | 2 | 0 |
+| **Total** | **236,405** | +122,513 | | **2306** | +1,361 | | |
 
-The top three crates are **82.3%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
+The top three crates are **81.4%** of the tree (`somnium_ui`, `somnium_renderer`, `somnium_core`). The plan's finding was 85.1%.
 
 `examples/hello_engine` is **3,684 lines** (+1,038 against the plan) and is still one of two programs in the repository. The second, `examples/vvardenfell`, is created by this sub-phase and is deliberately empty — the second-example rule is a rule about the *API boundary*, and an empty program that links only public crate APIs already tests part of it.
 
@@ -49,22 +50,23 @@ panel, which §8 says is not a finished sub-phase.
 
 | Crate | `pub fn` | `pub struct` | `pub enum` | `pub trait` | `pub type` | `pub const` | `pub mod` | Total |
 |---|---|---|---|---|---|---|---|---|
-| `somnium_ui` | 1346 | 272 | 125 | 8 | 14 | 197 | 113 | **2076** |
+| `somnium_ui` | 1363 | 273 | 128 | 8 | 14 | 198 | 115 | **2100** |
 | `somnium_renderer` | 706 | 164 | 9 | 1 | 3 | 137 | 92 | **1112** |
-| `somnium_core` | 350 | 113 | 25 | 4 | 3 | 47 | 41 | **583** |
-| `somnium_script` | 126 | 35 | 10 | 3 | 3 | 20 | 11 | **208** |
+| `somnium_core` | 455 | 146 | 28 | 4 | 4 | 47 | 49 | **733** |
+| `somnium_script` | 127 | 35 | 10 | 3 | 3 | 20 | 11 | **209** |
 | `somnium_ecs` | 148 | 22 | 7 | 5 | 3 | 9 | 7 | **201** |
-| `somnium_asset` | 93 | 49 | 10 | 0 | 0 | 13 | 9 | **174** |
-| `somnium_anim` | 91 | 38 | 16 | 0 | 1 | 7 | 0 | **153** |
+| `somnium_anim` | 113 | 51 | 20 | 0 | 1 | 8 | 0 | **193** |
+| `somnium_asset` | 96 | 53 | 11 | 0 | 0 | 13 | 10 | **183** |
 | `somnium_input` | 80 | 10 | 11 | 1 | 0 | 1 | 5 | **108** |
 | `somnium_shader` | 61 | 15 | 2 | 0 | 0 | 1 | 3 | **82** |
+| `somnium_ai` | 50 | 18 | 5 | 1 | 3 | 0 | 4 | **81** |
 | `somnium_audio` | 37 | 10 | 2 | 0 | 0 | 8 | 5 | **62** |
+| `somnium_physics` | 30 | 9 | 3 | 0 | 0 | 3 | 7 | **52** |
 | `somnium_i18n` | 35 | 5 | 4 | 0 | 1 | 0 | 4 | **49** |
 | `somnium_jobs` | 35 | 10 | 3 | 0 | 1 | 0 | 0 | **49** |
-| `somnium_physics` | 25 | 4 | 2 | 0 | 0 | 3 | 6 | **40** |
 | `somnium_script_luau` | 25 | 5 | 0 | 0 | 0 | 3 | 4 | **37** |
+| `somnium_physics_sys` | 33 | 4 | 0 | 0 | 0 | 0 | 0 | **37** |
 | `somnium_voxel` | 16 | 6 | 1 | 0 | 1 | 6 | 5 | **35** |
-| `somnium_physics_sys` | 28 | 1 | 0 | 0 | 0 | 0 | 0 | **29** |
 
 ## 3. WGSL inventory (plan §4.3)
 
@@ -93,23 +95,23 @@ is a system this phase still owes.
 
 | Term | Files | Plan | Δ | Reading |
 |---|---:|---:|---:|---|
-| `bone` | 6 | 0 | +6 | No skeletal animation of any kind (Track 5). |
+| `bone` | 10 | 0 | +10 | No skeletal animation of any kind (Track 5). |
 | `armature` | 1 | 0 | +1 | As above. |
-| `skin` | 36 | 8 | +28 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
+| `skin` | 41 | 8 | +33 | Mostly false positives (`asking`, `masking`); `hlms.rs` names skinning as a hypothetical key. |
 | `navmesh` | 0 | 0 | — | No navigation (Track 6). |
 | `pathfind` | 0 | 0 | — | As above. |
 | `gamepad` | 8 | 0 | +8 | No input abstraction (Track 8, Seam 5). |
 | `action_map` | 1 | 0 | +1 | As above. |
 | `localiz` | 4 | 0 | +4 | No localization (Track 8). |
-| `state_machine` | 6 | 0 | +6 | No animation or AI state machines (Tracks 5, 6). |
-| `prefab` | 9 | 2 | +7 | Both are comments in the scripting crate. No prefab system (Track 3). |
+| `state_machine` | 7 | 0 | +7 | No animation or AI state machines (Tracks 5, 6). |
+| `prefab` | 26 | 2 | +24 | Both are comments in the scripting crate. No prefab system (Track 3). |
 | `dock` | 15 | 5 | +10 | An unused `IconId::Dock` and a comment. No docking system (Track 2). |
 | `accessib` | 12 | 1 | +11 | A doc comment about script-accessible fields. No accessibility (Track 1). |
 | `nine_slice` | 2 | 1 | +1 | The draw call exists; nothing can feed it (Track 1). |
 
 ## 5. Component schemas and environment knobs (plan §4.8, §4.9)
 
-- **Component schemas registered:** 32 (+20 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
+- **Component schemas registered:** 45 (+33 against the plan). Counted as `component_schema!` invocations across `crates/`; the plan's twelve counted only the registrations in `reflect_registry.rs`, and CONTROL-B added the rest. §11 row 4 makes a schema a per-sub-phase obligation, so this number is expected to rise once per new component and never on its own.
 - **`SOMNIUM_*` variables:** 154 (+58 against the plan), over `crates/` and `examples/`. `phase_CONTROL.md` reports a different figure because it counts different directories; **CONTROL-A's generated table stays authoritative** and this row exists so the two numbers do not read as a regression (plan §4.9).
 
 ## 6. Dependency justification (plan §4.7)

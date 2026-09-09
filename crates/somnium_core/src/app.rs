@@ -562,7 +562,9 @@ enum LifecycleState {
 /// true the moment TSUSHIMA-I added a fifth.
 #[derive(Clone, Copy)]
 pub struct FoliageEntry {
+    /// Label in the foliage palette.
     pub name: &'static str,
+    /// Source mesh path relative to project content.
     pub path: &'static str,
     /// One instance per click, at the cursor, ignoring density.
     pub single: bool,
@@ -571,6 +573,7 @@ pub struct FoliageEntry {
     /// Terrain layer this entry wants underneath it. `min_layer_weight` of 0
     /// means the entry does not care and the test is skipped entirely.
     pub layer: u8,
+    /// Minimum terrain-layer contribution required for placement.
     pub min_layer_weight: f32,
     /// Largest lean from vertical, degrees. Zero for anything that grew.
     pub max_tilt_deg: f32,
@@ -578,7 +581,9 @@ pub struct FoliageEntry {
     /// the whole reason this is per-entry: the brush's 40° default is right for
     /// grass and refuses to put a rock wall anywhere a rock wall belongs.
     pub max_slope_deg: f32,
+    /// Lower uniform scale bound for deterministic placement.
     pub scale_min: f32,
+    /// Upper uniform scale bound for deterministic placement.
     pub scale_max: f32,
 }
 
@@ -973,6 +978,10 @@ pub struct Engine<G: GameApp> {
     a11y: Option<crate::a11y_bridge::A11yBridge>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
     jobs: JobSystem,
+    navigation_editor: crate::ai::NavigationEditor,
+    animation_authoring: crate::animation_authoring::AnimationAuthoringSystem,
+    designer_saves: crate::save_game::editor::DesignerSaves,
+    animation_event_owner: Option<somnium_ecs::Entity>,
     /// MORROWIND-S production coordinator driven by the reflected component
     /// attached to a terrain entity.
     world_partition: Option<crate::world_partition::WorldPartition>,
@@ -1571,6 +1580,10 @@ impl<G: GameApp + 'static> Engine<G> {
             ui_manager: None,
             a11y: None,
             jobs: JobSystem::default(),
+            navigation_editor: crate::ai::NavigationEditor::default(),
+            animation_authoring: crate::animation_authoring::AnimationAuthoringSystem::default(),
+            designer_saves: crate::save_game::editor::DesignerSaves::default(),
+            animation_event_owner: None,
             world_partition: None,
             world_partition_cell_size: 0.0,
             world_partition_pin: None,
@@ -1949,6 +1962,18 @@ impl<G: GameApp> Engine<G> {
             .update(&mut self.world, time, &input, &mut services);
     }
 
+    fn script_behavior_update(&mut self, dt: f32) {
+        let time = self.script_time(self.simulation_clock.fixed_delta_seconds, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
+        };
+        self.scripts
+            .tick_behaviors(&mut self.world, time, &input, &mut services);
+    }
+
     /// Phase 16-E: recompile scripts whose file changed and settled.
     ///
     /// A quarter of a second is long enough to cover an editor that
@@ -2175,6 +2200,10 @@ impl<G: GameApp> Engine<G> {
         };
         let kind = SceneKind::of(&document);
         let _ = header;
+        self.animation_authoring
+            .clear(&mut self.world, self.physics.as_mut());
+        self.navigation_editor.clear(&mut self.world);
+        self.animation_event_owner = None;
 
         // The renderer's scene-side state is torn down once, for every route,
         // so a half-loaded scene cannot inherit the previous one's colliders.
@@ -2285,10 +2314,31 @@ impl<G: GameApp> Engine<G> {
                     MeshKind::Sphere => somnium_asset::generate_sphere(0.5, 16, 16),
                     MeshKind::Cylinder => somnium_asset::generate_cylinder(0.5, 1.0, 16),
                 };
-                let material = self
-                    .world
-                    .get::<MaterialComponent>(entity)
-                    .map_or(0, |material| material.runtime_id);
+                let binding = self.world.get::<MaterialComponent>(entity).copied();
+                let material = match binding {
+                    Some(material)
+                        if material.runtime_id != 0
+                            || material.asset != somnium_asset::database::AssetId::NONE =>
+                    {
+                        material.runtime_id
+                    }
+                    _ => *self.default_material_id.get_or_insert_with(|| {
+                        renderer.materials_pool.add_material(
+                            &render_ctx.queue,
+                            somnium_renderer::material::pool::GpuMaterial::from_asset(
+                                &somnium_asset::material::MaterialAsset::default(),
+                                |_| -1,
+                            ),
+                        )
+                    }),
+                };
+                let _ = self.world.insert_component(
+                    entity,
+                    MaterialComponent {
+                        asset: binding.map_or(somnium_asset::database::AssetId::NONE, |m| m.asset),
+                        runtime_id: material,
+                    },
+                );
                 let alloc =
                     renderer
                         .geometry
@@ -2517,16 +2567,7 @@ impl<G: GameApp> Engine<G> {
             .selection
             .as_slice()
             .iter()
-            .filter_map(|entity| {
-                self.world
-                    .get::<WorldTransform>(*entity)
-                    .map(|world| world.0.to_scale_rotation_translation().2)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(*entity)
-                            .map(|transform| transform.translation)
-                    })
-            })
+            .flat_map(|entity| designer::designer_focus_points(&self.world, *entity))
             .collect();
         let first = points.first().copied()?;
         let mut min = first;
@@ -2969,12 +3010,17 @@ impl<G: GameApp> Engine<G> {
             &mut self.world,
             &self.type_registry,
         ));
+        self.designer_saves
+            .begin(&mut self.world, &self.type_registry);
         self.script_step = 0;
         self.scripts.runtime_mut().set_world_seed(SCRIPT_WORLD_SEED);
     }
 
     /// Tear every script down and restore the world exactly as it was.
     fn end_play_session(&mut self) {
+        self.animation_authoring
+            .clear(&mut self.world, self.physics.as_mut());
+        crate::ai::reset_editor_runtime(&mut self.world);
         self.audio_scene.stop_all();
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
@@ -2985,6 +3031,7 @@ impl<G: GameApp> Engine<G> {
         if let Some(checkpoint) = self.play_checkpoint.take() {
             checkpoint.restore(&mut self.world, &self.type_registry);
         }
+        self.designer_saves.end();
         self.script_step = 0;
         self.drain_script_output();
     }
@@ -3187,6 +3234,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3280,6 +3328,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
                     &mut self.jobs,
+                    &mut self.navigation_editor,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -3313,6 +3362,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3597,6 +3647,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3812,6 +3863,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3907,6 +3959,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.physics.as_mut().unwrap(),
                         self.audio.as_mut().unwrap(),
                         &mut self.jobs,
+                        &mut self.navigation_editor,
                         self.render_ctx.as_ref(),
                         self.renderer.as_mut(),
                         &mut self.selection.primary,
@@ -4057,6 +4110,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -4208,6 +4262,26 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     row.locked = flags.locked;
                 }
                 row.tags = entity_tags(&self.world, entity);
+                if self
+                    .world
+                    .get::<crate::prefab::PrefabMember>(entity)
+                    .is_some()
+                {
+                    row.tags.push("prefab");
+                    row.name.push_str(" [Prefab]");
+                    if self.selection.primary == Some(entity) {
+                        let count = crate::prefab_details::refresh(
+                            &mut self.world,
+                            entity,
+                            &self.type_registry,
+                        );
+                        if count > 0 {
+                            row.name.push_str(&format!(" [{count} overrides*]"));
+                        }
+                    }
+                } else if self.selection.primary == Some(entity) {
+                    crate::prefab_details::refresh(&mut self.world, entity, &self.type_registry);
+                }
             }
             self.selection.retain_alive(&self.world);
             self.selection.reconcile();
@@ -4732,6 +4806,39 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        // Evaluate author intent before the game publishes this frame's draw data.
+        let playing = self.simulation_clock.state == SimulationState::Playing || self.stepping_now;
+        let preview_dt = if self.stepping_now {
+            self.simulation_clock.fixed_delta_seconds
+        } else if self.simulation_clock.state == SimulationState::Paused {
+            0.0
+        } else {
+            dt
+        };
+        if let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+            crate::blockout::sync(&mut self.world, renderer, render_ctx);
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            self.navigation_editor.update(
+                &mut self.world,
+                renderer,
+                &mut self.jobs,
+                preview_dt,
+                playing,
+            );
+        }
+        self.animation_authoring.update(
+            &mut self.world,
+            self.physics.as_mut(),
+            &mut self.jobs,
+            preview_dt,
+        );
+        crate::propagate_transforms(&mut self.world);
+        if playing {
+            self.designer_saves.tick(preview_dt);
+            self.script_behavior_update(preview_dt);
+        }
+
         {
             let mut ctx = EngineContext::new(
                 &self.time,
@@ -4740,6 +4847,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -4970,6 +5078,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
                     &mut self.jobs,
+                    &mut self.navigation_editor,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -5653,6 +5762,7 @@ impl<G: GameApp> Engine<G> {
             self.physics.as_mut().unwrap(),
             self.audio.as_mut().unwrap(),
             &mut self.jobs,
+            &mut self.navigation_editor,
             self.render_ctx.as_ref(),
             self.renderer.as_mut(),
             &mut self.selection.primary,
@@ -6573,6 +6683,11 @@ impl<G: GameApp> Engine<G> {
             };
             let snapshot = EntitySnapshot {
                 spline: None,
+                blockout: None,
+                prefab: None,
+                persistent_id: None,
+                surface_tags: None,
+                reflected: Vec::new(),
                 transform: Some(Transform {
                     translation: translation + offset,
                     rotation,
@@ -8664,6 +8779,135 @@ impl<G: GameApp> Engine<G> {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
         match ev {
+            EditorEvent::CreateComponent(name) => self.create_designer_component(&name),
+            EditorEvent::DesignerTool(action) => self.run_designer_tool(action),
+            EditorEvent::Prefab(action) => {
+                self.selection.reconcile();
+                let registry = crate::reflect_registry::component_registry();
+                let source_before = if matches!(
+                    action,
+                    somnium_ui::editor_event::PrefabAction::Propagate
+                        | somnium_ui::editor_event::PrefabAction::Nest
+                ) {
+                    self.selection
+                        .primary
+                        .and_then(|entity| self.world.get::<crate::prefab::PrefabMember>(entity))
+                        .and_then(|member| {
+                            let path = std::path::PathBuf::from(&member.source);
+                            std::fs::read(&path).ok().map(|bytes| (path, bytes))
+                        })
+                } else {
+                    None
+                };
+                let before = crate::scene_schema::scene_to_json(&mut self.world, &registry);
+                match crate::prefab::editor_action(&mut self.world, &mut self.selection, action) {
+                    Ok(message) => {
+                        if matches!(
+                            action,
+                            somnium_ui::editor_event::PrefabAction::Instantiate
+                                | somnium_ui::editor_event::PrefabAction::Revert
+                                | somnium_ui::editor_event::PrefabAction::Propagate
+                                | somnium_ui::editor_event::PrefabAction::Nest
+                        ) {
+                            self.reconstruct_scene_gpu("assets/prefab.somprefab");
+                        }
+                        let after = crate::scene_schema::scene_to_json(&mut self.world, &registry);
+                        let sources = source_before
+                            .and_then(|(path, before)| {
+                                std::fs::read(&path).ok().map(|after| (path, before, after))
+                            })
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        if before != after
+                            || sources.iter().any(|(_, before, after)| before != after)
+                        {
+                            self.undo_stack.push_silent(Box::new(
+                                crate::prefab::PrefabEditCommand::with_sources(
+                                    before, after, sources,
+                                ),
+                            ));
+                            self.scene_dirty = true;
+                        }
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast(&message);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast(&error);
+                        }
+                    }
+                }
+            }
+            EditorEvent::ExportBlockout => {
+                let result = (|| -> Result<(), String> {
+                    let entity = self.selection.primary.ok_or("Select a blockout entity")?;
+                    let blockout = self
+                        .world
+                        .get::<crate::blockout::BlockoutComponent>(entity)
+                        .ok_or("Selection has no Blockout component")?;
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("glTF mesh", &["glb"])
+                        .set_directory("assets")
+                        .set_file_name("Blockout.glb")
+                        .save_file()
+                    {
+                        blockout.write_glb(&path)?;
+                    }
+                    Ok(())
+                })();
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast(
+                        &result.map_or_else(|e| e, |()| "Blockout export finished".into()),
+                    );
+                }
+            }
+            EditorEvent::OpenAuthoringGraph => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Authoring graph", &["somgraph"])
+                    .set_directory("assets")
+                    .pick_file()
+                {
+                    let result = (|| -> Result<(), String> {
+                        let bytes = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                        let document: serde_json::Value =
+                            serde_json::from_str(&bytes).map_err(|e| e.to_string())?;
+                        let catalogue = document["catalogue"]
+                            .as_str()
+                            .ok_or("Graph has no catalogue")?;
+                        let ui = self.ui_manager.as_mut().ok_or("Editor unavailable")?;
+                        ui.edit_authoring_graph(catalogue, &bytes)?;
+                        ui.set_authoring_graph_source(&path.to_string_lossy());
+                        Ok(())
+                    })();
+                    if let Err(error) = result
+                        && let Some(ui) = &mut self.ui_manager
+                    {
+                        ui.push_toast(&error);
+                    }
+                }
+            }
+            EditorEvent::AuthoringGraph {
+                catalogue,
+                json,
+                apply,
+                preview,
+                source,
+            } => {
+                let result = self.apply_authoring_graph(
+                    &catalogue,
+                    &json,
+                    apply,
+                    preview,
+                    source.as_deref(),
+                );
+                if let Some(ui) = &mut self.ui_manager {
+                    let error = result.is_err();
+                    let message = result.unwrap_or_else(|e| e);
+                    ui.set_authoring_graph_status(&message, error);
+                    ui.push_toast(&message);
+                }
+            }
             EditorEvent::CompleteDrop(request) => {
                 use somnium_ui::DropRequest;
                 match request {
@@ -9233,6 +9477,11 @@ impl<G: GameApp> Engine<G> {
                 // (and tears it down when the entity is deleted).
                 let snapshot = EntitySnapshot {
                     spline: None,
+                    blockout: None,
+                    prefab: None,
+                    persistent_id: None,
+                    surface_tags: None,
+                    reflected: Vec::new(),
                     transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
                     name: Some(Name::new("Voxel Terrain")),
                     light: None,
@@ -9554,6 +9803,12 @@ impl<G: GameApp> Engine<G> {
                 let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
                     spline,
+                    blockout: (kind == CreateKind::Blockout)
+                        .then(crate::blockout::BlockoutComponent::default),
+                    prefab: None,
+                    persistent_id: None,
+                    surface_tags: None,
+                    reflected: Vec::new(),
                     transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
@@ -10063,6 +10318,10 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::NewScene => {
                 info!("Creating new scene");
+                self.animation_authoring
+                    .clear(&mut self.world, self.physics.as_mut());
+                self.navigation_editor.clear(&mut self.world);
+                self.animation_event_owner = None;
                 // Clear the world
                 let all_entities: Vec<somnium_ecs::Entity> = self
                     .world
@@ -10158,7 +10417,18 @@ impl<G: GameApp> Engine<G> {
                     let mut dup_transform = transform;
                     dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
                     let snapshot = EntitySnapshot {
-                        spline: None,
+                        reflected: EntitySnapshot::capture(&self.world, entity).reflected,
+                        spline: self.world.get::<crate::SplineComponent>(entity).cloned(),
+                        blockout: self
+                            .world
+                            .get::<crate::blockout::BlockoutComponent>(entity)
+                            .copied(),
+                        prefab: None,
+                        persistent_id: Some(somnium_ecs::PersistentId::mint()),
+                        surface_tags: self
+                            .world
+                            .get::<crate::scatter_scene::SurfaceTagsComponent>(entity)
+                            .cloned(),
                         transform: Some(dup_transform),
                         name: Some(name),
                         light,
@@ -10673,6 +10943,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::StopSimulation => {
+                crate::ai::reset_behaviors(&mut self.world);
                 self.pending_steps = 0;
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
@@ -12165,3 +12436,184 @@ mod viewport_control_tests {
         }
     }
 }
+
+impl<G: GameApp> Engine<G> {
+    fn apply_authoring_graph(
+        &mut self,
+        catalogue: &str,
+        json: &str,
+        apply: bool,
+        preview: bool,
+        document_source: Option<&str>,
+    ) -> Result<String, String> {
+        if !apply {
+            let catalogue_def = match catalogue {
+                "somnium.scatter" => somnium_ui::graph::scatter::catalogue(),
+                "somnium.behavior" => somnium_ui::graph::behavior::catalogue(),
+                _ => return Err("Open a scatter or behavior graph first".into()),
+            };
+            let graph = somnium_ui::graph::serial::from_json(json, &catalogue_def)
+                .map_err(|e| e.to_string())?;
+            // Source graphs can be saved as drafts; Preview and Apply enforce
+            // runtime validity without discarding the designer's work.
+            let validation = if catalogue == "somnium.scatter" {
+                somnium_ui::graph::scatter::compile(&graph).map(|_| ())
+            } else {
+                somnium_ui::graph::behavior::compile(&graph).map(|_| ())
+            };
+            let path = document_source.map(std::path::PathBuf::from).or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Authoring graph", &["somgraph"])
+                    .set_directory("assets")
+                    .set_file_name("NewGraph.somgraph")
+                    .save_file()
+            });
+            if let Some(path) = path {
+                crate::save_game::atomic_write(&path, json.as_bytes())?;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.set_authoring_graph_source(&path.to_string_lossy());
+                }
+                return Ok(validation.map_or_else(
+                    |error| format!("Saved draft · {error}"),
+                    |()| format!("Saved {}", path.display()),
+                ));
+            }
+            return Ok("Graph save cancelled".into());
+        }
+        if catalogue == "somnium.behavior" && preview {
+            let graph = somnium_ui::graph::serial::from_json(
+                json,
+                &somnium_ui::graph::behavior::catalogue(),
+            )
+            .map_err(|e| e.to_string())?;
+            somnium_ui::graph::behavior::compile(&graph)?;
+            return Ok(format!(
+                "Behavior valid · {} nodes · Apply attaches to the selected entity",
+                graph.nodes().len()
+            ));
+        }
+        let source = self
+            .selection
+            .primary
+            .ok_or("Select a scene entity first")?;
+        if catalogue == "somnium.behavior" {
+            let before = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            crate::ai::attach_behavior(&mut self.world, source, json.to_owned())?;
+            let after = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            self.undo_stack
+                .push_silent(Box::new(crate::prefab::PrefabEditCommand::new(
+                    before, after,
+                )));
+            self.after_selection_change();
+            self.scene_dirty = true;
+            return Ok("Attached behavior graph to selected entity".into());
+        }
+        if catalogue != "somnium.scatter" {
+            return Err("Open a scatter or behavior graph first".into());
+        }
+        let graph =
+            somnium_ui::graph::serial::from_json(json, &somnium_ui::graph::scatter::catalogue())
+                .map_err(|e| e.to_string())?;
+        let rule = somnium_ui::graph::scatter::compile(&graph)?;
+        let origin = self
+            .world
+            .get::<Transform>(source)
+            .map_or(glam::Vec3::ZERO, |t| t.translation);
+        let settings = crate::scatter_scene::ScatterSettings::for_source(&self.world, source);
+        let origin = self
+            .world
+            .get::<WorldTransform>(source)
+            .map_or(origin, |transform| transform.0.w_axis.truncate());
+        let (min, max) = settings.region(origin)?;
+        let terrains: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|e| {
+                let component = self.world.get::<TerrainComponent>(e)?;
+                Some((
+                    component.terrain_id,
+                    self.world
+                        .get::<Transform>(e)
+                        .map_or(glam::Mat4::IDENTITY, Transform::to_matrix),
+                    self.world
+                        .get::<crate::scatter_scene::SurfaceTagsComponent>(e)
+                        .cloned()
+                        .unwrap_or_default()
+                        .tags(),
+                ))
+            })
+            .collect();
+        let images = rule.load_images(min, max)?;
+        let renderer = &mut self.renderer;
+        let snapshots =
+            crate::scatter_scene::bake(&self.world, source, &rule, min, max, &images, |p| {
+                let sample = |renderer: &mut Option<SomniumRenderer>,
+                              x: f32,
+                              z: f32|
+                 -> Option<(f32, usize)> {
+                    if terrains.is_empty() {
+                        return Some((origin.y, usize::MAX));
+                    }
+                    let renderer = renderer.as_mut()?;
+                    let mut best: Option<(f32, usize)> = None;
+                    for (index, (id, model, _)) in terrains.iter().enumerate() {
+                        if let Some(terrain) = renderer.terrain_mut(*id) {
+                            terrain.model = *model;
+                            if let Some(hit) = terrain.raycast(
+                                glam::Vec3::new(x, origin.y + 10_000.0, z),
+                                glam::Vec3::NEG_Y,
+                            ) {
+                                if best.is_none_or(|(height, _)| hit.y > height) {
+                                    best = Some((hit.y, index));
+                                }
+                            }
+                        }
+                    }
+                    best
+                };
+                let (height, terrain_index) = sample(renderer, p.x, p.y)?;
+                let dx = sample(renderer, p.x + 0.1, p.y).map_or(height, |v| v.0)
+                    - sample(renderer, p.x - 0.1, p.y).map_or(height, |v| v.0);
+                let dz = sample(renderer, p.x, p.y + 0.1).map_or(height, |v| v.0)
+                    - sample(renderer, p.x, p.y - 0.1).map_or(height, |v| v.0);
+                let tags = terrains.get(terrain_index).map_or_else(
+                    || std::collections::BTreeMap::from([("ground".into(), 1.0)]),
+                    |terrain| terrain.2.clone(),
+                );
+                Some(somnium_asset::scatter::SurfacePoint {
+                    position: glam::Vec3::new(p.x, height, p.y),
+                    normal: glam::Vec3::new(-dx, 0.2, -dz).normalize(),
+                    tags,
+                })
+            })?;
+        let count = snapshots.len();
+        if preview {
+            return Ok(format!(
+                "Preview: {count} instances in {:.1} × {:.1} m · Apply creates one undo step",
+                settings.width, settings.depth
+            ));
+        }
+        let commands = snapshots
+            .into_iter()
+            .map(|snapshot| {
+                Box::new(CreateEntityCmd::new(snapshot)) as Box<dyn crate::EditorCommand>
+            })
+            .collect();
+        self.undo_stack.push(
+            Box::new(crate::editor_commands::CommandGroup::new(
+                "Apply scatter graph",
+                commands,
+            )),
+            &mut self.world,
+            &mut self.selection.primary,
+        );
+        self.scene_dirty |= count > 0;
+        Ok(format!(
+            "Scattered {count} instances in {:.1} × {:.1} m; Undo reverses the batch",
+            settings.width, settings.depth
+        ))
+    }
+}
+
+#[path = "app_designer.rs"]
+mod designer;

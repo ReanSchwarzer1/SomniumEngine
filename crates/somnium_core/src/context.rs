@@ -99,6 +99,10 @@ pub struct EngineContext<'a> {
     /// this instead of creating a private pool or detached Rayon task.
     pub jobs: &'a mut JobSystem,
 
+    /// The engine's navigation service. Game code queues bakes here; the engine
+    /// publishes results, advances agents and draws previews once per frame.
+    pub navigation: &'a mut crate::ai::NavigationEditor,
+
     /// The renderer context containing wgpu state. Optional if headless.
     pub render_ctx: Option<&'a RenderContext>,
 
@@ -195,6 +199,7 @@ impl<'a> EngineContext<'a> {
         physics: &'a mut PhysicsWorld,
         audio: &'a mut AudioEngine,
         jobs: &'a mut JobSystem,
+        navigation: &'a mut crate::ai::NavigationEditor,
         render_ctx: Option<&'a RenderContext>,
         renderer: Option<&'a mut SomniumRenderer>,
         selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
@@ -210,6 +215,7 @@ impl<'a> EngineContext<'a> {
             physics,
             audio,
             jobs,
+            navigation,
             render_ctx,
             renderer,
             selected_entity,

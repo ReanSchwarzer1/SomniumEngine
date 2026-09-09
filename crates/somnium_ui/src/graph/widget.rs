@@ -20,6 +20,8 @@ use crate::{
 };
 use somnium_anim::{CompareOp, Condition};
 
+mod authoring;
+
 const PIN_GRAB: f32 = 9.0;
 const GRID_STEP: f32 = 32.0;
 const NODE_HEADER: f32 = 28.0;
@@ -51,6 +53,26 @@ fn wheel_zoom_factor(delta: f32) -> Option<f32> {
 /// Messages understood or emitted by [`GraphEditor`].
 #[derive(Clone)]
 pub enum GraphEditorMessage {
+    /// Activate a catalogue's retained document, creating its starter only on first use.
+    ActivateSurface(GraphSurface),
+    /// Set the active graph's durable source after a successful open/save.
+    SetSource(String),
+    /// Report an application result in the graph footer without replacing edits.
+    HostStatus { text: String, error: bool },
+    /// A visible toolbar action, routed to the existing host command path.
+    Tool(crate::editor_event::GraphToolAction),
+    /// Switch catalogues and documents at the existing graph seam.
+    SetSurface(GraphSurface),
+    /// Ask the control, the sole document owner, for a serialized copy.
+    RequestDocument { apply: bool, preview: bool },
+    /// Serialized document emitted to the host for saving or scene application.
+    Document {
+        catalogue: String,
+        json: String,
+        apply: bool,
+        preview: bool,
+        source: Option<String>,
+    },
     /// Replace the authored graph without echoing a change.
     SetGraph(Graph),
     /// Route one CONTROL-A2 command id to this document.
@@ -288,6 +310,7 @@ pub struct GraphEditor {
     transition_edit: Option<TransitionEdit>,
     transition_error: Option<String>,
     font_id: u8,
+    authoring: authoring::AuthoringToolbar,
 }
 
 impl GraphEditor {
@@ -306,11 +329,13 @@ impl GraphEditor {
     fn graph_point(&self, widget: &Widget, point: Vec2) -> Vec2 {
         self.surface()
             .view
-            .screen_to_graph(Self::local(widget, point))
+            .screen_to_graph(Self::local(widget, point) - self.authoring_offset())
     }
 
     fn screen_point(&self, widget: &Widget, point: Vec2) -> Vec2 {
-        widget.screen_bounds().pos() + self.surface().view.graph_to_screen(point)
+        widget.screen_bounds().pos()
+            + self.authoring_offset()
+            + self.surface().view.graph_to_screen(point)
     }
 
     fn node_at(&self, widget: &Widget, point: Vec2) -> Option<NodeId> {
@@ -337,7 +362,8 @@ impl GraphEditor {
             .map(|(pin, _)| pin)
     }
 
-    fn emit_changed(&self, widget: &Widget, emit: &mut Vec<UiMessage>) {
+    fn emit_changed(&mut self, widget: &Widget, emit: &mut Vec<UiMessage>) {
+        self.authoring_changed();
         let message = self.document.state_machine().map_or_else(
             || GraphEditorMessage::Changed(self.surface().graph.clone()),
             |document| GraphEditorMessage::StateMachineChanged(document.clone()),
@@ -961,9 +987,13 @@ impl Control for GraphEditor {
             }
         }
         self.draw_transition_inspector(widget, ctx);
+        self.draw_authoring(widget, ctx);
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
+        if self.authoring_pointer(widget, pos) {
+            return CursorKind::Pointer;
+        }
         if self.literal_at(widget, pos).is_some() || self.transition_field_at(widget, pos).is_some()
         {
             return CursorKind::Text;
@@ -981,7 +1011,9 @@ impl Control for GraphEditor {
     }
 
     fn is_text_input(&self) -> bool {
-        self.literal_edit.is_some() || self.transition_edit.is_some()
+        self.literal_edit.is_some()
+            || self.transition_edit.is_some()
+            || self.authoring.palette.is_some()
     }
 
     fn is_keyboard_focusable(&self) -> bool {
@@ -1013,6 +1045,33 @@ impl Control for GraphEditor {
     ) {
         if let Some(message) = msg.data::<GraphEditorMessage>().cloned() {
             match message {
+                GraphEditorMessage::ActivateSurface(surface) => {
+                    self.activate_authoring(surface, false);
+                    widget.invalidate_layout();
+                }
+                GraphEditorMessage::SetSource(source) => {
+                    let catalogue = self.surface().catalogue.id.to_owned();
+                    self.authoring.sources.insert(catalogue.clone(), source);
+                    self.authoring.dirty.remove(&catalogue);
+                }
+                GraphEditorMessage::HostStatus { text, error } => {
+                    self.authoring.status = text;
+                    self.authoring.error = error;
+                }
+                GraphEditorMessage::Tool(_) => {}
+                GraphEditorMessage::SetSurface(surface) => {
+                    self.activate_authoring(surface, true);
+                    self.gesture = Gesture::None;
+                    self.literal_edit = None;
+                    self.selected_transition = None;
+                    self.transition_edit = None;
+                    widget.invalidate_layout();
+                }
+                GraphEditorMessage::RequestDocument { apply, preview } => {
+                    self.commit_literal(widget, emit);
+                    self.request_authoring_document(widget, apply, preview, emit);
+                }
+                GraphEditorMessage::Document { .. } => {}
                 GraphEditorMessage::SetGraph(graph) => {
                     self.surface_mut().graph = graph;
                     self.literal_edit = None;
@@ -1021,7 +1080,7 @@ impl Control for GraphEditor {
                     widget.invalidate_layout();
                 }
                 GraphEditorMessage::SetStateMachineDocument(document) => {
-                    self.document = EditorDocument::StateMachine(document);
+                    self.activate_state_machine(document);
                     self.literal_edit = None;
                     self.selected_transition = None;
                     self.transition_edit = None;
@@ -1107,9 +1166,13 @@ impl Control for GraphEditor {
         let Some(message) = msg.data::<WidgetMessage>().cloned() else {
             return;
         };
+        if self.handle_authoring_input(widget, &message, emit) {
+            msg.handled = true;
+            return;
+        }
         match message {
             WidgetMessage::MouseWheel { pos, delta, .. } => {
-                let local = Self::local(widget, pos);
+                let local = Self::local(widget, pos) - self.authoring_offset();
                 if let Some(factor) = wheel_zoom_factor(delta) {
                     self.surface_mut().view.zoom_at(local, factor);
                     msg.handled = true;
@@ -1538,6 +1601,7 @@ impl GraphEditorBuilder {
                 transition_edit: None,
                 transition_error: None,
                 font_id: self.font_id,
+                authoring: authoring::AuthoringToolbar::default(),
             }),
         )
     }

@@ -33,3 +33,9 @@ This window stays inside the editor. Press **F1** or the **?** button to open it
 Nothing in Help is a web page. If a control looks like a button, it is a button — click it, it highlights, and it does the thing.
 
 Help will gain topics as the engine does. Missing a page for a new panel usually means the chrome for that feature is still being written.
+
+## Composition, animation and AI
+
+[Designer tools](morrowind.md) covers prefabs, blockout/scatter, animation rigs,
+navmesh/behavior/perception and Play-session save slots. Start each workflow
+from Create or the command palette; its settings live in Details.

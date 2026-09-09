@@ -11,6 +11,7 @@ pub mod depend;
 pub mod material;
 pub mod preview;
 pub mod residency;
+pub mod scatter;
 pub mod scene_file;
 /// Logical terrain source-page addresses used by MORROWIND-AD virtual texturing.
 pub mod virtual_texture;
@@ -837,7 +838,7 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
     for seg in 0..segments {
         let a = top_ring_start + seg;
         let b = top_ring_start + (seg + 1) % segments;
-        indices.extend_from_slice(&[top_centre, a, b]);
+        indices.extend_from_slice(&[top_centre, b, a]);
     }
 
     // Bottom cap
@@ -861,7 +862,7 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
     for seg in 0..segments {
         let a = bot_ring_start + seg;
         let b = bot_ring_start + (seg + 1) % segments;
-        indices.extend_from_slice(&[bot_centre, b, a]);
+        indices.extend_from_slice(&[bot_centre, a, b]);
     }
 
     (vertices, indices)

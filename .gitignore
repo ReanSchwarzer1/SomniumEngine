@@ -88,6 +88,8 @@ dev records/phase CONTROL/CONTROL-A_baseline/*
 dev records/phase MORROWIND/*
 !dev records/phase MORROWIND/README.md
 !dev records/phase MORROWIND/MORROWIND-*.md
+# Reviewed native designer captures; raw logs remain local.
+!dev records/phase MORROWIND/morrowind-*-1280x720.png
 # MORROWIND-AC evidence. Added with the sub-phase, per PORTAL-0-C's note that
 # an allowlist silently swallows a phase whose entries were added afterwards.
 !dev records/phase MORROWIND/AC/
@@ -95,8 +97,8 @@ dev records/phase MORROWIND/AC/*
 !dev records/phase MORROWIND/AC/README.md
 !dev records/phase MORROWIND/AC/AC_*.somtime
 !dev records/phase MORROWIND/AC/AC_*.png
-# Sub-phase measurements are source evidence; screenshots stay local unless
-# promoted into the reviewed golden manifest below.
+# Sub-phase measurements are source evidence. Other screenshot experiments stay
+# local; reviewed designer captures and golden references have explicit exceptions.
 !dev records/phase MORROWIND/MORROWIND-AB_*.somtime
 !dev records/phase MORROWIND/golden/
 dev records/phase MORROWIND/golden/*

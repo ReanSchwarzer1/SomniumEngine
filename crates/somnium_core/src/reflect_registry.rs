@@ -650,14 +650,19 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(foliage_schema());
     registry.register(light_schema());
     registry.register(material_schema());
+    crate::animation_authoring::register(&mut registry);
     registry.register(mesh_schema());
     registry.register(mesh_kind_schema());
     registry.register(name_schema());
     registry.register(parent_schema());
     registry.register(particle_emitter_schema());
     registry.register(post_process_schema());
+    crate::ai::register(&mut registry);
+    crate::save_game::editor::register(&mut registry);
     crate::character::register(&mut registry);
     crate::spline::register(&mut registry);
+    crate::blockout::register(&mut registry);
+    crate::scatter_scene::register(&mut registry);
     registry.register(sky_schema());
     registry.register(terrain_schema());
     registry.register(world_partition_schema());
@@ -678,6 +683,7 @@ pub fn component_registry() -> TypeRegistry {
 #[must_use]
 pub fn editor_registry() -> TypeRegistry {
     let mut registry = component_registry();
+    crate::prefab_details::register(&mut registry);
     registry.register(somnium_asset::material::material_asset_schema());
     registry.register(editor_settings_schema());
     registry.register(project_settings_schema());
@@ -1294,12 +1300,16 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 25);
+        assert_eq!(registry.len(), 37);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
+                "somnium.AnimationAuthoring",
+                "somnium.AnimationPreviewJoint",
                 "somnium.AudioEmitter",
+                "somnium.Behavior",
+                "somnium.Blockout",
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
                 "somnium.Decal",
@@ -1310,12 +1320,20 @@ mod tests {
                 "somnium.Mesh",
                 "somnium.MeshKind",
                 "somnium.Name",
+                "somnium.NavigationAgent",
+                "somnium.NavigationLink",
+                "somnium.NavigationObstacle",
+                "somnium.NavigationProfile",
                 "somnium.Parent",
                 "somnium.ParticleEmitter",
+                "somnium.Perception",
                 "somnium.PostProcess",
                 "somnium.RigidBody",
+                "somnium.SaveSettings",
+                "somnium.ScatterSettings",
                 "somnium.Sky",
                 "somnium.Spline",
+                "somnium.SurfaceTags",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",

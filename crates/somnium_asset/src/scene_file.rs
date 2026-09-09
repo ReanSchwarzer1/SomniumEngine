@@ -113,7 +113,7 @@ impl SceneKind {
         match document.get("version").and_then(serde_json::Value::as_u64) {
             Some(1) => Self::LegacyDump,
             Some(2) => Self::MapRecipe,
-            Some(3) => Self::Schema,
+            Some(3 | 4) => Self::Schema,
             Some(other) => Self::Unsupported(other),
             None => Self::Unsupported(0),
         }

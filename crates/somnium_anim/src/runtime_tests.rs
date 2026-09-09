@@ -431,6 +431,78 @@ fn compiled_graph_nodes_evaluate_clip_blend_layer_and_cache_without_ui_types() {
 }
 
 #[test]
+fn task_graph_matches_recursive_sampling_with_sync_masks_and_cache() {
+    use std::sync::Arc;
+    let (skeleton, graph) = compiled_graph(401, 1);
+    let skeleton = Arc::new(skeleton);
+    let graph = Arc::new(graph);
+    for (speed, layer, elapsed) in [(0.0, 0.0, 0.3), (2.0, 0.8, 1.3), (4.0, 1.0, -0.25)] {
+        let mut parameters = graph.parameters().instantiate();
+        parameters
+            .set("speed", ParameterValue::Float(speed))
+            .unwrap();
+        parameters
+            .set("layer", ParameterValue::Float(layer))
+            .unwrap();
+        let expected = graph
+            .evaluate(
+                &skeleton,
+                &parameters,
+                elapsed,
+                1,
+                &mut PoseCache::default(),
+            )
+            .unwrap();
+        let tasks = graph
+            .pose_tasks(skeleton.clone(), &parameters, elapsed)
+            .unwrap();
+        let task_count = tasks.task_count();
+        let mut evaluation = tasks.start(2);
+        let mut jobs = somnium_jobs::JobSystem::single_threaded();
+        let result = evaluation.poll(&mut jobs).unwrap().unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(evaluation.submitted_tasks(), task_count);
+        assert_eq!(evaluation.poll(&mut jobs), Err(PoseTaskError::AlreadyTaken));
+    }
+}
+
+#[test]
+fn task_graph_runs_on_shared_workers_with_bounded_queue_and_cancels() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let (skeleton, graph) = compiled_graph(402, 1);
+    let skeleton = Arc::new(skeleton);
+    let graph = Arc::new(graph);
+    let mut parameters = graph.parameters().instantiate();
+    parameters.set("speed", ParameterValue::Float(2.0)).unwrap();
+    let expected = graph
+        .evaluate(&skeleton, &parameters, 0.3, 1, &mut PoseCache::default())
+        .unwrap();
+    let mut evaluation = graph
+        .pose_tasks(skeleton.clone(), &parameters, 0.3)
+        .unwrap()
+        .start(4);
+    let mut jobs = somnium_jobs::JobSystem::with_workers_and_capacity(2, 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let actual = loop {
+        if let Some(pose) = evaluation.poll(&mut jobs).unwrap() {
+            break pose;
+        }
+        assert!(Instant::now() < deadline, "pose task graph stalled");
+        std::thread::yield_now();
+    };
+    assert_eq!(actual, expected);
+    let mut cancelled = graph
+        .pose_tasks(skeleton, &parameters, 0.3)
+        .unwrap()
+        .start(1);
+    cancelled.cancel();
+    assert_eq!(cancelled.poll(&mut jobs), Err(PoseTaskError::Cancelled));
+}
+
+#[test]
 fn compiled_graph_blend2d_uses_authored_triangles() {
     let skeleton = skeleton();
     let clips = [
@@ -777,6 +849,46 @@ fn states_reference_arbitrary_compiled_pose_nodes() {
         graph.nodes()[machine.states()[1].node.0 as usize],
         AnimNode::Cache { .. }
     ));
+}
+
+#[test]
+fn state_transition_task_graph_matches_synchronized_serial_lanes() {
+    use std::sync::Arc;
+    let (skeleton, graph) = compiled_graph(403, 1);
+    let skeleton = Arc::new(skeleton);
+    let graph = Arc::new(graph);
+    let machine = machine(&graph, 3);
+    let mut player = StateMachinePlayer::new(&machine);
+    let mut parameters = graph.parameters().instantiate();
+    parameters.set("speed", ParameterValue::Float(2.0)).unwrap();
+    parameters.set("layer", ParameterValue::Float(0.8)).unwrap();
+    parameters.trigger("go").unwrap();
+    player
+        .advance(&machine, &graph, &mut parameters, 0.1)
+        .unwrap();
+    player
+        .advance(&machine, &graph, &mut parameters, 0.2)
+        .unwrap();
+    assert!(player.is_transitioning());
+    let expected = player
+        .sample(
+            &machine,
+            &graph,
+            &skeleton,
+            &parameters,
+            1,
+            &mut PoseCache::default(),
+        )
+        .unwrap();
+    let mut jobs = somnium_jobs::JobSystem::single_threaded();
+    let result = player
+        .pose_tasks(&machine, &graph, skeleton, &parameters)
+        .unwrap()
+        .start(4)
+        .poll(&mut jobs)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result, expected);
 }
 
 #[test]

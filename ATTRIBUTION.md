@@ -2545,6 +2545,29 @@ Source pages:
 - <https://opengameart.org/content/footsteps-0>
 - <https://opengameart.org/content/water-splash-and-sand-footsteps>
 
+### 13H.28 Composition, animation, AI and saves — 2026-09-09
+
+Original implementations in Rust and Somnium's existing Jolt bridge. Reference
+files were read for module boundaries and algorithms; no reference source was
+copied. Local reference root: `C:/Users/adhir/Downloads/GE/example_repo`.
+
+| Reference | Files/pattern | Terms and use |
+|---|---|---|
+| O3DE | Prefab `Instance/Instance.h`; `SaveDataRequestBus.h`; `GameStateRequestBus.h` | Apache-2.0/MIT repository terms; alias ownership, atomic slots and state lifecycle patterns |
+| Flax | `Level/Prefabs/Prefab.h` | Flax Engine licence; read-only template/instance architecture comparison |
+| O3DE | WhiteBox component; Vegetation `DistributionFilterComponent`; `SurfaceAltitudeGradientComponent`; `SurfacePointList`; LandscapeCanvas `SlopeGradientNode` | Apache-2.0/MIT; blockout and composed scatter concepts |
+| bevy_trenchbroom | `fgd.rs`, `brush.rs` | MIT/Apache-2.0; schema-backed level-design entities |
+| Esoterica | `AnimationRootMotion.h`; `TaskSystem/Animation_PoseTask.h`; `Tasks/Animation_Task_FootIK.cpp` | Repository licence restrictions; read-only algorithm and ownership patterns |
+| Jolt | Vendored body, constraint and shape-cast headers | MIT; APIs used by the existing native bridge |
+| O3DE | `RecastNavigationMeshComponentController.cpp` | Apache-2.0/MIT; geometry-to-tile ownership pattern |
+| Fyrox | Behavior/composite implementation | MIT; immutable tree assets and per-agent state pattern |
+
+Navigation uses an original bounded voxel/span grid implementation. The
+oxidized_navigation collider coupling and Polyanya layer model were assessed;
+neither was vendored or added as a dependency. GPL engine references are not
+part of this implementation. Detailed decisions live in the eight sub-phase
+records and current architecture is in `context.md`.
+
 ## 13K. Phase DREAMS — Media Molecule (experimental rendering, 2026-08-31)
 
 Opened by **DREAMS-A**. §13E and §13F belong to Phase 27, §13G to CONTROL,

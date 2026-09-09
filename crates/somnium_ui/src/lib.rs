@@ -2120,6 +2120,31 @@ impl UiManager {
                 self.run_command_id("editor.foliage.edit");
             }
             "persona-gallery" => crate::editor::gallery::show(&mut self.native_ui),
+            "morrowind-animation" => {
+                if self.drawer_open {
+                    self.run_command_id("editor.view.content_drawer");
+                }
+                self.run_command_id("editor.animation.rig");
+                self.editor_events.push_back(EditorEvent::FocusSelection);
+            }
+            "morrowind-navigation" => {
+                if self.drawer_open {
+                    self.run_command_id("editor.view.content_drawer");
+                }
+                self.run_command_id("editor.create.cube");
+                self.run_command_id("editor.create.navigation_profile");
+                self.editor_events.push_back(EditorEvent::DesignerTool(
+                    crate::editor_event::DesignerTool::NavigationBake,
+                ));
+                self.editor_events.push_back(EditorEvent::FocusSelection);
+            }
+            "morrowind-prefab" => self.toggle_help(Some(10)),
+            "morrowind-scatter" => {
+                self.run_graph_tool_action(crate::editor_event::GraphToolAction::Scatter)
+            }
+            "morrowind-behavior" => {
+                self.run_graph_tool_action(crate::editor_event::GraphToolAction::Behavior)
+            }
             "preferences" => self.toggle_preferences(),
             "menu-file" => self.open_menu(0),
             "menu-create" => self.open_menu(1),
@@ -2217,6 +2242,7 @@ impl UiManager {
         &mut self,
         document: crate::graph::AnimationStateMachineDocument,
     ) {
+        self.set_graph_only_layout(false);
         self.native_ui.send(
             crate::graph::GraphEditorMessage::set_state_machine_document(
                 self.animation_graph_editor,
@@ -2229,6 +2255,7 @@ impl UiManager {
     /// Open a track document on MORROWIND-L's shared timeline in the shipped
     /// Animation workspace.
     pub fn edit_animation_timeline(&mut self, document: crate::timeline::TimelineDocument) {
+        self.set_graph_only_layout(false);
         self.animation_timeline_document = document.clone();
         self.native_ui
             .send(crate::timeline::TimelineEditorMessage::set_document(
@@ -4898,6 +4925,15 @@ impl UiManager {
         match action {
             A::NewScene => self.prompt_unsaved_new(),
             A::SaveScene => self.editor_events.push_back(EditorEvent::SaveScene),
+            A::Prefab(action) => self.editor_events.push_back(EditorEvent::Prefab(action)),
+            A::CreateComponent(name) => self
+                .editor_events
+                .push_back(EditorEvent::CreateComponent(name.into())),
+            A::DesignerTool(action) => self
+                .editor_events
+                .push_back(EditorEvent::DesignerTool(action)),
+            A::ExportBlockout => self.editor_events.push_back(EditorEvent::ExportBlockout),
+            A::GraphTool(action) => self.run_graph_tool_action(action),
             A::ImportModel => self.editor_events.push_back(EditorEvent::ImportModel),
             A::Undo => self.editor_events.push_back(EditorEvent::Undo),
             A::Redo => self.editor_events.push_back(EditorEvent::Redo),
@@ -7751,6 +7787,33 @@ impl UiManager {
             {
                 self.animation_timeline_document = document.clone();
                 self.set_scene_dirty(true);
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::Document {
+                catalogue,
+                json,
+                apply,
+                preview,
+                source,
+            }) = msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.editor_events.push_back(EditorEvent::AuthoringGraph {
+                        catalogue: catalogue.clone(),
+                        json: json.clone(),
+                        apply: *apply,
+                        preview: *preview,
+                        source: source.clone(),
+                    });
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::Tool(action)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.run_graph_tool_action(*action);
+                }
                 continue;
             }
             if matches!(
@@ -10732,6 +10795,95 @@ mod panel_drag_tests {
             &ui,
             layout.viewport_handle,
             layout.outliner_header
+        ));
+    }
+}
+
+impl UiManager {
+    fn set_graph_only_layout(&mut self, only_graph: bool) {
+        self.native_ui
+            .set_visibility(self.animation_timeline.editor, !only_graph);
+        self.native_ui.send(UiMessage::new(
+            self.animation_workspace,
+            MessageDirection::ToWidget,
+            crate::widgets::splitter::SplitterMessage::SetSinglePane(only_graph),
+        ));
+    }
+
+    fn run_graph_tool_action(&mut self, action: crate::editor_event::GraphToolAction) {
+        use crate::editor_event::GraphToolAction as A;
+        match action {
+            A::Scatter | A::Behavior => {
+                self.set_graph_only_layout(true);
+                let surface = if action == A::Scatter {
+                    crate::graph::scatter::default_surface()
+                } else {
+                    crate::graph::behavior::default_surface()
+                };
+                self.native_ui.send(UiMessage::new(
+                    self.animation_graph_editor,
+                    MessageDirection::ToWidget,
+                    crate::graph::GraphEditorMessage::ActivateSurface(surface),
+                ));
+                self.set_workspace(Workspace::Animation);
+                self.push_toast(if action == A::Scatter {
+                    "Scatter graph: edit nodes, then Apply Authoring Graph"
+                } else {
+                    "Behavior graph: edit tasks, then Save Authoring Graph"
+                });
+            }
+            A::Open => self
+                .editor_events
+                .push_back(EditorEvent::OpenAuthoringGraph),
+            A::Save | A::Preview | A::Apply => self.native_ui.send(UiMessage::new(
+                self.animation_graph_editor,
+                MessageDirection::ToWidget,
+                crate::graph::GraphEditorMessage::RequestDocument {
+                    apply: action != A::Save,
+                    preview: action == A::Preview,
+                },
+            )),
+        }
+    }
+
+    /// Open a versioned behavior/scatter graph on the same retained graph control.
+    pub fn edit_authoring_graph(&mut self, catalogue: &str, json: &str) -> Result<(), String> {
+        let catalogue = match catalogue {
+            "somnium.scatter" => crate::graph::scatter::catalogue(),
+            "somnium.behavior" => crate::graph::behavior::catalogue(),
+            _ => return Err("unsupported authoring graph catalogue".into()),
+        };
+        let graph = crate::graph::serial::from_json(json, &catalogue).map_err(|e| e.to_string())?;
+        self.set_graph_only_layout(true);
+        let mut surface = crate::graph::GraphSurface::new(catalogue);
+        surface.graph = graph;
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::SetSurface(surface),
+        ));
+        self.set_workspace(Workspace::Animation);
+        Ok(())
+    }
+
+    /// Retain the source file in the document owner after a successful open/save.
+    pub fn set_authoring_graph_source(&mut self, source: &str) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::SetSource(source.to_owned()),
+        ));
+    }
+
+    /// Show compile/bake/save results on the graph surface without discarding edits.
+    pub fn set_authoring_graph_status(&mut self, text: &str, error: bool) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::HostStatus {
+                text: text.to_owned(),
+                error,
+            },
         ));
     }
 }

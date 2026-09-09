@@ -856,7 +856,7 @@ mod morrowind_h_tests {
     }
 
     /// Run a track to completion and report how long it took.
-    fn settle(animator: &mut Animator, key: MotionKey, step_ms: f32) -> f32 {
+    fn settle(animator: &mut Animator, _key: MotionKey, step_ms: f32) -> f32 {
         let mut elapsed = 0.0;
         while !animator.is_idle() && elapsed < MAX_SPRING_MS * 2.0 {
             animator.tick(step_ms);

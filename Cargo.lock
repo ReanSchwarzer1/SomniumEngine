@@ -3822,10 +3822,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "somnium_ai"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "serde",
+ "serde_json",
+ "somnium_ecs",
+ "somnium_jobs",
+ "somnium_script",
+ "somnium_script_luau",
+]
+
+[[package]]
 name = "somnium_anim"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "somnium_jobs",
 ]
 
 [[package]]
@@ -3878,6 +3892,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_audio",
@@ -4001,6 +4016,7 @@ dependencies = [
  "rustybuzz",
  "serde",
  "serde_json",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
@@ -4680,6 +4696,7 @@ name = "vvardenfell"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_core",

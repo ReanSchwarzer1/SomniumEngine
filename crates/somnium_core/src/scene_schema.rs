@@ -22,7 +22,7 @@
 //! of each. It cannot express a script attachment with author-declared
 //! properties, and every new component makes it longer.
 //!
-//! Version 3 asks the [`TypeRegistry`] instead. It writes whatever is
+//! Version 4 asks the [`TypeRegistry`] instead. It writes whatever is
 //! registered and reads whatever it recognises, so a component becomes
 //! saveable by being described once in
 //! [`reflect_registry`](crate::reflect_registry) rather than by being
@@ -64,7 +64,7 @@ use somnium_script::ids::{InstanceUuid, ScriptAssetId};
 
 /// The format tag this module writes. See the module docs: 1 is the
 /// hand-written dump, 2 is a map recipe, 3 is this.
-pub const SCENE_VERSION: u64 = 3;
+pub const SCENE_VERSION: u64 = 4;
 
 /// What went wrong reading a scene.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,7 +394,7 @@ fn attachment_from_json(
 // Save
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// Serialize the world to a version-2 scene document.
+/// Serialize the world to a version-4 schema scene document.
 ///
 /// Every entity is given a persistent id if it does not have one, which
 /// is why this takes `&mut World`: an entity that cannot be named cannot
@@ -495,6 +495,7 @@ pub fn entities_to_json(
                 "persistent_id": id.to_string(),
                 "components":    components,
                 "scripts":       scripts,
+                "prefab": world.get::<crate::prefab::PrefabMember>(entity),
             })
         })
         .collect();
@@ -508,7 +509,7 @@ pub fn entities_to_json(
     Ok(serde_json::json!({ "version": SCENE_VERSION, "entities": entities }))
 }
 
-/// Write a version-3 schema scene to disk.
+/// Write a version-4 schema scene to disk.
 ///
 /// # Errors
 ///
@@ -521,7 +522,7 @@ pub fn save_scene_schema(
     save_scene_schema_with_thumbnail(world, registry, path, None)
 }
 
-/// Write a version-3 scene, with an optional viewport PNG in the container
+/// Write a version-4 scene, with an optional viewport PNG in the container
 /// header — CONTROL-J, §6.2.3.
 ///
 /// The thumbnail goes ahead of the data so the Content Drawer can read it with
@@ -558,7 +559,7 @@ pub fn save_scene_schema_with_thumbnail(
 // Load
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// Rebuild a world from a version-3 schema scene document.
+/// Rebuild a world from a version-4 schema scene document.
 ///
 /// Two passes: every entity is created with its persistent id first, so
 /// that a component holding an entity reference can resolve it in the
@@ -581,7 +582,7 @@ pub fn scene_from_json(
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| SceneError::Malformed("no version".into()))?;
-    if version != SCENE_VERSION {
+    if version != 3 && version != SCENE_VERSION {
         return Err(SceneError::UnsupportedVersion(version));
     }
     let entities_json = document
@@ -637,6 +638,17 @@ pub fn scene_from_json(
             .unwrap_or("?")
             .to_owned();
 
+        if let Some(link) = entry.get("prefab").filter(|value| !value.is_null()) {
+            match serde_json::from_value::<crate::prefab::PrefabMember>(link.clone()) {
+                Ok(member) => {
+                    let _ = world.insert_component(entity, member);
+                }
+                Err(error) => report.warnings.push(SceneWarning {
+                    entity: entity_label.clone(),
+                    message: format!("invalid prefab link: {error}"),
+                }),
+            }
+        }
         let mut retained = crate::RetainedUnknowns::default();
         if let Some(components) = entry
             .get("components")
@@ -768,7 +780,91 @@ pub fn scene_from_json(
     Ok(report)
 }
 
-/// Read a version-3 schema scene from disk.
+/// Apply a resolved prefab member without replacing its live entity handle.
+/// Uses the same value decoder and schema migrations as scene loading.
+pub(crate) fn apply_entity_document(
+    world: &mut World,
+    registry: &TypeRegistry,
+    entity: Entity,
+    entry: &serde_json::Value,
+) -> Result<(), String> {
+    let ids: BTreeMap<_, _> = world
+        .entities()
+        .filter_map(|e| world.persistent_id(e).map(|id| (id, e)))
+        .collect();
+    let resolve = |id| ids.get(&id).copied();
+    let components = entry["components"]
+        .as_object()
+        .ok_or("missing component map")?;
+    let remove: Vec<_> = registry
+        .schemas_on(world, entity)
+        .into_iter()
+        .filter(|schema| {
+            schema
+                .fields
+                .iter()
+                .any(|f| f.flags.contains(FieldFlags::SERIALIZE))
+                && !components.contains_key(schema.stable_id.as_str())
+        })
+        .map(|schema| schema.remove)
+        .collect();
+    for remove in remove {
+        let _ = remove(world, entity);
+    }
+    let mut retained = crate::RetainedUnknowns::default();
+    for (name, body) in components {
+        let Some(schema) = registry.by_name(name) else {
+            retained.keep_component(name, body.clone());
+            continue;
+        };
+        let fields = body["fields"].as_object().ok_or("missing fields")?;
+        let mut values = ReflectObject::new();
+        for (name, json) in fields {
+            let Some(field) = schema.field_by_name(name) else {
+                retained.keep_field(schema.stable_id.as_str(), name, json.clone());
+                continue;
+            };
+            let value = value_from_json(&resolve, &field.ty, json)
+                .ok_or_else(|| format!("invalid {}.{}", schema.stable_id, name))?;
+            field.validate(&value).map_err(|e| e.to_string())?;
+            values.insert(field.id, value);
+        }
+        let version = body["version"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(schema.version);
+        if version != schema.version
+            && let Some(migrate) = schema.migrate
+        {
+            migrate(&mut values, version).map_err(|e| e.to_string())?;
+        }
+        if (schema.snapshot)(world, entity).is_none() {
+            (schema.insert_default)(world, entity).map_err(|e| e.to_string())?;
+        }
+        (schema.apply)(world, entity, &values).map_err(|e| e.to_string())?;
+    }
+    let _ = world.remove_component::<crate::RetainedUnknowns>(entity);
+    if !retained.is_empty() {
+        world
+            .insert_component(entity, retained)
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = world.remove_component::<ScriptSet>(entity);
+    if let Some(scripts) = entry["scripts"].as_array() {
+        let mut set = ScriptSet::new();
+        for json in scripts {
+            set.attach(attachment_from_json(&resolve, json).ok_or("invalid script attachment")?);
+        }
+        if !scripts.is_empty() {
+            world
+                .insert_component(entity, set)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Read a schema scene from disk.
 ///
 /// # Errors
 ///

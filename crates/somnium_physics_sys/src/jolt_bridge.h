@@ -29,6 +29,35 @@ void* jph_heightfield_shape_create(const float* samples, uint32_t sample_count,
 void  jph_shape_destroy(void* shape);
 
 // BodyCreationSettings
+typedef struct JphRagdollPart {
+    int32_t parent;
+    float position[3];
+    float rotation[4];
+    float half_height;
+    float radius;
+    float anchor[3];
+    float swing_limit;
+    float twist_limit;
+} JphRagdollPart;
+typedef struct JphCapsuleCast {
+    float position[3];
+    float rotation[4];
+    float displacement[3];
+    float half_height;
+    float radius;
+    uint32_t ignore_body;
+} JphCapsuleCast;
+typedef struct JphCastHit {
+    float fraction;
+    float normal[3];
+    uint32_t body;
+} JphCastHit;
+void* jph_ragdoll_create(void* system, const JphRagdollPart* parts, uint32_t count, uint32_t group);
+void jph_ragdoll_destroy(void* ragdoll);
+uint32_t jph_ragdoll_body(void* ragdoll, uint32_t joint);
+void jph_ragdoll_reset(void* ragdoll);
+int jph_cast_capsule(void* system, const JphCapsuleCast* cast, JphCastHit* hit);
+
 typedef struct JphBodyCreationSettings {
     void* shape;
     float position[3];
