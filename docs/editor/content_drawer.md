@@ -36,3 +36,15 @@ The drawer is the project file browser. It stays docked above the status bar, li
 **File → Import Model** still opens a native picker for glTF/GLB. Imported nodes appear in the Outliner and can be selected immediately.
 
 New asset kinds (cooked packs, animation clips, prefabs, …) will show up here as those systems land. The drawer is not a finished catalog. Lighting extras (world cache, path tracer, area lights) are Details / Create-menu controls, not drawer assets.
+
+## Material detail strength
+
+Open a `.sommat` material and use **Details → Textures → Normal Scale**. Zero removes the normal-map perturbation, 1 preserves its authored strength, and smaller values soften exaggerated surface detail. The edit supports native Undo and Save. glTF/GLB import preserves `normalTexture.scale`; older materials default to 1. Hello Engine uses the same material editor and shader path.
+
+```mermaid
+flowchart LR
+  GLTF[glTF normalTexture.scale] --> Source[Editable material]
+  Details[Details and Undo] --> Source
+  Source --> GPU[80-byte GPU material]
+  GPU --> Shade[Scaled tangent-space normal]
+```

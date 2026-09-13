@@ -1401,7 +1401,7 @@ impl SomniumRenderer {
                         emissive_map: resolve_tex(mat.emissive_map),
                         terrain_index: -1,
                         porosity: 0.5,
-                        _pad: 0.0,
+                        normal_scale: mat.normal_scale,
                         // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                         // and BLEND goes to the forward pass, so a cutoff on either
                         // would punch holes in geometry that should be solid.
@@ -2523,7 +2523,7 @@ impl SomniumRenderer {
                 emissive_map: -1,
                 terrain_index: terrain.terrain_index as i32,
                 porosity: 0.5,
-                _pad: 0.0,
+                normal_scale: 1.0,
             },
         );
         // Opaque and single-sided, which is what an unregistered material

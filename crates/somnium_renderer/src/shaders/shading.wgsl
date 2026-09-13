@@ -1571,7 +1571,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             textureSampleGrad(textures[material.normal_map], default_sampler, uv, uv_ddx, uv_ddy).rgb,
             analytic_grad,
         );
-        let tangent_n  = nm_sample * 2.0 - vec3<f32>(1.0);
+        let source_normal = nm_sample * 2.0 - vec3<f32>(1.0);
+        var tangent_n = source_normal;
+        tangent_n = vec3<f32>(tangent_n.xy * material.normal_scale, tangent_n.z);
         surface.normal = normalize(tbn * tangent_n);
 
         // Phase 24F: specular anti-aliasing. A normal-map texel that averages
@@ -1582,8 +1584,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         //
         // Without it, thin or distant detail flickers on every camera move, and
         // TAA fights the flicker rather than resolving it.
-        let len = length(tbn * tangent_n);
-        normal_variance = saturate(1.0 - len * len);
+        let len = length(tbn * source_normal);
+        normal_variance = saturate(1.0 - len * len) * min(material.normal_scale * material.normal_scale, 1.0);
     }
 
     // Widen roughness by the variance the normal map lost to mipping.

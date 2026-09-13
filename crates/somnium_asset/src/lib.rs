@@ -76,6 +76,8 @@ pub struct LoadedMaterial {
     /// undefined, so AO must never be read from it.
     pub occlusion_map: Option<usize>,
     pub normal_map: Option<usize>,
+    /// glTF normalTexture.scale; zero preserves the geometric normal.
+    pub normal_scale: f32,
     pub metallic_roughness_map: Option<usize>,
     /// glTF `alphaMode`. Dropping this was why blended glass rendered as
     /// opaque grey panels.
@@ -238,6 +240,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 .occlusion_texture()
                 .map(|t| t.texture().source().index()),
             normal_map: mat.normal_texture().map(|t| t.texture().source().index()),
+            normal_scale: mat.normal_texture().map_or(1.0, |t| t.scale()),
             metallic_roughness_map: pbr
                 .metallic_roughness_texture()
                 .map(|t| t.texture().source().index()),
@@ -288,6 +291,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             albedo_map: None,
             occlusion_map: None,
             normal_map: None,
+            normal_scale: 1.0,
             metallic_roughness_map: None,
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
@@ -1014,5 +1018,34 @@ mod foliage_tuft_tests {
         let a = generate_foliage_tuft(6, 9).0;
         let b = generate_foliage_tuft(6, 9).0;
         assert!(a.iter().zip(&b).all(|(x, y)| x.position == y.position));
+    }
+}
+
+#[cfg(test)]
+mod normal_scale_tests {
+    #[test]
+    fn gltf_normal_strength_preserves_zero_fractional_and_default_values() {
+        let root =
+            std::env::temp_dir().join(format!("somnium-normal-scale-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([128, 128, 255, 255]))
+            .save(root.join("normal.png"))
+            .unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "images":[{"uri":"normal.png"}], "textures":[{"source":0}],
+            "materials":[
+                {"normalTexture":{"index":0,"scale":0.0}},
+                {"normalTexture":{"index":0,"scale":0.25}},
+                {"normalTexture":{"index":0}}, {}]
+        });
+        let path = root.join("strength.gltf");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        let strengths: Vec<_> = loaded.materials.iter().map(|m| m.normal_scale).collect();
+        assert_eq!(&strengths[..4], &[0.0, 0.25, 1.0, 1.0]);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(root.join("normal.png")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

@@ -51,13 +51,8 @@ pub struct GpuMaterial {
     /// material beside roughness rather than on the weather. Occupies what was
     /// padding, so the struct's size and alignment are unchanged.
     pub porosity: f32,
-    /// Explicit tail padding to a 16-byte multiple.
-    ///
-    /// WGSL requires the array stride of a storage-buffer element to be a
-    /// multiple of its alignment, which is 16 here because of `base_color`.
-    /// Adding a single f32 took the struct from 48 to 52 bytes, so the padding
-    /// is spelled out rather than left to the compiler to insert silently.
-    pub _pad: f32,
+    /// Normal-map XY strength, stored in the former tail padding; stride stays 80 bytes.
+    pub normal_scale: f32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -125,7 +120,7 @@ impl GpuMaterial {
             emissive_map: resolve_texture(asset.emissive_map),
             terrain_index: -1,
             porosity: asset.porosity,
-            _pad: 0.0,
+            normal_scale: asset.normal_scale,
         }
     }
 }
@@ -294,12 +289,14 @@ mod material_flag_tests {
             roughness: 0.2,
             emissive: somnium_asset::material::LinearColor([0.25, 0.5, 1.0]),
             emissive_intensity: 4.0,
+            normal_scale: 0.2,
             double_sided: true,
             ..Default::default()
         };
         let gpu = GpuMaterial::from_asset(&asset, |_| -1);
         assert_eq!((gpu.metallic, gpu.roughness), (1.0, 0.2));
         assert_eq!(gpu.emissive, [1.0, 2.0, 4.0]);
+        assert_eq!(gpu.normal_scale, 0.2);
         assert_eq!(gpu.flags & MATERIAL_FLAG_DOUBLE_SIDED, 1);
         assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
     }

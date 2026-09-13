@@ -9933,7 +9933,7 @@ impl<G: GameApp> Engine<G> {
                                     emissive_map: -1,
                                     terrain_index: -1,
                                     porosity: 0.5,
-                                    _pad: 0.0,
+                                    normal_scale: 1.0,
                                 },
                             );
                             self.default_material_id = Some(id);

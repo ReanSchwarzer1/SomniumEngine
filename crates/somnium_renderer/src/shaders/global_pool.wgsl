@@ -64,7 +64,7 @@ struct Material {
     terrain_index: i32,
     // Phase CONTROL-N: water uptake, 0..1. See `pool.rs`.
     porosity: f32,
-    _pad2: f32,
+    normal_scale: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).

@@ -6,14 +6,14 @@
 
 use std::{fs, io::Cursor, path::Path};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use somnium_ecs::reflect::{ComponentSchema, FieldType, ReflectError, ReflectField, ReflectValue};
-use somnium_ecs::{component_schema, Component};
+use somnium_ecs::{Component, component_schema};
 
 use crate::{
-    database::{AssetId, ASSET_KIND_TEXTURE},
     AlphaMode,
+    database::{ASSET_KIND_TEXTURE, AssetId},
 };
 
 /// Current on-disk `.sommat` header version.
@@ -135,6 +135,7 @@ pub struct MaterialAsset {
     pub foliage_card: bool,
     pub albedo_map: AssetId,
     pub normal_map: AssetId,
+    pub normal_scale: f32,
     pub metallic_roughness_map: AssetId,
     pub occlusion_map: AssetId,
     pub emissive_map: AssetId,
@@ -165,6 +166,7 @@ impl Default for MaterialAsset {
             foliage_card: false,
             albedo_map: AssetId::NONE,
             normal_map: AssetId::NONE,
+            normal_scale: 1.0,
             metallic_roughness_map: AssetId::NONE,
             occlusion_map: AssetId::NONE,
             emissive_map: AssetId::NONE,
@@ -197,6 +199,7 @@ pub fn material_asset_schema() -> ComponentSchema {
             foliage_card { group: "Raster", advanced: true,
                 doc: "Flat cut-out cards only. Bends normals across the card using uv.x, which is wrong for modelled or atlased plants." },
             albedo_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
+            normal_scale { group:"Textures",min:0.0,max:2.0,step:0.05,doc:"Normal-map relief strength. Zero uses the geometric normal; one preserves the source detail." },
             normal_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             metallic_roughness_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             occlusion_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
@@ -375,6 +378,7 @@ pub fn materialize_gltf_assets(
             foliage_card: source_material.foliage_card,
             albedo_map: texture(source_material.albedo_map),
             normal_map: texture(source_material.normal_map),
+            normal_scale: source_material.normal_scale,
             metallic_roughness_map: texture(source_material.metallic_roughness_map),
             occlusion_map: texture(source_material.occlusion_map),
             emissive_map: texture(source_material.emissive_map),
@@ -434,6 +438,7 @@ mod tests {
             foliage_card: true,
             albedo_map: AssetId::from_raw(1),
             normal_map: AssetId::from_raw(2),
+            normal_scale: 0.2,
             metallic_roughness_map: AssetId::from_raw(3),
             occlusion_map: AssetId::from_raw(4),
             emissive_map: AssetId::from_raw(5),
@@ -442,25 +447,37 @@ mod tests {
         let preview = crate::preview::render_material_sphere(&material);
         save_material(&path, &mut material, &preview).unwrap();
         assert_eq!(load_material(&path).unwrap(), material);
-        assert!(material
-            .preview_png()
-            .is_some_and(|png| png.starts_with(b"\x89PNG")));
+        assert!(
+            material
+                .preview_png()
+                .is_some_and(|png| png.starts_with(b"\x89PNG"))
+        );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn older_materials_keep_full_normal_strength() {
+        let mut encoded = serde_json::to_value(MaterialAsset::default()).unwrap();
+        encoded.as_object_mut().unwrap().remove("normal_scale");
+        let material: MaterialAsset = serde_json::from_value(encoded).unwrap();
+        assert_eq!(material.normal_scale, 1.0);
     }
 
     #[test]
     fn schema_is_complete_and_texture_slots_reject_non_textures() {
         let schema = material_asset_schema();
-        assert_eq!(schema.fields.len(), 18);
+        assert_eq!(schema.fields.len(), 19);
         let texture_fields: Vec<_> = schema
             .fields
             .iter()
             .filter(|field| field.ty == FieldType::Asset)
             .collect();
         assert_eq!(texture_fields.len(), 5);
-        assert!(texture_fields
-            .iter()
-            .all(|field| field.asset_kind_mask == ASSET_KIND_TEXTURE));
+        assert!(
+            texture_fields
+                .iter()
+                .all(|field| field.asset_kind_mask == ASSET_KIND_TEXTURE)
+        );
         assert_eq!(
             schema.field_by_name("base_color").unwrap().ty,
             FieldType::Color
@@ -516,6 +533,7 @@ mod tests {
                 albedo_map: Some(0),
                 occlusion_map: None,
                 normal_map: None,
+                normal_scale: 1.0,
                 metallic_roughness_map: None,
                 alpha_mode: AlphaMode::Opaque,
                 alpha_cutoff: 0.5,
