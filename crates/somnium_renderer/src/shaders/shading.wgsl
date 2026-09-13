@@ -1541,7 +1541,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let bent_view = gtao.rgb * 2.0 - 1.0;
     let bent_world = normalize(
         (transpose(view.view) * vec4<f32>(bent_view, 0.0)).xyz);
-    surface.bent_normal = select(geo_normal, bent_world, length(bent_view) > 0.1);
+    // Two horizon slices give weak directional evidence at low occlusion.
+    // Fade their normal override with occlusion so sample rotation cannot tint
+    // an almost-open wall in bands. Scalar contact visibility remains intact.
+    let bent_weight = select(0.0, 1.0 - gtao.a, length(bent_view) > 0.1);
+    surface.bent_normal = normalize(mix(geo_normal, bent_world, bent_weight));
 
     // Occlusion comes from its own texture, never from the metallic-roughness
     // map: glTF leaves that map's red channel undefined, and models that store

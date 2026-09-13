@@ -105,8 +105,23 @@ The transmitted lobe carries the same shadow visibility the reflected light does
 
 Occlusion composes. GTAO, a material's own occlusion map, baked terrain sky visibility and terrain layer occlusion all multiply into one ambient number, so a tuft gets the contact darkening where it meets the ground as well as its own interior shade. Micro-shadowing is direct light and deliberately takes the material-scale value alone.
 
+GTAO normalizes visibility against an open hemisphere sampled with the same slices. Bent normals describe only the change caused by occluders; open surfaces retain their mesh normal. Directional bending fades with occlusion strength so sparse samples cannot tint almost-open surfaces. Disabling GTAO removes both occlusion and normal bending. This prevents horizontal ambient-light bands on plain walls while preserving contact shading.
+
+```mermaid
+flowchart LR
+  Depth[Depth horizons] --> Integral[Visible arc / open arc]
+  Integral --> AO[Contact visibility]
+  Depth --> Bend[Occluder-only direction change]
+  Bend --> Filter[Depth-aware denoise]
+  Filter --> Normal[Mesh normal when no bending]
+  AO --> IBL[Environment lighting]
+  Normal --> IBL
+```
+
 Night has one deliberate asymmetry: the moon has no transmitted lobe. The shading pass cannot yet trace shadow visibility toward the moon, and an unshadowed transmission term under night exposure turns isolated back-facing grass into bright green pinpricks. Reflected moonlight stays, on the same area BRDF and specular bound the sun uses. Transmitted moonlight returns once there is a moon-direction shadow to multiply it by.
 
 ## Profiler (29)
 
 The overlay lists **GPU** pass times, then the **Graph** (pass order), then **CPU** zones (instances, cluster cull, foliage, lighting extra), then draw counters. Toggle **Profiler** on the viewport bar.
+
+The shared sampling mask scrambles equal-distance rank ties instead of assigning them in scan order. This removes repeating horizontal noise ramps from AO and other stochastic lighting passes while preserving the progressive spatial spacing.
