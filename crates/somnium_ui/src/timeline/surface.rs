@@ -211,6 +211,20 @@ impl TimelineSurface {
         &self.document
     }
 
+    /// Replace a validated authored document as one native undo step.
+    pub fn replace_authored(&mut self, document: TimelineDocument) -> Result<(), String> {
+        if document.catalogue() != self.catalogue.id {
+            return Err("timeline catalogue mismatch".into());
+        }
+        self.history
+            .apply(&mut self.document, "Edit Timeline Document", |current| {
+                *current = document;
+                true
+            });
+        self.selection = TimelineSelection::default();
+        Ok(())
+    }
+
     pub fn set_document(&mut self, document: TimelineDocument) -> Result<(), TimelineError> {
         if document.catalogue() != self.catalogue.id {
             return Err(TimelineError::UnknownArchetype);

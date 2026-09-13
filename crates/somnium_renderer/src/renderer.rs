@@ -112,6 +112,8 @@ pub struct SomniumRenderer {
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
     pub shaders: crate::shaders::Shaders,
+    pub animated_geometry: crate::animated_geometry::AnimatedGeometry,
+    pub skin_pass: crate::pass::skin::SkinPass,
     /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
     pub grain_masks: crate::pass::grain::GrainMasks,
     /// The visibility buffer render pass.
@@ -964,7 +966,10 @@ impl SomniumRenderer {
             ctx.config.height,
         );
 
+        let skin_pass = crate::pass::skin::SkinPass::new(&ctx.device, &shaders);
         Self {
+            skin_pass,
+            animated_geometry: Default::default(),
             global_pool,
             vis_pass,
             shading_pass,
@@ -1264,11 +1269,11 @@ impl SomniumRenderer {
     /// Upload a `LoadedScene` to the GPU pools and return one `UploadedNode` per
     /// renderable node (mesh_index is Some). The caller can then spawn ECS entities
     /// using the returned data.
-    pub fn upload_scene(
+    pub fn upload_scene_materials(
         &mut self,
         ctx: &RenderContext,
         scene: &somnium_asset::LoadedScene,
-    ) -> Vec<UploadedNode> {
+    ) -> Vec<u32> {
         // 1. Textures --------------------------------------------------------
         //
         // **Only colour maps are sRGB** (Phase 17E remainder). Every imported
@@ -1427,6 +1432,15 @@ impl SomniumRenderer {
             })
             .collect();
 
+        material_ids
+    }
+
+    pub fn upload_scene(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+    ) -> Vec<UploadedNode> {
+        let material_ids = self.upload_scene_materials(ctx, scene);
         // 3. Meshes ----------------------------------------------------------
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
             .meshes
@@ -2802,6 +2816,10 @@ impl SomniumRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Main Render Encoder"),
             });
+
+        self.animated_geometry.prepare(&mut self.geometry);
+        self.animated_geometry
+            .record(ctx, &mut encoder, &self.geometry, &mut self.skin_pass);
 
         // Nothing is going to draw the scene into this window, and the UI pass
         // loads rather than clears. Without this the editor's own swapchain

@@ -2892,64 +2892,25 @@ impl<G: GameApp> Engine<G> {
 
     /// Write the edited table back, one file per locale.
     fn save_localisation(&mut self) {
-        let dir = self.locale_dir();
-        let Some(table) = self
-            .ui_manager
-            .as_ref()
-            .and_then(UiManager::localisation_table)
-            .cloned()
-        else {
-            return;
-        };
-        // The loaded catalogue is the template: it carries the display name and
-        // the font list, which a grid of strings cannot hold and which a save
-        // that dropped them would cost a language its typeface.
-        let template = self
-            .locale_catalog
-            .clone()
-            .unwrap_or_else(|| somnium_i18n::Catalog::new("en"));
-        let catalog = crate::i18n::table_to_catalog(&table, &template);
-        match crate::i18n::save_catalog(&dir, &catalog) {
-            Ok(()) => {
-                let locales = catalog.locales().len();
-                self.locale_catalog = Some(catalog);
-                // Rescan: the files just changed on disk, and the drawer is
-                // showing them.
-                self.next_asset_scan = std::time::Instant::now();
-                if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.append_log(&format!(
-                        "[locale] saved {locales} locale(s) to {}",
-                        dir.display()
-                    ));
-                    ui.push_toast("Localisation saved");
-                }
-            }
-            Err(error) => self.report_content_error(&dir, &error),
+        let result = self.save_localisation_result();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(
+                &result
+                    .map(|_| "Localisation saved".to_owned())
+                    .unwrap_or_else(|e| e),
+            );
         }
     }
 
     /// Hand the table to a translator as one CSV.
     fn export_localisation_csv(&mut self) {
-        let Some(table) = self
-            .ui_manager
-            .as_ref()
-            .and_then(UiManager::localisation_table)
-            .cloned()
-        else {
-            return;
-        };
-        let path = self.locale_dir().join("localisation.csv");
-        match std::fs::create_dir_all(self.locale_dir())
-            .and_then(|()| std::fs::write(&path, table.to_csv()))
-        {
-            Ok(()) => {
-                self.next_asset_scan = std::time::Instant::now();
-                if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.append_log(&format!("[locale] exported {}", path.display()));
-                    ui.push_toast("Exported localisation.csv");
-                }
-            }
-            Err(error) => self.report_content_error(&path, &format!("{error}")),
+        let result = self.export_localisation_result();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(
+                &result
+                    .map(|_| "Exported localisation.csv".to_owned())
+                    .unwrap_or_else(|e| e),
+            );
         }
     }
 
@@ -6588,6 +6549,15 @@ impl<G: GameApp> Engine<G> {
         };
         for op in ops {
             match op {
+                TerrainRestoreOp::Foliage {
+                    terrain_id,
+                    instances,
+                } => {
+                    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                        terrain.painted_foliage = instances;
+                        terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+                    }
+                }
                 TerrainRestoreOp::Heights {
                     terrain_id,
                     region,
@@ -8011,6 +7981,7 @@ impl<G: GameApp> Engine<G> {
         let local_hit = model.inverse().transform_point3(hit);
         let center = [local_hit.x, local_hit.z];
 
+        let before = terrain.painted_foliage.clone();
         if erase {
             let removed = somnium_renderer::terrain::foliage_paint::erase(
                 &mut terrain.painted_foliage,
@@ -8020,6 +7991,17 @@ impl<G: GameApp> Engine<G> {
             );
             if removed > 0 {
                 info!("Foliage: erased {removed}");
+            }
+            if terrain.painted_foliage != before {
+                terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+                self.undo_stack
+                    .push_silent(Box::new(crate::editor_commands::FoliageEditCmd::new(
+                        tc.terrain_id,
+                        before,
+                        terrain.painted_foliage.clone(),
+                        self.terrain_restore_queue.clone(),
+                    )));
+                self.scene_dirty = true;
             }
             return true;
         }
@@ -8036,6 +8018,17 @@ impl<G: GameApp> Engine<G> {
             |x, z| terrain.ground_sample(x, z, brush.layer),
         );
         terrain.painted_foliage = painted;
+        if terrain.painted_foliage != before {
+            terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+            self.undo_stack
+                .push_silent(Box::new(crate::editor_commands::FoliageEditCmd::new(
+                    tc.terrain_id,
+                    before,
+                    terrain.painted_foliage.clone(),
+                    self.terrain_restore_queue.clone(),
+                )));
+            self.scene_dirty = true;
+        }
         let total = terrain.painted_foliage.len();
         let entry = &FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()];
         if report.placed > 0 {
@@ -9326,32 +9319,17 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::OpenProjectPicker => {
-                // 27-G's picker, unblocked: that phase deferred it because it
-                // needed an `EditorEvent` addition it had forbidden itself.
                 let Some(folder) = rfd::FileDialog::new()
-                    .set_title("Open Project")
+                    .set_title("Open Game Project (game.project.json)")
                     .pick_folder()
                 else {
                     return;
                 };
-                let (component, field) =
-                    crate::settings::field_address("somnium.ProjectSettings", "content_root");
-                let value =
-                    somnium_ecs::reflect::ReflectValue::Str(folder.to_string_lossy().into_owned());
-                match self.settings.set(component, field, value) {
-                    Ok(()) => {
-                        self.config.content_root = folder;
-                        self.next_asset_scan = std::time::Instant::now();
-                        self.asset_scan_stamp = None;
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.push_toast("Project opened");
-                        }
-                    }
-                    Err(reason) => {
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.push_toast(&reason);
-                        }
-                    }
+                let result = self.open_editor_project(&folder);
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(
+                        &result.unwrap_or_else(|e| format!("Project could not open: {e}")),
+                    );
                 }
             }
 
@@ -9401,11 +9379,15 @@ impl<G: GameApp> Engine<G> {
                 let Some(renderer) = self.renderer.as_ref() else {
                     return;
                 };
-                let forward = renderer
-                    .view_proj
-                    .inverse()
-                    .transform_vector3(glam::Vec3::NEG_Z);
-                let forward = forward.normalize_or_zero();
+                let (width, height) = self.viewport_size();
+                let point = ndc_to_world(
+                    width * 0.5,
+                    height * 0.5,
+                    width,
+                    height,
+                    &renderer.picking_view_proj().inverse(),
+                );
+                let forward = (point - renderer.camera_pos).normalize_or_zero();
                 let yaw = forward.z.atan2(forward.x).to_degrees();
                 let pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
                 self.camera_bookmarks[index.min(8)] = Some((renderer.camera_pos, yaw, pitch));

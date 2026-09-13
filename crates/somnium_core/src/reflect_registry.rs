@@ -641,6 +641,7 @@ fn mesh_kind_schema() -> ComponentSchema {
 #[must_use]
 pub fn component_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
+    crate::interaction::register_schema(&mut registry);
     registry.register(audio_emitter_schema());
 
     registry.register(buoyant_vessel_schema());

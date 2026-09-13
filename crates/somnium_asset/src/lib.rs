@@ -4,6 +4,7 @@
 //! Somnium-native types (`LoadedScene`) that the renderer can upload
 //! without ever seeing `gltf::` crate types directly.
 
+pub mod animated;
 pub mod cook;
 pub mod database;
 /// MORROWIND-M item 3: what references what, across a whole project.

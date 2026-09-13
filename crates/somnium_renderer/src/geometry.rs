@@ -246,6 +246,11 @@ impl GeometryPool {
             .iter()
             .position(|b| b.vertex_capacity >= v_count && b.index_capacity >= i_count);
 
+        if reuse.is_none() {
+            if let Some(empty) = self.reject_if_full(vertices.len(), indices.len(), material_id) {
+                return empty;
+            }
+        }
         let alloc = if let Some(slot) = reuse {
             let block = self.free_blocks.swap_remove(slot);
             MeshAllocation {
@@ -388,6 +393,8 @@ impl GeometryPool {
             return;
         }
         self.sdf_bricks.remove(&alloc.vertex_offset);
+        self.aabbs.remove(&alloc.vertex_offset);
+        self.meshlets.remove(&alloc.vertex_offset);
         self.free_blocks.push(FreeBlock {
             vertex_offset: alloc.vertex_offset,
             vertex_capacity: alloc.vertex_capacity,
@@ -439,6 +446,13 @@ impl GeometryPool {
     /// Local-space bounds of the mesh at `vertex_offset`, if it is known.
     pub fn mesh_aabb(&self, vertex_offset: u32) -> Option<([f32; 3], [f32; 3])> {
         self.aabbs.get(&vertex_offset).copied()
+    }
+
+    /// Refresh a GPU-deformed span's conservative bounds before culling.
+    pub fn set_mesh_bounds(&mut self, offset: u32, bounds: ([f32; 3], [f32; 3])) {
+        if self.aabbs.contains_key(&offset) {
+            self.aabbs.insert(offset, bounds);
+        }
     }
 
     /// Packed triangle SDF for the mesh at `vertex_offset`, if one was baked.

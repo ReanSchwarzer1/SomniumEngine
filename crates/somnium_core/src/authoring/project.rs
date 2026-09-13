@@ -102,6 +102,77 @@ impl ProjectPaths {
     }
 }
 
+/// A game's editor launcher, separate from portable content paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorLauncher {
+    /// Launcher schema version.
+    pub version: u32,
+    /// Executable relative to the project directory (or absolute).
+    pub executable: PathBuf,
+    /// Literal arguments; no shell expansion is performed.
+    #[serde(default)]
+    pub arguments: Vec<String>,
+}
+
+impl ProjectPaths {
+    /// Resolve the game-specific editor without replacing its registered schemas.
+    /// Executables must remain inside the nearest Cargo workspace/repository.
+    pub fn editor_launcher(&self) -> Result<Option<(PathBuf, Vec<String>)>, String> {
+        let path = self.root.join("editor.launch.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let config: EditorLauncher =
+            serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        if config.version != 1 || config.arguments.len() > 32 {
+            return Err("unsupported editor launcher".into());
+        }
+        let executable = self
+            .root
+            .join(config.executable)
+            .canonicalize()
+            .map_err(|e| format!("Build the game editor first: {e}"))?;
+        let workspace = self
+            .root
+            .ancestors()
+            .find(|p| p.join(".git").exists())
+            .or_else(|| {
+                self.root
+                    .ancestors()
+                    .find(|p| p.join("Cargo.toml").is_file())
+            })
+            .unwrap_or(&self.root);
+        if !executable.starts_with(workspace) || !executable.is_file() {
+            return Err("editor executable must be a file inside the project workspace".into());
+        }
+        #[cfg(windows)]
+        if !executable
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        {
+            return Err("editor launcher needs a built .exe".into());
+        }
+        Ok(Some((executable, config.arguments)))
+    }
+
+    /// Launch the registered game editor with contained working/content roots.
+    pub fn launch_editor(&self) -> Result<u32, String> {
+        let (executable, args) = self.editor_launcher()?.ok_or(
+            "Project has no editor.launch.json; open it with hello_engine --project <folder>",
+        )?;
+        let child = std::process::Command::new(executable)
+            .args(args)
+            .arg("--project")
+            .arg(&self.root)
+            .current_dir(&self.root)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(child.id())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

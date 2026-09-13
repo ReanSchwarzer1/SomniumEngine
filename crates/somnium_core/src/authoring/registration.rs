@@ -69,10 +69,87 @@ pub fn install(game: GameRegistration) -> Result<(), String> {
 
 /// Snapshot metadata without retaining a lock across a game callback.
 pub fn game_registration() -> GameRegistration {
-    declarations()
+    let mut game = declarations()
         .read()
         .expect("game registration lock poisoned")
-        .clone()
+        .clone();
+    game.documents.extend(engine_documents());
+    game
+}
+
+/// Built-in assets share validators with the native graph, timeline and UI owners.
+pub fn engine_documents() -> Vec<GameDocument> {
+    fn ui(v: &Value) -> Result<(), String> {
+        somnium_ui::somui::UiDocument::from_json(&v.to_string())
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    }
+    fn scatter(v: &Value) -> Result<(), String> {
+        somnium_ui::graph::serial::from_json(
+            &v.to_string(),
+            &somnium_ui::graph::scatter::catalogue(),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+    fn behavior(v: &Value) -> Result<(), String> {
+        somnium_ui::graph::serial::from_json(
+            &v.to_string(),
+            &somnium_ui::graph::behavior::catalogue(),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+    fn material(v: &Value) -> Result<(), String> {
+        somnium_ui::graph::serial::from_json(
+            &v.to_string(),
+            &somnium_ui::graph::catalogues::material(),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+    fn timeline(v: &Value) -> Result<(), String> {
+        somnium_ui::timeline::serial::from_json(
+            &v.to_string(),
+            &somnium_ui::timeline::catalogues::animation(),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+    fn luau(v: &Value) -> Result<(), String> {
+        let text = v["text"].as_str().ok_or("Luau document needs text")?;
+        somnium_script_luau::validate_source(text)
+    }
+
+    let definitions: [(&str, &str, &str, fn(&Value) -> Result<(), String>); 6] = [
+        ("somnium.luau_source", "Luau script", "luau", luau),
+        ("somnium.ui_document", "UI layout", "somui", ui),
+        (
+            "somnium.scatter_graph",
+            "Scatter graph",
+            "somgraph",
+            scatter,
+        ),
+        (
+            "somnium.behavior_graph",
+            "Behavior graph",
+            "somgraph",
+            behavior,
+        ),
+        (
+            "somnium.material_graph",
+            "Material graph",
+            "somgraph",
+            material,
+        ),
+        (
+            "somnium.timeline",
+            "Animation timeline",
+            "somtimeline",
+            timeline,
+        ),
+    ];
+    definitions.into_iter().map(|(id,label,extension,validate)|GameDocument{id,label,extension,schema:serde_json::json!({"type":"object","description":"Validated by the native asset document schema"}),validate}).collect()
 }
 
 /// Called by the one component-registry factory used throughout the engine.

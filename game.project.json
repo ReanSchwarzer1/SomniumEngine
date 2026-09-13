@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "hello-somnium",
+  "name": "Hello Somnium Engine",
+  "content": "assets",
+  "scenes": "assets/scenes",
+  "source_assets": "assets",
+  "documents": "assets",
+  "cooked": "target/hello-editor/cooked",
+  "staging": "target/hello-editor/staging",
+  "saves": "target/hello-editor/saves",
+  "logs": "target/hello-editor/logs",
+  "captures": "target/hello-editor/captures",
+  "runtime": "target/hello-editor/runtime"
+}

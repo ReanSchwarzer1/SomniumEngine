@@ -17,6 +17,21 @@ fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| error(format!("{key} required")))
 }
 const MAX_BYTES: usize = 512 * 1024;
+fn decode(path: &Path, bytes: &[u8]) -> Result<Value> {
+    if path.extension().and_then(|e| e.to_str()) == Some("luau") {
+        Ok(json!({"text":std::str::from_utf8(bytes).map_err(|e|error(e.to_string()))?}))
+    } else {
+        serde_json::from_slice(bytes).map_err(|e| error(e.to_string()))
+    }
+}
+fn encode(path: &Path, value: &Value) -> Result<Vec<u8>> {
+    if path.extension().and_then(|e| e.to_str()) == Some("luau") {
+        Ok(text(value, "text")?.as_bytes().to_vec())
+    } else {
+        serde_json::to_vec_pretty(value).map_err(|e| error(e.to_string()))
+    }
+}
+
 #[derive(Clone)]
 struct Revision {
     path: PathBuf,
@@ -42,7 +57,7 @@ pub struct DocumentDraft {
 }
 impl DocumentDraft {
     pub fn dirty(&self) -> bool {
-        serde_json::from_slice::<Value>(&self.base).ok().as_ref() != Some(&self.value)
+        decode(Path::new(&self.path), &self.base).ok().as_ref() != Some(&self.value)
     }
 }
 /// Bounded per-editor document state, using exact bytes for conflict checks.
@@ -73,11 +88,17 @@ impl DocumentSession {
     }
     fn path(&self, path: &str) -> Result<PathBuf> {
         let relative = Path::new(path);
-        if !relative.starts_with(&self.project.manifest.documents)
-            || relative.extension().and_then(|s| s.to_str()) != Some("json")
-        {
+        let extension = relative.extension().and_then(|s| s.to_str());
+        let game_document =
+            relative.starts_with(&self.project.manifest.documents) && extension == Some("json");
+        let engine_document = relative.starts_with(&self.project.manifest.content)
+            && matches!(
+                extension,
+                Some("somui" | "somgraph" | "somtimeline" | "luau")
+            );
+        if !game_document && !engine_document {
             return Err(error(
-                "Only .json files in the declared documents directory are accessible",
+                "Only registered JSON documents or .somui/.somgraph/.somtimeline content assets are accessible",
             ));
         }
         self.project.resolve(relative).map_err(error)
@@ -140,7 +161,10 @@ impl DocumentSession {
                 }
                 if path.is_dir() {
                     visit(&path, project, out, depth + 1)?;
-                } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                } else if matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("json" | "somui" | "somgraph" | "somtimeline" | "luau")
+                ) {
                     out.push(json!({"path":relative}));
                 }
             }
@@ -156,12 +180,32 @@ impl DocumentSession {
             &mut files,
             0,
         )?;
+        if self.project.manifest.content != self.project.manifest.documents {
+            let mut assets = vec![];
+            visit(
+                &self
+                    .project
+                    .resolve(&self.project.manifest.content)
+                    .map_err(error)?,
+                &self.project,
+                &mut assets,
+                0,
+            )?;
+            files.extend(assets.into_iter().filter(|v| {
+                v["path"].as_str().is_some_and(|p| {
+                    matches!(
+                        Path::new(p).extension().and_then(|s| s.to_str()),
+                        Some("somui" | "somgraph" | "somtimeline" | "luau")
+                    )
+                })
+            }));
+        }
         Ok(json!({"ok":true,"documents":files}))
     }
     pub fn query(&mut self, p: &Value) -> Result<Value> {
         let path = self.path(text(p, "path")?)?;
         let bytes = Self::read(&path)?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|e| error(e.to_string()))?;
+        let value = decode(&path, &bytes)?;
         self.sequence += 1;
         let token = format!("doc-view:{}:{}", self.session, self.sequence);
         if self.views.len() >= 32 {
@@ -205,9 +249,9 @@ impl DocumentSession {
             token.clone(),
             Plan {
                 change: Revision {
-                    path,
+                    path: path.clone(),
                     before: before.clone(),
-                    after: serde_json::to_vec_pretty(value).map_err(|e| error(e.to_string()))?,
+                    after: encode(&path, value)?,
                     label: label.into(),
                 },
                 generation: self.draft.as_ref().map_or(0, |d| d.generation),
@@ -274,7 +318,7 @@ impl DocumentSession {
         crate::save_game::atomic_write(&path, next).map_err(error)?;
         if let Some(d) = self.draft.as_mut() {
             if self.project.root.join(&d.path) == path {
-                d.value = serde_json::from_slice(next).map_err(|e| error(e.to_string()))?;
+                d.value = decode(&path, next)?;
                 d.base = next.clone();
                 d.generation += 1;
                 d.undo.clear();
@@ -338,7 +382,7 @@ impl DocumentSession {
             let relative = text(p, "path")?;
             let path = self.path(relative)?;
             let base = Self::read(&path)?;
-            let value: Value = serde_json::from_slice(&base).map_err(|e| error(e.to_string()))?;
+            let value = decode(&path, &base)?;
             let document_type = text(p, "document_type")?;
             Self::validate(document_type, &value)?;
             self.draft = Some(DocumentDraft {
@@ -377,7 +421,7 @@ impl DocumentSession {
                     .clone()
                     .ok_or_else(|| error("Open a document first"))?,
                 before: d.base.clone(),
-                after: serde_json::to_vec_pretty(&d.value).map_err(|e| error(e.to_string()))?,
+                after: encode(Path::new(&d.path), &d.value)?,
                 label: format!("Edit {}", d.path),
             };
             self.publish(&change, false)?;
@@ -394,7 +438,7 @@ impl DocumentSession {
                     .as_ref()
                     .ok_or_else(|| error("Open a document first"))?,
             )?;
-            d.value = serde_json::from_slice(&bytes).map_err(|e| error(e.to_string()))?;
+            d.value = decode(Path::new(&d.path), &bytes)?;
             d.base = bytes;
             d.undo.clear();
             d.redo.clear();
@@ -414,7 +458,16 @@ impl DocumentSession {
         }
         let before = d.value.clone();
         let pointer = text(p, "pointer")?;
-        if action == "document_edit" {
+        if action == "document_replace" {
+            let target = d
+                .value
+                .pointer_mut(pointer)
+                .ok_or_else(|| error("Document location absent"))?;
+            *target = p
+                .get("value")
+                .ok_or_else(|| error("value required"))?
+                .clone();
+        } else if action == "document_edit" {
             let target = d
                 .value
                 .pointer_mut(pointer)

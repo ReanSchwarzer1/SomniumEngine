@@ -32,6 +32,7 @@ it was planned. Read it before the source.
 | [Rendering](context.md#renderer-and-simulation-contracts) | Current rendering and simulation contracts |
 | [Authoring model](context.md#scene-and-authoring-model) | Schemas, prefab overrides and saves |
 | [Phase ledger](context.md#phase-ledger-and-remaining-work) | Shipped, open, deferred, refused |
+| [Projects and automation](docs/editor/automation.md) | Open game editors, semantic MCP controls, public interaction and GPU animation examples |
 
 The engine is organized around three deliberate commitments:
 

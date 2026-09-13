@@ -19,6 +19,8 @@
 //! - Scene save/load (11.5F)
 //! - Editor mode (Play/Pause/Stop) (11.5L)
 
+mod animated_preview;
+mod authoring_demo;
 mod dreams_fixture;
 
 use glam::Vec3;
@@ -706,6 +708,8 @@ impl VoxelTerrain {
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
 struct HelloGame {
+    interactions: authoring_demo::InteractionDemo,
+    animated_previews: animated_preview::Previews,
     log_timer: f32,
     camera: EditorCamera,
     dreams_rail: Option<dreams_fixture::DreamRail>,
@@ -809,6 +813,8 @@ impl HelloGame {
         let mut runtime_ui = somnium_core::UiCanvas::new(640.0, 360.0);
         runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
         Self {
+            interactions: Default::default(),
+            animated_previews: Default::default(),
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
             dreams_rail: None,
@@ -1131,6 +1137,14 @@ impl HelloGame {
 }
 
 impl GameApp for HelloGame {
+    fn register_authoring(&mut self, registration: &mut somnium_core::authoring::GameRegistration) {
+        authoring_demo::register(registration);
+        animated_preview::register(registration);
+    }
+    fn authoring_state(&self) -> serde_json::Value {
+        serde_json::json!({"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state()})
+    }
+
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
     ///
     /// This is what makes `assets/ui/hello_hud.somui` a *runtime* asset rather
@@ -1669,6 +1683,22 @@ impl GameApp for HelloGame {
     }
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
+        if play_session(ctx)
+            && matches!(
+                event,
+                EngineEvent::KeyInput {
+                    key: KeyCode::KeyE,
+                    state: InputState::Pressed
+                }
+            )
+        {
+            self.interactions.request();
+            return;
+        }
+        if matches!(event, EngineEvent::WindowFocused(false)) {
+            self.interactions.cancel();
+        }
+
         match event {
             EngineEvent::KeyInput { key, state } => {
                 let pressed = *state == InputState::Pressed;
@@ -1784,6 +1814,23 @@ impl GameApp for HelloGame {
     }
 
     fn on_fixed_update(&mut self, ctx: &mut EngineContext) {
+        if !play_session(ctx) {
+            return;
+        }
+
+        let (eye, forward) = self
+            .player
+            .as_ref()
+            .and_then(|p| ctx.world.get::<WorldTransform>(p.camera))
+            .map(|t| {
+                (
+                    t.0.w_axis.truncate(),
+                    -t.0.z_axis.truncate().normalize_or_zero(),
+                )
+            })
+            .unwrap_or((self.camera.position, self.camera.forward_vector()));
+        self.interactions.tick(ctx, eye, forward);
+
         let Some(boat) = self.boat.as_ref() else {
             return;
         };
@@ -1930,6 +1977,15 @@ impl GameApp for HelloGame {
             }
         }
 
+        let playing_now = play_session(ctx);
+        if playing_now && !self.was_playing {
+            if let Some(boat) = self.boat.as_mut() {
+                if let Some(t) = ctx.world.get::<Transform>(boat.entity) {
+                    boat.initial_position = t.translation;
+                    boat.initial_rotation = t.rotation;
+                }
+            }
+        }
         let required = ComponentSet::from_ids(vec![
             ComponentId::of::<Transform>(),
             ComponentId::of::<PhysicsBody>(),
@@ -1947,8 +2003,18 @@ impl GameApp for HelloGame {
             for row in 0..archetype.len() {
                 let body = unsafe { *archetype.column(b_col).get::<PhysicsBody>(row) };
                 let transform = unsafe { archetype.column_mut(t_col).get_mut::<Transform>(row) };
-                transform.translation = ctx.physics.get_position(body.id);
-                transform.rotation = ctx.physics.get_rotation(body.id);
+                if playing_now {
+                    transform.translation = ctx.physics.get_position(body.id);
+                    transform.rotation = ctx.physics.get_rotation(body.id);
+                } else {
+                    // Edit mode owns authored transforms. Physics preview must not
+                    // move the designer's objects or invalidate every automation plan.
+                    ctx.physics
+                        .set_position(body.id, transform.translation, false);
+                    ctx.physics.set_rotation(body.id, transform.rotation, false);
+                    ctx.physics.set_linear_velocity(body.id, Vec3::ZERO);
+                    ctx.physics.set_angular_velocity(body.id, Vec3::ZERO);
+                }
             }
         }
         self.last_simulation_time = ctx.simulation.elapsed_seconds;
@@ -1960,8 +2026,10 @@ impl GameApp for HelloGame {
         // game will want a different one.
         let playing = play_session(ctx);
         if playing && !self.was_playing {
+            self.interactions.begin_play(ctx.world);
             spawn_player(self, ctx);
         } else if !playing && self.was_playing {
+            self.interactions.end_play(ctx.world);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
@@ -2051,6 +2119,7 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        self.animated_previews.render(ctx);
         // **Which canvas** and **whether it draws** are two questions, and
         // conflating them costs more than it looks. `EditorFlags::hidden` is an
         // authoring state — *"not submitted for drawing"* — not an unload: a
@@ -2415,40 +2484,33 @@ impl GameApp for HelloGame {
                         default_mat,
                     );
 
-                    // Read old components
-                    let t = ctx
-                        .world
-                        .get::<Transform>(entity)
-                        .copied()
-                        .unwrap_or(Transform::from_translation(glam::Vec3::ZERO));
-                    let n = ctx
-                        .world
-                        .get::<Name>(entity)
-                        .cloned()
-                        .unwrap_or(Name::new("Mesh"));
-                    let wt = ctx
-                        .world
-                        .get::<WorldTransform>(entity)
-                        .copied()
-                        .unwrap_or(WorldTransform::identity());
-
-                    // Respawn
-                    ctx.world.despawn(entity);
-                    let new_entity = ctx.world.spawn((
-                        t,
-                        n,
-                        wt,
-                        kind,
+                    // Attach derived render data in place. Respawning here discarded
+                    // authored components, persistent IDs, parents and undo references.
+                    let _ = ctx.world.insert_component(
+                        entity,
                         MeshComponent {
                             vertex_offset: alloc.vertex_offset,
                             index_offset: alloc.index_offset,
                             index_count: alloc.index_count,
                         },
+                    );
+                    let _ = ctx.world.insert_component(
+                        entity,
                         MaterialComponent {
                             asset: somnium_asset::database::AssetId::NONE,
                             runtime_id: default_mat,
                         },
-                    ));
+                    );
+                    if ctx.world.get::<WorldTransform>(entity).is_none() {
+                        let transform = ctx
+                            .world
+                            .get::<Transform>(entity)
+                            .copied()
+                            .unwrap_or_default();
+                        let _ = ctx
+                            .world
+                            .insert_component(entity, WorldTransform(transform.to_matrix()));
+                    }
 
                     if std::env::var("SOMNIUM_SHADOWTEST").is_ok() {
                         tracing::info!(
@@ -2459,11 +2521,6 @@ impl GameApp for HelloGame {
                             alloc.index_count,
                             default_mat
                         );
-                    }
-
-                    // Fix selection if needed
-                    if *ctx.selected_entity == Some(entity) {
-                        *ctx.selected_entity = Some(new_entity);
                     }
                 }
             }
@@ -3288,14 +3345,41 @@ fn audit_window_size() -> Option<(u32, u32)> {
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
 
-fn main() -> Result<(), somnium_core::EngineError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args_os().skip(1);
+    let mut project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    while let Some(arg) = args.next() {
+        if arg == "--project" {
+            project_root = args
+                .next()
+                .map(Into::into)
+                .ok_or("--project requires a folder")?;
+        } else {
+            return Err(format!(
+                "Unknown argument: {}. Usage: hello_engine [--project <folder>]",
+                arg.to_string_lossy()
+            )
+            .into());
+        }
+    }
+    let project = somnium_core::authoring::project::ProjectPaths::open(&project_root)?;
+    if project.editor_launcher()?.is_some() {
+        project.launch_editor()?;
+        return Ok(());
+    }
+    project.create_directories()?;
+    std::env::set_current_dir(&project.root)?;
     let config = EngineConfig {
+        project_root: Some(project.root.clone()),
+        content_root: project.resolve(&project.manifest.content)?,
+        authoring_enabled: true,
         window_title: "Somnium Engine".into(),
         window_size: audit_window_size().unwrap_or((1280, 720)),
         target_fps: Some(60),
         ..Default::default()
     };
-    Engine::run(config, HelloGame::new())
+    Engine::run(config, HelloGame::new())?;
+    Ok(())
 }
 
 #[cfg(test)]

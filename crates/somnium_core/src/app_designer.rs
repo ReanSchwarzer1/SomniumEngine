@@ -83,7 +83,16 @@ impl<G: GameApp> Engine<G> {
     }
 
     pub(super) fn run_designer_tool(&mut self, action: DesignerTool) {
-        let result = (|| -> Result<String, String> {
+        let result = self.run_designer_tool_result(action);
+        if let Some(ui) = &mut self.ui_manager {
+            ui.push_toast(&result.unwrap_or_else(|error| error));
+        }
+    }
+    pub(super) fn run_designer_tool_result(
+        &mut self,
+        action: DesignerTool,
+    ) -> Result<String, String> {
+        (|| -> Result<String, String> {
             match action {
                 DesignerTool::NavigationBake => {
                     let entity = self.selection.primary.ok_or("Select a Navigation Volume")?;
@@ -247,10 +256,7 @@ impl<G: GameApp> Engine<G> {
                     }
                 }
             }
-        })();
-        if let Some(ui) = &mut self.ui_manager {
-            ui.push_toast(&result.unwrap_or_else(|error| error));
-        }
+        })()
     }
     fn animation_selection(&self) -> Result<somnium_ecs::Entity, String> {
         self.selection

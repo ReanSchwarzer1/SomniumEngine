@@ -66,6 +66,7 @@ pub mod error;
 pub mod event;
 pub mod i18n;
 pub mod input_actions;
+pub mod interaction;
 pub mod jobs;
 pub mod landscape;
 pub mod light_units;

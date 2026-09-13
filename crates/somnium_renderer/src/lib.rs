@@ -13,6 +13,7 @@
 //! - **Ray-traced water reflections (Phase VV Halcyon):** `pass/water_reflection.rs` +
 //!   `shaders/rt_hit.wgsl`. Layer 1 is VV+1 refraction (default off). See ATTRIBUTION.md §1.7.
 
+pub mod animated_geometry;
 pub mod bindless;
 pub mod capability;
 pub mod capture;

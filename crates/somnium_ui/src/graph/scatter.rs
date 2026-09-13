@@ -14,6 +14,7 @@ const GRADIENT: PinType = PinType::Opaque("scatter.gradient");
 #[must_use]
 pub fn catalogue() -> Catalogue {
     let mut catalogue = Catalogue::new("somnium.scatter");
+    super::catalogues::register_layout(&mut catalogue);
     let mut add = |id: &'static str,
                    title: &'static str,
                    group: &'static str,

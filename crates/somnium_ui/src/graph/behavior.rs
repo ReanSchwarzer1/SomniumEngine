@@ -7,6 +7,7 @@ const FLOW: PinType = PinType::Opaque("behavior.flow");
 
 pub fn catalogue() -> Catalogue {
     let mut c = Catalogue::new("somnium.behavior");
+    super::catalogues::register_layout(&mut c);
     c.register(
         NodeArchetype::new("behavior.root", "Behavior Root", "Behavior")
             .with_input(PinArchetype::new("Tree", FLOW))

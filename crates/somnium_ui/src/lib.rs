@@ -27,6 +27,7 @@ pub mod path;
 pub mod pool;
 pub mod primitive;
 pub mod runtime;
+pub mod semantic_authoring;
 pub mod shaped;
 pub mod somui;
 pub mod somui_editor;
@@ -10933,11 +10934,55 @@ impl UiManager {
         }
     }
 
+    /// Address the retained document owner directly, preserving its native undo stack.
+    pub fn authoring_editor(
+        &mut self,
+        target: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let handle = match target {
+            "graph" => self.animation_graph_editor,
+            "timeline" => self.animation_timeline.editor,
+            "localisation" => self.locale_grid,
+            _ => return Err("editor must be graph, timeline or localisation".into()),
+        };
+        let mut emit = Vec::new();
+        let result = {
+            let node = self
+                .native_ui
+                .nodes
+                .try_borrow_mut(handle.transmute())
+                .map_err(|_| "editor document is unavailable")?;
+            node.control.authoring(&node.widget, params, &mut emit)
+        }?;
+        for message in emit {
+            if let Some(crate::widgets::data_grid::DataGridMessage::Edited { table, .. }) =
+                message.data::<crate::widgets::data_grid::DataGridMessage>()
+            {
+                self.locale_table = Some((**table).clone());
+            }
+            self.native_ui.send(message);
+        }
+        if target == "timeline" {
+            if let Some(document) = result.get("document") {
+                self.animation_timeline_document = crate::timeline::serial::from_json(
+                    &document.to_string(),
+                    &crate::timeline::catalogues::animation(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        self.native_ui.invalidate_ancestors(handle);
+        Ok(result)
+    }
+
     /// Open a versioned behavior/scatter graph on the same retained graph control.
     pub fn edit_authoring_graph(&mut self, catalogue: &str, json: &str) -> Result<(), String> {
         let catalogue = match catalogue {
             "somnium.scatter" => crate::graph::scatter::catalogue(),
             "somnium.behavior" => crate::graph::behavior::catalogue(),
+            "somnium.material" => crate::graph::catalogues::material(),
+            "somnium.animation" => crate::graph::catalogues::animation(),
             _ => return Err("unsupported authoring graph catalogue".into()),
         };
         let graph = crate::graph::serial::from_json(json, &catalogue).map_err(|e| e.to_string())?;

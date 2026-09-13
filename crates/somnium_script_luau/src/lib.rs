@@ -63,6 +63,15 @@ use somnium_script::value::{FieldType, ScriptValue};
 
 use crate::deadline::Deadline;
 
+/// Compile source without executing it, for editor draft validation.
+/// Runtime reload still reports schema and initialization diagnostics separately.
+pub fn validate_source(source: &str) -> Result<(), String> {
+    Compiler::new()
+        .compile(source)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// The standard libraries a Somnium script may use.
 ///
 /// Deliberately **not** `StdLib::ALL_SAFE`, which is `u32::MAX` under

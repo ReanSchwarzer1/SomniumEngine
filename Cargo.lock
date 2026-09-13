@@ -1623,6 +1623,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "somnium_anim",
  "somnium_asset",
  "somnium_audio",
  "somnium_core",
@@ -3859,6 +3860,7 @@ dependencies = [
  "somnium_anim",
  "somnium_ecs",
  "somnium_jobs",
+ "thiserror 2.0.18",
  "tracing",
  "ureq",
 ]

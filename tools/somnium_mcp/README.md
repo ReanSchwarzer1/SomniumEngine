@@ -1,5 +1,7 @@
 # Somnium local MCP adapter
 
+See [designer controls and project opening](../../docs/editor/automation.md) and the [generated live capability evidence](CAPABILITIES.md). Hello Engine enables the adapter by default; its descriptor is `target/hello-editor/runtime/authoring-connection.json`.
+
 This Python 3.10+ stdio adapter forwards seven authoring methods to an **actual running editor** through its current-user Windows named pipe. It has no network listener, arbitrary shell tool, copied editing implementation, or emulated success path. No third-party Python packages are required.
 
 The engine writes `<project>/runtime/authoring-connection.json` with a random session, local pipe address, project identity, limits and credential. The descriptor is protected to the current Windows user and must not be committed, logged, embedded in tool results or shared. The pipe rejects remote clients. The editor owns shared operation scopes and scene semantics; connection authentication does not replace those checks.
@@ -34,7 +36,7 @@ The separate read-only live probe requires a running editor and **fails** when n
 python -B tools/somnium_mcp/probe.py --connection C:/path/to/project/runtime/authoring-connection.json --output C:/path/to/project/evidence/mcp-transport.json
 ```
 
-It verifies fragmented request framing, fresh connections, wrong credential/project/session rejection, native method allowlisting, malformed-frame recovery and MCP subprocess → real editor discovery. Scene mutation/undo/import/capture acceptance must additionally exercise the engine's implemented operation schemas. Rust transport/feedback tests run with the repository's normal core test gate; avoid spawning a second Cargo target or build during coordinated implementation.
+It verifies fragmented request framing, fresh connections, wrong credential/project/session rejection, native method allowlisting, malformed-frame recovery and MCP subprocess â†’ real editor discovery. Scene mutation/undo/import/capture acceptance must additionally exercise the engine's implemented operation schemas. Rust transport/feedback tests run with the repository's normal core test gate; avoid spawning a second Cargo target or build during coordinated implementation.
 
 ## Implementation references
 
@@ -58,4 +60,6 @@ flowchart LR
   Host --> Jobs[Import and capture receipts]
 ```
 
-Coverage is explicit: reflected scene fields and routed commands do not imply complete specialized-editor gesture support. Jobs and receipts are session-local. Revoke can close the pipe before its acknowledgement is received; inspect the editor's revoked state instead of automatically retrying.
+Semantic graph, state-machine and timeline operations use their retained native document owners. Terrain and foliage strokes update renderer data and use native undo; script and material edits reuse their existing handlers. `editor_acceptance.py` and `editor_gap_acceptance.py` perform live mutations and source restoration (including Content, localisation and native panel placement), then `generate_capabilities.py` produces the compact inventory. Navigation completion is reported on its reflected profile; import and capture use authoring job receipts.
+
+Jobs and receipts are session-local. Revoke can close the pipe before its acknowledgement is received; inspect the editor's revoked state instead of automatically retrying.

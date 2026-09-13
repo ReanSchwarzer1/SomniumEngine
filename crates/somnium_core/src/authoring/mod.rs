@@ -1,5 +1,5 @@
 //! Typed, revision-checked authoring shared by the editor and local adapters.
-mod codec;
+pub(crate) mod codec;
 pub mod documents;
 pub mod feedback;
 pub mod project;

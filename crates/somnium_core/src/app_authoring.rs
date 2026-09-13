@@ -1,5 +1,9 @@
 //! Main-thread adapter shared by local IPC and the native authoring panel.
 use super::*;
+#[path = "app_authoring_specialized.rs"]
+mod specialized;
+#[path = "app_authoring_workspace.rs"]
+mod workspace;
 use crate::authoring::{
     AuthoringError, AuthoringSession, PlanRequest,
     feedback::{FeedbackKind, FeedbackQueue},
@@ -32,6 +36,7 @@ pub(super) struct AuthoringHost {
     capture: Option<CaptureWork>,
     pub(super) import: Option<(String, u64)>,
     next_refresh: Instant,
+    semantic_receipts: std::collections::BTreeMap<String, (Value, Value)>,
 }
 fn fail(code: &'static str, message: impl Into<String>) -> Value {
     AuthoringError::new(code, message).json()
@@ -54,6 +59,136 @@ fn vec3(params: &Value, key: &str, default: [f32; 3]) -> Result<[f32; 3], String
         Err(format!("{key} is not finite"))
     }
 }
+const INPUT_KEYS: &[(&str, KeyCode)] = &[
+    ("A", KeyCode::KeyA),
+    ("B", KeyCode::KeyB),
+    ("C", KeyCode::KeyC),
+    ("D", KeyCode::KeyD),
+    ("E", KeyCode::KeyE),
+    ("F", KeyCode::KeyF),
+    ("G", KeyCode::KeyG),
+    ("H", KeyCode::KeyH),
+    ("I", KeyCode::KeyI),
+    ("J", KeyCode::KeyJ),
+    ("K", KeyCode::KeyK),
+    ("L", KeyCode::KeyL),
+    ("M", KeyCode::KeyM),
+    ("N", KeyCode::KeyN),
+    ("O", KeyCode::KeyO),
+    ("P", KeyCode::KeyP),
+    ("Q", KeyCode::KeyQ),
+    ("R", KeyCode::KeyR),
+    ("S", KeyCode::KeyS),
+    ("T", KeyCode::KeyT),
+    ("U", KeyCode::KeyU),
+    ("V", KeyCode::KeyV),
+    ("W", KeyCode::KeyW),
+    ("X", KeyCode::KeyX),
+    ("Y", KeyCode::KeyY),
+    ("Z", KeyCode::KeyZ),
+    ("0", KeyCode::Digit0),
+    ("1", KeyCode::Digit1),
+    ("2", KeyCode::Digit2),
+    ("3", KeyCode::Digit3),
+    ("4", KeyCode::Digit4),
+    ("5", KeyCode::Digit5),
+    ("6", KeyCode::Digit6),
+    ("7", KeyCode::Digit7),
+    ("8", KeyCode::Digit8),
+    ("9", KeyCode::Digit9),
+    ("F1", KeyCode::F1),
+    ("F2", KeyCode::F2),
+    ("F3", KeyCode::F3),
+    ("F4", KeyCode::F4),
+    ("F5", KeyCode::F5),
+    ("F6", KeyCode::F6),
+    ("F7", KeyCode::F7),
+    ("F8", KeyCode::F8),
+    ("F9", KeyCode::F9),
+    ("F10", KeyCode::F10),
+    ("F11", KeyCode::F11),
+    ("F12", KeyCode::F12),
+    ("F13", KeyCode::F13),
+    ("F14", KeyCode::F14),
+    ("F15", KeyCode::F15),
+    ("F16", KeyCode::F16),
+    ("F17", KeyCode::F17),
+    ("F18", KeyCode::F18),
+    ("F19", KeyCode::F19),
+    ("F20", KeyCode::F20),
+    ("F21", KeyCode::F21),
+    ("F22", KeyCode::F22),
+    ("F23", KeyCode::F23),
+    ("F24", KeyCode::F24),
+    ("ArrowUp", KeyCode::ArrowUp),
+    ("ArrowDown", KeyCode::ArrowDown),
+    ("ArrowLeft", KeyCode::ArrowLeft),
+    ("ArrowRight", KeyCode::ArrowRight),
+    ("Escape", KeyCode::Escape),
+    ("Enter", KeyCode::Enter),
+    ("Tab", KeyCode::Tab),
+    ("Space", KeyCode::Space),
+    ("Backspace", KeyCode::Backspace),
+    ("Delete", KeyCode::Delete),
+    ("Insert", KeyCode::Insert),
+    ("Home", KeyCode::Home),
+    ("End", KeyCode::End),
+    ("PageUp", KeyCode::PageUp),
+    ("PageDown", KeyCode::PageDown),
+    ("ShiftLeft", KeyCode::ShiftLeft),
+    ("ShiftRight", KeyCode::ShiftRight),
+    ("ControlLeft", KeyCode::ControlLeft),
+    ("ControlRight", KeyCode::ControlRight),
+    ("AltLeft", KeyCode::AltLeft),
+    ("AltRight", KeyCode::AltRight),
+    ("SuperLeft", KeyCode::SuperLeft),
+    ("SuperRight", KeyCode::SuperRight),
+    ("CapsLock", KeyCode::CapsLock),
+    ("NumLock", KeyCode::NumLock),
+    ("ScrollLock", KeyCode::ScrollLock),
+    ("PrintScreen", KeyCode::PrintScreen),
+    ("Pause", KeyCode::Pause),
+    ("Backquote", KeyCode::Backquote),
+    ("Backslash", KeyCode::Backslash),
+    ("BracketLeft", KeyCode::BracketLeft),
+    ("BracketRight", KeyCode::BracketRight),
+    ("Comma", KeyCode::Comma),
+    ("Period", KeyCode::Period),
+    ("Minus", KeyCode::Minus),
+    ("Equal", KeyCode::Equal),
+    ("Semicolon", KeyCode::Semicolon),
+    ("Quote", KeyCode::Quote),
+    ("Slash", KeyCode::Slash),
+    ("NumpadAdd", KeyCode::NumpadAdd),
+    ("NumpadSubtract", KeyCode::NumpadSubtract),
+    ("NumpadMultiply", KeyCode::NumpadMultiply),
+    ("NumpadDivide", KeyCode::NumpadDivide),
+    ("NumpadDecimal", KeyCode::NumpadDecimal),
+    ("NumpadEnter", KeyCode::NumpadEnter),
+    ("Numpad0", KeyCode::Numpad0),
+    ("Numpad1", KeyCode::Numpad1),
+    ("Numpad2", KeyCode::Numpad2),
+    ("Numpad3", KeyCode::Numpad3),
+    ("Numpad4", KeyCode::Numpad4),
+    ("Numpad5", KeyCode::Numpad5),
+    ("Numpad6", KeyCode::Numpad6),
+    ("Numpad7", KeyCode::Numpad7),
+    ("Numpad8", KeyCode::Numpad8),
+    ("Numpad9", KeyCode::Numpad9),
+    ("Shift", KeyCode::ShiftLeft),
+    ("Control", KeyCode::ControlLeft),
+    ("Alt", KeyCode::AltLeft),
+    ("Esc", KeyCode::Escape),
+];
+fn authoring_key(name: &str) -> Result<KeyCode, String> {
+    INPUT_KEYS
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, key)| *key)
+        .ok_or_else(|| {
+            "Unknown key; query authoring.discover input_keys for the supported names".into()
+        })
+}
 fn action(label: &str, method: &str, params: Value) -> AuthoringAction {
     AuthoringAction {
         label: label.into(),
@@ -64,6 +199,40 @@ fn action(label: &str, method: &str, params: Value) -> AuthoringAction {
     }
 }
 impl<G: GameApp> Engine<G> {
+    /// Open a project in its own registered editor; keep the current unsaved session alive.
+    pub(super) fn open_editor_project(&mut self, folder: &Path) -> Result<String, String> {
+        let project = ProjectPaths::open(folder)?;
+        if self
+            .config
+            .project_root
+            .as_ref()
+            .and_then(|p| p.canonicalize().ok())
+            .as_ref()
+            == Some(&project.root)
+        {
+            return Ok("This project is already open".into());
+        }
+        let id = if project.editor_launcher()?.is_some() {
+            project.launch_editor()?
+        } else {
+            let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+            if executable.file_stem().and_then(|v| v.to_str()) != Some("hello_engine") {
+                return Err("This project has no editor.launch.json. Open generic projects with Hello Engine; game projects need their own built editor to retain custom schemas.".into());
+            }
+            std::process::Command::new(executable)
+                .arg("--project")
+                .arg(&project.root)
+                .current_dir(&project.root)
+                .spawn()
+                .map_err(|e| e.to_string())?
+                .id()
+        };
+        Ok(format!(
+            "Opened {} in its editor (process {id}); this session is preserved",
+            project.manifest.name
+        ))
+    }
+
     pub(super) fn poll_authoring(&mut self) {
         if !self.config.authoring_enabled {
             return;
@@ -96,6 +265,7 @@ impl<G: GameApp> Engine<G> {
                     capture: None,
                     import: None,
                     next_refresh: Instant::now(),
+                    semantic_receipts: Default::default(),
                 })
             })();
             match result {
@@ -224,7 +394,27 @@ impl<G: GameApp> Engine<G> {
                         }
                     }
                 }
+                result["input_keys"] =
+                    json!(INPUT_KEYS.iter().map(|(name, _)| *name).collect::<Vec<_>>());
                 result["execute_actions"] = json!([
+                    "terrain_settings",
+                    "foliage_settings",
+                    "content",
+                    "workspace",
+                    "bookmark",
+                    "material_open",
+                    "material_save",
+                    "setting",
+                    "terrain_stroke",
+                    "foliage_stroke",
+                    "designer",
+                    "script",
+                    "editor",
+                    "graph_open",
+                    "graph_apply",
+                    "graph_preview",
+                    "graph_save",
+                    "open_project",
                     "command",
                     "preset",
                     "select",
@@ -239,14 +429,66 @@ impl<G: GameApp> Engine<G> {
                     "load_scene",
                     "revoke"
                 ]);
-                result["coverage"] = json!({"scene_fields":true,"specialized_document_gestures":false,
-                    "note":"Command discovery exposes native command routing; it does not imply parity for every specialized gesture."});
+                result["coverage"] = json!({
+                    "scene":"typed plan/commit, reflected Details, persistent IDs, one transaction undo",
+                    "graph":{"owner":"retained GraphSurface","operations":["add_node","literal","select","move","connect","disconnect","comment","group","delete","copy","paste","align","replace","undo","redo"],"guards":["expected_view includes document and selection","native pointer/literal gesture exclusion"]},
+                    "state_machine":{"owner":"native graph overlay","operations":["state_initial","state_add_transition","state_set_transition","state_remove_transition","state_undo","state_redo"],"guard":"expected_state_view"},
+                    "timeline":{"owner":"retained TimelineSurface","operations":["add_group","add_track","add_media","move_media","resize_media","add_marker","move_marker","add_key","move_key","remove_track","select_channel","replace","scrub","undo","redo"],"guard":"expected_view"},
+                    "terrain":{"actions":["terrain_stroke","foliage_stroke"],"owner":"renderer terrain buffers + native restore history","guards":["expected_revision","terrain_revision","bounded brush samples"]},
+                    "designer":{"tools":["navigation_bake","navigation_clear","behavior_edit","animation_rig","animation_reset","animation_reload","animation_events","animation_save_events","save_play","load_play"],"owner":"native designer handlers; bake completion in NavigationProfile status/pending_cells"},
+                    "scripts":{"operations":["attach","detach","reorder","enabled","number","bool","reload"],"source":"validated Luau document publication and exact-byte undo"},
+                    "materials":"material_open -> reflected native material draft -> material_save; native dirty/GPU path",
+                    "documents":["somui","somgraph","somtimeline","luau","registered game JSON"],
+                    "spatial":{"queries":["pick","clearance","bookmarks"],"actions":["camera","bookmark"],"limits":"picking uses native proxy bounds; clearance uses registered physics colliders"},
+                    "project":"native File > Open Project or open_project; game launcher preserves private schemas",
+                    "renderer_controls":"terrain_settings / foliage_settings query and native value updates with expected_value; session preview scope",
+                    "content":{"operations":["new_folder","new_script","new_material","rename","assign_material","make_unique"],"owner":"native Content Drawer handlers"},
+                    "workspace":{"operations":["float","dock","place"],"owner":"actual native panel windows"},
+                    "localisation":{"operations":["cell","range","replace","sort","filter","undo","redo","save","export"],"owner":"retained DataGrid; shared catalogue save/export"},
+                    "preferences":"settings query + setting with expected_value; stored preference has no scene undo",
+                    "evidence":"tools/somnium_mcp/editor_acceptance.py generates live case receipts and inventory; metadata describes routes, not a claim that every decorative UI gesture was replayed"
+                });
                 result
             }
             "authoring.query" => match params["kind"].as_str().unwrap_or("scene") {
                 "project" => {
                     json!({"ok":true,"project":host.project.manifest,"root":host.project.root,"revision":host.session.revision})
                 }
+                "pick" | "clearance" => self
+                    .query_authoring_spatial(&params)
+                    .unwrap_or_else(|e| fail("spatial_error", e)),
+                "bookmarks" => {
+                    json!({"ok":true,"bookmarks":self.camera_bookmarks.iter().enumerate().map(|(index,p)|json!({"slot":index+1,"pose":p.map(|(position,yaw,pitch)|json!({"position":position.to_array(),"yaw":yaw,"pitch":pitch}))})).collect::<Vec<_>>()})
+                }
+                "settings" => {
+                    let (world, entity) = self.settings.world();
+                    let schemas = self.settings.registry().iter();
+                    let values:Vec<_>=schemas.map(|schema|{
+                        let fields=(schema.snapshot)(world,entity).unwrap_or_default();
+                        json!({"component":schema.stable_id.as_str(),"fields":schema.fields.iter().map(|field|json!({"name":field.name,"schema":crate::authoring::codec::type_schema(&field.ty),"value":fields.get(&field.id).map(|v|crate::authoring::codec::encode(world,&field.ty,v)),"override":self.settings.override_of(schema.stable_id,field.id)})).collect::<Vec<_>>()})
+                    }).collect();
+                    json!({"ok":true,"settings":values})
+                }
+                "terrain_settings" | "foliage_settings" => self
+                    .query_authoring_controls(&params)
+                    .unwrap_or_else(|e| fail("control_error", e)),
+                "workspace" => self
+                    .query_authoring_workspace(&params)
+                    .unwrap_or_else(|e| fail("workspace_error", e)),
+                "terrain" => self
+                    .query_authoring_terrain(&params)
+                    .unwrap_or_else(|e| fail("terrain_error", e)),
+                "editor" => self
+                    .ui_manager
+                    .as_mut()
+                    .ok_or("editor unavailable".to_string())
+                    .and_then(|ui| {
+                        ui.authoring_editor(
+                            params["editor"].as_str().unwrap_or("graph"),
+                            &json!({"operation":"query"}),
+                        )
+                    })
+                    .unwrap_or_else(|e| fail("editor_error", e)),
                 "game" => json!({"ok":true,"game":self.game.authoring_state()}),
                 "commands" => {
                     json!({"ok":true,"commands":self.ui_manager.as_ref().map(|ui|ui.authoring_commands()).unwrap_or_default()})
@@ -337,6 +579,7 @@ impl<G: GameApp> Engine<G> {
             _ => fail("method_not_found", "Unknown authoring method"),
         };
         if marks_scene_dirty && result["ok"] == true {
+            self.apply_terrain_restores();
             self.scene_dirty = true;
             self.selection.reconcile();
             self.after_selection_change();
@@ -353,6 +596,86 @@ impl<G: GameApp> Engine<G> {
             return host.documents.execute(params).map_err(|e| e.message);
         }
         match kind {
+            "bookmark"=>{
+                let slot=params["slot"].as_u64().filter(|v|(1..=9).contains(v)).ok_or("bookmark slot must be 1..9")? as u8;
+                let operation=required(params,"operation")?;
+                if operation=="set" {self.handle_editor_event(EditorEvent::SetCameraBookmark(slot));}
+                else if operation=="recall" {if self.camera_bookmarks[slot as usize-1].is_none(){return Err("bookmark is empty".into());}self.handle_editor_event(EditorEvent::RecallCameraBookmark(slot));}
+                else{return Err("bookmark operation must be set or recall".into());}
+                Ok(json!({"ok":true,"slot":slot,"status":if operation=="set"{"stored"}else{"queued"}}))
+            }
+            "material_open"=>{
+                let path=Path::new(required(params,"path")?);
+                if !path.starts_with(&host.project.manifest.content)||path.extension().and_then(|v|v.to_str())!=Some("sommat"){return Err("material needs .sommat under content".into());}
+                let resolved=host.project.resolve(path)?;
+                somnium_asset::material::load_material(&resolved)?;
+                self.inspect_material_asset(resolved);
+                let (_,entity)=self.material_asset_target.ok_or("material editor could not open")?;
+                let entity=self.world.ensure_persistent_id(entity).map_err(|e|format!("material edit session: {e:?}"))?;
+                host.session.observe(&mut self.world);
+                Ok(json!({"ok":true,"entity":entity.to_string(),"revision":host.session.revision,"edit":"Use authoring.plan set operations for somnium.asset.Material fields; native Details and GPU update share the same session"}))
+            }
+            "material_save"=>{
+                self.flush_material_assets();
+                let failed:Vec<_>=self.material_documents.values().filter(|d|d.dirty).map(|d|d.path.clone()).collect();
+                if !failed.is_empty(){return Err(format!("Some material saves failed: {failed:?}"));}
+                Ok(json!({"ok":true,"status":"Material assets saved"}))
+            }
+            "setting"=>{
+                let name=required(params,"component")?;let field_name=required(params,"field")?;
+                if name=="somnium.ProjectSettings"&&field_name=="content_root"{return Err("Use Open Project; content roots belong to the manifest".into());}
+                let schema=self.settings.registry().by_name(name).ok_or("unknown settings component")?;
+                let field=schema.fields.iter().find(|f|f.name==field_name).ok_or("unknown settings field")?;
+                let (world,entity)=self.settings.world();
+                let snapshot=(schema.snapshot)(world,entity).ok_or("settings absent")?;
+                let previous=snapshot.get(&field.id).map(|v|crate::authoring::codec::encode(world,&field.ty,v)).ok_or("setting absent")?;
+                if params["expected_value"]!=previous{return Err("setting_conflict: refresh the current preference".into());}
+                let value=crate::authoring::codec::decode(world,&field.ty,&params["value"])?;
+                self.settings.set(schema.stable_id,field.id,value)?;self.apply_settings();
+                Ok(json!({"ok":true,"previous_value":previous,"value":params["value"]}))
+            }
+            "terrain_stroke"|"foliage_stroke"|"designer"|"script"|"terrain_settings"|"foliage_settings"|"content"=> {
+                let id=required(params,"request_id")?;
+                if let Some((old,receipt))=host.semantic_receipts.get(id){return if old==params{Ok(receipt.clone())}else{Err("request_id reused with different inputs".into())};}
+                let result=self.execute_specialized(host,params)?;
+                if host.semantic_receipts.len()>=128{host.semantic_receipts.clear();}
+                host.semantic_receipts.insert(id.into(),(params.clone(),result.clone()));Ok(result)
+            },
+            "editor"=>{
+                let request_id=required(params,"request_id")?;
+                if let Some((previous,receipt))=host.semantic_receipts.get(request_id){
+                    return if previous==params {Ok(receipt.clone())}else{Err("request_id already used with different editor parameters".into())};
+                }
+                let result=self.ui_manager.as_mut().ok_or("editor unavailable")?.authoring_editor(required(params,"editor")?,params)?;
+                if host.semantic_receipts.len()>=128 {host.semantic_receipts.clear();}
+                host.semantic_receipts.insert(request_id.into(),(params.clone(),result.clone()));
+                Ok(result)
+            }
+            "graph_open"=>{
+                let path=Path::new(required(params,"path")?);
+                if !path.starts_with(&host.project.manifest.content)||path.extension().and_then(|v|v.to_str())!=Some("somgraph"){return Err("graph needs .somgraph under project content".into());}
+                let source=host.project.resolve(path)?;
+                let json=std::fs::read_to_string(&source).map_err(|e|e.to_string())?;
+                let catalogue=serde_json::from_str::<Value>(&json).map_err(|e|e.to_string())?["catalogue"].as_str().ok_or("graph catalogue absent")?.to_owned();
+                let ui=self.ui_manager.as_mut().ok_or("editor unavailable")?;
+                ui.edit_authoring_graph(&catalogue,&json)?;ui.set_authoring_graph_source(&source.to_string_lossy());
+                Ok(json!({"ok":true,"status":"queued","path":path}))
+            }
+            "graph_apply"|"graph_preview"|"graph_save"=>{
+                host.session.check_revision(&mut self.world,params["expected_revision"].as_u64().ok_or("expected_revision required")?).map_err(|e|e.message)?;
+                let q=self.ui_manager.as_mut().ok_or("editor unavailable")?.authoring_editor("graph",&json!({"operation":"query"}))?;
+                if params["expected_view"]!=q["view_token"]{return Err("graph changed; query its current view before applying".into());}
+                let doc=q["document"].to_string();let catalogue=q["document"]["catalogue"].as_str().ok_or("graph catalogue missing")?;
+                let path=if kind=="graph_save" {let p=Path::new(required(params,"path")?);if !p.starts_with(&host.project.manifest.content)||p.extension().and_then(|v|v.to_str())!=Some("somgraph"){return Err("save requires .somgraph under content".into());}Some(host.project.resolve(p)?)}else{None};
+                let status=self.apply_authoring_graph(catalogue,&doc,kind!="graph_save",kind=="graph_preview",path.as_ref().map(|p|p.to_str().ok_or("invalid path")).transpose()?)?;
+                host.session.observe(&mut self.world);
+                Ok(json!({"ok":true,"status":status,"revision":host.session.revision}))
+            }
+            "workspace"=>self.execute_authoring_workspace(host,params),
+            "open_project"=>{
+                let message=self.open_editor_project(Path::new(required(params,"path")?))?;
+                Ok(json!({"ok":true,"message":message}))
+            }
             "panel_capture"=>{
                 self.execute_authoring(host,&json!({"action":"capture","request_id":format!("panel-capture-{}",self.time.frame_count()),"include_editor":true}))
             }
@@ -367,8 +690,12 @@ impl<G: GameApp> Engine<G> {
             "preset"=>{
                 host.session.observe(&mut self.world);
                 let label=required(params,"id")?;
+                let mut args=params.get("args").cloned().unwrap_or(json!({}));
+                if args.get("position").is_none() && crate::authoring::game_registration().presets.iter().any(|p|p.id==label && p.schema["properties"].get("position").is_some()) {
+                    let (position,_,_)=camera_spawn_basis(self.renderer.as_ref(),5.0);args["position"]=json!(position.to_array());
+                }
                 let plan=host.session.plan(&mut self.world,PlanRequest { expected_revision:host.session.revision,
-                    label:format!("Create {label}"),operations:vec![crate::authoring::Operation::Preset{id:label.into(),args:params.get("args").cloned().unwrap_or(json!({}))}]
+                    label:format!("Create {label}"),operations:vec![crate::authoring::Operation::Preset{id:label.into(),args}]
                 }).map_err(|e|e.message)?;
                 self.scene_dirty=true;
                 host.session.commit(&mut self.world,&mut self.undo_stack,&mut self.selection.primary,
@@ -429,12 +756,7 @@ impl<G: GameApp> Engine<G> {
                     if v.iter().any(|n|!n.is_finite()||n.abs()>3600.0){return Err("look delta is invalid".into());}
                     EngineEvent::MouseMotion{delta_x:v[0],delta_y:v[1]}
                 }else{
-                let key=match required(params,"key")? {
-                    "W"=>KeyCode::KeyW,"A"=>KeyCode::KeyA,"S"=>KeyCode::KeyS,"D"=>KeyCode::KeyD,
-                    "Shift"=>KeyCode::ShiftLeft,"Control"=>KeyCode::ControlLeft,"F"=>KeyCode::KeyF,
-                    "E"=>KeyCode::KeyE,"V"=>KeyCode::KeyV,"F5"=>KeyCode::F5,"F9"=>KeyCode::F9,"Space"=>KeyCode::Space,
-                    _=>return Err("Supported keys: W A S D Shift Control F E V F5 F9 Space".into())
-                };
+                let key=authoring_key(required(params,"key")?)?;
                 let state=if params["pressed"].as_bool().ok_or("pressed must be boolean")?{InputState::Pressed}else{InputState::Released};
                 EngineEvent::KeyInput{key,state}
                 };
@@ -662,6 +984,13 @@ impl<G: GameApp> Engine<G> {
         if let Ok(files) = host.documents.list() {
             for file in files["documents"].as_array().into_iter().flatten() {
                 for document in &game.documents {
+                    if Path::new(file["path"].as_str().unwrap_or(""))
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        != Some(document.extension)
+                    {
+                        continue;
+                    }
                     entries.push(AuthoringEntry{fields:vec![],id:format!("doc:{}:{}",file["path"],document.id),label:file["path"].as_str().unwrap_or("").into(),category:"Documents".into(),detail:document.label.into(),actions:vec![action("Open","authoring.execute",json!({"action":"document_open","path":file["path"],"document_type":document.id}))]});
                 }
             }

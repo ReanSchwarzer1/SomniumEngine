@@ -1567,6 +1567,11 @@ impl EditorCommand for ReparentCmd {
 /// shared with the `Engine`, which drains it (with renderer access) right
 /// after every undo/redo call.
 pub enum TerrainRestoreOp {
+    /// Restore the authored foliage instances on one terrain.
+    Foliage {
+        terrain_id: u32,
+        instances: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    },
     /// Restore a heightmap region: inclusive vertex rect + row-major heights.
     Heights {
         terrain_id: u32,
@@ -1583,6 +1588,49 @@ pub enum TerrainRestoreOp {
 
 /// Queue of terrain restores shared between commands and the `Engine`.
 pub type TerrainRestoreQueue = std::sync::Arc<std::sync::Mutex<Vec<TerrainRestoreOp>>>;
+
+/// One reversible authored foliage stroke, applied through the renderer restore queue.
+pub struct FoliageEditCmd {
+    terrain_id: u32,
+    before: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    after: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    queue: TerrainRestoreQueue,
+}
+impl FoliageEditCmd {
+    /// Record a completed stroke. The caller uses UndoStack::push_silent.
+    pub fn new(
+        terrain_id: u32,
+        before: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+        after: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+        queue: TerrainRestoreQueue,
+    ) -> Self {
+        Self {
+            terrain_id,
+            before,
+            after,
+            queue,
+        }
+    }
+    fn restore(&self, instances: &[somnium_renderer::terrain::foliage_paint::PaintedFoliage]) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.push(TerrainRestoreOp::Foliage {
+                terrain_id: self.terrain_id,
+                instances: instances.to_vec(),
+            });
+        }
+    }
+}
+impl EditorCommand for FoliageEditCmd {
+    fn execute(&mut self, _world: &mut World, _selection: &mut Option<Entity>) {
+        self.restore(&self.after);
+    }
+    fn undo(&mut self, _world: &mut World, _selection: &mut Option<Entity>) {
+        self.restore(&self.before);
+    }
+    fn description(&self) -> &str {
+        "Paint Foliage Stroke"
+    }
+}
 
 /// Reversible terrain sculpt or paint stroke (Phase 14D-4 `TerrainEditCmd`).
 ///

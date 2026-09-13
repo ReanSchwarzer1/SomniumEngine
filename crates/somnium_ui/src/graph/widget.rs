@@ -755,6 +755,90 @@ impl GraphEditor {
 }
 
 impl Control for GraphEditor {
+    fn authoring(
+        &mut self,
+        widget: &Widget,
+        params: &serde_json::Value,
+        emit: &mut Vec<UiMessage>,
+    ) -> Result<serde_json::Value, String> {
+        let operation = params["operation"].as_str().unwrap_or("query");
+        if operation != "query"
+            && (!matches!(self.gesture, Gesture::None)
+                || self.literal_edit.is_some()
+                || self.transition_edit.is_some())
+        {
+            return Err("Finish the designer's graph gesture or text edit first".into());
+        }
+        if operation.starts_with("state_") {
+            let doc = self
+                .document
+                .state_machine_mut()
+                .ok_or("open an animation state-machine document first")?;
+            let before = doc.to_json().map_err(|e| format!("{e:?}"))?;
+            if params["expected_state_view"] != crate::semantic_authoring::view_token(&before) {
+                return Err("state_document_conflict: refresh the graph query".into());
+            }
+            let mut value: serde_json::Value =
+                serde_json::from_str(&before).map_err(|e| e.to_string())?;
+            let changed = match operation {
+                "state_initial" => doc.set_initial(NodeId(
+                    params["node"]
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or("node id required")?,
+                )),
+                "state_add_transition" | "state_set_transition" => {
+                    value["transitions"] = serde_json::json!([params["transition"]]);
+                    let parsed = AnimationStateMachineDocument::from_json(
+                        &value.to_string(),
+                        doc.surface().catalogue.clone(),
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                    let transition = parsed
+                        .transitions()
+                        .first()
+                        .ok_or("transition missing")?
+                        .clone();
+                    if operation == "state_add_transition" {
+                        doc.add_transition(transition)
+                    } else {
+                        doc.set_transition(
+                            params["index"].as_u64().ok_or("index required")? as usize,
+                            transition,
+                        )
+                    }
+                }
+                "state_remove_transition" => doc
+                    .remove_transition(params["index"].as_u64().ok_or("index required")? as usize),
+                "state_undo" => doc.undo_overlay().is_some(),
+                "state_redo" => doc.redo_overlay().is_some(),
+                _ => return Err("unknown state-machine operation".into()),
+            };
+            if !changed {
+                return Err("animation state edit invalid or unchanged".into());
+            }
+            self.emit_changed(widget, emit);
+        }
+        let query = serde_json::json!({"operation":"query"});
+        let mut result = crate::semantic_authoring::graph(
+            self.surface_mut(),
+            if operation.starts_with("state_") {
+                &query
+            } else {
+                params
+            },
+        )?;
+        if !operation.starts_with("state_") && operation != "query" {
+            self.emit_changed(widget, emit);
+        }
+        if let Some(doc) = self.document.state_machine() {
+            let data = doc.to_json().map_err(|e| format!("{e:?}"))?;
+            result["state_view_token"] =
+                serde_json::json!(crate::semantic_authoring::view_token(&data));
+            result["state_document"] = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+        }
+        Ok(result)
+    }
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         Vec2::new(available.x.max(320.0), available.y.max(200.0))
     }

@@ -171,6 +171,17 @@ impl CursorKind {
 /// The behavior interface every widget type must implement.
 /// Analogous to Fyrox's `Control` trait in fyrox-ui/src/control.rs.
 pub trait Control: Send + 'static {
+    /// Optional semantic editor adapter. Implemented by durable document owners.
+    /// Queries and mutations share the same model and history as pointer edits.
+    fn authoring(
+        &mut self,
+        _widget: &Widget,
+        _params: &serde_json::Value,
+        _emit: &mut Vec<UiMessage>,
+    ) -> Result<serde_json::Value, String> {
+        Err("This control has no semantic authoring document".into())
+    }
+
     // ── MORROWIND-I: accessibility ──────────────────────────────────────────
     //
     // Three defaulted hooks rather than a registry, because the control already

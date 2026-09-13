@@ -341,7 +341,7 @@ pub fn animation() -> Catalogue {
     catalogue
 }
 
-fn register_layout(catalogue: &mut Catalogue) {
+pub(crate) fn register_layout(catalogue: &mut Catalogue) {
     catalogue.register(
         NodeArchetype::new("graph.comment", "Comment", "Layout")
             .in_group("layout")

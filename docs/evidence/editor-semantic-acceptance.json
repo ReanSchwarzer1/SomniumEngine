@@ -1,0 +1,129 @@
+{
+  "cases": {
+    "animation_state_overlay": {
+      "pass": true,
+      "native_undo": true
+    },
+    "graph_topology": {
+      "pass": true,
+      "conflict_rejected": true,
+      "native_undo": true
+    },
+    "timeline": {
+      "pass": true,
+      "markers": true,
+      "keys": true,
+      "media": true,
+      "native_undo": true
+    },
+    "terrain_and_foliage": {
+      "pass": true,
+      "foliage_placed": 1,
+      "restored_count": 0
+    },
+    "luau_source": {
+      "pass": true,
+      "compile_validation": true,
+      "published_undo": true
+    },
+    "ui_layout_document": {
+      "pass": true,
+      "native_schema": true,
+      "published_undo": true
+    },
+    "hello_shared_interaction_preset": {
+      "pass": true,
+      "actions": 5,
+      "scene_undo": true
+    },
+    "hello_gpu_animation": {
+      "pass": true,
+      "imported_clip": "Bend",
+      "gpu_frames": 26,
+      "scrub": true,
+      "native_details": true,
+      "removed_allocations": true
+    },
+    "spatial": {
+      "pass": true,
+      "pick_hits": 0,
+      "capsule_sweep": true,
+      "bookmark_recall": true
+    },
+    "settings": {
+      "pass": true
+    },
+    "script_attachments": {
+      "pass": true,
+      "attach": true,
+      "exported_number": true,
+      "enabled": true,
+      "reorder": true,
+      "reload": true,
+      "native_undo": true
+    },
+    "behavior_compile_apply": {
+      "pass": true,
+      "native_undo": true
+    },
+    "navigation_bake": {
+      "pass": true,
+      "polygons": 64,
+      "terminal_status": "Ready \u2014 64 polygons, 4 tiles, 1 unsupported meshes",
+      "clear": true
+    },
+    "material_native_draft": {
+      "pass": true,
+      "reflected_edit": true,
+      "native_undo": true
+    },
+    "renderer_controls": {
+      "native_ranges": 14,
+      "value_change": true,
+      "stale_value_rejected": true,
+      "restored": true,
+      "pass": true
+    },
+    "foliage_controls": {
+      "native_ranges": 7,
+      "custom_slope_survives_stroke": true,
+      "restored": true,
+      "pass": true
+    },
+    "positive_pick": {
+      "native_bounds_hit": true,
+      "distance_metres": 4.0,
+      "pass": true
+    },
+    "content_operations": {
+      "create_folder": true,
+      "create_script": true,
+      "rename": true,
+      "create_material": true,
+      "assign_material": true,
+      "make_unique": true,
+      "assignment_undo": true,
+      "pass": true
+    },
+    "localisation": {
+      "native_cells": true,
+      "range": true,
+      "native_undo": true,
+      "saved_catalogue": true,
+      "exported_csv": true,
+      "source_restored": true,
+      "pass": true
+    },
+    "native_panels": {
+      "floating_window": true,
+      "requested_size": [
+        480,
+        600
+      ],
+      "dock_restored": true,
+      "pass": true
+    }
+  },
+  "source": "live editor",
+  "complete": true
+}
