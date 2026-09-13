@@ -988,7 +988,8 @@ impl<G: GameApp> Engine<G> {
                 )],
             });
         }
-        if let Ok(files) = host.documents.list() {
+        {
+            let files = host.documents.panel_list(&mut self.jobs);
             for file in files["documents"].as_array().into_iter().flatten() {
                 for document in &game.documents {
                     if Path::new(file["path"].as_str().unwrap_or(""))

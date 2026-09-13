@@ -2,10 +2,12 @@
 //! Only the declared document directory is exposed; IPC credentials and source
 //! backups are never readable through this API.
 use super::{AuthoringError, project::ProjectPaths, registration::game_registration};
+use crate::jobs::{JobContext, JobHandle, JobPriority, JobSystem};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, AuthoringError>;
 fn error(message: impl Into<String>) -> AuthoringError {
@@ -17,6 +19,58 @@ fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| error(format!("{key} required")))
 }
 const MAX_BYTES: usize = 512 * 1024;
+
+/// The panel can use the last completed scan; explicit document requests stay fresh.
+/// At most one scan runs per session, with no filesystem work or waiting on the UI thread.
+struct DocumentCatalog {
+    files: Value,
+    pending: Option<JobHandle<Value>>,
+    next_scan: Instant,
+}
+impl DocumentCatalog {
+    fn new() -> Self {
+        Self {
+            files: json!({"ok":true,"documents":[]}),
+            pending: None,
+            next_scan: Instant::now(),
+        }
+    }
+    fn poll(&mut self) {
+        let Some(result) = self.pending.as_ref().and_then(JobHandle::try_take) else {
+            return;
+        };
+        match result {
+            Ok(files) => self.files = files,
+            // Keep the last good list during transient filesystem errors.
+            Err(_) => {}
+        }
+        self.pending = None;
+        self.next_scan = Instant::now() + Duration::from_secs(2);
+    }
+    fn list(&mut self, project: &ProjectPaths, jobs: &mut JobSystem) -> &Value {
+        self.poll();
+        if self.pending.is_none() && Instant::now() >= self.next_scan {
+            let project = project.clone();
+            match jobs.submit("Document catalog", JobPriority::Background, move |ctx| {
+                DocumentSession::list_project(&project, Some(&ctx)).map_err(|e| e.message)
+            }) {
+                Ok(handle) => self.pending = Some(handle),
+                Err(_) => {
+                    // A full shared queue can retry without blocking or clearing the panel.
+                    self.next_scan = Instant::now() + Duration::from_secs(2);
+                }
+            }
+        }
+        &self.files
+    }
+}
+impl Drop for DocumentCatalog {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.pending {
+            handle.cancel();
+        }
+    }
+}
 fn decode(path: &Path, bytes: &[u8]) -> Result<Value> {
     if path.extension().and_then(|e| e.to_str()) == Some("luau") {
         Ok(json!({"text":std::str::from_utf8(bytes).map_err(|e|error(e.to_string()))?}))
@@ -29,6 +83,61 @@ fn encode(path: &Path, value: &Value) -> Result<Vec<u8>> {
         Ok(text(value, "text")?.as_bytes().to_vec())
     } else {
         serde_json::to_vec_pretty(value).map_err(|e| error(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn slow_scan_keeps_the_previous_snapshot_available() {
+        let mut jobs = JobSystem::with_workers_and_capacity(1, 4);
+        let (release, wait) = std::sync::mpsc::channel();
+        let previous = json!({"ok":true,"documents":[{"path":"old.json"}]});
+        let mut catalog = DocumentCatalog::new();
+        catalog.files = previous.clone();
+        catalog.pending = Some(
+            jobs.submit("Blocked catalog", JobPriority::Background, move |_| {
+                wait.recv_timeout(Duration::from_secs(5))
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({"ok":true,"documents":[]}))
+            })
+            .unwrap(),
+        );
+
+        catalog.poll();
+        assert_eq!(catalog.files, previous);
+        assert!(catalog.pending.is_some());
+        // Release even if the assertion above unwinds: dropping the sender also
+        // disconnects the worker, so the test cannot hang on pool destruction.
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn completed_scan_publishes_once_and_failed_refresh_keeps_it() {
+        let mut jobs = JobSystem::single_threaded();
+        let mut catalog = DocumentCatalog::new();
+        let files = json!({"ok":true,"documents":[{"path":"fresh.json"}]});
+        let scanned = files.clone();
+        catalog.pending = Some(
+            jobs.submit("Catalog", JobPriority::Background, move |_| Ok(scanned))
+                .unwrap(),
+        );
+        catalog.poll();
+        assert_eq!(catalog.files, files);
+        assert!(catalog.pending.is_none());
+        assert!(catalog.next_scan > Instant::now());
+
+        catalog.pending = Some(
+            jobs.submit("Unavailable catalog", JobPriority::Background, |_| {
+                Err("disk unavailable".into())
+            })
+            .unwrap(),
+        );
+        catalog.poll();
+        assert_eq!(catalog.files, files);
+        assert!(catalog.pending.is_none());
     }
 }
 
@@ -70,6 +179,7 @@ pub struct DocumentSession {
     receipts: BTreeMap<String, (Value, Value)>,
     undo: Vec<Revision>,
     redo: Vec<Revision>,
+    catalog: DocumentCatalog,
     pub draft: Option<DocumentDraft>,
 }
 impl DocumentSession {
@@ -83,6 +193,7 @@ impl DocumentSession {
             receipts: BTreeMap::new(),
             undo: vec![],
             redo: vec![],
+            catalog: DocumentCatalog::new(),
             draft: None,
         }
     }
@@ -134,16 +245,28 @@ impl DocumentSession {
         Ok(())
     }
     pub fn list(&self) -> Result<Value> {
+        Self::list_project(&self.project, None)
+    }
+    /// Nonblocking catalog for the native authoring panel. External file changes
+    /// appear after the next background scan; `list` still reads the disk directly.
+    pub fn panel_list(&mut self, jobs: &mut JobSystem) -> &Value {
+        self.catalog.list(&self.project, jobs)
+    }
+    fn list_project(project: &ProjectPaths, job: Option<&JobContext>) -> Result<Value> {
         fn visit(
             root: &Path,
             project: &ProjectPaths,
             out: &mut Vec<Value>,
             depth: usize,
+            job: Option<&JobContext>,
         ) -> Result<()> {
             if depth > 12 || out.len() >= 256 {
                 return Ok(());
             }
             for entry in std::fs::read_dir(root).map_err(|e| error(e.to_string()))? {
+                if job.is_some_and(JobContext::is_cancelled) {
+                    return Err(error("Document catalog cancelled"));
+                }
                 let entry = entry.map_err(|e| error(e.to_string()))?;
                 let path = entry.path();
                 if entry
@@ -160,7 +283,7 @@ impl DocumentSession {
                     continue;
                 }
                 if path.is_dir() {
-                    visit(&path, project, out, depth + 1)?;
+                    visit(&path, project, out, depth + 1, job)?;
                 } else if matches!(
                     path.extension().and_then(|s| s.to_str()),
                     Some("json" | "somui" | "somgraph" | "somtimeline" | "luau")
@@ -172,24 +295,22 @@ impl DocumentSession {
         }
         let mut files = vec![];
         visit(
-            &self
-                .project
-                .resolve(&self.project.manifest.documents)
+            &project
+                .resolve(&project.manifest.documents)
                 .map_err(error)?,
-            &self.project,
+            project,
             &mut files,
             0,
+            job,
         )?;
-        if self.project.manifest.content != self.project.manifest.documents {
+        if project.manifest.content != project.manifest.documents {
             let mut assets = vec![];
             visit(
-                &self
-                    .project
-                    .resolve(&self.project.manifest.content)
-                    .map_err(error)?,
-                &self.project,
+                &project.resolve(&project.manifest.content).map_err(error)?,
+                project,
                 &mut assets,
                 0,
+                job,
             )?;
             files.extend(assets.into_iter().filter(|v| {
                 v["path"].as_str().is_some_and(|p| {

@@ -38,6 +38,14 @@ python -B tools/somnium_mcp/probe.py --connection C:/path/to/project/runtime/aut
 
 It verifies fragmented request framing, fresh connections, wrong credential/project/session rejection, native method allowlisting, malformed-frame recovery and MCP subprocess â†’ real editor discovery. Scene mutation/undo/import/capture acceptance must additionally exercise the engine's implemented operation schemas. Rust transport/feedback tests run with the repository's normal core test gate; avoid spawning a second Cargo target or build during coordinated implementation.
 
+The Windows flight probe drives RMB+W/S through the native editor window and supplies look deltas through the engine input route. Run it on the editor's desktop, using the running process ID:
+
+```powershell
+python -B tools/somnium_mcp/tests/viewport_flight_profile.py DESCRIPTOR PID RECEIPT.json
+```
+
+It records raw frame stages, sampled frame times and actual camera travel. It releases input without saving the scene, and fails if the camera did not move or sampled authoring work exceeds 12 ms. `--authoring-budget-ms` adjusts that local regression threshold. Compare the same scene, terrain and build profile; the probe does not measure every rendered frame.
+
 ## Implementation references
 
 Protocol compatibility follows [MCP 2025-11-25 tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools). Named-pipe polling follows Microsoft's [type/read/wait modes](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes) and [ConnectNamedPipe semantics](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-connectnamedpipe). `PIPE_NOWAIT` is intentionally used for bounded main-thread polling, not advertised as overlapped asynchronous I/O; no worker is created. Production migration to overlapped I/O should preserve the same bounded queue and dispatch interface.

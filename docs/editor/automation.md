@@ -41,6 +41,21 @@ ReSTIR GI currently estimates bounced directional sunlight. Shading adds that bo
 
 Device checks: `cargo test -p somnium_renderer --test taa_reactive -- --ignored --nocapture`, `cargo test -p somnium_renderer --lib pass::fsr::tests -- --ignored --nocapture --test-threads=1`, and `cargo test -p somnium_renderer --test gtao_near_surface -- --ignored --nocapture`.
 
+## Viewport responsiveness
+
+The Game / Authoring document list refreshes through the shared background job system. One scan runs at a time; the panel keeps its last completed list during slow or failed scans. External file changes appear after the next scan, scheduled two seconds after completion. Explicit document queries still read current files and enforce the same project boundaries.
+
+```mermaid
+flowchart LR
+  Tick[Panel refresh] --> Cache[Last completed document list]
+  Tick --> Jobs[Shared background job queue]
+  Jobs --> Scan[Contained filesystem scan]
+  Scan --> Cache
+  Cache --> Panel[Native document actions]
+```
+
+The September 14 Hello Engine flight probe traced a 54.2 ms authoring pause to synchronous asset-tree scans. With background scanning, the sampled authoring maximum was 3.4 ms and total frame maximum fell from 75.5 to 20.1 ms. No sampled frames exceeded 33 ms after the change. These are local CPU samples with the normal terrain scene, not a hardware-independent frame-rate guarantee.
+
 ## Semantic editor access
 
 The [local MCP adapter](../../tools/somnium_mcp/README.md) uses the editor's actual document owners and native handlers. Discover component schemas and operation names before editing. Scene edits use plan/commit and stable entity IDs. Graph and timeline edits require the queried view token; terrain edits require scene and terrain revisions. Active native pointer/text edits reject competing semantic gestures.
