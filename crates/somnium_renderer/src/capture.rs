@@ -408,6 +408,26 @@ pub struct FrameCapture {
 }
 
 impl FrameCapture {
+    /// Arm a fresh display/editor capture for the next rendered frame.
+    /// The caller owns the unique output path and verifies terminal readback.
+    pub fn request_png(
+        &mut self,
+        path: &std::path::Path,
+        include_editor: bool,
+    ) -> Result<(), String> {
+        if self.pending.is_some() || (self.active() && self.frame < self.target_frame) {
+            return Err("another frame capture is pending".into());
+        }
+        self.write_to = None;
+        self.write_png = None;
+        self.compare_to = None;
+        self.write_display_png = (!include_editor).then(|| path.to_string_lossy().into_owned());
+        self.write_ui_png = include_editor.then(|| path.to_string_lossy().into_owned());
+        self.target_frame = self.frame.saturating_add(1);
+        CAPTURE_FINISHED.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn from_env() -> Self {
         Self {
             write_to: std::env::var("SOMNIUM_CAPTURE").ok(),

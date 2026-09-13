@@ -2030,7 +2030,7 @@ fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {
     }
 }
 
-fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entity>) {
+pub(crate) fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entity>) {
     if let Some(old) = world
         .get::<Parent>(child)
         .and_then(|p| world.is_alive(p.entity).then_some(p.entity))

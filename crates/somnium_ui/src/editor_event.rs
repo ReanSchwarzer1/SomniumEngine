@@ -240,6 +240,12 @@ pub struct OutlinerRow {
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
+    /// Shared, typed host authoring request from the native panel. The same
+    /// method/parameters are accepted from MCP; the host validates both.
+    AuthoringRequest {
+        method: String,
+        params: serde_json::Value,
+    },
     /// Create a registered designer component with normal Details and undo.
     CreateComponent(String),
     /// Native authoring actions shared by menus and the command palette.

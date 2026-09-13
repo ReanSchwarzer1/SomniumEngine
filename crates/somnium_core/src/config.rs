@@ -21,6 +21,10 @@
 /// Immutable engine-wide configuration consumed at startup.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Optional game.project.json directory; scopes authoring, saves and content.
+    pub project_root: Option<std::path::PathBuf>,
+    /// Enable the local, authenticated authoring bridge for this project.
+    pub authoring_enabled: bool,
     /// Project content directory. All inventory, authoring and preview-cache
     /// paths derive from this one source.
     pub content_root: std::path::PathBuf,
@@ -60,6 +64,8 @@ impl Default for EngineConfig {
     /// | `resizable`    | `true`               |
     fn default() -> Self {
         Self {
+            project_root: None,
+            authoring_enabled: false,
             content_root: std::env::var_os("SOMNIUM_CONTENT_ROOT")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("assets")),

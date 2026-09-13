@@ -1,4 +1,5 @@
 pub mod a11y;
+pub mod authoring_panel;
 pub mod brand;
 pub mod brand_ico;
 pub mod color;
@@ -868,6 +869,8 @@ enum LogView {
 }
 
 pub struct UiManager {
+    authoring_panel: Option<crate::authoring_panel::AuthoringPanel>,
+    authoring_tool_mode: crate::editor::tool_context::ToolMode,
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
     /// rules and the workspace presets all measure against.
@@ -1730,6 +1733,8 @@ impl UiManager {
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
             persona: layout.persona,
+            authoring_panel: None,
+            authoring_tool_mode: crate::editor::tool_context::ToolMode::Select,
             details_empty: layout.details_empty,
             outliner_empty: layout.outliner_empty,
             log_empty: layout.log_empty,
@@ -4877,10 +4882,10 @@ impl UiManager {
                 .last_outliner_state
                 .as_ref()
                 .is_some_and(|(_, selected)| selected.is_some()),
-            // UiManager does not own the undo cursor; core remains authoritative.
-            // Keep existing reachability until CONTROL-H exposes that snapshot.
-            can_undo: true,
-            can_redo: true,
+            // Core publishes this cursor through set_history; discovery and
+            // native dispatch therefore report the same real enablement.
+            can_undo: self.history_position > 0,
+            can_redo: self.history_position < self.history_rows.len(),
             has_content_target: self.content_menu_target.is_some(),
             has_clipboard: self.clipboard_filled,
         }
@@ -4892,7 +4897,71 @@ impl UiManager {
         self.clipboard_filled = filled;
     }
 
-    fn run_command_id(&mut self, id: &str) -> bool {
+    /// Registry-derived command inventory, including current native enablement.
+    pub fn authoring_commands(&self) -> Vec<crate::authoring_panel::CommandCapability> {
+        crate::authoring_panel::command_capabilities(&self.command_context())
+    }
+
+    /// Update the project's generic left-panel authoring view. Private game
+    /// labels and supported actions arrive through this state, not engine code.
+    pub fn set_authoring_state(&mut self, state: crate::authoring_panel::AuthoringState) {
+        use crate::editor::tool_context::ToolMode;
+        let was_enabled = self
+            .authoring_panel
+            .as_ref()
+            .is_some_and(|panel| panel.enabled());
+        let enabled = state.enabled;
+        if self.authoring_panel.is_none() {
+            let parent = self
+                .native_ui
+                .parent_of(self.persona.tool_panel.host)
+                .unwrap_or(self.persona.tools);
+            self.authoring_panel = Some(crate::authoring_panel::AuthoringPanel::build(
+                &mut self.native_ui,
+                parent,
+                self.font_id,
+            ));
+        }
+        if let Some(panel) = &mut self.authoring_panel {
+            panel.set_state(&mut self.native_ui, state);
+        }
+        if enabled != was_enabled {
+            let shown = self.authoring_tool_mode;
+            let visible = enabled || shown != ToolMode::Select;
+            self.native_ui.set_visibility(self.persona.tools, visible);
+            self.native_ui.set_visibility(
+                self.persona.tool_panel.host,
+                shown != ToolMode::Select || !enabled,
+            );
+            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
+            {
+                320.0
+            } else if visible {
+                280.0
+            } else {
+                48.0
+            };
+            self.chrome_layout.viewport = (self.window_size.0 as f32
+                - self.chrome_layout.tools
+                - self.chrome_layout.details
+                - 12.0)
+                .max(200.0);
+            for (handle, size) in [
+                (self.inner_h, self.chrome_layout.tools),
+                (self.content_split_h, self.chrome_layout.viewport),
+            ] {
+                self.native_ui.send(UiMessage::new(
+                    handle,
+                    MessageDirection::ToWidget,
+                    SplitterMessage::SetFirstSize(size),
+                ));
+            }
+        }
+    }
+
+    /// Invoke the same semantic route used by native menus and shortcuts.
+    /// Returns whether it was accepted; queued core work may still fail later.
+    pub fn run_command_id(&mut self, id: &str) -> bool {
         if let Some(command) = crate::commands::registry().get(id).copied() {
             if !command.enabled(&self.command_context()).is_enabled() {
                 return false;
@@ -7199,6 +7268,7 @@ impl UiManager {
                 _ => ToolMode::Select,
             }
         };
+        self.authoring_tool_mode = shown;
         for (component, host) in &self.persona.component_hosts {
             let in_tools = match shown {
                 ToolMode::Materials => component.as_str() == "somnium.asset.Material",
@@ -7235,7 +7305,15 @@ impl UiManager {
                 self.native_ui
                     .send(ButtonMessage::set_selected(handle, mode == active));
             }
-            let visible = shown != ToolMode::Select;
+            let authoring_visible = self
+                .authoring_panel
+                .as_ref()
+                .is_some_and(|panel| panel.enabled());
+            let visible = shown != ToolMode::Select || authoring_visible;
+            self.native_ui.set_visibility(
+                self.persona.tool_panel.host,
+                shown != ToolMode::Select || !authoring_visible,
+            );
             self.native_ui.set_visibility(self.persona.tools, visible);
             self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
             {
@@ -7972,6 +8050,15 @@ impl UiManager {
             if let Some(event) = self.persona.tool_panel.event(&msg) {
                 self.editor_events.push_back(event);
                 continue;
+            }
+            if let Some(panel) = &mut self.authoring_panel {
+                let (handled, event) = panel.event(&mut self.native_ui, &msg);
+                if let Some(event) = event {
+                    self.editor_events.push_back(event);
+                }
+                if handled {
+                    continue;
+                }
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if self.persona.click(&mut self.native_ui, msg.destination)

@@ -73,6 +73,12 @@ pub struct GlyphInfo {
     pub advance: f32,
 }
 
+#[derive(Default)]
+struct ShapeCache {
+    lines: HashMap<(String, u32, u8, bool), std::sync::Arc<crate::text::shape::ShapedLine>>,
+    order: std::collections::VecDeque<(String, u32, u8, bool)>,
+}
+
 pub struct FontAtlas {
     /// RGBA8 pixel data — RGB=255 everywhere, A=glyph coverage.
     pub pixels: Vec<u8>,
@@ -81,6 +87,7 @@ pub struct FontAtlas {
     /// Set when pixels are modified; UiPass should upload the texture and clear this flag.
     pub dirty: bool,
 
+    shapes: std::sync::Mutex<ShapeCache>,
     fonts: Vec<fontdue::Font>,
     /// The bytes each face was loaded from.
     ///
@@ -149,6 +156,7 @@ impl FontAtlas {
             width: ATLAS_WIDTH,
             height: ATLAS_HEIGHT,
             dirty: false,
+            shapes: std::sync::Mutex::new(ShapeCache::default()),
             fonts: Vec::new(),
             font_bytes: Vec::new(),
             chain: crate::text::fallback::FallbackChain::new(),
@@ -183,6 +191,7 @@ impl FontAtlas {
         );
         self.fonts.push(font);
         self.font_bytes.push(std::sync::Arc::from(bytes));
+        *self.shapes.get_mut().unwrap_or_else(|e| e.into_inner()) = ShapeCache::default();
         Ok(id)
     }
 
@@ -193,15 +202,56 @@ impl FontAtlas {
         if !self.shaper.is_available() || tracking != 0.0 || line.is_empty() {
             return None;
         }
-        crate::text::shape::shape_line(
+        self.shape_line(
             line,
             px,
-            self,
-            self.chain(),
             crate::text::Direction::of_paragraph(line),
             font_id,
         )
         .map(|shaped| shaped.width)
+    }
+
+    /// Share positioned glyphs between layout and drawing. Repeated labels must
+    /// not parse OpenType tables on every measure/draw pass. Font registration
+    /// invalidates the cache; size, direction and preferred face are in the key.
+    /// At most 1,024 short lines are retained; long document text is not cached.
+    pub(crate) fn shape_line(
+        &self,
+        text: &str,
+        px: f32,
+        base: crate::text::Direction,
+        primary: u8,
+    ) -> Option<std::sync::Arc<crate::text::shape::ShapedLine>> {
+        let key = (text.to_owned(), px.to_bits(), primary, base.is_rtl());
+        let cacheable = text.len() <= 512;
+        if cacheable {
+            let cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(line) = cache.lines.get(&key) {
+                return Some(line.clone());
+            }
+        }
+        let line = std::sync::Arc::new(crate::text::shape::shape_line(
+            text,
+            px,
+            self,
+            self.chain(),
+            base,
+            primary,
+        )?);
+        if cacheable {
+            let mut cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = cache.lines.get(&key) {
+                return Some(existing.clone());
+            }
+            if cache.lines.len() >= 1024 {
+                if let Some(old) = cache.order.pop_front() {
+                    cache.lines.remove(&old);
+                }
+            }
+            cache.order.push_back(key.clone());
+            cache.lines.insert(key, line.clone());
+        }
+        Some(line)
     }
 
     /// Which face serves which codepoint.
@@ -496,6 +546,44 @@ impl Default for FontAtlas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_layout_keeps_shaped_glyphs_and_font_size_variants() {
+        let mut atlas = FontAtlas::new();
+        atlas.add_font(CUTS[0]).unwrap();
+        for text in ["Office ffi AV", "Doctor: café — 12", "שלום Hello"] {
+            for size in [12.0, 18.0] {
+                let direction = crate::text::Direction::of_paragraph(text);
+                let expected =
+                    crate::text::shape::shape_line(text, size, &atlas, atlas.chain(), direction, 0)
+                        .unwrap();
+                for _ in 0..3 {
+                    assert_eq!(
+                        *atlas.shape_line(text, size, direction, 0).unwrap(),
+                        expected
+                    );
+                    assert!((atlas.measure_text(text, size, 0).x - expected.width).abs() < 0.001);
+                }
+            }
+        }
+        atlas.add_font(CUTS[2]).unwrap();
+        let text = "Different face AV";
+        let expected = crate::text::shape::shape_line(
+            text,
+            14.0,
+            &atlas,
+            atlas.chain(),
+            crate::text::Direction::Ltr,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            *atlas
+                .shape_line(text, 14.0, crate::text::Direction::Ltr, 1)
+                .unwrap(),
+            expected
+        );
+    }
 
     /// The five bundled cuts, in the order `typography::FontRole` expects.
     const CUTS: [&[u8]; 5] = [

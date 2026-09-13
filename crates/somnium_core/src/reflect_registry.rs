@@ -651,6 +651,13 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(light_schema());
     registry.register(material_schema());
     crate::animation_authoring::register(&mut registry);
+    registry.register(component_schema! {
+        crate::ImportedMesh as "somnium.ImportedMesh", display "Imported Mesh Source", version 1,
+        fields {
+            source { read_only: true, doc: "Source file used when reopening this scene. Reimport to replace geometry." },
+            node { read_only: true, doc: "Mesh-node ordinal in the imported source." },
+        }
+    });
     registry.register(mesh_schema());
     registry.register(mesh_kind_schema());
     registry.register(name_schema());
@@ -672,6 +679,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(voxel_terrain_schema());
     registry.register(water_schema());
     registry.register(weather_schema());
+    crate::authoring::registration::extend_components(&mut registry);
 
     registry
 }

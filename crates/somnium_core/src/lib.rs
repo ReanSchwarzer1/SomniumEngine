@@ -50,6 +50,7 @@ pub mod ai;
 pub mod animation_motion;
 pub mod app;
 mod audio_scene;
+pub mod authoring;
 mod authoring_settings;
 pub mod autosave;
 pub mod blockout;
@@ -2085,14 +2086,24 @@ impl somnium_ecs::Component for WorldTransform {}
 
 // ─── Phase 11.5A-2: Transform Propagation System ──────────────────────────
 
+/// Durable origin of an imported mesh node. GPU offsets are rebuilt on load.
+#[derive(Clone, Debug, Default)]
+pub struct ImportedMesh {
+    /// Path relative to the project root, or absolute for projectless editors.
+    pub source: String,
+    /// Ordinal in the source's uploaded mesh-node list.
+    pub node: u32,
+}
+impl somnium_ecs::Component for ImportedMesh {}
+
 /// Propagates parent-child transform hierarchies, writing `WorldTransform` for
 /// every entity that has a `Transform` component.
 ///
 /// Run this in `on_update` after physics sync and before rendering. Entities
 /// without a `Parent` component are treated as roots (parent = identity).
 ///
-/// **Requires:** All spawned entities must include a `WorldTransform::identity()`
-/// component so the propagation system can write to them.
+/// Missing derived `WorldTransform` components are created, including after
+/// loading a scene that only stores local transforms.
 ///
 /// Algorithm: BFS starting from root entities (Transform + no Parent). For each
 /// root, `world_mat = Transform::to_matrix()`. For each child, `child_world =
@@ -2129,19 +2140,24 @@ pub fn propagate_transforms(world: &mut World) {
         }
     }
 
-    // Phase 1c — BFS: accumulate world matrices for all children.
+    // Parent is authored; Children is a bounded editor cache and may be absent
+    // after load. Build traversal from Parent so it cannot drop restored nodes.
+    let mut children = std::collections::HashMap::<Entity, Vec<(Entity, glam::Mat4)>>::new();
+    for &(entity, local) in &all_entities {
+        if let Some(parent) = world.get::<Parent>(entity) {
+            children
+                .entry(parent.entity)
+                .or_default()
+                .push((entity, local));
+        }
+    }
     let mut i = 0;
     while i < stack.len() {
-        let (entity, world_mat) = stack[i];
+        let (entity, parent_world) = stack[i];
         i += 1;
-        if let Some(children) = world.get::<Children>(entity) {
-            let children_copy = *children;
-            for &child in children_copy.as_slice() {
-                if world.is_alive(child) {
-                    if let Some(local_t) = world.get::<Transform>(child) {
-                        stack.push((child, world_mat * local_t.to_matrix()));
-                    }
-                }
+        if let Some(children) = children.get(&entity) {
+            for &(child, local) in children {
+                stack.push((child, parent_world * local));
             }
         }
     }
@@ -2149,9 +2165,11 @@ pub fn propagate_transforms(world: &mut World) {
     // Phase 2 — write WorldTransform. All immutable borrows from phase 1 are
     // released here; &mut self borrows are safe.
     for (entity, world_mat) in stack {
-        let _ = world
-            .get_mut::<WorldTransform>(entity)
-            .map(|wt| wt.0 = world_mat);
+        if let Some(wt) = world.get_mut::<WorldTransform>(entity) {
+            wt.0 = world_mat;
+        } else {
+            let _ = world.insert_component(entity, WorldTransform(world_mat));
+        }
     }
 }
 

@@ -1472,6 +1472,15 @@ impl SomniumRenderer {
     }
 
     /// Current internal 3D target size (may be smaller than the swapchain).
+    /// Request live authoring evidence after the next complete render.
+    pub fn request_authoring_capture(
+        &mut self,
+        path: &std::path::Path,
+        include_editor: bool,
+    ) -> Result<(), String> {
+        self.capture.request_png(path, include_editor)
+    }
+
     pub fn scene_extent(&self) -> (u32, u32) {
         (self.render_width, self.render_height)
     }
@@ -2212,6 +2221,15 @@ impl SomniumRenderer {
         }
     }
 
+    /// Draw geometry only into shadow maps. Useful for a first-person body
+    /// whose head is hidden from the primary camera but still casts a shadow.
+    /// The command uses the same instance layout and clears with the frame.
+    pub fn submit_shadow_only(&mut self, command: DrawCommand) {
+        if command.casts_shadow {
+            self.shadow_only_queue.push(command);
+        }
+    }
+
     /// Record whether a material is alpha-blended, so `submit` can route it.
     /// Materials default to opaque when never registered.
     /// Record that `material_id` renders from both sides (Phase 17D).
@@ -2675,6 +2693,7 @@ impl SomniumRenderer {
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+        self.profiler.cpu_begin("Renderer prepare");
         self.grain_masks.advance_packed(&ctx.queue);
 
         // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
@@ -2751,6 +2770,7 @@ impl SomniumRenderer {
         // same frame, which this one does — but the row belongs beside
         // `Frame wall` and `Frame CPU` rather than among the engine's own
         // zones, because it is a wait and not work.
+        self.profiler.cpu_end();
         let acquire_started = std::time::Instant::now();
         let output = match ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex) => tex,
@@ -2984,6 +3004,7 @@ impl SomniumRenderer {
         // as a HUD that costs two milliseconds, not as an editor that got
         // slower.
         if let Some(game_ui) = game_ui {
+            self.profiler.cpu_begin("Game HUD");
             self.profiler.begin(&mut encoder, "Game UI");
             let mut frame = somnium_ui::GameUiFrame::new(
                 window,
@@ -2995,6 +3016,7 @@ impl SomniumRenderer {
             );
             game_ui.draw_ui(&mut frame);
             let drawn = frame.drawn();
+            self.profiler.cpu_end();
             self.profiler.end(&mut encoder); // Game UI
             if drawn == 0 && !self.game_ui_empty_warned {
                 self.game_ui_empty_warned = true;
@@ -3004,7 +3026,9 @@ impl SomniumRenderer {
             }
         }
         if !ui.is_immersive() {
+            self.profiler.cpu_begin("Editor UI layout and draw");
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
+            self.profiler.cpu_end();
         }
         self.profiler.end(&mut encoder); // UI
 
@@ -3519,7 +3543,7 @@ impl SomniumRenderer {
         // cascade, so off-screen ground can still shadow into view (15B's
         // contract). CR-E cascade-culls that list; never the camera frustum.
         self.profiler.cpu_begin("Terrain");
-        self.shadow_only_queue.clear();
+        // Keep explicit shadow-only submissions; all queues clear at frame end.
         self.terrain_lod_by_vertex.clear();
         let cam_planes = crate::culling::frustum_planes(self.view_proj_unjittered);
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =

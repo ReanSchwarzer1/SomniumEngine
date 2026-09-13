@@ -120,7 +120,7 @@ pub struct LoadReport {
 /// Entity and asset references become tagged objects rather than bare
 /// numbers so that a reader can tell a reference from an integer without
 /// consulting the schema — which matters for a human reading a diff.
-fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
+pub(crate) fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
     use serde_json::json;
     match value {
         // An unset reference and an absent value are both null in the
@@ -183,7 +183,7 @@ fn value_to_json(world: &World, value: &ReflectValue) -> serde_json::Value {
 /// `Quat`, or a float that happens to be whole from an integer. Parsing
 /// against the schema rather than guessing from the JSON is what makes
 /// the round trip exact.
-fn value_from_json(
+pub(crate) fn value_from_json(
     resolve: &dyn Fn(PersistentId) -> Option<Entity>,
     ty: &FieldType,
     json: &serde_json::Value,

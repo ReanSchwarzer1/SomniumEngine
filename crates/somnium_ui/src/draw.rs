@@ -660,14 +660,7 @@ impl DrawingContext {
         }
         let direction = crate::text::Direction::of_paragraph(text);
         let line = {
-            let Some(line) = crate::text::shape::shape_line(
-                text,
-                px,
-                &self.font_atlas,
-                self.font_atlas.chain(),
-                direction,
-                font_id,
-            ) else {
+            let Some(line) = self.font_atlas.shape_line(text, px, direction, font_id) else {
                 return false;
             };
             line

@@ -442,6 +442,15 @@ struct TerrainStroke {
 
 /// Trait to be implemented by the user's game.
 pub trait GameApp {
+    /// Read-only game diagnostics for the authoring host. Game-specific state
+    /// stays in the private game; the engine transports the returned document.
+    fn authoring_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Register game components, documents and presets before engine initialization.
+    fn register_authoring(&mut self, _registration: &mut crate::authoring::GameRegistration) {}
+
     /// Called once when the engine starts.
     fn on_init(&mut self, _ctx: &mut EngineContext) {}
 
@@ -966,6 +975,8 @@ pub struct Engine<G: GameApp> {
     /// reflection inspector — the whole point being that there is exactly
     /// one of these.
     type_registry: somnium_ecs::reflect::TypeRegistry,
+    authoring: Option<authoring_host::AuthoringHost>,
+    authoring_frame_timings: [f64; 6],
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
     audio_scene: crate::audio_scene::AudioScene,
@@ -1518,7 +1529,7 @@ impl FloatingWindow {
 
 impl<G: GameApp + 'static> Engine<G> {
     /// Start the engine loop. This will take control of the current thread.
-    pub fn run(mut config: EngineConfig, game: G) -> Result<(), EngineError> {
+    pub fn run(mut config: EngineConfig, mut game: G) -> Result<(), EngineError> {
         // Phase 11.5M: install both the fmt layer and the log-capture layer.
         let (capture_layer, log_rx) = crate::log_capture::make_log_capture();
         {
@@ -1565,12 +1576,26 @@ impl<G: GameApp + 'static> Engine<G> {
         } else {
             config.content_root = resolved_root;
         }
+        if let Some(root) = &config.project_root {
+            let project =
+                crate::authoring::project::ProjectPaths::open(root).map_err(EngineError::Config)?;
+            project.create_directories().map_err(EngineError::Config)?;
+            config.content_root = project
+                .resolve(&project.manifest.content)
+                .map_err(EngineError::Config)?;
+            config.project_root = Some(project.root);
+        }
+        let mut registration = crate::authoring::GameRegistration::default();
+        game.register_authoring(&mut registration);
+        crate::authoring::registration::install(registration).map_err(EngineError::Config)?;
         let mut engine = Self {
             game: Box::new(game),
             time: TimeState::new(config.target_fps),
             config,
             world: World::new(),
             type_registry: crate::reflect_registry::component_registry(),
+            authoring: None,
+            authoring_frame_timings: [0.0; 6],
             physics: None,
             audio: None,
             audio_scene: crate::audio_scene::AudioScene::default(),
@@ -2352,6 +2377,60 @@ impl<G: GameApp> Engine<G> {
                     *existing = mesh;
                 } else {
                     let _ = self.world.insert_component(entity, mesh);
+                }
+            }
+        }
+
+        // Imported nodes retain a durable source instead of saving GPU offsets.
+        let mut imported = std::collections::BTreeMap::<String, Vec<(Entity, u32)>>::new();
+        for entity in self.world.entities() {
+            if let Some(source) = self.world.get::<crate::ImportedMesh>(entity) {
+                imported
+                    .entry(source.source.clone())
+                    .or_default()
+                    .push((entity, source.node));
+            }
+        }
+        for (source, entities) in imported {
+            let source_path = std::path::Path::new(&source);
+            let resolved = if let Some(root) = self.config.project_root.as_ref() {
+                match crate::authoring::project::ProjectPaths::open(root)
+                    .and_then(|project| project.resolve(source_path))
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        warn!(%error,%source,"Imported mesh path rejected");
+                        continue;
+                    }
+                }
+            } else {
+                source_path.to_path_buf()
+            };
+            let scene = match somnium_asset::load_gltf(&resolved) {
+                Ok(scene) => scene,
+                Err(error) => {
+                    warn!(%error,%source,"Imported mesh could not be restored");
+                    continue;
+                }
+            };
+            if let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+                let uploaded = renderer.upload_scene(ctx, &scene);
+                for (entity, ordinal) in entities {
+                    if let Some(node) = uploaded.get(ordinal as usize) {
+                        let _ = self.world.insert_component(
+                            entity,
+                            MeshComponent {
+                                vertex_offset: node.vertex_offset,
+                                index_offset: node.index_offset,
+                                index_count: node.index_count,
+                            },
+                        );
+                        if let Some(material) = self.world.get_mut::<MaterialComponent>(entity) {
+                            material.runtime_id = node.material_id;
+                        }
+                    } else {
+                        warn!(%source,ordinal,"Imported mesh node no longer exists");
+                    }
                 }
             }
         }
@@ -4173,6 +4252,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
         // quote about editor cost.
+        self.authoring_frame_timings[0] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Editor panels");
         }
@@ -4789,6 +4869,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.authoring_frame_timings[1] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Jobs & assets");
         }
@@ -4864,6 +4945,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.authoring_frame_timings[2] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // `on_render` is where a game publishes its active editor/player view
         // through `renderer.set_view`. Stream from that same-frame position,
         // not from a stale ECS settings transform or last frame's renderer.
@@ -5095,6 +5177,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        self.authoring_frame_timings[3] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.poll_authoring();
+
+        self.authoring_frame_timings[4] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // ── Forward log entries to the output log panel ───────────────────────
         {
             let mut entries: Vec<String> = Vec::new();
@@ -5110,6 +5196,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.authoring_frame_timings[5] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
         if let Some(r) = &mut self.renderer {
             r.profiler.frame_cpu_ms = frame_body_started.elapsed().as_secs_f32() * 1000.0;
@@ -5668,8 +5755,18 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_import {
             self.import_job = None;
             match result {
-                Ok((path, scene, materials)) => self.finish_import_model(path, scene, materials),
+                Ok((path, scene, materials)) => {
+                    if self.authoring_import_may_publish() {
+                        let before = self.world.entity_count();
+                        self.finish_import_model(path, scene, materials);
+                        self.authoring_import_finished(Ok(self
+                            .world
+                            .entity_count()
+                            .saturating_sub(before)));
+                    }
+                }
                 Err(error) => {
+                    self.authoring_import_finished(Err(format!("{error:?}")));
                     warn!(?error, "model import failed");
                     if let Some(ui) = self.ui_manager.as_mut() {
                         ui.push_toast("Import failed — see the Output Log");
@@ -6674,7 +6771,16 @@ impl<G: GameApp> Engine<G> {
         let offset = glam::Vec3::from_array(self.import_spawn_at);
         let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> =
             Vec::with_capacity(count);
-        for node in uploaded {
+        let source_path = std::path::Path::new(&path_str);
+        let source = self
+            .config
+            .project_root
+            .as_ref()
+            .and_then(|root| source_path.strip_prefix(root).ok())
+            .unwrap_or(source_path)
+            .to_string_lossy()
+            .into_owned();
+        for (ordinal, node) in uploaded.into_iter().enumerate() {
             let (scale, rotation, translation) = node.transform.to_scale_rotation_translation();
             let name = if node.entity_name.is_empty() {
                 Name::new("Imported Mesh")
@@ -6687,7 +6793,19 @@ impl<G: GameApp> Engine<G> {
                 prefab: None,
                 persistent_id: None,
                 surface_tags: None,
-                reflected: Vec::new(),
+                reflected: vec![(
+                    somnium_ecs::reflect::StableId::new("somnium.ImportedMesh"),
+                    std::collections::BTreeMap::from([
+                        (
+                            somnium_ecs::reflect::FieldId(0),
+                            somnium_ecs::reflect::ReflectValue::Str(source.clone()),
+                        ),
+                        (
+                            somnium_ecs::reflect::FieldId(1),
+                            somnium_ecs::reflect::ReflectValue::I64(ordinal as i64),
+                        ),
+                    ]),
+                )],
                 transform: Some(Transform {
                     translation: translation + offset,
                     rotation,
@@ -8779,6 +8897,17 @@ impl<G: GameApp> Engine<G> {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
         match ev {
+            EditorEvent::AuthoringRequest { method, params } => {
+                let result = self.authoring_request(&method, params);
+                if let Some(ui) = &mut self.ui_manager {
+                    if result.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+                        let message = result["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Authoring request failed");
+                        ui.push_toast(message);
+                    }
+                }
+            }
             EditorEvent::CreateComponent(name) => self.create_designer_component(&name),
             EditorEvent::DesignerTool(action) => self.run_designer_tool(action),
             EditorEvent::Prefab(action) => {
@@ -12617,3 +12746,6 @@ impl<G: GameApp> Engine<G> {
 
 #[path = "app_designer.rs"]
 mod designer;
+
+#[path = "app_authoring.rs"]
+mod authoring_host;

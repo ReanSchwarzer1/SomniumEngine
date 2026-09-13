@@ -194,10 +194,18 @@ impl<G: GameApp> Engine<G> {
                     if !self.play_session_active {
                         return Err("Press Play before saving or loading a play slot".into());
                     }
-                    let message = self.designer_saves.run(
+                    let save_root = match self.config.project_root.as_deref() {
+                        Some(root) => {
+                            let project = crate::authoring::project::ProjectPaths::open(root)?;
+                            project.resolve(&project.manifest.saves)?
+                        }
+                        None => std::path::PathBuf::from("saves"),
+                    };
+                    let message = self.designer_saves.run_with_slots(
                         &mut self.world,
                         self.selection.primary,
                         action == DesignerTool::LoadPlay,
+                        &crate::save_game::SaveSlots::new(&save_root),
                     )?;
                     if action == DesignerTool::LoadPlay {
                         self.animation_authoring
