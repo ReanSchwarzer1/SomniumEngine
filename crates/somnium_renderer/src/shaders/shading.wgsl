@@ -573,10 +573,9 @@ fn sh_probe_volume_weight(pos: vec3<f32>) -> f32 {
 }
 
 /// Image-based ambient: diffuse irradiance + split-sum specular.
-/// Phase 24L: `traced_diffuse` replaces the diffuse half when the GI pass has a
-/// result for this pixel. Only the diffuse half — the specular lobe still comes
-/// from the environment cubemap, because ReSTIR GI resolves *diffuse* indirect
-/// and a mirror needs a sharp reflection this pass cannot give it.
+/// ReSTIR estimates directional-light bounce only: escaped rays carry no sky
+/// energy and local lights are not sampled. Keep environment illumination and
+/// add the measured bounce, including when a valid reservoir measures zero.
 fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
 
@@ -592,12 +591,7 @@ fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32
     let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
     var diffuse = irradiance * surface.albedo * kd;
     if traced_diffuse.a > 0.5 {
-        // The traced term is irradiance, so the albedo and the dielectric
-        // fraction still belong here. Applying them in the shading pass rather
-        // than in the GI pass keeps one definition of what a surface's colour
-        // is — the GI pass only ever sees the *bounce* surface's albedo, never
-        // this one's, and applying both would square it.
-        diffuse = traced_diffuse.rgb * surface.albedo * kd;
+        diffuse += traced_diffuse.rgb * surface.albedo * kd;
     }
 
     return diffuse * surface.occlusion;
@@ -684,13 +678,12 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         surface.roughness,
     );
 
-    // The same bent-normal gather and the same traced-diffuse override the
-    // single-scatter path used, so TSUSHIMA-C's landscape-scale bent normal
-    // and Phase 24L's ReSTIR result both still reach this.
+    // Match the single-scatter path: the reservoir contains sun bounce, not
+    // the environment irradiance gathered here.
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
     var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
     if traced_diffuse.a > 0.5 {
-        irradiance = traced_diffuse.rgb;
+        irradiance += traced_diffuse.rgb;
     }
 
     let fss_ess = k_s * ab.x + ab.y;

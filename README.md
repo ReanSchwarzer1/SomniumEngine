@@ -33,6 +33,7 @@ it was planned. Read it before the source.
 | [Authoring model](context.md#scene-and-authoring-model) | Schemas, prefab overrides and saves |
 | [Phase ledger](context.md#phase-ledger-and-remaining-work) | Shipped, open, deferred, refused |
 | [Projects and automation](docs/editor/automation.md) | Open game editors, semantic MCP controls, public interaction and GPU animation examples |
+| [Textured particles](docs/editor/particles.md) | Sprite/flipbook effects, native Details controls and the CC0 Hello example |
 
 The engine is organized around three deliberate commitments:
 

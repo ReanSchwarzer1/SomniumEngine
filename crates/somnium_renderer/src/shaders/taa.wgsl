@@ -48,6 +48,22 @@ struct TaaParams {
 @group(0) @binding(6) var velocity_tex: texture_2d<f32>;
 /// RG = encoded water normal, B = linear depth, A = water coverage.
 @group(0) @binding(7) var water_surface_tex: texture_2d<f32>;
+@group(0) @binding(8) var visibility_tex: texture_2d<u32>;
+@group(0) @binding(9) var<storage, read> reactive_instances: array<u32>;
+
+// Match coverage to visible pixels, not actor bounds; retain a one-pixel edge guard.
+fn current_reactive(coord: vec2<i32>, extent: vec2<i32>) -> f32 {
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let p = clamp(coord + vec2<i32>(x,y), vec2<i32>(0), extent - vec2<i32>(1));
+            let id = textureLoad(visibility_tex, p, 0).x;
+            if id > 0u && id - 1u < arrayLength(&reactive_instances) {
+                if reactive_instances[id - 1u] != 0u { return 1.; }
+            }
+        }
+    }
+    return 0.;
+}
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -141,7 +157,7 @@ fn clip_to_neighbourhood(history: vec3<f32>, minimum: vec3<f32>, maximum: vec3<f
 /// Bilinear resampling of the history every frame compounds: each blend blurs
 /// it slightly, and after a hundred frames the image is visibly soft. A
 /// higher-order filter keeps it sharp for the cost of a few extra taps.
-fn sample_history_catmull_rom(uv: vec2<f32>, resolution: vec2<f32>) -> vec3<f32> {
+fn sample_history_catmull_rom(uv: vec2<f32>, resolution: vec2<f32>) -> vec4<f32> {
     let sample_pos = uv * resolution;
     let tex_pos1 = floor(sample_pos - 0.5) + 0.5;
     let f = sample_pos - tex_pos1;
@@ -160,32 +176,53 @@ fn sample_history_catmull_rom(uv: vec2<f32>, resolution: vec2<f32>) -> vec3<f32>
     let tex_pos12 = (tex_pos1 + offset12) / resolution;
 
     var result = vec3<f32>(0.0);
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos0.x, tex_pos0.y), 0.0).rgb * w0.x * w0.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos12.x, tex_pos0.y), 0.0).rgb * w12.x * w0.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos3.x, tex_pos0.y), 0.0).rgb * w3.x * w0.y;
+    var reactive = 0.0;
+    let tap0 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos0.x, tex_pos0.y), 0.0);
+    result += tap0.rgb * w0.x * w0.y;
+    reactive = max(reactive, tap0.a);
+    let tap1 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos12.x, tex_pos0.y), 0.0);
+    result += tap1.rgb * w12.x * w0.y;
+    reactive = max(reactive, tap1.a);
+    let tap2 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos3.x, tex_pos0.y), 0.0);
+    result += tap2.rgb * w3.x * w0.y;
+    reactive = max(reactive, tap2.a);
 
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos0.x, tex_pos12.y), 0.0).rgb * w0.x * w12.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos12.x, tex_pos12.y), 0.0).rgb * w12.x * w12.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos3.x, tex_pos12.y), 0.0).rgb * w3.x * w12.y;
+    let tap3 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos0.x, tex_pos12.y), 0.0);
+    result += tap3.rgb * w0.x * w12.y;
+    reactive = max(reactive, tap3.a);
+    let tap4 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos12.x, tex_pos12.y), 0.0);
+    result += tap4.rgb * w12.x * w12.y;
+    reactive = max(reactive, tap4.a);
+    let tap5 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos3.x, tex_pos12.y), 0.0);
+    result += tap5.rgb * w3.x * w12.y;
+    reactive = max(reactive, tap5.a);
 
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos0.x, tex_pos3.y), 0.0).rgb * w0.x * w3.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos12.x, tex_pos3.y), 0.0).rgb * w12.x * w3.y;
-    result += textureSampleLevel(history_tex, linear_samp,
-        vec2<f32>(tex_pos3.x, tex_pos3.y), 0.0).rgb * w3.x * w3.y;
+    let tap6 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos0.x, tex_pos3.y), 0.0);
+    result += tap6.rgb * w0.x * w3.y;
+    reactive = max(reactive, tap6.a);
+    let tap7 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos12.x, tex_pos3.y), 0.0);
+    result += tap7.rgb * w12.x * w3.y;
+    reactive = max(reactive, tap7.a);
+    let tap8 = textureSampleLevel(history_tex, linear_samp,
+        vec2<f32>(tex_pos3.x, tex_pos3.y), 0.0);
+    result += tap8.rgb * w3.x * w3.y;
+    reactive = max(reactive, tap8.a);
 
     // Clamping at zero bounds the undershoot but does not remove it — a tap
     // set that sums below zero still lands at black rather than at the colour
     // it should have. The caller clamps to the current neighbourhood, which is
     // what actually contains it.
-    return max(result, vec3<f32>(0.0));
+    // Alpha is coverage, never a Catmull-Rom weighted colour: negative lobes
+    // must not cancel a previous moving silhouette inside the filter footprint.
+    return vec4<f32>(max(result, vec3<f32>(0.0)), reactive);
 }
 
 @fragment
@@ -193,17 +230,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let resolution = 1.0 / taa.inv_resolution;
     let coord = vec2<i32>(in.uv * resolution);
     let current = sanitize(textureLoad(current_tex, coord, 0).rgb);
+    let reactive = current_reactive(coord, vec2<i32>(resolution));
 
     // ── REPROJECTION ────────────────────────────────────────────────────────
     // Depth-based: reconstruct this pixel's world position, then project it
     // with the previous frame's matrices to find where it used to be.
     //
-    // This handles camera motion exactly, which is what the editor viewport
-    // spends its time doing. It does *not* handle objects that moved while the
-    // camera stood still — that needs a velocity buffer written from previous
-    // per-instance transforms, which the visibility pass does not yet produce.
-    // Moving geometry will ghost until that lands; the neighbourhood clip below
-    // limits how badly.
+    // Camera motion uses depth reprojection. GPU-skinned meshes and explicitly
+    // submitted dynamic tools lack previous deformation positions, so current
+    // and previous dynamic coverage rejects history locally below. Static scene
+    // pixels keep normal temporal accumulation.
     // Closest-depth dilation. Reprojecting a pixel using its *own* depth is
     // wrong at a silhouette: an edge pixel often carries the background's
     // depth, so it reprojects to where the background was and fetches history
@@ -278,7 +314,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     let prev_clip = taa.prev_view_proj * vec4<f32>(world_pos, 1.0);
     if prev_clip.w <= 0.0 {
-        return vec4<f32>(current, 1.0);
+        return vec4<f32>(current, reactive);
     }
     let prev_ndc = prev_clip.xy / prev_clip.w;
     let depth_prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
@@ -293,7 +329,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Off screen last frame: there is no history to reuse.
     if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0))
         || taa.history_valid < 0.5 {
-        return vec4<f32>(current, 1.0);
+        return vec4<f32>(current, reactive);
+    }
+
+    let history_sample = sample_history_catmull_rom(prev_uv, resolution);
+    if reactive > 0.5 || history_sample.a > 0.001 {
+        return vec4<f32>(current, reactive);
     }
 
     // ── Neighbourhood bounds ────────────────────────────────────────────────
@@ -323,7 +364,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     minimum = max(minimum, mean - sigma * 1.25);
     maximum = min(maximum, mean + sigma * 1.25);
 
-    let history_raw = sanitize(sample_history_catmull_rom(prev_uv, resolution));
+    let history_raw = sanitize(history_sample.rgb);
     // Clip first to preserve hue, then hard-clamp into the same box.
     //
     // The clip alone is not enough, and this is what produced a black outline
@@ -358,17 +399,17 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         // 1: history straight out of the Catmull-Rom filter, before any
         // clipping. If the black is already here, the fault is upstream in
         // reprojection or in what the history buffer holds.
-        case 1u: { return vec4<f32>(history_raw, 1.0); }
+        case 1u: { return vec4<f32>(history_raw, reactive); }
         // 2: history after clip and clamp, back in linear space. Black here but
         // not in mode 1 means the clip is what darkens it.
-        case 2u: { return vec4<f32>(untonemap_for_blend(history), 1.0); }
+        case 2u: { return vec4<f32>(untonemap_for_blend(history), reactive); }
         // 3: this frame's own colour, for reference.
-        case 3u: { return vec4<f32>(current, 1.0); }
+        case 3u: { return vec4<f32>(current, reactive); }
         // 4/5: the neighbourhood bounds the clip works against. If `minimum` is
         // black on the failing pixels, the box legitimately permits black and
         // the clamp was never going to help.
-        case 4u: { return vec4<f32>(untonemap_for_blend(minimum), 1.0); }
-        case 5u: { return vec4<f32>(untonemap_for_blend(maximum), 1.0); }
+        case 4u: { return vec4<f32>(untonemap_for_blend(minimum), reactive); }
+        case 5u: { return vec4<f32>(untonemap_for_blend(maximum), reactive); }
         // 8: |prev_uv - uv| in pixels. Green under 0.1, red over.
         //
         // With a still camera and no dilation this must be zero. **It also
@@ -384,8 +425,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         //    green = under 0.02 px, red = above.
         case 8u: {
             let d = length((prev_uv - in.uv) * resolution);
-            if d < 0.1 { return vec4<f32>(0.0, 4.0, 0.0, 1.0); }
-            return vec4<f32>(4.0, 0.0, 0.0, 1.0);
+            if d < 0.1 { return vec4<f32>(0.0, 4.0, 0.0, reactive); }
+            return vec4<f32>(4.0, 0.0, 0.0, reactive);
         }
         // 6: what actually happened, as a flag image.
         //    red   = the clip moved history (it fell outside the box)
@@ -400,16 +441,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 select(0.0, 1.0, moved_by_clip),
                 select(0.0, 1.0, moved_by_clamp),
                 select(1.0, 0.0, moved_by_clip || moved_by_clamp),
-                1.0,
+                reactive,
             );
         }
         // 7: how far history sits from this frame, amplified. Bright means the
         // two disagree strongly, which is where a bad blend shows up.
         case 7u: {
-            return vec4<f32>(abs(untonemap_for_blend(history) - current) * 4.0, 1.0);
+            return vec4<f32>(abs(untonemap_for_blend(history) - current) * 4.0, reactive);
         }
         default: {}
     }
 
-    return vec4<f32>(resolved, 1.0);
+    return vec4<f32>(resolved, reactive);
 }

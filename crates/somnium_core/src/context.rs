@@ -39,6 +39,9 @@ pub struct SimulationClock {
     pub elapsed_seconds: f32,
     /// Duration of one gameplay/physics step, in seconds.
     pub fixed_delta_seconds: f32,
+    /// Blend between the previous and current fixed poses for presentation.
+    /// Playing uses the remaining fixed-step fraction; Pause/Step uses 1.0.
+    pub interpolation_alpha: f32,
 }
 
 #[cfg(test)]
@@ -60,6 +63,7 @@ impl Default for SimulationClock {
             state: SimulationState::Editing,
             elapsed_seconds: 0.0,
             fixed_delta_seconds: 1.0 / 60.0,
+            interpolation_alpha: 1.0,
         }
     }
 }

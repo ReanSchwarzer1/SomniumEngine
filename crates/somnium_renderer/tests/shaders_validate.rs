@@ -488,6 +488,14 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
     assert!(aa < f0, "specular AA must run before f0 is derived");
 }
 
+#[test]
+fn the_particle_module_validates() {
+    check(
+        "particle.wgsl",
+        include_str!("../src/shaders/particle.wgsl"),
+    );
+}
+
 /// A foliage occlusion texture refines the GTAO result; it must not replace it.
 ///
 /// These two fields intentionally carry different meanings downstream:
@@ -820,4 +828,15 @@ fn one_parallax_march_serves_both_frames() {
         );
         assert!(!body.contains("loop {"), "{caller} grew a march of its own");
     }
+}
+
+#[test]
+fn the_taa_dynamic_coverage_module_validates() {
+    check("taa.wgsl", &composed("taa.wgsl"));
+}
+
+#[test]
+fn close_surface_ao_and_fsr_reactivity_validate() {
+    check("gtao.wgsl", &composed("gtao.wgsl"));
+    check("fsr_sanitize.wgsl", &composed("fsr_sanitize.wgsl"));
 }

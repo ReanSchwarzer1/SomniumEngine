@@ -90,6 +90,10 @@ impl AnimatedGeometry {
         self.dirty = true;
         Ok((id, offset))
     }
+    /// Posed mesh origins identify visible draws that lack deformation motion vectors.
+    pub(crate) fn posed_offsets(&self) -> impl Iterator<Item = u32> + '_ {
+        self.entries.values().map(|entry| entry.posed.vertex_offset)
+    }
     /// Replace a finite palette with exactly the registered joint count.
     pub fn update(&mut self, id: AnimatedMeshId, matrices: &[Mat4]) -> bool {
         let Some(entry) = self.entries.get_mut(&id) else {

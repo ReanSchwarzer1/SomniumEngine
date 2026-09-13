@@ -506,6 +506,7 @@ pub struct SomniumRenderer {
     /// already holds the chunk when it builds the draw, so the word is
     /// recorded there instead of searched for afterwards.
     terrain_lod_by_vertex: std::collections::HashMap<u32, u32>,
+    reactive_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
     /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
     /// so they skip vis / GPU 15B, but they occupy instance slots after the
     /// opaque vis draws so the shadow pass can find their transforms.
@@ -825,7 +826,7 @@ impl SomniumRenderer {
         );
 
         // Phase 11.5J: GPU billboard particle pass.
-        let particle_pass = ParticlePass::new(&ctx.device, &shaders, ctx.config.format);
+        let particle_pass = ParticlePass::new(&ctx.device, &shaders, &global_pool.layout);
 
         // Phase 11.5I: Selection outline (stencil-based, renders to swapchain).
         let outline_pass = OutlinePass::new(
@@ -1136,6 +1137,7 @@ impl SomniumRenderer {
             cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
             rebuilt_chunks: Vec::with_capacity(32),
             terrain_lod_by_vertex: std::collections::HashMap::new(),
+            reactive_draws: std::collections::HashSet::new(),
             shadow_only_queue: Vec::with_capacity(256),
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
@@ -2180,6 +2182,7 @@ impl SomniumRenderer {
                 &self.vis_pass.depth_view,
                 self.velocity_pass.view(),
                 self.water_pass.surface_view(),
+                &self.vis_pass.view,
             );
             self.motion_blur_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
@@ -2233,6 +2236,15 @@ impl SomniumRenderer {
         } else {
             self.draw_queue.push(cmd);
         }
+    }
+
+    /// Submit moving opaque/cutout geometry without reusing stale TAA history.
+    /// GPU-skinned draws are detected automatically; use this for rigid held tools.
+    /// The declaration lasts one frame and does not affect static instances elsewhere.
+    pub fn submit_dynamic(&mut self, cmd: DrawCommand) {
+        self.reactive_draws
+            .insert(crate::pass::taa::ReactiveDrawKey::of(&cmd));
+        self.submit(cmd);
     }
 
     /// Draw geometry only into shadow maps. Useful for a first-person body
@@ -3001,18 +3013,6 @@ impl SomniumRenderer {
                 .record(&ctx.device, &ctx.queue, &mut encoder, scene_view, &lines);
         }
 
-        // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
-        if !self.pending_particles.is_empty() {
-            self.particle_pass.record(
-                &ctx.queue,
-                &mut encoder,
-                scene_view,
-                self.view_proj_unjittered,
-                self.view_matrix,
-                &self.pending_particles,
-            );
-        }
-
         self.profiler.end(&mut encoder); // Editor overlays
 
         // ── 9. UI Overlay ────────────────────────────────────────────────────
@@ -3727,6 +3727,30 @@ impl SomniumRenderer {
         // mesh's offsets — which renders as triangles stretched between
         // unrelated parts of the geometry pool.
         self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
+        if self.taa_pass.enabled() || self.fsr_pass.enabled {
+            let posed: std::collections::HashSet<_> =
+                self.animated_geometry.posed_offsets().collect();
+            let flags: Vec<_> = self
+                .draw_queue
+                .iter()
+                .map(|cmd| {
+                    u32::from(
+                        posed.contains(&cmd.vertex_offset)
+                            || self
+                                .reactive_draws
+                                .contains(&crate::pass::taa::ReactiveDrawKey::of(cmd)),
+                    )
+                })
+                .collect();
+            if self.taa_pass.enabled() {
+                self.taa_pass
+                    .set_reactive_instances(&ctx.device, &ctx.queue, &flags);
+            }
+            if self.fsr_pass.enabled {
+                self.fsr_pass
+                    .set_reactive_instances(&ctx.device, &ctx.queue, &flags);
+            }
+        }
 
         // ── 3. Build and upload instance buffer ──────────────────────────────
         self.profiler.cpu_begin("Instances");
@@ -4992,6 +5016,7 @@ impl SomniumRenderer {
             &self.vis_pass.depth_view,
             self.velocity_pass.view(),
             self.water_pass.surface_view(),
+            &self.vis_pass.view,
         );
         // TAA deliberately reprojects between unjittered matrices so a static
         // scene has zero velocity. See `TaaPass::record`.
@@ -5041,6 +5066,24 @@ impl SomniumRenderer {
         // reported as TAA. Closing it here is a *reattribution*, not a change
         // in cost — expect the TAA row to fall and three new rows to appear
         // holding the difference.
+        self.profiler.end(&mut encoder);
+
+        // Sprite particles render after TAA and mark FSR reactivity, inside HDR
+        // exposure/bloom. Each view has independent upload buffers.
+        self.profiler.begin(&mut encoder, "Particles");
+        self.particle_pass.record(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &self.postprocess_pass.hdr_view,
+            &self.vis_pass.depth_view,
+            &self.global_pool.bind_group,
+            self.view_proj_unjittered,
+            self.view_matrix,
+            slot as usize,
+            [self.render_width, self.render_height],
+            &self.pending_particles,
+        );
         self.profiler.end(&mut encoder);
 
         // Phase IV-G: choose the finite body under the camera from the same
@@ -5179,6 +5222,8 @@ impl SomniumRenderer {
             &self.postprocess_pass.hdr_texture,
             &self.vis_pass.depth_texture,
             self.velocity_pass.texture(),
+            &self.vis_pass.view,
+            self.particle_pass.reactive_view(slot as usize),
             self.exposure,
             self.proj_matrix,
             self.frame_delta_time,
@@ -5318,6 +5363,7 @@ impl SomniumRenderer {
     /// before drawing.
     fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
+        self.reactive_draws.clear();
         self.shadow_only_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();

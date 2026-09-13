@@ -34,6 +34,11 @@ struct FsrGpu {
     reconstructed_previous_depth: wgpu::Buffer,
     sanitized: wgpu::Texture,
     depth_f32: wgpu::Texture,
+    /// One-frame dynamic coverage, independent of FSR's accumulated color.
+    coverage: [wgpu::Texture; 2],
+    reactive_mask: wgpu::Texture,
+    reactive_instances: wgpu::Buffer,
+    empty_particle_coverage: wgpu::Texture,
     exposure_buf: wgpu::Buffer,
     sanitize_bgl: wgpu::BindGroupLayout,
     sanitize_pipeline: wgpu::ComputePipeline,
@@ -81,6 +86,31 @@ impl FsrPass {
             enabled: want && supported,
             sharpness: 0.8,
         }
+    }
+
+    /// Draw-order flags from the current opaque visibility instance buffer.
+    pub fn set_reactive_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        flags: &[u32],
+    ) {
+        let Some(gpu) = &mut self.gpu else {
+            return;
+        };
+        let bytes = (flags.len().max(1) * 4) as u64;
+        if gpu.reactive_instances.size() < bytes {
+            gpu.reactive_instances = alloc_reactive_instances(device, bytes.next_power_of_two());
+        }
+        queue.write_buffer(
+            &gpu.reactive_instances,
+            0,
+            if flags.is_empty() {
+                bytemuck::bytes_of(&0_u32)
+            } else {
+                bytemuck::cast_slice(flags)
+            },
+        );
     }
 
     pub fn output_view(&self) -> &wgpu::TextureView {
@@ -159,6 +189,8 @@ impl FsrPass {
             gpu.reconstructed_previous_depth = alloc_prev_depth(device, render);
             gpu.sanitized = alloc_hdr(device, "FSR Sanitized HDR", render);
             gpu.depth_f32 = alloc_r32(device, "FSR Depth F32", render);
+            gpu.coverage = alloc_coverage(device, render);
+            gpu.reactive_mask = alloc_r32(device, "FSR Dynamic Reactive Mask", render);
         }
         gpu.render_size = render;
         gpu.upscale_size = upscale;
@@ -177,6 +209,8 @@ impl FsrPass {
         color: &wgpu::Texture,
         depth: &wgpu::Texture,
         motion_vectors: &wgpu::Texture,
+        visibility: &wgpu::TextureView,
+        particle_coverage: Option<&wgpu::TextureView>,
         exposure: f32,
         proj: glam::Mat4,
         frame_delta_seconds: f32,
@@ -197,10 +231,21 @@ impl FsrPass {
         queue.write_buffer(
             &gpu.exposure_buf,
             0,
-            bytemuck::bytes_of(&[exposure.max(1e-8), self.sharpness.clamp(0.0, 1.0), 0.0, 0.0]),
+            bytemuck::bytes_of(&[
+                exposure.max(1e-8),
+                self.sharpness.clamp(0.0, 1.0),
+                f32::from(u8::from(!reset_history && gpu.frame_index != 0)),
+                0.0,
+            ]),
         );
         let sanitized_view = gpu.sanitized.create_view(&Default::default());
         let depth_f32_view = gpu.depth_f32.create_view(&Default::default());
+        let write = (gpu.frame_index as u32 & 1) as usize;
+        let previous_coverage = gpu.coverage[1 - write].create_view(&Default::default());
+        let current_coverage = gpu.coverage[write].create_view(&Default::default());
+        let reactive_mask = gpu.reactive_mask.create_view(&Default::default());
+        let motion_view = motion_vectors.create_view(&Default::default());
+        let empty_particles = gpu.empty_particle_coverage.create_view(&Default::default());
         let sanitize_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("FSR Sanitize"),
             layout: &gpu.sanitize_bgl,
@@ -213,6 +258,16 @@ impl FsrPass {
                 },
                 bind_view(3, &depth_view),
                 bind_view(4, &depth_f32_view),
+                bind_view(5, visibility),
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: gpu.reactive_instances.as_entire_binding(),
+                },
+                bind_view(7, &previous_coverage),
+                bind_view(8, &current_coverage),
+                bind_view(9, &reactive_mask),
+                bind_view(10, &motion_view),
+                bind_view(11, particle_coverage.unwrap_or(&empty_particles)),
             ],
         });
         {
@@ -241,8 +296,10 @@ impl FsrPass {
             depth: gpu.depth_f32.clone(),
             motion_vectors: motion_vectors.clone(),
             exposure: None,
-            reactive_mask: None,
-            transparency_and_composition: None,
+            reactive_mask: Some(gpu.reactive_mask.clone()),
+            // The same coverage also invalidates temporal locks. A disappearing
+            // actor must not survive as a locked high-frequency scene detail.
+            transparency_and_composition: Some(gpu.reactive_mask.clone()),
             dilated_depth: gpu.dilated_depth.clone(),
             dilated_motion_vectors: gpu.dilated_motion_vectors.clone(),
             reconstructed_previous_depth: gpu.reconstructed_previous_depth.clone(),
@@ -378,6 +435,10 @@ fn alloc_gpu(
         reconstructed_previous_depth,
         sanitized,
         depth_f32,
+        coverage: alloc_coverage(device, render),
+        reactive_mask: alloc_r32(device, "FSR Dynamic Reactive Mask", render),
+        reactive_instances: alloc_reactive_instances(device, 4),
+        empty_particle_coverage: alloc_r32(device, "FSR Empty Sprite Coverage", [1, 1]),
         exposure_buf,
         sanitize_bgl,
         sanitize_pipeline,
@@ -463,6 +524,31 @@ fn alloc_sanitize_pipeline(
                 count: None,
             },
             storage_tex(4, wgpu::TextureFormat::R32Float),
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            sampled_tex(7, false),
+            storage_tex(8, wgpu::TextureFormat::R32Float),
+            storage_tex(9, wgpu::TextureFormat::R32Float),
+            sampled_tex(10, false),
+            sampled_tex(11, false),
         ],
     });
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -591,3 +677,22 @@ fn alloc_prev_depth(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Buffer {
         mapped_at_creation: false,
     })
 }
+
+fn alloc_reactive_instances(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("FSR Reactive Instances"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+fn alloc_coverage(device: &wgpu::Device, size: [u32; 2]) -> [wgpu::Texture; 2] {
+    [
+        alloc_r32(device, "FSR Dynamic Coverage A", size),
+        alloc_r32(device, "FSR Dynamic Coverage B", size),
+    ]
+}
+
+#[cfg(test)]
+#[path = "fsr_tests.rs"]
+mod tests;

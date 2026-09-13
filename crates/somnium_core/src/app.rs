@@ -1053,6 +1053,9 @@ pub struct Engine<G: GameApp> {
         somnium_asset::database::AssetId,
         JobHandle<somnium_asset::LoadedTexture>,
     >,
+    /// Avoid retrying a broken sprite every frame; changed sources retry immediately.
+    material_texture_failures:
+        std::collections::HashMap<somnium_asset::database::AssetId, (u64, u64, std::time::Instant)>,
     /// Entity edit sessions and their last observed reflected value. The actual
     /// editable value is the `MaterialAsset` component temporarily attached to
     /// the entity and therefore uses the normal generated Details undo path.
@@ -1629,6 +1632,7 @@ impl<G: GameApp + 'static> Engine<G> {
             material_runtime: std::collections::HashMap::new(),
             material_textures: std::collections::HashMap::new(),
             material_texture_jobs: std::collections::HashMap::new(),
+            material_texture_failures: std::collections::HashMap::new(),
             material_sessions: std::collections::HashMap::new(),
             import_job: None,
             import_spawn_at: [0.0; 3],
@@ -4043,6 +4047,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.simulation_clock.interpolation_alpha =
+            if self.simulation_clock.state == SimulationState::Playing {
+                (self.simulation_accumulator / self.simulation_clock.fixed_delta_seconds)
+                    .clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+
         // ── Gizmo drag: update entity transform each frame while dragging ────
         // Snapping is settings, not constants (Seam 4), and `command()` held
         // during the drag inverts it.
@@ -4934,11 +4946,41 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
-            let particle_dt = if self.simulation_clock.state != SimulationState::Paused {
-                dt
-            } else {
-                0.0
-            };
+            let particle_dt =
+                crate::particle::simulation_delta(&self.simulation_clock, self.stepping_now, dt);
+            let sprite_entities: Vec<_> = self
+                .world
+                .entities()
+                .filter_map(|e| {
+                    self.world
+                        .get::<crate::ParticleEmitter>(e)
+                        .map(|p| (e, p.texture))
+                })
+                .collect();
+            self.queue_texture_ids(
+                &sprite_entities
+                    .iter()
+                    .map(|(_, texture)| *texture)
+                    .collect::<Vec<_>>(),
+            );
+            for (entity, texture) in sprite_entities {
+                let slot = self.material_textures.get(&texture).copied().unwrap_or(-1);
+                let status = if texture == somnium_asset::database::AssetId::NONE {
+                    "Soft round particle"
+                } else if slot >= 0 {
+                    "Ready"
+                } else if self.material_texture_jobs.contains_key(&texture) {
+                    "Loading texture"
+                } else {
+                    "Texture unavailable; check Content and Output Log"
+                };
+                if let Some(emitter) = self.world.get_mut::<crate::ParticleEmitter>(entity) {
+                    emitter.texture_slot = slot;
+                    if emitter.texture_status != status {
+                        emitter.texture_status = status.into();
+                    }
+                }
+            }
             let gpu_particles = simulate_particles(&mut self.world, particle_dt, frame);
             if let Some(r) = &mut self.renderer {
                 r.set_particles(gpu_particles);
@@ -5297,7 +5339,11 @@ impl<G: GameApp> Engine<G> {
             document.asset.occlusion_map,
             document.asset.emissive_map,
         ];
-        for texture_id in slots {
+        self.queue_texture_ids(&slots);
+    }
+
+    fn queue_texture_ids(&mut self, slots: &[somnium_asset::database::AssetId]) {
+        for &texture_id in slots {
             if texture_id == somnium_asset::database::AssetId::NONE
                 || self.material_textures.contains_key(&texture_id)
                 || self.material_texture_jobs.contains_key(&texture_id)
@@ -5312,6 +5358,19 @@ impl<G: GameApp> Engine<G> {
             let Some(record) = record else {
                 continue;
             };
+            if record.kind != somnium_asset::database::AssetKind::Texture {
+                continue;
+            }
+            if self.material_texture_failures.get(&texture_id).is_some_and(
+                |(bytes, modified, retry_at)| {
+                    *bytes == record.metadata.bytes
+                        && *modified == record.metadata.modified_unix_ms
+                        && std::time::Instant::now() < *retry_at
+                },
+            ) {
+                continue;
+            }
+            self.material_texture_failures.remove(&texture_id);
             let path = record.absolute_path;
             match self
                 .jobs
@@ -5560,7 +5619,23 @@ impl<G: GameApp> Engine<G> {
                         self.refresh_material_gpu(asset);
                     }
                 }
-                Err(error) => warn!(?error, "material texture decode failed"),
+                Err(error) => {
+                    if let Some(record) = self
+                        .asset_gate
+                        .published()
+                        .and_then(|snapshot| snapshot.get(texture_id))
+                    {
+                        self.material_texture_failures.insert(
+                            texture_id,
+                            (
+                                record.metadata.bytes,
+                                record.metadata.modified_unix_ms,
+                                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                            ),
+                        );
+                    }
+                    warn!(?error, "material texture decode failed; retry delayed");
+                }
             }
         }
 

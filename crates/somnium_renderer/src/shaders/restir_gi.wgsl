@@ -324,9 +324,9 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // This NO_WORLD_CACHE estimator can only light a bounce point from the
     // directional sun. Once atmospheric transmittance switches the sun off,
-    // a black reservoir is not a measurement of the night sky: replacing IBL
-    // with it makes every diffuse surface black. Empty both reservoir stages;
-    // pass 2 writes alpha zero so shading keeps environment diffuse instead.
+    // this sun-only estimator has no remaining contribution. Empty both
+    // reservoir stages; pass 2 writes alpha zero and shading keeps its separate
+    // environment diffuse term.
     if gi_luma(light.color) <= 1.0e-6 {
         gi_b[index] = gi_empty();
         return;

@@ -1,0 +1,13 @@
+{
+  "provider": "Kenney",
+  "pack": "Particle Pack 1.1",
+  "license": "CC0-1.0",
+  "asset_page": "https://kenney.nl/assets/particle-pack",
+  "download": "https://kenney.nl/media/pages/assets/particle-pack/f8fe0f8cb8-1677578741/kenney_particle-pack.zip",
+  "retrieved": "2026-09-13",
+  "archive_sha256": "b631d4b07f7002549fdcf155f01141ad482f79f3440e4e301eed49ce5f1d8958",
+  "files": {
+    "smoke_01.png": "e8724c219e8d35859167fc0a7e207e13c72ccf0c29704909b9bb3d3dc71c6cf7"
+  },
+  "processing": "Original transparent 512px PNG, unchanged."
+}

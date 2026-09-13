@@ -10,6 +10,42 @@ use somnium_ecs::{Entity, World};
 pub fn register(r: &mut somnium_core::authoring::GameRegistration) {
     r.label = "Hello Engine".into();
     r.presets.push(somnium_core::authoring::GamePreset{id:"hello.interaction_demo",label:"Interaction Demo",category:"Examples",schema:json!({"type":"object","properties":{"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"additionalProperties":false}),build:spawn});
+    r.presets.push(somnium_core::authoring::GamePreset{id:"hello.textured_particles",label:"Textured Particle Demo",category:"Examples",schema:json!({"type":"object","properties":{"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"additionalProperties":false}),build:spawn_particles});
+}
+fn spawn_particles(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
+    let origin = Vec3::from_array(
+        serde_json::from_value(args.get("position").cloned().unwrap_or(json!([0, 1, 0])))
+            .map_err(|_| "position needs [x,y,z]")?,
+    );
+    if !origin.is_finite() {
+        return Err("position must be finite".into());
+    }
+    Ok(vec![world.spawn((
+        Name::new("Textured Smoke Preview"),
+        Transform::from_translation(origin),
+        WorldTransform::identity(),
+        somnium_core::ParticleEmitter {
+            texture: somnium_asset::database::AssetId::from_relative_path(std::path::Path::new(
+                "textures/particles/smoke_01.png",
+            )),
+            max_particles: 24,
+            spawn_rate: 8.0,
+            lifetime: 2.0,
+            initial_speed: 0.25,
+            spread_angle: 0.2,
+            gravity: -0.03,
+            size_start: 0.12,
+            size_end: 0.6,
+            spin: 0.2,
+            rotation_spread: 1.0,
+            color_over_life: somnium_ecs::curve::Gradient::from_stops(vec![
+                somnium_ecs::curve::GradientStop::new(0.0, [0.7, 0.75, 0.8, 0.0]),
+                somnium_ecs::curve::GradientStop::new(0.15, [0.7, 0.75, 0.8, 0.4]),
+                somnium_ecs::curve::GradientStop::new(1.0, [0.7, 0.75, 0.8, 0.0]),
+            ]),
+            ..Default::default()
+        },
+    ))])
 }
 fn spawn(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     let origin: Vec3 = Vec3::from_array(
