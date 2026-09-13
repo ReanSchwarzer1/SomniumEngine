@@ -45,6 +45,18 @@ export type GradientStop = { t: number, color: Color, alpha: number }
 
 -- ── Components, generated from the type registry ──────────────
 
+--- `hello.AnimatedPreview` (schema version 1).
+export type HelloAnimatedPreview = {
+	source: Asset?,
+	clip: string,
+	playing: boolean,
+	speed: number,
+	time: number,
+	looping: boolean,
+	hidden_joints: string,
+	reload: boolean,
+}
+
 --- `somnium.AnimationAuthoring` (schema version 1).
 export type SomniumAnimationAuthoring = {
 	playing: boolean,
@@ -183,6 +195,26 @@ export type SomniumFoliage = {
 	lod_distance: number,
 	impostor_distance: number,
 	max_instances: number,
+}
+
+--- `somnium.ImportedMesh` (schema version 1).
+export type SomniumImportedMesh = {
+	source: string,
+	node: number,
+}
+
+--- `somnium.Interactable` (schema version 1).
+export type SomniumInteractable = {
+	kind: number --[[ Door | Collect | Inspect | Operate | Equip Light ]],
+	prompt: string,
+	trigger: string,
+	enabled: boolean,
+	locked: boolean,
+	reach: number,
+	duration: number,
+	anchor: Vec3,
+	open_angle: number,
+	preview_requested: boolean,
 }
 
 --- `somnium.Light` (schema version 1).
@@ -571,6 +603,7 @@ export type SomniumWorldPartition = {
 
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
+	animatedPreview: HelloAnimatedPreview?,
 	animationAuthoring: SomniumAnimationAuthoring?,
 	animationPreviewJoint: SomniumAnimationPreviewJoint?,
 	audioEmitter: SomniumAudioEmitter?,
@@ -581,6 +614,8 @@ export type SelfComponents = {
 	decal: SomniumDecal?,
 	editorFlags: SomniumEditorFlags?,
 	foliage: SomniumFoliage?,
+	importedMesh: SomniumImportedMesh?,
+	interactable: SomniumInteractable?,
 	light: SomniumLight?,
 	material: SomniumMaterial?,
 	mesh: SomniumMesh?,
