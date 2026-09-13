@@ -35,6 +35,8 @@ GPU-skinned meshes mark their visible pixels for temporal history rejection unti
 
 GTAO skips off-screen and sky horizon samples. Close hands/faces no longer treat missing depth as near-plane occluders; physical radius and intensity remain authored controls.
 
+`authoring.query(kind="diagnostics")` exposes `play_cursor` (`requested`, `captured`, `mode`, `immersive`). The Windows probe `tools/somnium_mcp/tests/play_cursor_smoke.py DESCRIPTOR PID RECEIPT` exercises native Play/Esc, click, focus and scene-restoration behavior. Run it on the editor's desktop. `--isolated-desktop` tests routing without claiming OS cursor visibility verification.
+
 ReSTIR GI currently estimates bounced directional sunlight. Shading adds that bounce to environment diffuse; it does not replace sky irradiance or local lighting. An unlit or missed bounce therefore cannot erase the existing ambient contribution.
 
 Device checks: `cargo test -p somnium_renderer --test taa_reactive -- --ignored --nocapture`, `cargo test -p somnium_renderer --lib pass::fsr::tests -- --ignored --nocapture --test-threads=1`, and `cargo test -p somnium_renderer --test gtao_near_surface -- --ignored --nocapture`.

@@ -495,6 +495,8 @@ impl<G: GameApp> Engine<G> {
                 }
                 "diagnostics" => {
                     json!({"ok":true,"frame":self.time.frame_count(),"simulation":format!("{:?}",self.simulation_clock.state),
+                    "play_cursor":{"requested":self.play_cursor.requested,"captured":self.play_cursor.window.is_some(),"mode":self.play_cursor.mode,
+                        "immersive":self.ui_manager.as_ref().is_some_and(|ui|ui.is_immersive())},
                     "entities":self.world.entity_count(),"revision":host.session.revision,"fps":self.time.fps(),"surface_acquire_ms":self.renderer.as_ref().map(|r|r.profiler.surface_acquire_ms),"frame_cpu_ms":self.renderer.as_ref().map(|r|r.profiler.frame_cpu_ms),"cumulative_stage_ms":self.authoring_frame_timings,
                     "adapter":self.render_ctx.as_ref().map(|r|format!("{:?}",r.adapter.get_info())),
                     "cpu":self.renderer.as_ref().map(|r|r.profiler.cpu_results().iter().map(|s|json!({"name":s.name,"ms":s.ms})).collect::<Vec<_>>()),
@@ -758,6 +760,11 @@ impl<G: GameApp> Engine<G> {
                 }else{
                 let key=authoring_key(required(params,"key")?)?;
                 let state=if params["pressed"].as_bool().ok_or("pressed must be boolean")?{InputState::Pressed}else{InputState::Released};
+                if key==KeyCode::Escape && state==InputState::Pressed && self.play_session_active {
+                    self.release_play_cursor();
+                    if let Some(ui)=&mut self.ui_manager {ui.set_immersive(false);}
+                    return Ok(json!({"ok":true,"frame":self.time.frame_count(),"cursor_released":true}));
+                }
                 EngineEvent::KeyInput{key,state}
                 };
                 let mut ctx=EngineContext::new(&self.time,&self.config,&mut self.world,

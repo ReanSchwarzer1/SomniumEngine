@@ -1191,6 +1191,7 @@ pub struct Engine<G: GameApp> {
     /// True from Play until Stop, including while a play session is paused.
     /// Editor-only overlays and authoring tools stay disabled for the session.
     play_session_active: bool,
+    play_cursor: play_input::PlayCursor,
     /// Carries fractional wall-clock time between 60 Hz physics steps.
     simulation_accumulator: f32,
     /// True after a mutating editor action until Save or New.
@@ -1683,6 +1684,7 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_clock: SimulationClock::default(),
             path_trace_previous_simulation_state: None,
             play_session_active: false,
+            play_cursor: play_input::PlayCursor::default(),
             simulation_accumulator: 0.0,
             scene_dirty: false,
             day_state: None,
@@ -3429,6 +3431,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        if self.route_play_input(event_loop, window_id, &event) {
+            return;
+        }
+
         // MORROWIND-J step 2. The id was ignored while there was one window,
         // and that is precisely the assumption a second window breaks. Without
         // this line the floating log's `Resized` reaches the main render
@@ -3670,6 +3676,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        if self.capture_on_viewport_click(window_id, &event)
+            || self.suppress_released_play_input(&event)
+        {
+            return;
+        }
+
         // Once the editor has declined the event, feed the same physical
         // transition to the action system. Scripts never see this hardware
         // event; they sample the named actions evaluated from it.
@@ -3683,26 +3695,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // a game's HUD can take a click the shell did not want but the sculpt
         // brush would have. See `GameApp::on_os_event` for why the order is
         // MORROWIND-N's to revisit.
-        {
-            let mut ctx = EngineContext::new(
-                &self.time,
-                &self.config,
-                &mut self.world,
-                self.physics.as_mut().unwrap(),
-                self.audio.as_mut().unwrap(),
-                &mut self.jobs,
-                &mut self.navigation_editor,
-                self.render_ctx.as_ref(),
-                self.renderer.as_mut(),
-                &mut self.selection.primary,
-                self.ui_manager.as_mut().unwrap(),
-                crate::camera_speed_from_normalized(self.camera_speed_norm),
-                self.simulation_clock,
-                &mut self.scripts,
-            );
-            if self.game.on_os_event(&mut ctx, &event) {
-                return;
-            }
+        if self.dispatch_game_os_event(&event) {
+            return;
         }
 
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
@@ -3884,6 +3878,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         if self.state != LifecycleState::Running {
             return;
         }
+        if self.play_session_active && self.play_cursor.window.is_none() {
+            return;
+        }
 
         let engine_event: Option<EngineEvent> = match event {
             winit::event::DeviceEvent::MouseMotion { delta } => {
@@ -3921,6 +3918,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_play_cursor();
         self.maintain_floating_placement();
         if self.state != LifecycleState::Running {
             return;
@@ -5933,6 +5931,7 @@ impl<G: GameApp> Engine<G> {
             return;
         }
         info!("Initiating engine shutdown");
+        self.release_play_cursor();
         self.state = LifecycleState::ShuttingDown;
         self.game.on_shutdown();
         event_loop.exit();
@@ -11085,6 +11084,8 @@ impl<G: GameApp> Engine<G> {
                 }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
+                self.play_cursor.requested = true;
+                self.sync_play_cursor();
                 self.audio_scene.set_paused(false);
                 self.gizmo_drag = None;
                 self.terrain_stroke = None;
@@ -11099,6 +11100,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::PauseSimulation => {
+                self.release_play_cursor();
                 self.simulation_clock.state = SimulationState::Paused;
                 self.audio_scene.set_paused(true);
                 if self.play_session_active {
@@ -11129,6 +11131,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::StopSimulation => {
+                self.release_play_cursor();
                 crate::ai::reset_behaviors(&mut self.world);
                 self.pending_steps = 0;
                 self.simulation_clock.state = SimulationState::Editing;
@@ -11196,19 +11199,10 @@ impl<G: GameApp> Engine<G> {
                     ui.set_immersive(entering);
                 }
                 if entering {
-                    self.simulation_clock.state = SimulationState::Playing;
-                    self.play_session_active = true;
-                    self.gizmo_drag = None;
-                    self.terrain_stroke = None;
-                    if let Some(r) = &mut self.renderer {
-                        r.set_editor_overlays_enabled(false);
-                    }
-                    if let Some(ui) = &mut self.ui_manager {
-                        ui.update_simulation_controls(1);
-                        ui.set_play_overlays_hidden(true);
-                    }
+                    self.handle_editor_event(EditorEvent::PlaySimulation);
                     info!("Immersive viewport");
                 } else {
+                    self.release_play_cursor();
                     info!("Immersive viewport exited");
                 }
             }
@@ -12806,3 +12800,6 @@ mod designer;
 
 #[path = "app_authoring.rs"]
 mod authoring_host;
+
+#[path = "app_play_input.rs"]
+mod play_input;

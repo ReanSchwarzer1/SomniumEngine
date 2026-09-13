@@ -19,6 +19,8 @@ The large centre pane is the 3D view. Chrome around it does not steal fly-cam in
 
 ## Viewport toolbar
 
+Play and fullscreen Play capture and hide the cursor. **Esc** releases it and restores the editor from fullscreen; simulation continues. Click the scene to capture again. Pause, Stop and focus loss also release it. Released input does not control the game. Fullscreen Play uses the normal scene checkpoint, so Stop restores the authored scene.
+
 Play / Pause / Stop sit on the main toolbar. The button beside Play fills the monitor with the 3D view (Esc restores the editor). The **Profiler** toggle on the viewport bar shows GPU timings, a pass-order **Graph**, and CPU zones over the scene (including Water prepass / reflection / shade). Camera speed is the slider next to the m/s readout. **Resolution** caps the 3D target (Native, 2560×1440, 1920×1080, 1600×900, 1280×720) while the window and UI stay at display pixels — pick **1920×1080** for fullscreen on a 2K panel. **FSR** (Post Processing, default on) temporally reconstructs that internal target to the window; it replaces TAA and the bilinear blit while enabled. Frame generation is not in the engine. `SOMNIUM_FSR=0` kills it at startup. Water and other transparents have no reactive mask yet, so they can ghost under camera motion.
 
 ### When the bar runs out of room
