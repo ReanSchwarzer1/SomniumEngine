@@ -306,6 +306,19 @@ export type SomniumParent = {
 
 --- `somnium.ParticleEmitter` (schema version 1).
 export type SomniumParticleEmitter = {
+	enabled: boolean,
+	texture: Asset?,
+	aspect: number,
+	additive: boolean,
+	world_up: boolean,
+	local_space: boolean,
+	tip_tint: Vec3,
+	atlas_columns: number,
+	atlas_rows: number,
+	atlas_frames: number,
+	atlas_fps: number,
+	rotation_spread: number,
+	spin: number,
 	max_particles: number,
 	spawn_rate: number,
 	lifetime: number,
