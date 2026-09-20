@@ -85,7 +85,7 @@ fn visible_sprite_coverage_respects_alpha_depth_empty_frames_and_viewports() {
         rotation: 0.0,
         texture_index: 0,
         flags: 0,
-        _pad: 0,
+        flutter: 0.0,
     };
     let mut frame = |slot, depth_value, particles: &[GpuParticle]| {
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -136,6 +136,42 @@ fn visible_sprite_coverage_respects_alpha_depth_empty_frames_and_viewports() {
         "transparent corners keep static history"
     );
     assert_eq!(pixel(&visible, 1, 1), 0, "outside sprite is not reactive");
+    let mirrored = frame(
+        0,
+        0.75,
+        &[GpuParticle {
+            flags: 4,
+            ..particle
+        }],
+    );
+    for y in 4..12 {
+        for x in 4..12 {
+            assert_eq!(
+                pixel(&visible, x, y),
+                pixel(&mirrored, 15 - x, y),
+                "a staged reflection must reverse the actual asymmetric sprite"
+            );
+        }
+    }
+    let bent = frame(
+        0,
+        0.75,
+        &[GpuParticle {
+            flutter: 0.4,
+            ..particle
+        }],
+    );
+    assert_ne!(
+        visible, bent,
+        "flutter must deform the actual textured silhouette"
+    );
+    for x in 4..12 {
+        assert_eq!(
+            pixel(&visible, x, 11),
+            pixel(&bent, x, 11),
+            "base stays pinned"
+        );
+    }
     let occluded = frame(1, 0.25, &[particle]);
     assert!(
         occluded.chunks_exact(4).all(|p| p[0] == 0),

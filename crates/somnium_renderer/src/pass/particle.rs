@@ -11,9 +11,10 @@ pub struct GpuParticle {
     pub uv_rect: [f32; 4],
     pub rotation: f32,
     pub texture_index: i32,
-    /// Bit 0 additive; bit 1 world-up billboard.
+    /// Bit 0 additive; bit 1 world-up billboard; bit 2 mirrored sprite UV.
     pub flags: u32,
-    pub _pad: u32,
+    /// Tip displacement in sprite-width units; its base stays pinned.
+    pub flutter: f32,
 }
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

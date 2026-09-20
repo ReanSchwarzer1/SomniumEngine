@@ -642,6 +642,8 @@ fn mesh_kind_schema() -> ComponentSchema {
 pub fn component_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
     crate::interaction::register_schema(&mut registry);
+    crate::work::register(&mut registry);
+    crate::staged_mirror::register(&mut registry);
     registry.register(audio_emitter_schema());
 
     registry.register(buoyant_vessel_schema());
@@ -723,6 +725,7 @@ fn particle_emitter_schema() -> ComponentSchema {
             additive { group: "Sprite", doc: "Emissive blending for fire and sparks." },
             world_up { group: "Sprite", doc: "Keep flame sprites upright in world space." },
             local_space { group: "Emission", doc: "Keep existing particles attached to this emitter. Clear before switching on a live effect." },
+            staged_reflection { group: "Sprite", doc: "Show this effect in the active staged mirror. Reuses the same simulated particles." },
             tip_tint { min: 0.0, max: 100.0, group: "Sprite", doc: "RGB multiplier at the top edge; 1 keeps the lifetime colour." },
             atlas_columns { min: 1, max: 64, group: "Flipbook" },
             atlas_rows { min: 1, max: 64, group: "Flipbook" },
@@ -730,6 +733,8 @@ fn particle_emitter_schema() -> ComponentSchema {
             atlas_fps { min: 0.0, max: 240.0, group: "Flipbook", doc: "Zero plays once over each particle's lifetime." },
             rotation_spread { min: 0.0, max: 3.1415927, group: "Sprite", unit: "rad" },
             spin { min: -20.0, max: 20.0, group: "Sprite", unit: "rad/s" },
+            flutter { min: 0.0, max: 0.4, group: "Sprite", doc: "Bend the tip of a textured sprite while keeping its base pinned. Zero disables motion." },
+            flutter_hz { min: 0.0, max: 30.0, group: "Sprite", unit: "Hz", doc: "Tip motion follows simulation time and pauses with the scene." },
             burst { min: 0, max: 10000, group: "Emission", flags: FieldFlags::EDIT, doc: "Emit this many particles once, including while continuous emission is disabled." },
             max_particles { min: 0, group: "Emission" },
             spawn_rate { min: 0.0, step: 1.0, group: "Emission", unit: "particles/s" },
@@ -1324,7 +1329,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 37);
+        assert_eq!(registry.len(), 41);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1339,6 +1344,8 @@ mod tests {
                 "somnium.Decal",
                 "somnium.EditorFlags",
                 "somnium.Foliage",
+                "somnium.ImportedMesh",
+                "somnium.Interactable",
                 "somnium.Light",
                 "somnium.Material",
                 "somnium.Mesh",
@@ -1357,6 +1364,7 @@ mod tests {
                 "somnium.ScatterSettings",
                 "somnium.Sky",
                 "somnium.Spline",
+                "somnium.StagedMirror",
                 "somnium.SurfaceTags",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
@@ -1365,6 +1373,7 @@ mod tests {
                 "somnium.VoxelTerrain",
                 "somnium.Water",
                 "somnium.Weather",
+                "somnium.WorkTarget",
                 "somnium.WorldPartition",
             ],
             "iteration is sorted by stable id, not by registration order"

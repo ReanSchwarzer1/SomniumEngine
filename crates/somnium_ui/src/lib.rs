@@ -6521,6 +6521,12 @@ impl UiManager {
         self.editor_events.pop_front()
     }
 
+    /// Queue a game-owned scene load through the same loader as File/Open.
+    /// Callers validate their project path and stop Play before requesting it.
+    pub fn request_scene_load(&mut self, path: String) {
+        self.editor_events.push_back(EditorEvent::LoadScene(path));
+    }
+
     // ── Live UI updates ───────────────────────────────────────────────────────
 
     /// CONTROL-L: publish the scene's clock to the viewport context bar.

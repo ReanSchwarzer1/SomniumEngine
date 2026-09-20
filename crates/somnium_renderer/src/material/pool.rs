@@ -128,29 +128,66 @@ impl GpuMaterial {
 /// Manages a pool of materials in a GPU storage buffer.
 pub struct MaterialPool {
     pub buffer: wgpu::Buffer,
+    device: wgpu::Device,
+    max_buffer_bytes: u64,
     materials: Vec<GpuMaterial>,
     revision: u64,
 }
 
 impl MaterialPool {
     pub fn new(device: &wgpu::Device) -> Self {
+        let limits = device.limits();
+        let max_buffer_bytes = limits
+            .max_buffer_size
+            .min(u64::from(limits.max_storage_buffer_binding_size));
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Material Buffer"),
-            size: 1024 * 64, // 64KB
+            size: (1024 * 64).min(max_buffer_bytes),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         Self {
             buffer,
+            device: device.clone(),
+            max_buffer_bytes,
             materials: Vec::new(),
             revision: 0,
         }
     }
 
     /// Add a material to the pool and return its ID.
+    ///
+    /// IDs remain stable when the storage grows. The renderer must bind the
+    /// current `buffer` before recording the next frame; existing submissions
+    /// retain their old buffer through wgpu's resource ownership.
     pub fn add_material(&mut self, queue: &wgpu::Queue, material: GpuMaterial) -> u32 {
-        let id = self.materials.len() as u32;
+        let id = u32::try_from(self.materials.len()).expect("material ID space exhausted");
+        let required_bytes = (u64::from(id) + 1) * std::mem::size_of::<GpuMaterial>() as u64;
+        assert!(
+            required_bytes <= self.max_buffer_bytes,
+            "material pool exceeds the device storage-buffer limit"
+        );
+        if required_bytes > self.buffer.size() {
+            let capacity = self
+                .buffer
+                .size()
+                .saturating_mul(2)
+                .max(required_bytes)
+                .min(self.max_buffer_bytes);
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Global Material Buffer"),
+                size: capacity,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            // Materials already have a CPU shadow for inspection and ray data.
+            // Upload it once at growth, preserving every existing material ID.
+            if !self.materials.is_empty() {
+                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&self.materials));
+            }
+            self.buffer = buffer;
+        }
         self.materials.push(material);
         self.revision = self.revision.wrapping_add(1);
 

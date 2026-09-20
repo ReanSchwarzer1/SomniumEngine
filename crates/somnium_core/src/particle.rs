@@ -52,6 +52,8 @@ pub struct ParticleEmitter {
     pub world_up: bool,
     /// Birth positions remain relative to the moving emitter.
     pub local_space: bool,
+    /// Duplicate visible sprites into the one active staged mirror.
+    pub staged_reflection: bool,
     /// Additional colour multiplier at the sprite's top edge.
     pub tip_tint: glam::Vec3,
     /// Sprite-sheet columns, rows and usable frames.
@@ -66,6 +68,10 @@ pub struct ParticleEmitter {
     pub rotation_spread: f32,
     /// Angular speed in radians per second after birth.
     pub spin: f32,
+    /// Sideways sprite deformation in fractions of its width; zero disables it.
+    pub flutter: f32,
+    /// Deformation frequency in Hz, driven by simulation age (respects Pause).
+    pub flutter_hz: f32,
     /// One-shot burst, consumed by simulation.
     pub burst: u32,
     /// Resolved texture state, not persisted.
@@ -124,6 +130,48 @@ mod tests {
     use super::*;
     use somnium_ecs::World;
     #[test]
+    fn staged_mirror_reuses_exact_particle_state_without_double_advancing() {
+        let mut world = World::new();
+        let entity = world.spawn((
+            Transform::from_translation(glam::Vec3::new(1., 2., 3.)),
+            ParticleEmitter {
+                enabled: false,
+                staged_reflection: true,
+                local_space: true,
+                flutter: 0.2,
+                gravity: 0.0,
+                particles: vec![ParticleState {
+                    position: glam::Vec3::ZERO,
+                    velocity: glam::Vec3::ZERO,
+                    age: 0.2,
+                    lifetime: 1.,
+                    rotation_seed: 0.4,
+                }],
+                ..Default::default()
+            },
+        ));
+        let matrix = glam::Mat4::from_scale(glam::Vec3::new(1., 1., -1.));
+        let particles = simulate_particles_reflected(&mut world, 0.05, 1, Some(matrix));
+        assert_eq!(particles.len(), 2);
+        assert_eq!(particles[0].position, [1., 2., 3.]);
+        assert_eq!(particles[1].position, [1., 2., -3.]);
+        assert_eq!(particles[0].color, particles[1].color);
+        assert_eq!(particles[0].flutter, particles[1].flutter);
+        assert_eq!(particles[1].flags & 4, 4);
+        assert_eq!(
+            world.get::<ParticleEmitter>(entity).unwrap().particles[0].age,
+            0.25
+        );
+        world
+            .get_mut::<ParticleEmitter>(entity)
+            .unwrap()
+            .staged_reflection = false;
+        assert_eq!(
+            simulate_particles_reflected(&mut world, 0., 2, Some(matrix)).len(),
+            1
+        );
+    }
+    #[test]
     fn initial_rotation_stays_constant_as_particles_travel_without_spin() {
         let mut world = World::new();
         world.spawn((ParticleEmitter {
@@ -134,6 +182,8 @@ mod tests {
             velocity_bias: [2.0, 0.0, 0.0],
             rotation_spread: 1.0,
             spin: 0.0,
+            flutter: 0.0,
+            flutter_hz: 4.0,
             ..Default::default()
         },));
         let first = simulate_particles(&mut world, 0.01, 1);
@@ -225,6 +275,29 @@ mod tests {
         assert_eq!(simulate_particles(&mut world, 0.01, 2).len(), 3);
     }
     #[test]
+    fn textured_flutter_changes_silhouette_over_time_and_respects_pause() {
+        let mut world = World::new();
+        let e = world.spawn((ParticleEmitter {
+            enabled: false,
+            burst: 1,
+            gravity: 0.0,
+            initial_speed: 0.0,
+            flutter: 0.25,
+            flutter_hz: 4.0,
+            ..Default::default()
+        },));
+        let first = simulate_particles(&mut world, 0.01, 1)[0];
+        let moved = simulate_particles(&mut world, 0.04, 2)[0];
+        assert!((first.flutter - moved.flutter).abs() > 0.01);
+        assert_eq!(first.position, moved.position);
+        assert_eq!(
+            moved.flutter,
+            simulate_particles(&mut world, 0.0, 3)[0].flutter
+        );
+        world.get_mut::<ParticleEmitter>(e).unwrap().flutter = 0.0;
+        assert_eq!(simulate_particles(&mut world, 0.04, 4)[0].flutter, 0.0);
+    }
+    #[test]
     fn flipbook_uv_tracks_lifetime_without_leaving_the_sheet() {
         let mut world = World::new();
         let entity = world.spawn((ParticleEmitter {
@@ -260,6 +333,7 @@ impl Default for ParticleEmitter {
             additive: false,
             world_up: false,
             local_space: false,
+            staged_reflection: false,
             tip_tint: glam::Vec3::ONE,
             atlas_columns: 1,
             atlas_rows: 1,
@@ -267,6 +341,8 @@ impl Default for ParticleEmitter {
             atlas_fps: 0.0,
             rotation_spread: 0.0,
             spin: 0.0,
+            flutter: 0.0,
+            flutter_hz: 4.0,
             burst: 0,
             texture_status: "Soft round particle".into(),
             texture_slot: -1,
@@ -299,6 +375,17 @@ pub fn simulate_particles(
     world: &mut somnium_ecs::World,
     dt: f32,
     frame: u64,
+) -> Vec<somnium_renderer::pass::particle::GpuParticle> {
+    simulate_particles_reflected(world, dt, frame, None)
+}
+
+/// Advance once, then mirror opted-in instances without a second simulation.
+/// The caller selects the visible staged mirror using the current camera.
+pub(crate) fn simulate_particles_reflected(
+    world: &mut somnium_ecs::World,
+    dt: f32,
+    frame: u64,
+    reflection: Option<glam::Mat4>,
 ) -> Vec<somnium_renderer::pass::particle::GpuParticle> {
     use somnium_renderer::pass::particle::GpuParticle;
 
@@ -437,8 +524,27 @@ pub fn simulate_particles(
                 rotation: emitter.spin * p.age + emitter.rotation_spread * p.rotation_seed,
                 texture_index: emitter.texture_slot,
                 flags: u32::from(emitter.additive) | (u32::from(emitter.world_up) << 1),
-                _pad: 0,
+                flutter: emitter.flutter.clamp(0.0, 0.4)
+                    * ((p.age * emitter.flutter_hz.clamp(0.0, 30.0) * std::f32::consts::TAU
+                        + p.rotation_seed * 3.0)
+                        .sin()
+                        + 0.35
+                            * (p.age * emitter.flutter_hz.clamp(0.0, 30.0) * 15.3
+                                + p.rotation_seed * 7.0)
+                                .sin())
+                    / 1.35,
             });
+            if emitter.staged_reflection
+                && let Some(matrix) = reflection
+            {
+                let mut reflected = *gpu_particles.last().unwrap();
+                reflected.position = matrix
+                    .transform_point3(glam::Vec3::from_array(reflected.position))
+                    .to_array();
+                reflected.rotation = -reflected.rotation;
+                reflected.flags |= 4; // mirror the sprite texture horizontally
+                gpu_particles.push(reflected);
+            }
         }
     }
 

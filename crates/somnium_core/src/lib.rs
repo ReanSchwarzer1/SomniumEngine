@@ -67,6 +67,8 @@ pub mod event;
 pub mod i18n;
 pub mod input_actions;
 pub mod interaction;
+pub mod work;
+pub mod staged_mirror;
 pub mod jobs;
 pub mod landscape;
 pub mod light_units;

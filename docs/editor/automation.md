@@ -99,3 +99,54 @@ flowchart LR
 ```
 
 Run the live [main probe](../../tools/somnium_mcp/editor_acceptance.py) and [workspace probe](../../tools/somnium_mcp/editor_gap_acceptance.py) against Hello. They exercise semantic changes and restore tested sources/scene edits. The [generated inventory](../../tools/somnium_mcp/CAPABILITIES.md) records tested families separately from declared operations.
+
+## Contact, repair and staged mirrors
+
+Hello's left **Game / Authoring** panel includes **Burn / Repair Demo**, **Staged Mirror Demo** and **Textured Particle Demo**. Select their entities in the Outliner to edit the same reflected properties through Details or automation.
+
+| Component | Designer controls | Runtime behavior |
+|---|---|---|
+| Interaction | Local contact point/normal, finger closure, reach and duration | The game consumes one contact event; cancellation returns the hand smoothly. Zero normal uses the approach direction. |
+| Burn / Repair | Kind, duration, reach, progress retention, preview hold/reset | Held work starts after contact; interruption retracts the hand. Progress, contact and completion are read-only, session-owned values. |
+| Staged Mirror | Opening, staging depth, active distance, repair requirement | One visible front-facing opening draws complete reflected geometry. Runtime triangle count clears when disabled or outside the view. |
+| Particle Emitter | Sprite atlas, flutter strength/frequency, colour and size curves | Flutter bends the sprite above its fixed base; simulation and distortion pause together. Default strength is zero. |
+
+The mirror is a geometry-staged alternative: it requires an occluding alcove and correctly authored reflected content. It is not a general render-to-texture reflection of arbitrary surroundings. Animated previews reuse their posed vertices and submit complete reverse-wound indices, including geometry hidden in the primary view. Use pooled geometry uploads when retaining explicit index ranges; static clustering can reorder those ranges.
+
+```mermaid
+flowchart LR
+  Designer[Left presets / Details / automation] --> Intent[Interaction and work configuration]
+  Intent --> Contact[Target selection / contact / interruption]
+  Contact --> Game[Game action and hand pose]
+  Game --> Pose[Shared posed geometry]
+  Pose --> Primary[Primary visibility]
+  Pose --> Mirror[Complete reflected body / reversed winding]
+  Emitter[Particle sprite and flutter] --> Tick[Simulation age]
+  Tick --> Flame[Bent silhouette with a fixed base]
+```
+
+Native checks: [work and mirror probe](../../tools/somnium_mcp/tests/fracture_acceptance.py), [particle probe](../../tools/somnium_mcp/particle_acceptance.py). Their receipts are `docs/evidence/shared-fractures.json` and `docs/evidence/particle-flutter.json`; captures identify the tested scene revision and frame.
+
+## Standalone game startup
+
+Generated Luau declarations belong to the active project content directory; opening a game from Hello must not overwrite Hello declarations. Standalone players do not generate these authoring files.
+
+Games may set `EngineConfig.startup_scene` and `player_mode`. Startup validates the scene against the registered components before creating the window, then loads it and enters immersive Play. In player mode Esc pauses/resumes, editor shortcuts stay disabled, and authoring transport remains a separate explicit configuration choice.
+
+`GameApp::on_scene_loaded(ctx, path)` runs after a successful native or automated scene load. Capture persistent IDs and authored baselines here; Play begins afterward. A game can then reject checkpoints whose source scene or content revision changed before mutating the running world.
+
+```mermaid
+flowchart LR
+  Config[Game configuration] --> Validate[Registered scene validation]
+  Validate --> Load[Load authored scene]
+  Load --> Hook[Game scene-loaded hook]
+  Hook --> Play[Immersive Play]
+  Play <--> Pause[Esc pause and resume]
+```
+
+
+### Standalone players and larger scenes
+
+`EngineConfig.startup_scene` loads through the normal scene owner before Play. `player_mode` starts immersive Play, routes paused input to the game UI, and makes Esc toggle pause without dropping into editor controls on key repeat. `GameApp::on_scene_loaded` gives game-owned checkpoint code the loaded source path. `UiManager::request_scene_load` queues that same loader for validated game transitions; stop the old session before requesting it. Standalone players skip editor recovery/autosave writes.
+
+The material storage buffer grows before a new record would overflow it. Material IDs remain stable; the next rendered frame refreshes the shared binding. This fixes dense scenes and repeated scene transitions exceeding the original 64 KiB allocation. Applications should still reuse their per-scene material slots when unloading content.

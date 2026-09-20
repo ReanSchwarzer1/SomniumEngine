@@ -38,6 +38,62 @@ fn capture_allowed(requested: bool, state: SimulationState, focused: bool) -> bo
     requested && state == SimulationState::Playing && focused
 }
 
+fn owns_game_input(captured: bool, player_mode: bool, state: SimulationState) -> bool {
+    captured || (player_mode && state == SimulationState::Paused)
+}
+
+// Some means the player owns this event, including release and autorepeat.
+// The bool requests a pause toggle only for the initial physical press.
+fn player_escape(
+    player_mode: bool,
+    key: PhysicalKey,
+    state: ElementState,
+    repeat: bool,
+) -> Option<bool> {
+    (player_mode && key == PhysicalKey::Code(KeyCode::Escape))
+        .then_some(state == ElementState::Pressed && !repeat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_pause_menu_owns_input_without_a_captured_cursor() {
+        assert!(owns_game_input(false, true, SimulationState::Paused));
+        assert!(!owns_game_input(false, false, SimulationState::Paused));
+        assert!(!owns_game_input(false, true, SimulationState::Playing));
+        assert!(owns_game_input(true, false, SimulationState::Playing));
+    }
+
+    #[test]
+    fn held_escape_never_falls_through_to_editor_immersive_exit() {
+        let key = PhysicalKey::Code(KeyCode::Escape);
+        assert_eq!(
+            player_escape(true, key, ElementState::Pressed, false),
+            Some(true)
+        );
+        assert_eq!(
+            player_escape(true, key, ElementState::Pressed, true),
+            Some(false)
+        );
+        assert_eq!(
+            player_escape(true, key, ElementState::Released, false),
+            Some(false)
+        );
+        assert_eq!(player_escape(false, key, ElementState::Pressed, true), None);
+        assert_eq!(
+            player_escape(
+                true,
+                PhysicalKey::Code(KeyCode::KeyF),
+                ElementState::Pressed,
+                false
+            ),
+            None
+        );
+    }
+}
+
 impl<G: GameApp> Engine<G> {
     fn play_window(&self) -> Option<Arc<Window>> {
         let floating = self
@@ -157,6 +213,22 @@ impl<G: GameApp> Engine<G> {
             self.sync_play_cursor();
         }
         if let WindowEvent::KeyboardInput { event: key, .. } = event {
+            if let Some(toggle) = player_escape(
+                self.config.player_mode,
+                key.physical_key,
+                key.state,
+                key.repeat,
+            ) {
+                if toggle {
+                    let action = if self.simulation_clock.state == SimulationState::Paused {
+                        EditorEvent::PlaySimulation
+                    } else {
+                        EditorEvent::PauseSimulation
+                    };
+                    self.handle_editor_event(action);
+                }
+                return true;
+            }
             if key.physical_key == PhysicalKey::Code(KeyCode::Escape)
                 && key.state == ElementState::Pressed
                 && (self.play_cursor.requested
@@ -170,7 +242,12 @@ impl<G: GameApp> Engine<G> {
                 return true;
             }
         }
-        if self.play_cursor.window == Some(id) && is_game_input(event) {
+        if owns_game_input(
+            self.play_cursor.window == Some(id),
+            self.config.player_mode,
+            self.simulation_clock.state,
+        ) && is_game_input(event)
+        {
             self.input.handle_window_event(event);
             if !self.dispatch_game_os_event(event) {
                 if let Some(event) = translate_window_event(event) {

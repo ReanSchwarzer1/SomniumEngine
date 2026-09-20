@@ -22,6 +22,7 @@
 mod animated_preview;
 mod authoring_demo;
 mod dreams_fixture;
+mod fracture_demo;
 
 use glam::Vec3;
 use serde::Serialize;
@@ -709,6 +710,7 @@ impl VoxelTerrain {
 
 struct HelloGame {
     interactions: authoring_demo::InteractionDemo,
+    work_demo: fracture_demo::Demo,
     animated_previews: animated_preview::Previews,
     log_timer: f32,
     camera: EditorCamera,
@@ -814,6 +816,7 @@ impl HelloGame {
         runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
         Self {
             interactions: Default::default(),
+            work_demo: Default::default(),
             animated_previews: Default::default(),
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
@@ -1139,10 +1142,11 @@ impl HelloGame {
 impl GameApp for HelloGame {
     fn register_authoring(&mut self, registration: &mut somnium_core::authoring::GameRegistration) {
         authoring_demo::register(registration);
+        fracture_demo::register(registration);
         animated_preview::register(registration);
     }
     fn authoring_state(&self) -> serde_json::Value {
-        serde_json::json!({"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state()})
+        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state()})
     }
 
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
@@ -1683,6 +1687,7 @@ impl GameApp for HelloGame {
     }
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
+        self.work_demo.event(event);
         if play_session(ctx)
             && matches!(
                 event,
@@ -1830,6 +1835,7 @@ impl GameApp for HelloGame {
             })
             .unwrap_or((self.camera.position, self.camera.forward_vector()));
         self.interactions.tick(ctx, eye, forward);
+        self.work_demo.tick(ctx, eye, forward);
 
         let Some(boat) = self.boat.as_ref() else {
             return;
@@ -2027,9 +2033,11 @@ impl GameApp for HelloGame {
         let playing = play_session(ctx);
         if playing && !self.was_playing {
             self.interactions.begin_play(ctx.world);
+            self.work_demo.reset(ctx.world);
             spawn_player(self, ctx);
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
+            self.work_demo.reset(ctx.world);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
@@ -2119,6 +2127,15 @@ impl GameApp for HelloGame {
     }
 
     fn on_render(&mut self, ctx: &mut EngineContext) {
+        fracture_demo::Demo::sync(ctx.world);
+        somnium_core::propagate_transforms(ctx.world);
+        let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
+        if let Some(renderer) = &mut ctx.renderer {
+            let (rw, rh) = renderer.scene_extent();
+            let aspect = rw as f32 / rh.max(1) as f32;
+            let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
+            renderer.set_view(view_mat, proj, eye);
+        }
         self.animated_previews.render(ctx);
         // **Which canvas** and **whether it draws** are two questions, and
         // conflating them costs more than it looks. `EditorFlags::hidden` is an
@@ -2295,13 +2312,7 @@ impl GameApp for HelloGame {
                     [speed, wake_strength, 110.0, 3.0],
                 )
             });
-        let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
         if let (Some(renderer), Some(render_ctx)) = (&mut ctx.renderer, &ctx.render_ctx) {
-            let (rw, rh) = renderer.scene_extent();
-            let aspect = rw as f32 / rh.max(1) as f32;
-            let proj = glam::Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
-            renderer.set_view(view_mat, proj, eye);
-
             // Sync the lights from ECS LightComponent.
             {
                 let light_req = ComponentSet::from_ids(vec![

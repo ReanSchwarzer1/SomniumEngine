@@ -21,6 +21,12 @@
 /// Immutable engine-wide configuration consumed at startup.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Load this authored scene after game initialization. The game schemas
+    /// are registered before the file is decoded.
+    pub startup_scene: Option<std::path::PathBuf>,
+    /// Launch directly into an immersive game session. Editor shortcuts and
+    /// leaving the immersive viewport are disabled; Escape pauses/resumes.
+    pub player_mode: bool,
     /// Optional game.project.json directory; scopes authoring, saves and content.
     pub project_root: Option<std::path::PathBuf>,
     /// Enable the local, authenticated authoring bridge for this project.
@@ -64,6 +70,8 @@ impl Default for EngineConfig {
     /// | `resizable`    | `true`               |
     fn default() -> Self {
         Self {
+            startup_scene: None,
+            player_mode: false,
             project_root: None,
             authoring_enabled: false,
             content_root: std::env::var_os("SOMNIUM_CONTENT_ROOT")

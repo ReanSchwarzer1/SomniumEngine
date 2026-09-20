@@ -57,6 +57,11 @@ export type HelloAnimatedPreview = {
 	reload: boolean,
 }
 
+--- `hello.MirrorPart` (schema version 1).
+export type HelloMirrorPart = {
+	role: number,
+}
+
 --- `somnium.AnimationAuthoring` (schema version 1).
 export type SomniumAnimationAuthoring = {
 	playing: boolean,
@@ -213,6 +218,8 @@ export type SomniumInteractable = {
 	reach: number,
 	duration: number,
 	anchor: Vec3,
+	contact_normal: Vec3,
+	hand_grip: number,
 	open_angle: number,
 	preview_requested: boolean,
 }
@@ -312,6 +319,7 @@ export type SomniumParticleEmitter = {
 	additive: boolean,
 	world_up: boolean,
 	local_space: boolean,
+	staged_reflection: boolean,
 	tip_tint: Vec3,
 	atlas_columns: number,
 	atlas_rows: number,
@@ -319,6 +327,8 @@ export type SomniumParticleEmitter = {
 	atlas_fps: number,
 	rotation_spread: number,
 	spin: number,
+	flutter: number,
+	flutter_hz: number,
 	max_particles: number,
 	spawn_rate: number,
 	lifetime: number,
@@ -475,6 +485,17 @@ export type SomniumSpline = {
 	tangents: { Vec3 },
 }
 
+--- `somnium.StagedMirror` (schema version 1).
+export type SomniumStagedMirror = {
+	enabled: boolean,
+	width: number,
+	height: number,
+	depth: number,
+	active_distance: number,
+	requires_repair: boolean,
+	rendered_triangles: number, -- engine-owned; reading only
+}
+
 --- `somnium.SurfaceTags` (schema version 1).
 export type SomniumSurfaceTags = {
 	names: { string },
@@ -597,6 +618,23 @@ export type SomniumWeather = {
 	particle_rate: number,
 }
 
+--- `somnium.WorkTarget` (schema version 1).
+export type SomniumWorkTarget = {
+	kind: number --[[ Burn | Repair ]],
+	prompt: string,
+	trigger: string,
+	enabled: boolean,
+	seconds: number,
+	retain_progress: boolean,
+	reach: number,
+	anchor: Vec3,
+	progress: number, -- engine-owned; reading only
+	contact: number, -- engine-owned; reading only
+	complete: boolean, -- engine-owned; reading only
+	preview_held: boolean,
+	reset_requested: boolean,
+}
+
 --- `somnium.WorldPartition` (schema version 1).
 export type SomniumWorldPartition = {
 	enabled: boolean,
@@ -617,6 +655,7 @@ export type SomniumWorldPartition = {
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
 	animatedPreview: HelloAnimatedPreview?,
+	mirrorPart: HelloMirrorPart?,
 	animationAuthoring: SomniumAnimationAuthoring?,
 	animationPreviewJoint: SomniumAnimationPreviewJoint?,
 	audioEmitter: SomniumAudioEmitter?,
@@ -647,6 +686,7 @@ export type SelfComponents = {
 	scatterSettings: SomniumScatterSettings?,
 	sky: SomniumSky?,
 	spline: SomniumSpline?,
+	stagedMirror: SomniumStagedMirror?,
 	surfaceTags: SomniumSurfaceTags?,
 	terrain: SomniumTerrain?,
 	timeOfDay: SomniumTimeOfDay?,
@@ -655,6 +695,7 @@ export type SelfComponents = {
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
 	weather: SomniumWeather?,
+	workTarget: SomniumWorkTarget?,
 	worldPartition: SomniumWorldPartition?,
 }
 

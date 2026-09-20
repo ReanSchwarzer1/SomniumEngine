@@ -2722,6 +2722,14 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Renderer prepare");
         self.grain_masks.advance_packed(&ctx.queue);
 
+        // Material imports can grow the pool between frames. All raster
+        // consumers share this bind group, so refresh it before any pass or
+        // temporary texture-hiding group is recorded. Growth is monotonic.
+        if self.global_pool.material_buffer.size() != self.materials_pool.buffer.size() {
+            self.global_pool.material_buffer = self.materials_pool.buffer.clone();
+            self.global_pool.update_textures(&ctx.device);
+        }
+
         // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
         //
         // Here, at the top of the frame, because a resize reallocates every

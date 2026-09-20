@@ -110,10 +110,27 @@ impl Previews {
         json!({"loaded":self.instances.iter().map(|(e,i)|json!({"entity":format!("{e:?}"),"clips":i.asset.clips.keys().collect::<Vec<_>>(),"selected":i.clip,"time":i.clock,"frames":i.frames,"meshes":i.draws.len()})).collect::<Vec<_>>(),"errors":self.failed.values().map(|v|&v.3).collect::<Vec<_>>()})
     }
     pub fn render(&mut self, ctx: &mut EngineContext) {
+        let mirrors: Vec<_> = ctx
+            .world
+            .entities()
+            .filter(|e| {
+                ctx.world
+                    .get::<somnium_core::staged_mirror::StagedMirror>(*e)
+                    .is_some()
+            })
+            .collect();
+        for entity in mirrors {
+            ctx.world
+                .get_mut::<somnium_core::staged_mirror::StagedMirror>(entity)
+                .unwrap()
+                .rendered_triangles = 0;
+        }
         let Some(gpu) = ctx.render_ctx else { return };
         let Some(r) = ctx.renderer.as_deref_mut() else {
             return;
         };
+        let mirror =
+            somnium_core::staged_mirror::active(ctx.world, r.camera_pos, r.picking_view_proj());
         let removed: Vec<_> = self
             .instances
             .keys()
@@ -190,15 +207,18 @@ impl Previews {
                             .copied()
                             .unwrap_or(0);
                         let indices = asset.masked_indices(index, &hidden);
+                        let mut all_indices = indices.clone();
+                        all_indices
+                            .extend(somnium_core::staged_mirror::reversed_indices(&mesh.indices));
                         let allocation = r.geometry.upload_mesh_pooled(
                             &gpu.queue,
                             &mesh.vertices,
-                            &indices,
+                            &all_indices,
                             material,
                         );
                         let registration = if allocation.vertex_count as usize
                             != mesh.vertices.len()
-                            || allocation.index_count as usize != indices.len()
+                            || allocation.index_count as usize != all_indices.len()
                         {
                             Err("Rest geometry pool is full".into())
                         } else {
@@ -312,6 +332,28 @@ impl Previews {
                 continue;
             }
             for draw in &i.draws {
+                if let Some(mirror) = mirror {
+                    let full_count = draw.allocation.index_count - draw.indices.len() as u32;
+                    r.submit(somnium_renderer::DrawCommand {
+                        sort_key: somnium_renderer::SortKey::new(
+                            0,
+                            draw.material as u16,
+                            draw.posed,
+                        ),
+                        vertex_offset: draw.posed,
+                        index_offset: draw.allocation.index_offset + draw.indices.len() as u32,
+                        index_count: full_count,
+                        material_id: draw.material,
+                        transform: mirror.reflection * transform.to_matrix(),
+                        casts_shadow: false,
+                    });
+                    if let Some(m) = ctx
+                        .world
+                        .get_mut::<somnium_core::staged_mirror::StagedMirror>(mirror.entity)
+                    {
+                        m.rendered_triangles = m.rendered_triangles.saturating_add(full_count / 3);
+                    }
+                }
                 r.animated_geometry.update(draw.skin, &i.palette);
                 r.submit(somnium_renderer::command::DrawCommand {
                     sort_key: somnium_renderer::command::SortKey::new(

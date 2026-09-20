@@ -3,6 +3,19 @@
 use glam::Vec3;
 use somnium_ecs::{Component, component_schema, reflect::TypeRegistry};
 
+/// A world-space anatomical contact, consumed by a game's hand IK layer.
+#[derive(Clone, Copy, Debug)]
+pub struct HandContact {
+    /// Surface position, not the wrist position.
+    pub position: Vec3,
+    /// Surface normal pointing away from the object.
+    pub normal: Vec3,
+    /// Reach/return blend from the interaction owner.
+    pub weight: f32,
+    /// Finger closure: zero is an open palm.
+    pub grip: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 /// Authored reach, prompt and action settings shared by native Details and games.
 pub struct Interactable {
@@ -22,6 +35,10 @@ pub struct Interactable {
     pub duration: f32,
     /// Contact point in the entity local frame.
     pub anchor: Vec3,
+    /// Outward normal in the entity frame; zero derives it from the approach.
+    pub contact_normal: Vec3,
+    /// Finger closure at contact: -1 uses action defaults, 0 open, 1 closed.
+    pub hand_grip: f32,
     /// Signed hinge travel in degrees for a door.
     pub open_angle: f32,
     /// One-shot native preview request, consumed by the game.
@@ -39,6 +56,8 @@ impl Default for Interactable {
             reach: 2.0,
             duration: 0.65,
             anchor: Vec3::ZERO,
+            contact_normal: Vec3::ZERO,
+            hand_grip: -1.0,
             open_angle: 90.0,
             preview_requested: false,
         }
@@ -56,6 +75,8 @@ pub fn register_schema(registry: &mut TypeRegistry) {
             reach { group:"Contact",min:0.2,max:4.0,unit:"m" },
             duration { group:"Contact",min:0.2,max:3.0,unit:"s" },
             anchor { group:"Contact",unit:"m",doc:"Contact position relative to the entity." },
+            contact_normal { group:"Contact",doc:"Local outward surface normal. Zero uses the player's approach; set for angled surfaces and handles." },
+            hand_grip { group:"Contact",min:-1.0,max:1.0,doc:"-1 uses the action default; 0 is a flat palm, 1 a closed grip." },
             open_angle { group:"Door",min:-170.0,max:170.0,unit:"deg" },
             preview_requested { group:"Preview",doc:"Request the same interaction during Play." },
         }

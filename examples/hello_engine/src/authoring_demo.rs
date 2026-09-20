@@ -37,6 +37,9 @@ fn spawn_particles(world: &mut World, args: &Value) -> Result<Vec<Entity>, Strin
             size_start: 0.12,
             size_end: 0.6,
             spin: 0.2,
+            flutter: 0.12,
+            flutter_hz: 1.5,
+            staged_reflection: true,
             rotation_spread: 1.0,
             color_over_life: somnium_ecs::curve::Gradient::from_stops(vec![
                 somnium_ecs::curve::GradientStop::new(0.0, [0.7, 0.75, 0.8, 0.0]),

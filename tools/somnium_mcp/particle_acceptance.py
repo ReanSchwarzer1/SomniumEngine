@@ -70,7 +70,7 @@ def run(connection, output):
         wait(lambda: fields()["texture_status"] == "Ready")
         required = {"enabled", "texture", "texture_status", "aspect", "additive", "world_up",
                     "local_space", "tip_tint", "atlas_columns", "atlas_rows", "atlas_frames",
-                    "atlas_fps", "rotation_spread", "spin", "burst", "color_over_life"}
+                    "atlas_fps", "rotation_spread", "spin", "burst", "color_over_life", "flutter", "flutter_hz", "staged_reflection"}
         assert required <= fields().keys()
         execute("select", entity=actor, frame=False)
         capture("native_details_and_smoke")

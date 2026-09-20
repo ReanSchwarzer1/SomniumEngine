@@ -38,7 +38,7 @@ use crate::{
     AudioEmitterComponent, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
     LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
-    WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
+    WorldPartitionComponent, WorldTransform, look_rotation_neg_z,
 };
 use somnium_ecs::{Entity, World};
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -453,6 +453,10 @@ pub trait GameApp {
 
     /// Called once when the engine starts.
     fn on_init(&mut self, _ctx: &mut EngineContext) {}
+
+    /// A scene has successfully replaced the authored world. Games can update
+    /// checkpoint identity and discard their previous scene's runtime state.
+    fn on_scene_loaded(&mut self, _ctx: &mut EngineContext, _path: &std::path::Path) {}
 
     /// Called for every window event.
     fn on_event(&mut self, _ctx: &mut EngineContext, _event: &EngineEvent) {}
@@ -1592,6 +1596,29 @@ impl<G: GameApp + 'static> Engine<G> {
         let mut registration = crate::authoring::GameRegistration::default();
         game.register_authoring(&mut registration);
         crate::authoring::registration::install(registration).map_err(EngineError::Config)?;
+        if config.player_mode && config.startup_scene.is_none() {
+            return Err(EngineError::Config(
+                "Player mode requires a startup scene".into(),
+            ));
+        }
+        if let Some(path) = &config.startup_scene {
+            // Reject incomplete schema content before opening a game window.
+            let (_, document) = crate::scene_file::read(path)
+                .map_err(|e| EngineError::Config(format!("Startup scene: {e}")))?;
+            let mut staging = World::new();
+            let report = crate::scene_schema::scene_from_json(
+                &mut staging,
+                &crate::reflect_registry::component_registry(),
+                &document,
+            )
+            .map_err(|e| EngineError::Config(format!("Startup scene: {e}")))?;
+            if !report.warnings.is_empty() {
+                return Err(EngineError::Config(format!(
+                    "Startup scene has {} unresolved component(s)",
+                    report.warnings.len(),
+                )));
+            }
+        }
         let mut engine = Self {
             game: Box::new(game),
             time: TimeState::new(config.target_fps),
@@ -2155,6 +2182,9 @@ impl<G: GameApp> Engine<G> {
     /// because the person has not saved anything and the title bar would be
     /// lying to them.
     fn write_autosave(&mut self, reason: crate::autosave::AutosaveReason) {
+        if self.config.player_mode {
+            return;
+        }
         let path = crate::autosave::autosave_path(&self.config.content_root, reason);
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
@@ -2187,6 +2217,9 @@ impl<G: GameApp> Engine<G> {
     /// opened with a file they have never seen is a worse failure than losing
     /// the autosave, and they are the only one who knows which they want.
     fn check_crash_recovery(&mut self) {
+        if self.config.player_mode {
+            return;
+        }
         let scene = std::path::PathBuf::from("scene.somnium");
         self.pending_recovery = crate::autosave::find_recovery(&self.config.content_root, &scene);
         if let Some(recovery) = &self.pending_recovery {
@@ -2498,6 +2531,30 @@ impl<G: GameApp> Engine<G> {
         self.terrain_edit_active = false;
         self.terrain_stroke = None;
         self.after_selection_change();
+        if let (Some(physics), Some(audio), Some(ui)) = (
+            self.physics.as_mut(),
+            self.audio.as_mut(),
+            self.ui_manager.as_mut(),
+        ) {
+            let mut ctx = EngineContext::new(
+                &self.time,
+                &self.config,
+                &mut self.world,
+                physics,
+                audio,
+                &mut self.jobs,
+                &mut self.navigation_editor,
+                self.render_ctx.as_ref(),
+                self.renderer.as_mut(),
+                &mut self.selection.primary,
+                ui,
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
+                &mut self.scripts,
+            );
+            self.game
+                .on_scene_loaded(&mut ctx, std::path::Path::new(path));
+        }
     }
 
     /// Show a file in the OS file browser.
@@ -3246,8 +3303,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ordinary run does not dirty the working tree — and so a
         // component added to the registry updates it without anyone
         // having to remember to regenerate.
-        {
-            let path = crate::script_decls::default_declarations_path();
+        if !self.config.player_mode {
+            // A separately opened project must never overwrite the launcher's
+            // declarations. Shipped players do not generate authoring files.
+            let path = self.config.content_root.join("scripts/somnium.d.luau");
             let generated = crate::script_decls::generate_declarations(&self.type_registry);
             let current = std::fs::read_to_string(&path).is_ok_and(|on_disk| on_disk == generated);
             if !current {
@@ -3388,6 +3447,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 if ctx.should_exit {
                     self.initiate_shutdown(event_loop);
                     return;
+                }
+                if let Some(path) = self.config.startup_scene.clone() {
+                    self.load_scene_file(&path.to_string_lossy());
+                }
+                if self.config.player_mode {
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.set_immersive(true);
+                    }
+                    self.handle_editor_event(EditorEvent::PlaySimulation);
                 }
             }
             Err(err) => {
@@ -3533,8 +3601,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.cancel_persona_stroke();
                         return;
                     }
-                    let action =
-                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard);
+                    let action = if self.config.player_mode {
+                        None
+                    } else {
+                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard)
+                    };
                     use somnium_ui::commands::CommandAction as A;
                     match action {
                         Some(A::NewScene) => {
@@ -4979,7 +5050,20 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     }
                 }
             }
-            let gpu_particles = simulate_particles(&mut self.world, particle_dt, frame);
+            let reflection = self.renderer.as_ref().and_then(|renderer| {
+                crate::staged_mirror::active(
+                    &self.world,
+                    renderer.camera_pos,
+                    renderer.proj_matrix * renderer.view_matrix,
+                )
+                .map(|mirror| mirror.reflection)
+            });
+            let gpu_particles = crate::particle::simulate_particles_reflected(
+                &mut self.world,
+                particle_dt,
+                frame,
+                reflection,
+            );
             if let Some(r) = &mut self.renderer {
                 r.set_particles(gpu_particles);
             }
@@ -11191,6 +11275,9 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleImmersiveViewport => {
+                if self.config.player_mode {
+                    return;
+                }
                 let entering = self
                     .ui_manager
                     .as_ref()

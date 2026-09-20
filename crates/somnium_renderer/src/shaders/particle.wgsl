@@ -10,7 +10,7 @@ struct GpuParticle {
     color: vec4<f32>,
     tip_tint: vec3<f32>, aspect: f32,
     uv_rect: vec4<f32>,
-    rotation: f32, texture_index: i32, flags: u32, _pad: u32,
+    rotation: f32, texture_index: i32, flags: u32, flutter: f32,
 }
 @group(0) @binding(0) var<uniform> pview: ParticleView;
 @group(0) @binding(1) var<storage, read> particles: array<GpuParticle>;
@@ -25,6 +25,8 @@ struct Out {
     @location(3) @interpolate(flat) texture_index: i32,
     @location(4) @interpolate(flat) flags: u32,
     @location(5) local_uv: vec2<f32>,
+    @location(6) @interpolate(flat) uv_rect: vec4<f32>,
+    @location(7) @interpolate(flat) flutter: f32,
 }
 @vertex fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> Out {
     let p = particles[iid]; let uv = UV[vid];
@@ -42,6 +44,7 @@ struct Out {
     out.position = pview.view_proj * vec4(p.position + right*offset.x + up*offset.y,1.);
     out.uv = p.uv_rect.xy + uv*p.uv_rect.zw;
     out.local_uv = uv; out.colour = p.color; out.tip = p.tip_tint;
+    out.uv_rect = p.uv_rect; out.flutter = p.flutter;
     out.texture_index = p.texture_index; out.flags = p.flags;
     return out;
 }
@@ -52,7 +55,14 @@ struct Fragment {
 @fragment fn fs_main(in: Out) -> Fragment {
     var sprite = vec4(1.);
     if in.texture_index >= 0 {
-        sprite = textureSampleLevel(textures[in.texture_index],sprite_sampler,in.uv,0.);
+        // Bend the textured silhouette, with zero displacement at the wick.
+        // Sampling is clamped to this atlas cell, never its neighbour.
+        let height = 1. - in.local_uv.y;
+        let uv = vec2(select(in.local_uv.x, 1. - in.local_uv.x, (in.flags & 4u) != 0u), in.local_uv.y);
+        let warped = uv - vec2(in.flutter * height * height, 0.);
+        let sample_uv = in.uv_rect.xy + clamp(warped, vec2(.001), vec2(.999)) * in.uv_rect.zw;
+        sprite = textureSampleLevel(textures[in.texture_index],sprite_sampler,sample_uv,0.);
+        if any(warped < vec2(0.)) || any(warped > vec2(1.)) { sprite.a = 0.; }
         // Shared standalone asset textures are RGBA8 UNORM; colour input is sRGB.
         sprite = vec4(pow(max(sprite.rgb,vec3(0.)),vec3(2.2)),sprite.a);
     } else {

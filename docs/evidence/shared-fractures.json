@@ -1,0 +1,35 @@
+{
+  "work_fields": [
+    "anchor",
+    "complete",
+    "contact",
+    "enabled",
+    "kind",
+    "preview_held",
+    "progress",
+    "prompt",
+    "reach",
+    "reset_requested",
+    "retain_progress",
+    "seconds",
+    "trigger"
+  ],
+  "runtime_readonly": true,
+  "mirror_triangles": 480,
+  "capture": {
+    "capture": {
+      "camera": [
+        105.0,
+        1.5,
+        105.0
+      ],
+      "frame": 160,
+      "height": 720,
+      "path": "\\\\?\\C:\\Users\\adhir\\OneDrive\\Documents\\GitHub\\SomniumEngine\\target\\hello-editor\\captures\\capture-aac4fa8bd6bf83d4520408b17a875b61-159.png",
+      "requested_frame": 159,
+      "revision": 5,
+      "width": 1280
+    }
+  },
+  "mirror_disabled_clears_count": true
+}
