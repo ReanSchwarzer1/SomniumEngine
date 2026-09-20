@@ -48,3 +48,5 @@ flowchart LR
   Source --> GPU[80-byte GPU material]
   GPU --> Shade[Scaled tangent-space normal]
 ```
+
+Scene loads reuse unchanged glTF/GLB GPU uploads within the current renderer. Source, external buffer/image and optional alpha-mask timestamps and lengths invalidate that reuse, including a newly added mask. Reopening a shared-model scene no longer consumes another copy of its geometry and textures. The bounded cache does not reclaim allocations for genuinely different or repeatedly edited assets; it is not a general streaming system.

@@ -2,6 +2,17 @@
 
 These controls live on the **Post Processing** entity unless noted. Select that entity in the Outliner, then use Details. Expensive paths default **off**; turn them on from Details.
 
+**Dream Lens** adds optional, restrained distortion: **Heat drift**, **Peripheral echo** or **Architectural shear**. Strength zero disables it; Speed controls movement. The central interaction region stays clear. Echo is a spatial offset, not temporal history. Use low strength (roughly 0.1–0.2) for atmosphere and disable it for motion-sensitive play. Hello's left **Game / Authoring → Dream Lens Demo** selects an example; all three controls also support scene save, scripting and automation.
+
+```mermaid
+flowchart LR
+  D[Details / script / automation] --> P[Post Processing component]
+  P --> U[Grading uniform]
+  U --> L[Optional peripheral lens]
+  L --> T[Exposure and tone mapping]
+  T --> V[Viewport]
+```
+
 ## Anti-aliasing
 
 One control, **Anti-aliasing**, with six values. It used to be three separate checkboxes; the FXAA box was checked by default and never ran a pass, because FSR was also on and took precedence. There is one value now, and whatever it says is what runs.

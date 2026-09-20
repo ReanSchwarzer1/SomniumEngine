@@ -770,7 +770,7 @@ fn buoyant_vessel_schema() -> ComponentSchema {
 }
 
 fn post_process_schema() -> ComponentSchema {
-    component_schema! {
+    let mut schema = component_schema! {
         PostProcessComponent as "somnium.PostProcess", display "Post Processing", version 1,
         fields {
             ev100 { step: 0.1, precision: 2, group: "Exposure" },
@@ -784,6 +784,9 @@ fn post_process_schema() -> ComponentSchema {
             saturation { min: 0.0, step: 0.01, group: "Color Grading" }, gain { min: 0.0, step: 0.01, group: "Color Grading" },
             lift { step: 0.01, group: "Color Grading" }, gamma { min: 0.0, step: 0.01, group: "Color Grading" },
             grain { min: 0.0, step: 0.01, group: "Lens" },
+            dream_mode { min: 0, max: 3, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear. The central interaction region stays clear." },
+            dream_strength { min: 0.0, max: 1.0, step: 0.01, group: "Dream Lens", doc: "Zero disables distortion. Use modest values; this effect should suggest unstable surroundings." },
+            dream_speed { min: 0.0, max: 3.0, step: 0.05, group: "Dream Lens" },
             response_curve { group: "Color Grading", display_name: "Response Curve",
                 min: 0.0, max: 1.0, soft_min: 0.0, soft_max: 1.0 },
             bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },
@@ -831,7 +834,11 @@ fn post_process_schema() -> ComponentSchema {
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
              fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
+    };
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "dream_mode") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Heat drift", "Peripheral echo", "Architectural shear"]);
     }
+    schema
 }
 
 /// Water is the largest schema in the engine and the reason the macro

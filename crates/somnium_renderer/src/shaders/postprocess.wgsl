@@ -43,6 +43,7 @@ struct PostParams {
     /// four to a vector because a uniform `array<f32, N>` has a 16-byte stride
     /// and would cost four times the space for the same table.
     response: array<vec4<f32>, 8>,
+    dream: vec4<f32>,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -246,13 +247,36 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Written branch-free — at ca_strength = 0 all three taps land on the same
     // texel, which is exactly the un-aberrated result. (A branch around
     // textureSample would risk WGSL's uniform-control-flow rules.)
-    let ca_dir = in.uv - vec2(0.5);
+    let centre = in.uv - vec2(0.5);
+    let periphery = smoothstep(0.18, 0.66, length(centre));
+    let amount = pp.dream.y * periphery;
+    let t = pp.time * pp.dream.z;
+    var scene_uv = in.uv;
+    if pp.dream.x > 0.5 && pp.dream.x < 1.5 {
+        // Two slow incommensurate waves suggest heat without shaking the aim.
+        scene_uv += vec2(sin(in.uv.y * 17.0 + t * 0.8), cos(in.uv.x * 13.0 - t * 0.53)) * amount * 0.005;
+    }
+    if pp.dream.x > 2.5 {
+        // Local vertical shear follows broad facade bands, rather than strobing.
+        scene_uv.y += sin(in.uv.x * 24.0 + sin(t * 0.31)) * sin(t * 0.47) * amount * 0.009;
+    }
+    if pp.dream.x > 0.5 && pp.dream.y > 0.0 {
+        scene_uv = clamp(scene_uv, vec2(0.002), vec2(0.998));
+    }
+    let ca_dir = scene_uv - vec2(0.5);
     let ca_off = ca_dir * pp.ca_strength;
     var hdr = vec3(
-        textureSample(hdr_tex, hdr_samp, in.uv - ca_off).r,
-        textureSample(hdr_tex, hdr_samp, in.uv).g,
-        textureSample(hdr_tex, hdr_samp, in.uv + ca_off).b,
+        textureSample(hdr_tex, hdr_samp, scene_uv - ca_off).r,
+        textureSample(hdr_tex, hdr_samp, scene_uv).g,
+        textureSample(hdr_tex, hdr_samp, scene_uv + ca_off).b,
     );
+
+    // A spatial echo, deliberately bounded to the edge and never temporal history.
+    if pp.dream.x > 1.5 && pp.dream.x < 2.5 && pp.dream.y > 0.0 {
+        let echo_uv = clamp(scene_uv - centre * 0.022 * (0.65 + 0.35 * sin(t * 0.37)), vec2(0.002), vec2(0.998));
+        let echo = textureSampleLevel(hdr_tex, hdr_samp, echo_uv, 0.0).rgb;
+        hdr = mix(hdr, echo, amount * 0.22);
+    }
 
     // Phase 24T: bloom added *before* exposure and tone mapping, because it is
     // scattering inside the lens — it happens to the light on its way to the

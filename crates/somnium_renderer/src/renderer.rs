@@ -2382,7 +2382,17 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        self.create_terrain_inner(ctx, desc, false)
+        self.create_terrain_with_asset_dir(ctx, desc, std::path::Path::new("assets/terrain"))
+    }
+
+    /// Allocate scene terrain with texture sources rooted in its active project.
+    pub fn create_terrain_with_asset_dir(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+        asset_dir: &std::path::Path,
+    ) -> u32 {
+        self.create_terrain_inner(ctx, desc, false, asset_dir)
     }
 
     /// Same as [`Self::create_terrain`], but extra-bank layers 16–31 and splat
@@ -2393,7 +2403,7 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        self.create_terrain_inner(ctx, desc, true)
+        self.create_terrain_inner(ctx, desc, true, std::path::Path::new("assets/terrain"))
     }
 
     fn create_terrain_inner(
@@ -2401,12 +2411,14 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
         hero_bank_only: bool,
+        asset_dir: &std::path::Path,
     ) -> u32 {
-        let mut terrain = crate::terrain::TerrainData::new(
+        let mut terrain = crate::terrain::TerrainData::new_with_asset_dir(
             &ctx.device,
             &ctx.queue,
             desc,
             ctx.supports_bc_compression(),
+            asset_dir,
         );
         terrain.reserve_pool_spans(&mut self.geometry);
         if hero_bank_only {

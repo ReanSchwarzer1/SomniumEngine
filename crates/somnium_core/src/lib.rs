@@ -1089,6 +1089,10 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
+    /// Optional peripheral dream lens: 0 off, 1 heat drift, 2 echo, 3 shear.
+    pub dream_mode: u32,
+    pub dream_strength: f32,
+    pub dream_speed: f32,
     /// CONTROL-K: authored tone response, applied per channel after the fixed
     /// grade. An empty curve — the default — leaves grading exactly as Phase
     /// 24Y left it, so this field costs nothing until somebody uses it.
@@ -1317,6 +1321,9 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            dream_mode: 0,
+            dream_strength: 0.0,
+            dream_speed: 1.0,
             response_curve: somnium_ecs::curve::Curve::empty(),
             // Deterministic audit switch; the editor checkbox remains the
             // runtime source of truth after startup.

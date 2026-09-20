@@ -8,6 +8,19 @@ Terrain Details includes a generated **Actor World Partition** panel. **Stream A
 
 This does **not** hide or stream the Terrain entity's mesh chunks. Coastal is one authored terrain resource, so its chunks continue through the terrain frustum/LOD pipeline and the visible landscape can span the whole map. World partition controls actors stored under `assets/world_partition`; terrain chunk residency/virtual terrain is a separate renderer feature.
 
+## Saved project landscapes
+
+Loading a scene reconstructs its terrain from the saved grid descriptor and the adjacent `<scene>.terrain<ID>.bin` height/splat sidecar. Keep both files when copying a scene. Terrain material PNGs, BC7 banks and virtual-texture pages resolve from the active project's `assets/terrain`, so an external project or standalone game can supply its own materials. Existing terrain IDs are remapped together with linked water when renderer resources are recreated.
+
+```mermaid
+flowchart LR
+  Scene[Scene grid and transform] --> Terrain[Terrain allocation]
+  Sidecar[Height and 32-layer splat sidecar] --> Terrain
+  Assets[Project terrain materials] --> Terrain
+  Terrain --> Edit[Landscape sculpt / paint / foliage]
+  Edit --> Save[Scene and sidecar save]
+```
+
 ## Brushes
 
 Click a tool so it highlights. Keys **1–6** pick the same tools.

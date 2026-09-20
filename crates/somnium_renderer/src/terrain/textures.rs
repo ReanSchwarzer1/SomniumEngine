@@ -7,6 +7,8 @@
 //! normal, and roughness — following the array-texture material layout of
 //! `example_repo/bevy-plugins/bevy_triplanar_splatting-main/src/`.
 
+use std::path::{Path, PathBuf};
+
 /// Side length of each generated layer texture.
 pub const LAYER_TEXTURE_SIZE: u32 = 256;
 /// Number of material layers.
@@ -622,10 +624,16 @@ pub struct TerrainVirtualTextureGpu {
     pub page_table_view: wgpu::TextureView,
     hero_resolution: u32,
     extra_resolution: u32,
+    asset_dir: PathBuf,
 }
 
 impl TerrainVirtualTextureGpu {
-    fn new(device: &wgpu::Device, hero_resolution: u32, extra_resolution: u32) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        hero_resolution: u32,
+        extra_resolution: u32,
+        asset_dir: &Path,
+    ) -> Self {
         let make_atlas = |label, format| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -673,6 +681,7 @@ impl TerrainVirtualTextureGpu {
             page_table,
             hero_resolution,
             extra_resolution,
+            asset_dir: asset_dir.to_path_buf(),
         }
     }
 
@@ -801,7 +810,7 @@ impl TerrainVirtualTextureGpu {
         let material = LAYER_MATERIALS
             .get(id.layer as usize)
             .ok_or_else(|| format!("invalid terrain VT layer {}", id.layer))?;
-        let path = bc7_pack_path(material, suffix);
+        let path = bc7_pack_path(&self.asset_dir, material, suffix);
         let mut file = std::fs::File::open(&path).map_err(|e| format!("{path}: {e}"))?;
         let len = file.metadata().map_err(|e| format!("{path}: {e}"))?.len() as usize;
         let mut encoded = self.source_resolution(id.layer);
@@ -948,7 +957,6 @@ pub const LAYER_MATERIALS: [&str; TERRAIN_LAYER_COUNT as usize] = [
 
 /// Where the packed layer materials live, relative to the working directory.
 const TERRAIN_ASSET_DIR: &str = "assets/terrain";
-const TERRAIN_BC7_DIR: &str = "assets/terrain/bc7";
 
 fn rgba8_residency_mib(size: u32, arrays: u32) -> f32 {
     // Full mip chain is 4/3 of level-0 RGBA8.
@@ -959,14 +967,18 @@ fn bc7_residency_mib(size: u32, arrays: u32) -> f32 {
     rgba8_residency_mib(size, arrays) / 4.0
 }
 
-fn bc7_pack_path(material: &str, suffix: &str) -> String {
-    format!("{TERRAIN_BC7_DIR}/{material}_{suffix}.bc7")
+fn bc7_pack_path(asset_dir: &Path, material: &str, suffix: &str) -> String {
+    asset_dir
+        .join("bc7")
+        .join(format!("{material}_{suffix}.bc7"))
+        .to_string_lossy()
+        .into_owned()
 }
 
-fn bc7_packs_complete() -> bool {
+fn bc7_packs_complete(asset_dir: &Path) -> bool {
     LAYER_MATERIALS.iter().all(|m| {
-        std::path::Path::new(&bc7_pack_path(m, "albedo")).is_file()
-            && std::path::Path::new(&bc7_pack_path(m, "surface")).is_file()
+        std::path::Path::new(&bc7_pack_path(asset_dir, m, "albedo")).is_file()
+            && std::path::Path::new(&bc7_pack_path(asset_dir, m, "surface")).is_file()
     })
 }
 
@@ -1024,8 +1036,13 @@ fn parse_bc7_chain(bytes: &[u8], size: u32, path: &str) -> Result<Vec<Vec<u8>>, 
 /// A file encoded at a higher power-of-two edge can satisfy a smaller load:
 /// leading mips are skipped. Encoding 2048 then loading 1024 is the RGBA8
 /// budget-drop case.
-fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>, String> {
-    let path = bc7_pack_path(material, suffix);
+fn load_bc7_mips(
+    asset_dir: &Path,
+    material: &str,
+    suffix: &str,
+    size: u32,
+) -> Result<Vec<Vec<u8>>, String> {
+    let path = bc7_pack_path(asset_dir, material, suffix);
     let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
     let mut encoded = size;
     while encoded <= 4096 {
@@ -1046,8 +1063,13 @@ fn load_bc7_mips(material: &str, suffix: &str, size: u32) -> Result<Vec<Vec<u8>>
 }
 
 /// Validate a random-access BC7 source without reading its complete payload.
-fn validate_bc7_pack(material: &str, suffix: &str, runtime_size: u32) -> Result<(), String> {
-    let path = bc7_pack_path(material, suffix);
+fn validate_bc7_pack(
+    asset_dir: &Path,
+    material: &str,
+    suffix: &str,
+    runtime_size: u32,
+) -> Result<(), String> {
+    let path = bc7_pack_path(asset_dir, material, suffix);
     let len = std::fs::metadata(&path)
         .map_err(|e| format!("{path}: {e}"))?
         .len() as usize;
@@ -1141,8 +1163,16 @@ fn create_bc7_array_texture(
 }
 
 /// Load one packed layer, resized to `size`, as RGBA8.
-fn load_packed(material: &str, suffix: &str, size: u32) -> Result<Vec<u8>, String> {
-    let path = format!("{TERRAIN_ASSET_DIR}/{material}_{suffix}.png");
+fn load_packed(
+    asset_dir: &Path,
+    material: &str,
+    suffix: &str,
+    size: u32,
+) -> Result<Vec<u8>, String> {
+    let path = asset_dir
+        .join(format!("{material}_{suffix}.png"))
+        .to_string_lossy()
+        .into_owned();
     let img = image::open(&path).map_err(|e| format!("{path}: {e}"))?;
     let img = if img.width() == size && img.height() == size {
         img
@@ -1232,10 +1262,14 @@ fn procedural_pair(i: usize, size: u32) -> (Vec<u8>, Vec<u8>) {
 /// use the hash-noise fallback. Used by the RGBA8 loader and the offline
 /// BC7 encoder example.
 pub fn layer_packed_rgba(index: usize, size: u32) -> (Vec<u8>, Vec<u8>, bool) {
+    layer_packed_rgba_at(Path::new(TERRAIN_ASSET_DIR), index, size)
+}
+
+fn layer_packed_rgba_at(asset_dir: &Path, index: usize, size: u32) -> (Vec<u8>, Vec<u8>, bool) {
     let material = LAYER_MATERIALS[index];
     match (
-        load_packed(material, "albedo", size),
-        load_packed(material, "surface", size),
+        load_packed(asset_dir, material, "albedo", size),
+        load_packed(asset_dir, material, "surface", size),
     ) {
         (Ok(a), Ok(s)) => (a, s, true),
         (albedo_err, surface_err) => {
@@ -1269,10 +1303,10 @@ pub fn layer_packed_rgba(index: usize, size: u32) -> (Vec<u8>, Vec<u8>, bool) {
 /// its maps are readable, so a half-present pack still averages the procedural
 /// recipe and the shading fallback does not change. The surface map is checked
 /// by *header*, which reads a few dozen bytes rather than megabytes.
-fn mean_albedo_source(index: usize) -> [f32; 4] {
+fn mean_albedo_source(asset_dir: &Path, index: usize) -> [f32; 4] {
     let material = LAYER_MATERIALS[index];
-    let albedo = format!("{TERRAIN_ASSET_DIR}/{material}_albedo.png");
-    let surface = format!("{TERRAIN_ASSET_DIR}/{material}_surface.png");
+    let albedo = asset_dir.join(format!("{material}_albedo.png"));
+    let surface = asset_dir.join(format!("{material}_surface.png"));
     if image::image_dimensions(&surface).is_ok()
         && let Ok(image) = image::open(&albedo)
     {
@@ -1282,13 +1316,13 @@ fn mean_albedo_source(index: usize) -> [f32; 4] {
     mean_linear_albedo(&procedural)
 }
 
-fn mean_albedo_from_sources() -> [[f32; 4]; TERRAIN_LAYER_COUNT as usize] {
+fn mean_albedo_from_sources(asset_dir: &Path) -> [[f32; 4]; TERRAIN_LAYER_COUNT as usize] {
     let started = std::time::Instant::now();
     // Thirty-two independent decodes, so they run at once. See
     // `crate::jobs::map_expensive` for why the count-based threshold in
     // `for_each_mut` is the wrong test for work this size.
     let indices: Vec<usize> = (0..TERRAIN_LAYER_COUNT as usize).collect();
-    let means = crate::jobs::map_expensive(&indices, |&i| mean_albedo_source(i));
+    let means = crate::jobs::map_expensive(&indices, |&i| mean_albedo_source(asset_dir, i));
     let out = std::array::from_fn(|i| means[i]);
     tracing::info!(
         ms = started.elapsed().as_secs_f32() * 1000.0,
@@ -1297,12 +1331,16 @@ fn mean_albedo_from_sources() -> [[f32; 4]; TERRAIN_LAYER_COUNT as usize] {
     out
 }
 
-fn load_rgba_bank(range: std::ops::Range<usize>, size: u32) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize) {
+fn load_rgba_bank(
+    asset_dir: &Path,
+    range: std::ops::Range<usize>,
+    size: u32,
+) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, usize) {
     let mut albedos = Vec::with_capacity(range.len());
     let mut surfaces = Vec::with_capacity(range.len());
     let mut photographed = 0usize;
     for i in range {
-        let (a, s, from_png) = layer_packed_rgba(i, size);
+        let (a, s, from_png) = layer_packed_rgba_at(asset_dir, i, size);
         if from_png {
             photographed += 1;
         }
@@ -1324,6 +1362,23 @@ impl TerrainLayerTextures {
         bc_supported: bool,
         virtual_texturing: bool,
     ) -> Self {
+        Self::load_or_generate_at(
+            device,
+            queue,
+            bc_supported,
+            virtual_texturing,
+            Path::new(TERRAIN_ASSET_DIR),
+        )
+    }
+
+    /// Resolve every packed layer and streamed BC7 page from the active project.
+    pub fn load_or_generate_at(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bc_supported: bool,
+        virtual_texturing: bool,
+        asset_dir: &Path,
+    ) -> Self {
         // A 4K RGBA8 array of four layers with mips is ~350 MB per array, and
         // there are two. 2K is the default because terrain is viewed from
         // metres away, not centimetres; `SOMNIUM_TERRAIN_RES=4096` spends the
@@ -1332,7 +1387,7 @@ impl TerrainLayerTextures {
         // RGBA8 2048+1024 is 853 MiB (drops to 1K); BC7 of the same mix is
         // ~213 MiB and keeps hero 2K. `SOMNIUM_TERRAIN_FORCE_RGBA8=1` is the
         // A/B switch once packs exist.
-        let want_bc7 = bc_supported && bc7_packs_complete() && !force_rgba8();
+        let want_bc7 = bc_supported && bc7_packs_complete(asset_dir) && !force_rgba8();
         if force_rgba8() {
             tracing::info!("terrain: SOMNIUM_TERRAIN_FORCE_RGBA8=1; skipping BC7");
         }
@@ -1345,7 +1400,7 @@ impl TerrainLayerTextures {
         };
 
         if want_bc7 && virtual_texturing {
-            match Self::load_bc7_layers(device, queue, hero, extra) {
+            match Self::load_bc7_layers(device, queue, hero, extra, asset_dir) {
                 Ok(loaded) => {
                     tracing::info!(
                         "terrain: BC7 packs resident (hero {hero}, extra {extra}; RGBA8 not uploaded)"
@@ -1358,7 +1413,7 @@ impl TerrainLayerTextures {
                 }
             }
         } else if want_bc7 {
-            match Self::load_bc7_resident_layers(device, queue, hero, extra) {
+            match Self::load_bc7_resident_layers(device, queue, hero, extra, asset_dir) {
                 Ok(loaded) => return loaded,
                 Err(e) => {
                     tracing::warn!("terrain: BC7 packs unusable ({e}); RGBA8 fallback");
@@ -1371,7 +1426,7 @@ impl TerrainLayerTextures {
             tracing::info!("terrain: BC compression unavailable; RGBA8 fallback");
         }
 
-        match Self::load_packed_layers(device, queue, hero, extra) {
+        match Self::load_packed_layers(device, queue, hero, extra, asset_dir) {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::warn!(
@@ -1389,10 +1444,11 @@ impl TerrainLayerTextures {
         queue: &wgpu::Queue,
         hero: u32,
         extra: u32,
+        asset_dir: &Path,
     ) -> Result<Self, String> {
         let hero_n = TERRAIN_HERO_LAYERS as usize;
-        let (a0, s0, p0) = load_rgba_bank(0..hero_n, hero);
-        let (a1, s1, p1) = load_rgba_bank(hero_n..TERRAIN_LAYER_COUNT as usize, extra);
+        let (a0, s0, p0) = load_rgba_bank(asset_dir, 0..hero_n, hero);
+        let (a1, s1, p1) = load_rgba_bank(asset_dir, hero_n..TERRAIN_LAYER_COUNT as usize, extra);
         let photographed = p0 + p1;
         let mib = rgba8_residency_mib(hero, hero_n as u32 * 2)
             + rgba8_residency_mib(extra, (TERRAIN_LAYER_COUNT - TERRAIN_HERO_LAYERS) * 2);
@@ -1469,6 +1525,7 @@ impl TerrainLayerTextures {
         queue: &wgpu::Queue,
         hero: u32,
         extra: u32,
+        asset_dir: &Path,
     ) -> Result<Self, String> {
         let hero_n = TERRAIN_HERO_LAYERS as usize;
         // Validate every source chain by metadata only. Page payloads are read
@@ -1476,8 +1533,8 @@ impl TerrainLayerTextures {
         // transiently reads the full resident arrays.
         for (i, material) in LAYER_MATERIALS.iter().enumerate() {
             let size = if i < hero_n { hero } else { extra };
-            validate_bc7_pack(material, "albedo", size)?;
-            validate_bc7_pack(material, "surface", size)?;
+            validate_bc7_pack(asset_dir, material, "albedo", size)?;
+            validate_bc7_pack(asset_dir, material, "surface", size)?;
         }
         // TerrainLayerTextures keeps its legacy fields so RGBA8 and devices
         // without BC7 retain their exact path. In VT mode these tiny arrays are
@@ -1520,7 +1577,7 @@ impl TerrainLayerTextures {
         tracing::info!(
             "terrain: BC7 virtual source atlas resident at 64 MiB (hero {hero}, extra {extra})",
         );
-        let virtual_texture = TerrainVirtualTextureGpu::new(device, hero, extra);
+        let virtual_texture = TerrainVirtualTextureGpu::new(device, hero, extra, asset_dir);
         Ok(Self {
             albedo,
             albedo_view,
@@ -1534,7 +1591,7 @@ impl TerrainLayerTextures {
             compressed: true,
             resolution: hero,
             extra_resolution: extra,
-            mean_albedo: mean_albedo_from_sources(),
+            mean_albedo: mean_albedo_from_sources(asset_dir),
             virtual_texture: Some(virtual_texture),
         })
     }
@@ -1545,19 +1602,20 @@ impl TerrainLayerTextures {
         queue: &wgpu::Queue,
         hero: u32,
         extra: u32,
+        asset_dir: &Path,
     ) -> Result<Self, String> {
         let hero_n = TERRAIN_HERO_LAYERS as usize;
         let mut a0 = Vec::with_capacity(hero_n);
         let mut s0 = Vec::with_capacity(hero_n);
         for material in &LAYER_MATERIALS[..hero_n] {
-            a0.push(load_bc7_mips(material, "albedo", hero)?);
-            s0.push(load_bc7_mips(material, "surface", hero)?);
+            a0.push(load_bc7_mips(asset_dir, material, "albedo", hero)?);
+            s0.push(load_bc7_mips(asset_dir, material, "surface", hero)?);
         }
         let mut a1 = Vec::with_capacity(LAYER_MATERIALS.len() - hero_n);
         let mut s1 = Vec::with_capacity(LAYER_MATERIALS.len() - hero_n);
         for material in &LAYER_MATERIALS[hero_n..] {
-            a1.push(load_bc7_mips(material, "albedo", extra)?);
-            s1.push(load_bc7_mips(material, "surface", extra)?);
+            a1.push(load_bc7_mips(asset_dir, material, "albedo", extra)?);
+            s1.push(load_bc7_mips(asset_dir, material, "surface", extra)?);
         }
         let (albedo, albedo_view) = create_bc7_array_texture(
             device,
@@ -1604,7 +1662,7 @@ impl TerrainLayerTextures {
             compressed: true,
             resolution: hero,
             extra_resolution: extra,
-            mean_albedo: mean_albedo_from_sources(),
+            mean_albedo: mean_albedo_from_sources(asset_dir),
             virtual_texture: None,
         })
     }
@@ -1843,7 +1901,7 @@ mod doom_i_tests {
         for index in [0usize, 16] {
             let (resized, _, _) = layer_packed_rgba(index, 256);
             let old = mean_linear_albedo(&resized);
-            let new = mean_albedo_source(index);
+            let new = mean_albedo_source(Path::new(TERRAIN_ASSET_DIR), index);
             for c in 0..3 {
                 assert!(
                     (old[c] - new[c]).abs() < 0.03,

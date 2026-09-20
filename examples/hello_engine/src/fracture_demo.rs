@@ -27,6 +27,7 @@ pub fn register(r: &mut somnium_core::authoring::GameRegistration) {
             spawn_work as fn(&mut World, &Value) -> Result<Vec<Entity>, String>,
         ),
         ("hello.mirror_demo", "Staged Mirror Demo", spawn_mirror),
+        ("hello.dream_lens", "Dream Lens Demo", spawn_dream_lens),
     ] {
         r.presets.push(somnium_core::authoring::GamePreset{id,label,category:"Examples",schema:json!({"type":"object","properties":{"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"additionalProperties":false}),build});
     }
@@ -171,4 +172,14 @@ impl Demo {
             }
         }
     }
+}
+
+fn spawn_dream_lens(world: &mut World, _args: &Value) -> Result<Vec<Entity>, String> {
+    let existing = world.entities().find(|e| world.get::<somnium_core::PostProcessComponent>(*e).is_some());
+    let entity = existing.unwrap_or_else(|| world.spawn((Name::new("Dream Lens"), somnium_core::PostProcessComponent::default())));
+    let pp = world.get_mut::<somnium_core::PostProcessComponent>(entity).unwrap();
+    pp.dream_mode = 2;
+    pp.dream_strength = 0.35;
+    pp.dream_speed = 0.65;
+    Ok(vec![entity])
 }

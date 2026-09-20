@@ -102,7 +102,7 @@ Run the live [main probe](../../tools/somnium_mcp/editor_acceptance.py) and [wor
 
 ## Contact, repair and staged mirrors
 
-Hello's left **Game / Authoring** panel includes **Burn / Repair Demo**, **Staged Mirror Demo** and **Textured Particle Demo**. Select their entities in the Outliner to edit the same reflected properties through Details or automation.
+Hello's left **Game / Authoring** panel includes **Burn / Repair Demo**, **Staged Mirror Demo**, **Textured Particle Demo** and **Dream Lens Demo**. Select their entities in the Outliner to edit the same reflected properties through Details or automation. Dream Lens uses `somnium.PostProcess.dream_mode`, `dream_strength` and `dream_speed`; mode names are Off, Heat drift, Peripheral echo and Architectural shear. Strength defaults to zero, preserving existing scenes.
 
 | Component | Designer controls | Runtime behavior |
 |---|---|---|

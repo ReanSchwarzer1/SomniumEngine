@@ -289,6 +289,9 @@ impl LocalBridge {
             }
             self.output.append(&mut bytes);
             self.output.push(b'\n');
+            // A scene import can spend longer than the idle window in dispatch.
+            // Its completed reply is fresh activity, not an abandoned client.
+            self.last_activity = Instant::now();
             count += 1;
             // Bound queued response memory to one maximum-sized reply.
             if self.output.len() >= MAX_RESPONSE_BYTES {

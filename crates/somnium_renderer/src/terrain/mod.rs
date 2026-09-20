@@ -673,6 +673,23 @@ impl TerrainData {
         desc: TerrainDescriptor,
         bc_supported: bool,
     ) -> Self {
+        Self::new_with_asset_dir(
+            device,
+            queue,
+            desc,
+            bc_supported,
+            std::path::Path::new("assets/terrain"),
+        )
+    }
+
+    /// Create terrain using the active project's packed texture directory.
+    pub fn new_with_asset_dir(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        desc: TerrainDescriptor,
+        bc_supported: bool,
+        asset_dir: &std::path::Path,
+    ) -> Self {
         assert!(
             desc.chunk_cells.is_power_of_two() && desc.chunk_cells >= (1 << MAX_TERRAIN_LOD),
             "chunk_cells must be a power of two ≥ {}",
@@ -730,8 +747,13 @@ impl TerrainData {
         // is loaded instead, which is the arrangement that predates the cache.
         let virtual_texturing =
             desc.virtual_texturing && clipmap::TerrainClipmap::env_default_enabled();
-        let layer_textures =
-            TerrainLayerTextures::load_or_generate(device, queue, bc_supported, virtual_texturing);
+        let layer_textures = TerrainLayerTextures::load_or_generate_at(
+            device,
+            queue,
+            bc_supported,
+            virtual_texturing,
+            asset_dir,
+        );
         let virtual_capacity = layer_textures
             .virtual_texture
             .as_ref()

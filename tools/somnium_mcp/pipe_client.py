@@ -147,7 +147,7 @@ class EditorClient:
     def __init__(self, descriptor: Path, project_id: str | None = None, timeout: float = 10.0):
         self.path = descriptor.resolve()
         self.project_id = project_id
-        self.timeout = max(0.1, min(timeout, 30.0))
+        self.timeout = max(0.1, min(timeout, 120.0))
 
     def call(self, method: str, params: dict, *, chunk_size: int = 65536) -> dict:
         if method not in METHODS:

@@ -987,6 +987,8 @@ pub struct Engine<G: GameApp> {
     window: Option<Arc<Window>>,
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
+    /// Uploaded source nodes survive scene changes, never renderer recreation.
+    imported_uploads: import_cache::ImportedUploadCache,
     ui_manager: Option<UiManager>,
     /// MORROWIND-I. The platform screen-reader adapter, attached to the window
     /// before it is shown. `None` in a headless run.
@@ -1075,6 +1077,7 @@ pub struct Engine<G: GameApp> {
             String,
             somnium_asset::LoadedScene,
             Vec<somnium_asset::database::AssetId>,
+            Option<import_cache::SourceStamp>,
         )>,
     >,
     import_spawn_at: [f32; 3],
@@ -1633,6 +1636,7 @@ impl<G: GameApp + 'static> Engine<G> {
             window: None,
             render_ctx: None,
             renderer: None,
+            imported_uploads: import_cache::ImportedUploadCache::default(),
             ui_manager: None,
             a11y: None,
             jobs: JobSystem::default(),
@@ -2445,15 +2449,27 @@ impl<G: GameApp> Engine<G> {
             } else {
                 source_path.to_path_buf()
             };
-            let scene = match somnium_asset::load_gltf(&resolved) {
-                Ok(scene) => scene,
-                Err(error) => {
-                    warn!(%error,%source,"Imported mesh could not be restored");
-                    continue;
-                }
-            };
+            let stamp = import_cache::SourceStamp::read(&resolved);
+            let cached = stamp
+                .as_ref()
+                .and_then(|stamp| self.imported_uploads.get(stamp));
             if let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
-                let uploaded = renderer.upload_scene(ctx, &scene);
+                let uploaded = if let Some(nodes) = cached {
+                    nodes
+                } else {
+                    let scene = match somnium_asset::load_gltf(&resolved) {
+                        Ok(scene) => scene,
+                        Err(error) => {
+                            warn!(%error,%source,"Imported mesh could not be restored");
+                            continue;
+                        }
+                    };
+                    let nodes = renderer.upload_scene(ctx, &scene);
+                    if let Some(stamp) = stamp {
+                        self.imported_uploads.insert(stamp, &nodes);
+                    }
+                    nodes
+                };
                 for (entity, ordinal) in entities {
                     if let Some(node) = uploaded.get(ordinal as usize) {
                         let _ = self.world.insert_component(
@@ -2478,26 +2494,101 @@ impl<G: GameApp> Engine<G> {
         // Heightmaps and splatmaps are megabytes of painted data and live
         // beside the scene rather than inside it. Each is named after the
         // scene, so moving a scene moves its terrain with it.
-        let terrains: Vec<_> = self
+        let mut terrains: Vec<_> = self
             .world
             .entities()
-            .filter_map(|entity| self.world.get::<TerrainComponent>(entity).copied())
+            .filter_map(|entity| {
+                self.world
+                    .get::<TerrainComponent>(entity)
+                    .copied()
+                    .map(|component| (entity, component))
+            })
             .collect();
-        for component in terrains {
-            let sidecar = format!("{path}.terrain{}.bin", component.terrain_id);
-            if !std::path::Path::new(&sidecar).exists() {
-                continue;
-            }
-            let Some(renderer) = self.renderer.as_mut() else {
+        // Serialized ids name sidecars; fresh renderer ids depend on allocation
+        // order. Remap both terrain entities and terrain-linked water.
+        terrains.sort_by_key(|(_, component)| component.terrain_id);
+        let mut terrain_ids = std::collections::HashMap::new();
+        let asset_dir = self.config.content_root.join("terrain");
+        for (entity, component) in terrains {
+            let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) else {
                 break;
             };
-            let Some(terrain) = renderer.terrain_mut(component.terrain_id) else {
-                warn!(sidecar, "no renderer terrain to restore into");
-                continue;
+            let runtime_id = if let Some(&id) = terrain_ids.get(&component.terrain_id) {
+                id
+            } else {
+                let desc = somnium_renderer::terrain::TerrainDescriptor {
+                    chunk_cells: component.chunk_cells,
+                    grid_size: [component.grid_x, component.grid_z],
+                    cell_size: component.cell_size,
+                    height_scale: component.height_scale,
+                    virtual_texturing: component.virtual_texturing,
+                    ..Default::default()
+                };
+                let valid_axis = |chunks: u32| {
+                    chunks > 0
+                        && chunks
+                            .checked_mul(desc.chunk_cells)
+                            .and_then(|cells| cells.checked_add(1))
+                            .is_some()
+                };
+                if !desc.chunk_cells.is_power_of_two()
+                    || desc.chunk_cells < (1 << somnium_renderer::terrain::mesh::MAX_TERRAIN_LOD)
+                    || !valid_axis(component.grid_x)
+                    || !valid_axis(component.grid_z)
+                    || !desc.cell_size.is_finite()
+                    || desc.cell_size <= 0.0
+                    || !desc.height_scale.is_finite()
+                    || desc.height_scale <= 0.0
+                    || desc
+                        .total_vertices_x()
+                        .checked_mul(desc.total_vertices_z())
+                        .is_none()
+                {
+                    warn!(
+                        terrain_id = component.terrain_id,
+                        "invalid saved terrain descriptor"
+                    );
+                    continue;
+                }
+                // Prefab reconstruction also calls this method without resetting
+                // the scene. Its existing terrain must retain sculpted data.
+                let existed = renderer.terrain(component.terrain_id).is_some();
+                let id = if existed {
+                    component.terrain_id
+                } else {
+                    renderer.create_terrain_with_asset_dir(ctx, desc, &asset_dir)
+                };
+                let sidecar = format!("{path}.terrain{}.bin", component.terrain_id);
+                if (!existed || std::path::Path::new(&sidecar).is_file())
+                    && let Some(terrain) = renderer.terrain_mut(id)
+                {
+                    match terrain.load_binary(&sidecar) {
+                        Ok(()) => info!(
+                            "Terrain {} restored as {id} from {sidecar}",
+                            component.terrain_id
+                        ),
+                        Err(error) => {
+                            warn!(%error, "terrain sidecar failed to load; flat terrain retained")
+                        }
+                    }
+                }
+                terrain_ids.insert(component.terrain_id, id);
+                id
             };
-            match terrain.load_binary(&sidecar) {
-                Ok(()) => info!("Terrain {} restored from {sidecar}", component.terrain_id),
-                Err(error) => warn!(%error, "terrain sidecar failed to load"),
+            if let Some(saved) = self.world.get_mut::<TerrainComponent>(entity) {
+                saved.terrain_id = runtime_id;
+                saved.virtual_texture_resident_pages = 0;
+                saved.virtual_texture_pending_pages = 0;
+                saved.virtual_texture_hits = 0;
+                saved.virtual_texture_misses = 0;
+                saved.virtual_texture_evictions = 0;
+            }
+        }
+        for entity in self.world.entities().collect::<Vec<_>>() {
+            if let Some(water) = self.world.get_mut::<WaterComponent>(entity)
+                && let Some(&id) = terrain_ids.get(&water.terrain_id)
+            {
+                water.terrain_id = id;
             }
         }
 
@@ -3398,6 +3489,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 );
                 ui_manager.set_render_toggles(renderer.debug_toggles.clone());
                 self.render_ctx = Some(render_ctx);
+                self.imported_uploads.clear();
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
@@ -5873,10 +5965,10 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_import {
             self.import_job = None;
             match result {
-                Ok((path, scene, materials)) => {
+                Ok((path, scene, materials, stamp)) => {
                     if self.authoring_import_may_publish() {
                         let before = self.world.entity_count();
-                        self.finish_import_model(path, scene, materials);
+                        self.finish_import_model(path, scene, materials, stamp);
                         self.authoring_import_finished(Ok(self
                             .world
                             .entity_count()
@@ -6794,6 +6886,7 @@ impl<G: GameApp> Engine<G> {
                 ctx.set_progress(0.05);
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
+                let stamp = import_cache::SourceStamp::read(std::path::Path::new(&worker_path));
                 let scene = somnium_asset::load_gltf(&worker_path)?;
                 ctx.set_progress(0.7);
                 let materials = somnium_asset::material::materialize_gltf_assets(
@@ -6802,7 +6895,7 @@ impl<G: GameApp> Engine<G> {
                     &content_root,
                 )?;
                 ctx.set_progress(1.0);
-                Ok((worker_path, scene, materials))
+                Ok((worker_path, scene, materials, stamp))
             }) {
             Ok(handle) => {
                 self.import_job = Some(handle);
@@ -6882,6 +6975,7 @@ impl<G: GameApp> Engine<G> {
         path_str: String,
         scene: somnium_asset::LoadedScene,
         material_assets: Vec<somnium_asset::database::AssetId>,
+        stamp: Option<import_cache::SourceStamp>,
     ) {
         let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref())
         else {
@@ -6889,7 +6983,19 @@ impl<G: GameApp> Engine<G> {
             return;
         };
 
-        let uploaded = renderer.upload_scene(render_ctx, &scene);
+        let stamp = stamp.filter(import_cache::SourceStamp::is_current);
+        let uploaded = if let Some(nodes) = stamp
+            .as_ref()
+            .and_then(|stamp| self.imported_uploads.get(stamp))
+        {
+            nodes
+        } else {
+            let nodes = renderer.upload_scene(render_ctx, &scene);
+            if let Some(stamp) = stamp {
+                self.imported_uploads.insert(stamp, &nodes);
+            }
+            nodes
+        };
         if uploaded.is_empty() {
             warn!("{} contained no renderable meshes", path_str);
             return;
@@ -7578,6 +7684,12 @@ impl<G: GameApp> Engine<G> {
                 lift: pp.lift,
                 gamma: pp.gamma,
                 grain: pp.grain,
+                dream: [
+                    pp.dream_mode.min(3) as f32,
+                    pp.dream_strength.clamp(0.0, 1.0),
+                    pp.dream_speed.clamp(0.0, 3.0),
+                    0.0,
+                ],
                 time: self.time.elapsed().as_secs_f32(),
                 // CONTROL-K: the authored curve is sampled here, once per
                 // frame, and the renderer never sees a keyframe. This is the
@@ -12887,6 +12999,9 @@ mod designer;
 
 #[path = "app_authoring.rs"]
 mod authoring_host;
+
+#[path = "app_import_cache.rs"]
+mod import_cache;
 
 #[path = "app_play_input.rs"]
 mod play_input;

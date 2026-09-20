@@ -22,6 +22,8 @@ pub struct Grading {
     pub lift: f32,
     pub gamma: f32,
     pub grain: f32,
+    /// Mode, strength, speed and reserved padding for the optional dream lens.
+    pub dream: [f32; 4],
     /// Seconds, so grain animates instead of sitting still.
     pub time: f32,
     /// CONTROL-K. 32 uniform samples of the authored tone-response curve over
@@ -42,14 +44,15 @@ impl Default for Grading {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            dream: [0.0; 4],
             time: 0.0,
             response: None,
         }
     }
 }
 
-/// Floats in the post-process uniform: 16 scalars then 32 response samples.
-const POST_PARAM_FLOATS: usize = 48;
+/// 16 scalars, 32 response samples and one aligned dream-lens vector.
+const POST_PARAM_FLOATS: usize = 52;
 
 /// Post-processing pass: HDR texture → tone-mapped swapchain output.
 pub struct PostProcessPass {
@@ -430,8 +433,9 @@ impl PostProcessPass {
             f32::from(u8::from(grading.response.is_some())),
         ]);
         if let Some(response) = grading.response {
-            data[16..].copy_from_slice(&response);
+            data[16..48].copy_from_slice(&response);
         }
+        data[48..52].copy_from_slice(&grading.dream);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 

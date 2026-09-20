@@ -136,7 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--connection", required=True, type=Path, help="Private project runtime/authoring-connection.json")
     parser.add_argument("--project-id", help="Optional required project identity")
-    parser.add_argument("--timeout", type=float, default=10.0, help="Per-call deadline in seconds, capped at 30")
+    parser.add_argument("--timeout", type=float, default=10.0, help="Per-call deadline in seconds, capped at 120; use 120 for cold asset-heavy scene loads")
     args = parser.parse_args()
     server = Server(EditorClient(args.connection, args.project_id, args.timeout))
     while True:
