@@ -57,6 +57,8 @@ Two ways forward from there:
 
 **Cull** / **LOD** / **Impostor** are **horizontal** metres: past LOD leaf/cutout parts drop; past Impostor only solid parts remain (there is no camera-facing billboard). Impostor `0` keeps every part.
 
+Imported plant hierarchies can also use an enabled **Foliage** component on their root. Hello Engine applies **Cull Distance** and **Foliage Shadow Distance** to every imported descendant, measuring horizontal distance from that root's world position to the active editor or play camera. `0` leaves the corresponding distance unlimited. The nearest enabled ancestor supplies the policy. This controls mesh submission only; lights, collision and gameplay continue normally. Imported plants currently use these two distance cuts, not the painted-foliage LOD/impostor or scale-falloff controls. Custom games can use `somnium_core::foliage_visibility::imported_draw` in their mesh adapter.
+
 ### Vegetation shading
 
 Anything the palette imports as a cut-out or blended material is marked as vegetation: two-sided, translucent so a backlit leaf glows, and floored away from the wet-metal sheen thin surfaces otherwise pick up at night. This follows the **material**, not the exporter — a fern that arrives as `MASK` and a grass that arrives as `BLEND` are treated alike, which they were not before.

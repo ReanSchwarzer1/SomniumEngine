@@ -64,6 +64,7 @@ pub mod editor_commands;
 mod editor_gizmo;
 pub mod error;
 pub mod event;
+pub mod foliage_visibility;
 pub mod i18n;
 pub mod input_actions;
 pub mod interaction;

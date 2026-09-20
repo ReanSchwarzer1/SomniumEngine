@@ -2572,8 +2572,15 @@ impl GameApp for HelloGame {
                     let material =
                         unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity = archetype.entities()[row];
+                    let Some(casts_shadow) = somnium_core::foliage_visibility::imported_draw(
+                        ctx.world,
+                        entity,
+                        renderer.camera_pos,
+                    ) else {
+                        continue;
+                    };
                     renderer.submit(somnium_renderer::command::DrawCommand {
-                        casts_shadow: true,
+                        casts_shadow,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,
                             material.runtime_id as u16,
