@@ -11,6 +11,7 @@ readback. These additions change observability only.
 | `foliage.unavailable_mesh` | Placement could not resolve its palette geometry. |
 | `foliage.scale_culled` | Authored falloff reduced scale to zero or below. |
 | `foliage.submitted_instances` | Placements that emitted at least one material part. |
+| `foliage.lod_instances` | Placements selecting a project's complete simplified far mesh. |
 | `foliage.submitted_parts` | Material-part draws passed to the renderer before GPU culling. |
 | `foliage.shadow_parts` | Those parts offered as shadow casters before shadow size/cascade culling. |
 | `gpu_draw_arguments` | GPU indirect arguments, including whole-mesh fallbacks and expanded meshlets. |
@@ -30,7 +31,16 @@ A mesh used more than eight times in a frame intentionally uses whole-mesh
 arguments instead of expanding every copy into many meshlet arguments. Project
 palette kinds 128–255 retain every selected material part until distance culling;
 the legacy tree leaf-dropping LOD rules only apply to built-in kinds below 128.
-This does not claim a reduced custom patch mesh LOD or early CPU frustum rejection.
+Project entries may supply an optional simplified `lod` source and distance;
+`foliage.lod_instances` records its selection. Without it, the full mesh remains.
+This does not claim early CPU frustum rejection of whole painted patches.
+
+Authoring diagnostics also expose live bindless texture slots, GPU allocation
+bytes, terrain span reservations, and actual terrain texture bank format/size/VT
+presence. Invalid backend allocation counts are null. Scene resets release terrain
+views and reusable geometry reservations; imported shared assets remain cached.
+Texture mip selection, terrain source-page streaming and mesh LOD are separate
+systems. A bank reporting `virtual:false` is not streaming virtual source pages.
 
 `shadow_casters` counts eligible casters, while `shadow_cascades_rendered` counts
 atlas quadrants actually redrawn. A stationary frame can have many casters and

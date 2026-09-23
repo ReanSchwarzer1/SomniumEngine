@@ -197,6 +197,12 @@ impl RaytracePass {
         }
     }
 
+    /// Remove acceleration data before a scene-owned vertex reservation is reused.
+    pub fn unregister_mesh(&mut self, vertex_offset: u32) {
+        self.blas.remove(&vertex_offset);
+        self.pending_blas.retain(|offset| *offset != vertex_offset);
+    }
+
     /// Build any BLAS whose geometry changed, and a TLAS from `instances`.
     ///
     /// `instances` is `(vertex_offset, model matrix)`, matching what the draw

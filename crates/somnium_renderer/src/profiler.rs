@@ -118,6 +118,8 @@ pub struct FoliageCounters {
     pub unavailable_mesh: u32,
     pub scale_culled: u32,
     pub submitted_instances: u32,
+    /// Instances using a complete simplified project mesh at distance.
+    pub lod_instances: u32,
     pub submitted_parts: u32,
     /// Parts offered as casters before cascade/size shadow culling.
     pub shadow_parts: u32,

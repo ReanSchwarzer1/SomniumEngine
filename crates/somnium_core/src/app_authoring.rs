@@ -501,11 +501,18 @@ impl<G: GameApp> Engine<G> {
                     "adapter":self.render_ctx.as_ref().map(|r|format!("{:?}",r.adapter.get_info())),
                     "cpu":self.renderer.as_ref().map(|r|r.profiler.cpu_results().iter().map(|s|json!({"name":s.name,"ms":s.ms})).collect::<Vec<_>>()),
                     "cpu_raw":self.renderer.as_ref().map(|r|r.profiler.cpu_raw_results().iter().map(|s|json!({"name":s.name,"ms":s.ms})).collect::<Vec<_>>()),
+                    "resources":self.renderer.as_ref().zip(self.render_ctx.as_ref()).map(|(r,ctx)| {
+                        let a=somnium_renderer::timing::AllocationSnapshot::read(&ctx.device);
+                        let (vertices,indices)=r.geometry.reserved_span_counts();
+                        json!({"texture_slots":r.texture_pool.live_count(),"textures":(a.textures>=0).then_some(a.textures),"texture_bytes":a.texture_bytes,"buffer_bytes":a.buffer_bytes,"terrain_vertex_spans":vertices,"terrain_index_spans":indices,
+                            "terrain_texture_banks":r.terrains.iter().map(|t|{let b=&t.layer_textures;json!({"compressed":b.compressed,"virtual":b.virtual_texture.is_some(),"resolution":b.resolution,"extra_resolution":b.extra_resolution})}).collect::<Vec<_>>(),
+                            "meshlets":r.meshlet_draws,"gpu_culling":r.culling_enabled,"cpu_frustum_culling":r.cpu_frustum_cull,"cascade_caster_culling":r.cascade_caster_cull})
+                    }),
                     "submissions":self.renderer.as_ref().map(|r|{let c=&r.profiler.counters;let f=&c.foliage;json!({
                         "draws":c.draw_calls,"instances":c.instances,"triangles":c.triangles,
                         "gpu_draw_arguments":c.gpu_draw_arguments,"gpu_meshlet_arguments":c.gpu_meshlet_arguments,"gpu_visible_arguments":c.gpu_visible_arguments,
                         "water_draws":c.water_draws,"water_bound_draws":c.water_bound_draws,
-                        "foliage":{"candidates":f.candidates,"distance_culled":f.distance_culled,"unavailable_mesh":f.unavailable_mesh,"scale_culled":f.scale_culled,"submitted_instances":f.submitted_instances,"submitted_parts":f.submitted_parts,"shadow_parts":f.shadow_parts}})}),
+                        "foliage":{"candidates":f.candidates,"distance_culled":f.distance_culled,"unavailable_mesh":f.unavailable_mesh,"scale_culled":f.scale_culled,"submitted_instances":f.submitted_instances,"lod_instances":f.lod_instances,"submitted_parts":f.submitted_parts,"shadow_parts":f.shadow_parts}})}),
                     "gpu":self.renderer.as_ref().map(|r|r.profiler.results().iter().map(|s|json!({"name":s.name,"ms":s.ms})).collect::<Vec<_>>()),
                     "simulation_seconds":self.simulation_clock.elapsed_seconds,"pending_steps":self.pending_steps,
                     "camera":self.renderer.as_ref().map(|r|r.camera_pos.to_array())})

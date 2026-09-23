@@ -1073,6 +1073,18 @@ impl TerrainData {
         }
     }
 
+    pub fn release_pool_spans(&mut self, pool: &mut crate::geometry::GeometryPool) {
+        for chunk in &mut self.chunks {
+            if chunk.vertex_offset != UNALLOCATED {
+                pool.release_vertices(chunk.vertex_offset);
+                chunk.vertex_offset = UNALLOCATED;
+            }
+        }
+        for (_, (offset, _)) in self.index_blocks.drain() {
+            pool.release_indices(offset);
+        }
+    }
+
     /// Island GPU budget: no hex, no POM, extra-bank ids stay unbound.
     ///
     /// Coastal keeps the 32-slot close-up path. Editor checkboxes can still

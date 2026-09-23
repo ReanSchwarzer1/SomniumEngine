@@ -99,6 +99,8 @@ pub struct GeometryPool {
     /// traps that.
     vertex_spans: std::collections::HashMap<u32, u32>,
     index_spans: std::collections::HashMap<u32, u32>,
+    free_vertex_spans: Vec<(u32, u32)>,
+    free_index_spans: Vec<(u32, u32)>,
 
     /// Actual pool sizes after clamping to the device limit.
     vertex_bytes: u64,
@@ -166,6 +168,8 @@ impl GeometryPool {
             sdf_bricks: std::collections::HashMap::new(),
             vertex_spans: std::collections::HashMap::new(),
             index_spans: std::collections::HashMap::new(),
+            free_vertex_spans: Vec::new(),
+            free_index_spans: Vec::new(),
             vertex_bytes,
             index_bytes,
         }
@@ -311,10 +315,8 @@ impl GeometryPool {
     // There are at most 5 LODs × 16 masks, about 2 MB of the index pool if
     // every combination is ever needed.
     //
-    // Neither span is ever released today: a terrain lives as long as the
-    // renderer does. When terrain deletion arrives it wants a `release_*` pair
-    // feeding the free list — and because every chunk span is the same size,
-    // first-fit reuse would be exact, with no fragmentation.
+    // Scene unload returns reservations to separate vertex/index free lists.
+    // Static imported meshes keep their offsets across scene transitions.
 
     /// Reserve a vertex span to be rewritten in place, or `None` if the pool
     /// cannot fit it.
@@ -322,12 +324,14 @@ impl GeometryPool {
     /// The caller keeps the returned offset for the lifetime of the geometry and
     /// passes it back to [`GeometryPool::write_vertices`] on every rebuild.
     pub fn reserve_vertices(&mut self, count: u32) -> Option<u32> {
-        let offset = reserve_span(
-            &mut self.next_vertex,
-            count,
-            std::mem::size_of::<Vertex>() as u64,
-            self.vertex_bytes,
-        );
+        let offset = take_free_span(&mut self.free_vertex_spans, count).or_else(|| {
+            reserve_span(
+                &mut self.next_vertex,
+                count,
+                std::mem::size_of::<Vertex>() as u64,
+                self.vertex_bytes,
+            )
+        });
         match offset {
             Some(offset) => {
                 self.vertex_spans.insert(offset, count);
@@ -345,7 +349,9 @@ impl GeometryPool {
 
     /// Reserve an index span. See [`GeometryPool::reserve_vertices`].
     pub fn reserve_indices(&mut self, count: u32) -> Option<u32> {
-        match reserve_span(&mut self.next_index, count, 4, self.index_bytes) {
+        match take_free_span(&mut self.free_index_spans, count)
+            .or_else(|| reserve_span(&mut self.next_index, count, 4, self.index_bytes))
+        {
             Some(offset) => {
                 self.index_spans.insert(offset, count);
                 Some(offset)
@@ -358,6 +364,25 @@ impl GeometryPool {
                 None
             }
         }
+    }
+
+    /// Release only spans issued by reserve_vertices/reserve_indices. Keeping
+    /// the maps authoritative prevents duplicate frees and stale bounds.
+    pub fn release_vertices(&mut self, offset: u32) {
+        if let Some(count) = self.vertex_spans.remove(&offset) {
+            self.aabbs.remove(&offset);
+            return_free_span(&mut self.free_vertex_spans, offset, count);
+        }
+    }
+
+    pub fn release_indices(&mut self, offset: u32) {
+        if let Some(count) = self.index_spans.remove(&offset) {
+            return_free_span(&mut self.free_index_spans, offset, count);
+        }
+    }
+
+    pub fn reserved_span_counts(&self) -> (usize, usize) {
+        (self.vertex_spans.len(), self.index_spans.len())
     }
 
     /// Rewrite a reserved vertex span and refresh its recorded bounds.
@@ -500,14 +525,32 @@ impl GeometryPool {
     }
 }
 
-/// Bump-allocate `count` elements of `stride` bytes, or `None` if the pool
-/// cannot hold them.
-///
-/// Split out from the two `reserve_*` methods so the arithmetic can be tested
-/// without a GPU device — the failure it guards against (moving the bump
-/// pointer past the end and letting every later write land somewhere wrong) is
-/// silent on the GPU. The `u64` maths is deliberate: the multiply overflows
-/// `u32` well inside a 256 MB pool.
+/// Reuse a released reservation before extending the pool's high-water mark.
+fn take_free_span(free: &mut Vec<(u32, u32)>, count: u32) -> Option<u32> {
+    let i = free.iter().position(|&(_, capacity)| capacity >= count)?;
+    let (offset, capacity) = free.swap_remove(i);
+    if capacity > count {
+        free.push((offset + count, capacity - count));
+    }
+    Some(offset)
+}
+
+fn return_free_span(free: &mut Vec<(u32, u32)>, offset: u32, count: u32) {
+    free.push((offset, count));
+    free.sort_unstable_by_key(|span| span.0);
+    let mut i = 0;
+    while i + 1 < free.len() {
+        if free[i].0 + free[i].1 == free[i + 1].0 {
+            let adjacent = free.remove(i + 1).1;
+            free[i].1 += adjacent;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Bump-allocate without advancing on exhaustion. Use u64 so byte arithmetic
+/// cannot wrap inside a pool and corrupt the reservations that follow.
 fn reserve_span(next: &mut u32, count: u32, stride: u64, capacity_bytes: u64) -> Option<u32> {
     let end = (*next as u64 + count as u64) * stride;
     if end > capacity_bytes {

@@ -223,7 +223,7 @@ pub fn load_map(
 ) -> Result<MapLoadResult, String> {
     let kind = parse_map_file(path)?;
     renderer.wait_gpu(render_ctx);
-    renderer.reset_scene_gpu();
+    renderer.reset_scene_gpu(render_ctx);
     let all: Vec<somnium_ecs::Entity> = world.entities().collect();
     for e in all {
         world.despawn(e);

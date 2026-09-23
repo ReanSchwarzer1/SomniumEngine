@@ -1646,6 +1646,13 @@ impl UserInterface {
         if !visible && !(exiting && (local_visible || popup.is_some())) {
             return;
         }
+        // Layout propagates the intersection of ancestor clips to descendants.
+        // Prune before control.draw: GPU scissoring alone still shapes every
+        // offscreen label in long lists and churns the text caches each frame.
+        // Popups live under their window root, outside the anchor's clip.
+        if clip.w <= 0.0 || clip.h <= 0.0 {
+            return;
+        }
         let inherited_foreground = self.draw_ctx.inherited_foreground;
         self.draw_ctx.push_clip_rect(clip);
         let backdrop_mark = envelope.map(|_| self.draw_ctx.begin_presentation());

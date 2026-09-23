@@ -13,6 +13,7 @@ Missing IDs remain missing instead of silently becoming a different plant.
     "name": "Mixed woodland patch 1",
     "source": "assets/environment/groundcover_templates.gltf",
     "primitives": [0, 1, 2, 3, 4],
+    "lod": {"source":"assets/environment/lod/groundcover.gltf", "primitives":[0,1,2,3,4], "distance":16},
     "brush": {"single": true, "scale_min": 1, "scale_max": 1}
   }]
 }
@@ -48,7 +49,13 @@ files are rejected. Saving includes an empty companion when the last instance is
 removed, so erased foliage cannot reappear on reload. Existing paint/erase undo uses
 this same native vector, without making each plant or patch an ECS entity.
 
-Project entries keep all selected material parts until the terrain FoliageComponent's
+An optional `lod` selects a complete simplified mesh beyond a positive horizontal
+terrain-local `distance`, in metres. Its `source` uses the same contained path rule
+and its `primitives` select the far source's flattened nodes. Both sources share
+the entry's local transform; author their origins and complete plant silhouettes
+consistently. Import failure retains the near mesh. Omit `lod` for existing behavior.
+
+Project entries keep all selected material parts of the chosen mesh until the terrain FoliageComponent's
 cull distance, with its separate closer shadow cutoff. Legacy tree part-dropping at
 lod/impostor distances does not apply to mixed project patches. The native renderer
 still receives material-part draws and performs its existing visibility/meshlet

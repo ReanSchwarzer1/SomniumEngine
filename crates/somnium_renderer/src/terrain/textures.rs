@@ -1339,8 +1339,12 @@ fn load_rgba_bank(
     let mut albedos = Vec::with_capacity(range.len());
     let mut surfaces = Vec::with_capacity(range.len());
     let mut photographed = 0usize;
-    for i in range {
-        let (a, s, from_png) = layer_packed_rgba_at(asset_dir, i, size);
+    let indices: Vec<_> = range.collect();
+    // PNG decode and filtering dominate this path. Independent layers use the
+    // engine worker policy instead of serially stalling the editor for each map.
+    let layers =
+        crate::jobs::map_expensive(&indices, |&i| layer_packed_rgba_at(asset_dir, i, size));
+    for (a, s, from_png) in layers {
         if from_png {
             photographed += 1;
         }

@@ -34,6 +34,14 @@ impl Default for BrushDefaults {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ProjectLod {
+    pub source: PathBuf,
+    pub primitives: Vec<u32>,
+    pub distance: f32,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProjectEntry {
     pub kind: u8,
     pub name: String,
@@ -45,6 +53,9 @@ pub(crate) struct ProjectEntry {
     pub local_transform: Option<[f32; 16]>,
     #[serde(default)]
     pub brush: BrushDefaults,
+    /// Complete, simplified replacement; never delete individual leaf materials.
+    #[serde(default)]
+    pub lod: Option<ProjectLod>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +72,16 @@ fn parse(bytes: &[u8]) -> Result<BTreeMap<u8, ProjectEntry>, String> {
     }
     let mut entries = BTreeMap::new();
     for entry in document.entries {
+        if let Some(lod) = &entry.lod {
+            if !lod.distance.is_finite()
+                || lod.distance <= 0.0
+                || lod.primitives.is_empty()
+                || lod.primitives.len() > 256
+                || lod.primitives.iter().collect::<BTreeSet<_>>().len() != lod.primitives.len()
+            {
+                return Err(format!("invalid foliage LOD for kind {}", entry.kind));
+            }
+        }
         let b = &entry.brush;
         let scalars = [
             b.density,
@@ -124,6 +145,15 @@ pub(crate) fn load(
     let project = crate::authoring::project::ProjectPaths::open(root)?;
     let mut entries = parse(&std::fs::read(path).map_err(|e| e.to_string())?)?;
     for entry in entries.values_mut() {
+        if let Some(lod) = &mut entry.lod {
+            lod.source = project.resolve(&lod.source)?;
+            if !lod.source.is_file() {
+                return Err(format!(
+                    "foliage LOD source missing: {}",
+                    lod.source.display()
+                ));
+            }
+        }
         entry.source = project.resolve(&entry.source)?;
         if !entry.source.is_file() {
             return Err(format!(
@@ -138,6 +168,21 @@ pub(crate) fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_lod_preserves_parts_and_rejects_invalid_distances() {
+        let mut document = serde_json::json!({"version":1,"entries":[{
+            "kind":128,"name":"cover","source":"near.gltf","primitives":[0,1],
+            "lod":{"source":"far.gltf","primitives":[2,3],"distance":16.0}}]});
+        let parsed = parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let lod = parsed[&128].lod.as_ref().unwrap();
+        assert_eq!(lod.primitives, [2, 3]);
+        assert_eq!(lod.distance, 16.0);
+        document["entries"][0]["lod"]["distance"] = serde_json::json!(0);
+        assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err());
+        document["entries"][0]["lod"]["distance"] = serde_json::json!(16);
+        document["entries"][0]["lod"]["primitives"] = serde_json::json!([2, 2]);
+        assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
     #[test]
     fn stable_project_ids_preserve_all_selected_material_parts_and_transform() {
         let bytes=br#"{"version":1,"entries":[{"kind":137,"name":"mixed cover","source":"assets/cover.gltf","primitives":[5,6,7,8,9],"local_transform":[1,0,0,0,0,1,0,0,0,0,1,0,-2,0,3,1]}]}"#;

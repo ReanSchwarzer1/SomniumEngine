@@ -148,6 +148,9 @@ pub struct SomniumRenderer {
     pub materials_pool: MaterialPool,
     /// Global texture storage.
     pub texture_pool: TexturePool,
+    /// Terrain descriptors are scene-owned; imported asset descriptors are not.
+    terrain_texture_slots: Vec<u32>,
+    imported_texture_slots: std::collections::HashMap<[u8; 32], i32>,
     /// Per-frame instance storage.
     pub instances: InstancePool,
 
@@ -992,6 +995,8 @@ impl SomniumRenderer {
             geometry,
             materials_pool,
             texture_pool,
+            terrain_texture_slots: Vec::new(),
+            imported_texture_slots: Default::default(),
             instances,
             view_matrix: glam::Mat4::IDENTITY,
             proj_matrix: glam::Mat4::IDENTITY,
@@ -1208,6 +1213,12 @@ impl SomniumRenderer {
         index
     }
 
+    fn add_terrain_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
+        let index = self.add_texture(ctx, view);
+        self.terrain_texture_slots.push(index);
+        index
+    }
+
     /// Upload worker-decoded RGBA8 pixels into the bindless pool. Material
     /// asset jobs use this main-thread half after file IO and decode complete.
     pub fn upload_material_texture(
@@ -1293,7 +1304,30 @@ impl SomniumRenderer {
         // glTF images carry no colour-space flag — how a texture is referenced
         // is the only thing that says what it means.
         let mut is_colour = vec![false; scene.textures.len()];
-        for m in &scene.materials {
+        let mut used_textures = vec![false; scene.textures.len()];
+        let used_materials: std::collections::HashSet<_> = scene
+            .nodes
+            .iter()
+            .filter_map(|node| node.material_index)
+            .collect();
+        for (index, m) in scene.materials.iter().enumerate() {
+            if !used_materials.contains(&index) {
+                continue;
+            }
+            for slot in [
+                m.albedo_map,
+                m.emissive_map,
+                m.normal_map,
+                m.metallic_roughness_map,
+                m.occlusion_map,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(used) = used_textures.get_mut(slot) {
+                    *used = true;
+                }
+            }
             for slot in [m.albedo_map, m.emissive_map] {
                 if let Some(i) = slot {
                     if let Some(flag) = is_colour.get_mut(i) {
@@ -1308,6 +1342,14 @@ impl SomniumRenderer {
             .iter()
             .enumerate()
             .map(|(tex_index, tex)| {
+                if !used_textures[tex_index] {
+                    return None;
+                }
+                let colour = is_colour[tex_index];
+                let key = imported_texture_key(tex, colour);
+                if let Some(&slot) = self.imported_texture_slots.get(&key) {
+                    return Some(slot);
+                }
                 // Full mip chain. Without it, minified textures alias badly — the
                 // sampler asks for trilinear filtering but a single level leaves
                 // nothing to filter between, so detailed materials shimmer at
@@ -1375,7 +1417,9 @@ impl SomniumRenderer {
                 }
 
                 let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
-                Some(self.add_texture(ctx, view) as i32)
+                let slot = self.add_texture(ctx, view) as i32;
+                self.imported_texture_slots.insert(key, slot);
+                Some(slot)
             })
             .collect();
 
@@ -2448,19 +2492,20 @@ impl SomniumRenderer {
             if hero_bank_only && i >= 4 {
                 -1
             } else {
-                self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+                self.add_terrain_texture(ctx, terrain.splatmap.views[i].clone()) as i32
             }
         });
-        ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
+        ids.macro_map = self.add_terrain_texture(ctx, terrain.macro_view.clone()) as i32;
         // Phase TSUSHIMA-B/C. Registered once, like the macro map: the bake is
         // rewritten in place after a sculpt, so these three indices are valid
         // for the terrain's life and no bind group is ever invalidated.
         ids.horizon_maps = [
-            self.add_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
-            self.add_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
         ];
-        ids.sky_visibility = self.add_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
-        ids.relief_normal = self.add_texture(ctx, terrain.relief_gpu.view.clone()) as i32;
+        ids.sky_visibility =
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
+        ids.relief_normal = self.add_terrain_texture(ctx, terrain.relief_gpu.view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
         // Virtual mode deliberately leaves every legacy layer id at -1. The
         // 4x4 arrays only keep the struct/fallback shape valid; publishing
@@ -2469,7 +2514,7 @@ impl SomniumRenderer {
         if terrain.layer_textures.virtual_texture.is_none() {
             for layer in 0..hero {
                 let i = layer as usize;
-                ids.albedo[i] = self.add_texture(
+                ids.albedo[i] = self.add_terrain_texture(
                     ctx,
                     layer_view(
                         &terrain.layer_textures.albedo,
@@ -2477,7 +2522,7 @@ impl SomniumRenderer {
                         "Terrain Layer Albedo+Height",
                     ),
                 ) as i32;
-                ids.surface[i] = self.add_texture(
+                ids.surface[i] = self.add_terrain_texture(
                     ctx,
                     layer_view(
                         &terrain.layer_textures.surface,
@@ -2489,7 +2534,7 @@ impl SomniumRenderer {
             if !hero_bank_only {
                 for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
                     let i = (hero + layer) as usize;
-                    ids.albedo[i] = self.add_texture(
+                    ids.albedo[i] = self.add_terrain_texture(
                         ctx,
                         layer_view(
                             &terrain.layer_textures.albedo_extra,
@@ -2497,7 +2542,7 @@ impl SomniumRenderer {
                             "Terrain Layer Albedo+Height Extra",
                         ),
                     ) as i32;
-                    ids.surface[i] = self.add_texture(
+                    ids.surface[i] = self.add_terrain_texture(
                         ctx,
                         layer_view(
                             &terrain.layer_textures.surface_extra,
@@ -2510,9 +2555,9 @@ impl SomniumRenderer {
         }
         if let Some(gpu) = &terrain.layer_textures.virtual_texture {
             ids.virtual_texture = [
-                self.add_texture(ctx, gpu.albedo_view.clone()) as i32,
-                self.add_texture(ctx, gpu.surface_view.clone()) as i32,
-                self.add_texture(ctx, gpu.page_table_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.albedo_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.surface_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.page_table_view.clone()) as i32,
                 gpu.shader_atlas_size(),
             ];
         }
@@ -2578,7 +2623,23 @@ impl SomniumRenderer {
     }
 
     /// Drop GPU terrains, clipmaps, and water so a map load does not leak slots.
-    pub fn reset_scene_gpu(&mut self) {
+    pub fn reset_scene_gpu(&mut self, ctx: &RenderContext) {
+        // Clearing TerrainData alone leaves its texture arrays alive through
+        // both bindless view owners and the bind group. Release all three before
+        // importing the next scene, while keeping reusable asset slots stable.
+        for slot in self.terrain_texture_slots.drain(..) {
+            if self.texture_pool.release(slot) {
+                self.global_pool.texture_views[slot as usize] =
+                    self.texture_pool.dummy_view.clone();
+            }
+        }
+        self.global_pool.update_textures(&ctx.device);
+        for terrain in &mut self.terrains {
+            for chunk in &terrain.chunks {
+                self.raytrace_pass.unregister_mesh(chunk.vertex_offset);
+            }
+            terrain.release_pool_spans(&mut self.geometry);
+        }
         self.terrains.clear();
         self.clipmaps.clear();
         self.terrain_queue.clear();
@@ -5847,6 +5908,17 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
     *hash = hash.wrapping_add(fingerprint);
 }
 
+/// Content and interpretation both identify a reusable GPU image.
+fn imported_texture_key(texture: &somnium_asset::LoadedTexture, colour: bool) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(texture.width.to_le_bytes());
+    hash.update(texture.height.to_le_bytes());
+    hash.update([u8::from(colour)]);
+    hash.update(&texture.data);
+    hash.finalize().into()
+}
+
 /// Build a full mip chain by repeated 2×2 box filtering.
 ///
 /// Returns `(width, height, rgba8)` per level, starting with the original.
@@ -5976,6 +6048,25 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
 #[cfg(test)]
 mod mip_tests {
     use super::{ALPHA_TEST_CUTOFF, build_mip_chain};
+
+    #[test]
+    fn shared_images_are_reused_only_with_matching_shape_and_colour_space() {
+        let mut image = somnium_asset::LoadedTexture {
+            width: 2,
+            height: 1,
+            data: vec![128; 8],
+        };
+        let original = super::imported_texture_key(&image, true);
+        assert_eq!(original, super::imported_texture_key(&image, true));
+        assert_ne!(original, super::imported_texture_key(&image, false));
+        image.width = 1;
+        image.height = 2;
+        assert_ne!(original, super::imported_texture_key(&image, true));
+        image.width = 2;
+        image.height = 1;
+        image.data[0] = 127;
+        assert_ne!(original, super::imported_texture_key(&image, true));
+    }
 
     /// A 2x2 cutout block: one opaque green texel, three transparent black.
     /// Unweighted averaging would give a quarter-strength muddy green; weighting

@@ -1145,6 +1145,7 @@ pub struct Engine<G: GameApp> {
     /// is painted — loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
     foliage_meshes: [Option<Vec<FoliagePart>>; 256],
+    foliage_lod_meshes: [Option<Vec<FoliagePart>>; 256],
     /// Palette entries whose import failed, so we stop retrying them.
     foliage_failed: [bool; 256],
     project_foliage: std::collections::BTreeMap<u8, crate::foliage_palette::ProjectEntry>,
@@ -1694,6 +1695,7 @@ impl<G: GameApp + 'static> Engine<G> {
             gizmo_drag: None,
             marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
+            foliage_lod_meshes: std::array::from_fn(|_| None),
             foliage_failed: [false; 256],
             project_foliage,
             project_foliage_sources: std::collections::HashMap::new(),
@@ -2329,7 +2331,7 @@ impl<G: GameApp> Engine<G> {
     fn load_schema_scene(&mut self, path: &str, document: &serde_json::Value) {
         if let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
             renderer.wait_gpu(render_ctx);
-            renderer.reset_scene_gpu();
+            renderer.reset_scene_gpu(render_ctx);
         }
         for entity in self.world.entities().collect::<Vec<_>>() {
             self.world.despawn(entity);
@@ -3500,6 +3502,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.imported_uploads.clear();
                 self.project_foliage_sources.clear();
                 self.foliage_meshes = std::array::from_fn(|_| None);
+                self.foliage_lod_meshes = std::array::from_fn(|_| None);
                 self.foliage_failed = [false; 256];
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
@@ -7896,6 +7899,16 @@ impl<G: GameApp> Engine<G> {
                     counts.unavailable_mesh = counts.unavailable_mesh.saturating_add(1);
                     continue;
                 };
+                let far_parts = self
+                    .project_foliage
+                    .get(&inst.kind)
+                    .and_then(|entry| entry.lod.as_ref())
+                    .filter(|lod| d.x * d.x + d.z * d.z > lod.distance * lod.distance)
+                    .and_then(|_| self.foliage_lod_meshes[inst.kind as usize].as_ref());
+                if far_parts.is_some() {
+                    counts.lod_instances += 1;
+                }
+                let parts = far_parts.unwrap_or(parts);
                 // Terrain-local placement composed with the terrain's own
                 // transform, so moving the terrain carries its foliage.
                 // CONTROL-K: the authored falloff curve, evaluated against

@@ -10,6 +10,7 @@ pub struct TexturePool {
     pub views: Vec<wgpu::TextureView>,
     /// Indices of free slots in the pool.
     free_indices: Vec<u32>,
+    live: Vec<bool>,
 }
 
 impl TexturePool {
@@ -41,6 +42,7 @@ impl TexturePool {
             dummy_view,
             views: Vec::new(), // This will hold owned views
             free_indices: (0..MAX_BINDLESS_TEXTURES).rev().collect(),
+            live: vec![false; MAX_BINDLESS_TEXTURES as usize],
         }
     }
 
@@ -53,9 +55,29 @@ impl TexturePool {
                     .resize_with(index as usize + 1, || self.dummy_view.clone());
             }
             self.views[index as usize] = view;
+            self.live[index as usize] = true;
             index
         } else {
             panic!("Texture pool exhausted!");
         }
+    }
+
+    /// Release the owned view as well as its descriptor slot. Double release is
+    /// harmless; callers must also replace any separately retained bind-group view.
+    pub fn release(&mut self, index: u32) -> bool {
+        let Some(live) = self.live.get_mut(index as usize) else {
+            return false;
+        };
+        if !*live {
+            return false;
+        }
+        *live = false;
+        self.views[index as usize] = self.dummy_view.clone();
+        self.free_indices.push(index);
+        true
+    }
+
+    pub fn live_count(&self) -> usize {
+        MAX_BINDLESS_TEXTURES as usize - self.free_indices.len()
     }
 }

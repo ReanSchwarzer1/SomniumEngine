@@ -91,7 +91,10 @@ impl Meshlet {
     /// product can never reach it, so the test simply never fires and no branch
     /// is needed in the shader.
     pub fn backface_cutoff(&self) -> f32 {
-        if self.cone_cutoff <= 0.0 {
+        // Cancelling normals (closed boxes in particular) use 2.0. Treating
+        // that sentinel as a cosine produced sqrt(max(1 - 4, 0)) == 0 and
+        // incorrectly culled whole walls/floors when viewed from above.
+        if self.cone_cutoff <= 0.0 || self.cone_cutoff > 1.0 {
             return 2.0;
         }
         (1.0 - self.cone_cutoff * self.cone_cutoff).max(0.0).sqrt()
@@ -509,6 +512,11 @@ mod tests {
         // passed while every cube in the engine vanished — a cube's six face
         // normals cancel exactly, which is precisely this case.
         assert_eq!(b.meshlets[0].cone_cutoff, 2.0);
+        assert_eq!(
+            b.meshlets[0].backface_cutoff(),
+            2.0,
+            "the threshold uploaded to GPU arguments must retain the disabled sentinel"
+        );
         assert!(
             b.meshlets[0].cone_cutoff > 1.0,
             "the sentinel must exceed the guard in cull.wgsl, or the test is              not checking the thing that matters",
