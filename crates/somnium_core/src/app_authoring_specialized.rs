@@ -177,7 +177,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 let kind = p["kind"]
                     .as_u64()
-                    .filter(|v| *v < (FOLIAGE_PALETTE.len() as u64))
+                    .filter(|v| *v <= u8::MAX as u64 && self.foliage_kind_exists(*v as u8))
                     .ok_or("kind must be a foliage palette index")?
                     as u8;
                 if self.foliage_brush.kind != kind {

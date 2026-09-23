@@ -1859,7 +1859,8 @@ impl TerrainData {
         out.extend(
             bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(&self.splatmap.data),
         );
-        std::fs::write(path, out)
+        std::fs::write(path, out)?;
+        foliage_paint::save_instances(path, &self.painted_foliage)
     }
 
     /// Load heightmap + splatmap from a sidecar binary written by
@@ -1901,11 +1902,13 @@ impl TerrainData {
         let body = bytes
             .get(24..24 + h_bytes + s_bytes)
             .ok_or("truncated terrain sidecar")?;
+        let painted_foliage = foliage_paint::load_instances(path)?;
         self.heightmap
             .copy_from_slice(bytemuck::cast_slice(&body[..h_bytes]));
         let splat_src = &body[h_bytes..];
         self.splatmap.data =
             crate::terrain::splat::migrate_sidecar_splat(version, splat_src, texel_count)?;
+        self.painted_foliage = painted_foliage;
         self.macro_dirty = true;
         self.horizon_dirty = true;
         for chunk in &mut self.chunks {

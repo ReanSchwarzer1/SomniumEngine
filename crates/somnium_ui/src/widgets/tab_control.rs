@@ -82,11 +82,7 @@ impl Control for TabControl {
                 );
             }
             let (label, _) =
-                crate::widgets::property_row::ellipsise(title, (tw - 16.0).max(0.0), |text| {
-                    ctx.font_atlas
-                        .measure_text(text, t.typography.label, self.font_id)
-                        .x
-                });
+                ctx.font_atlas.ellipsise(title, (tw - 16.0).max(0.0), t.typography.label, self.font_id);
             let size = ctx
                 .font_atlas
                 .measure_text(&label, t.typography.label, self.font_id);

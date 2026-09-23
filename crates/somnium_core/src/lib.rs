@@ -62,6 +62,8 @@ pub mod context;
 pub mod decal;
 pub mod editor_commands;
 mod editor_gizmo;
+mod foliage_palette;
+mod outliner_hierarchy;
 pub mod error;
 pub mod event;
 pub mod foliage_visibility;

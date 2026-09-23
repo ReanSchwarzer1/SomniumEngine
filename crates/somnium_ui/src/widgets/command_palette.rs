@@ -267,9 +267,7 @@ impl Control for CommandPalette {
                 t.semantic.text.disabled.bytes()
             };
             let (label, _) =
-                crate::widgets::property_row::ellipsise(&item.label, row_r.w - 112.0, |text| {
-                    ctx.font_atlas.measure_text(text, 12.0, self.font_id).x
-                });
+                ctx.font_atlas.ellipsise(&item.label, row_r.w - 112.0, 12.0, self.font_id);
             ctx.push_text(
                 &label,
                 Vec2::new(row_r.x + 8.0, y + 4.0),

@@ -50,6 +50,124 @@ pub struct PaintedFoliage {
     pub scale: f32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredInstance {
+    kind: u8,
+    position: [f32; 3],
+    yaw: f32,
+    #[serde(default)]
+    tilt: f32,
+    scale: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstanceDocument {
+    version: u32,
+    instances: Vec<StoredInstance>,
+}
+
+fn decode_instances(bytes: &[u8]) -> Result<Vec<PaintedFoliage>, String> {
+    let document: InstanceDocument = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if document.version != 1 || document.instances.len() > 1_000_000 {
+        return Err("unsupported or oversized foliage instance document".into());
+    }
+    document
+        .instances
+        .into_iter()
+        .map(|i| {
+            if !i.position.iter().all(|v| v.is_finite())
+                || !i.yaw.is_finite()
+                || !i.tilt.is_finite()
+                || !i.scale.is_finite()
+                || i.scale <= 0.0
+            {
+                return Err("foliage instance needs finite coordinates and positive scale".into());
+            }
+            Ok(PaintedFoliage {
+                kind: i.kind,
+                position: Vec3::from_array(i.position),
+                yaw: i.yaw,
+                tilt: i.tilt,
+                scale: i.scale,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn save_instances(
+    terrain_path: &str,
+    instances: &[PaintedFoliage],
+) -> std::io::Result<()> {
+    let document = InstanceDocument {
+        version: 1,
+        instances: instances
+            .iter()
+            .map(|i| StoredInstance {
+                kind: i.kind,
+                position: i.position.to_array(),
+                yaw: i.yaw,
+                tilt: i.tilt,
+                scale: i.scale,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&document).map_err(std::io::Error::other)?;
+    // Refuse invalid runtime values rather than writing null floats that cannot reload.
+    decode_instances(&bytes).map_err(std::io::Error::other)?;
+    std::fs::write(format!("{terrain_path}.foliage.json"), bytes)
+}
+
+pub(super) fn load_instances(terrain_path: &str) -> Result<Vec<PaintedFoliage>, String> {
+    let path = format!("{terrain_path}.foliage.json");
+    match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read foliage sidecar: {e}")),
+        Ok(meta) if meta.len() > 64 * 1024 * 1024 => {
+            return Err("foliage sidecar exceeds 64 MiB".into());
+        }
+        Ok(_) => {}
+    }
+    decode_instances(&std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?)
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn stable_kind_and_terrain_local_pose_round_trip_without_ecs_entities() {
+        let source = InstanceDocument {
+            version: 1,
+            instances: vec![StoredInstance {
+                kind: 137,
+                position: [-2.25, 1.5, 23.0],
+                yaw: 1.2,
+                tilt: 0.1,
+                scale: 0.8,
+            }],
+        };
+        let decoded = decode_instances(&serde_json::to_vec(&source).unwrap()).unwrap();
+        assert_eq!(
+            decoded[0],
+            PaintedFoliage {
+                kind: 137,
+                position: Vec3::new(-2.25, 1.5, 23.0),
+                yaw: 1.2,
+                tilt: 0.1,
+                scale: 0.8
+            }
+        );
+        assert!(decode_instances(br#"{"version":2,"instances":[]}"#).is_err());
+        assert!(
+            decode_instances(
+                br#"{"version":1,"instances":[{"kind":128,"position":[0,0,0],"yaw":0,"scale":0}]}"#
+            )
+            .is_err()
+        );
+    }
+}
+
 /// Brush settings for a paint stroke.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FoliageBrush {

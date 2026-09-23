@@ -918,6 +918,7 @@ pub struct UiManager {
     /// Palette entry currently shown on the picker button, so a click can
     /// advance to the next one.
     foliage_kind_shown: u8,
+    foliage_palette_kinds: Vec<u8>,
     // File menu (Phase 19B): Import
     file_button: NodeHandle,
     file_popup: NodeHandle,
@@ -1754,6 +1755,7 @@ impl UiManager {
             create_popup_open: false,
             create_popup_items: layout.create_popup_items,
             foliage_kind_shown: 0,
+            foliage_palette_kinds: (0..FOLIAGE_KIND_NAMES.len() as u8).collect(),
             file_button: layout.file_button,
             file_popup: layout.file_popup,
             file_menu_stack: layout.file_menu_stack,
@@ -6671,13 +6673,18 @@ impl UiManager {
 
     /// Hierarchical outliner (Phase 26-E), one [`OutlinerRow`] per visible row.
     pub fn update_outliner_tree(&mut self, entities: &[OutlinerRow], selected: Option<u32>) {
-        let new_state = (entities.to_vec(), selected);
-        if let Some(ref old_state) = self.last_outliner_state {
-            if *old_state == new_state {
-                return;
-            }
+        // Compare the borrowed rows before allocating a fresh snapshot. The
+        // usual unchanged frame needs no cloned names or tag vectors.
+        if self
+            .last_outliner_state
+            .as_ref()
+            .is_some_and(|(rows, old_selected)| {
+                *old_selected == selected && rows.as_slice() == entities
+            })
+        {
+            return;
         }
-        self.last_outliner_state = Some(new_state);
+        self.last_outliner_state = Some((entities.to_vec(), selected));
 
         let filter = crate::outliner_filter::OutlinerFilter::parse(&format!(
             "{} {}",
@@ -7453,11 +7460,23 @@ impl UiManager {
 
     /// Show the stable authoring subset of a first-class water body.
 
-    /// Show or hide the Foliage section and refresh it (Phase 17C).
-    ///
-    /// `values` is `[density, radius, max_slope_deg, kind, scale_min, scale_max,
-    /// min_layer_weight]` followed by the component's four distances, plus the
-    /// enable flags.
+    /// Replace the palette display model while retaining stable saved kind IDs.
+    pub fn set_foliage_palette(&mut self, entries: &[(u8, String)]) {
+        self.foliage_palette_kinds = entries.iter().map(|(kind, _)| *kind).collect();
+        let names: Vec<String> = entries.iter().map(|(_, name)| name.clone()).collect();
+        for handle in [
+            self.inspector_handles.foliage_kind_button,
+            self.foliage_kind_combo,
+        ] {
+            self.native_ui.send(crate::message::UiMessage::new(
+                handle,
+                crate::message::MessageDirection::ToWidget,
+                ComboBoxMessage::SetItems(names.clone()),
+            ));
+        }
+    }
+
+    /// Show/hide the foliage section and refresh brush values, distances and flags.
     pub fn update_foliage_inspector(&mut self, values: Option<([f32; 11], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
@@ -7487,10 +7506,17 @@ impl UiManager {
                     self.native_ui
                         .send(CheckBoxMessage::set_checked(*handle, *on));
                 }
-                let kind = (v[3].round().max(0.0) as usize).min(FOLIAGE_KIND_NAMES.len() - 1);
-                self.foliage_kind_shown = kind as u8;
+                let kind = v[3].round().clamp(0.0, 255.0) as u8;
+                let row = self
+                    .foliage_palette_kinds
+                    .iter()
+                    .position(|&id| id == kind)
+                    .unwrap_or(0);
+                self.foliage_kind_shown = kind;
                 self.native_ui
-                    .send(ComboBoxMessage::set_selected(h.foliage_kind_button, kind));
+                    .send(ComboBoxMessage::set_selected(h.foliage_kind_button, row));
+                self.native_ui
+                    .send(ComboBoxMessage::set_selected(self.foliage_kind_combo, row));
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -8972,8 +8998,10 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.foliage_kind_button
                     || msg.destination == self.foliage_kind_combo
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectFoliageKind(*i as u8));
+                    if let Some(&kind) = self.foliage_palette_kinds.get(*i) {
+                        self.editor_events
+                            .push_back(EditorEvent::SelectFoliageKind(kind));
+                    }
                     continue;
                 }
                 if msg.destination == self.viewport_res_combo {

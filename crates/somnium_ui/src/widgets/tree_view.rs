@@ -275,14 +275,11 @@ impl Control for TreeView {
             let (uv, tex) = item.icon.draw_quad(ic);
             ctx.push_textured_rect(ic, uv, paint.foreground, tex);
             let label_x = b.x + indent + 18.0 + theme::ICON_TREE + 6.0;
-            let (label, _) = crate::widgets::property_row::ellipsise(
+            let (label, _) = ctx.font_atlas.ellipsise(
                 &item.label,
                 (badge_x - 18.0 - label_x).max(0.0),
-                |text| {
-                    ctx.font_atlas
-                        .measure_text(text, style.px, style.font_id())
-                        .x
-                },
+                style.px,
+                style.font_id(),
             );
             ctx.push_text(
                 &label,

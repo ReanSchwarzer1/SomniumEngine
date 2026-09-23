@@ -364,6 +364,8 @@ pub struct SomniumRenderer {
     /// Phase 29. Public because the editor drives its toggle and reads its
     /// report; there is nothing to encapsulate behind an accessor pair.
     pub profiler: crate::profiler::GpuProfiler,
+    /// Pending CPU foliage counts, copied into the frame after profiler reset.
+    pub foliage_submission: crate::profiler::FoliageCounters,
     /// Phase DOOM-A. Inert unless `SOMNIUM_TIME` is set; when it is, it forces
     /// the profiler on, accumulates unsmoothed samples and writes a `.somtime`
     /// table with a standard deviation beside every mean.
@@ -1164,6 +1166,7 @@ impl SomniumRenderer {
             debug_toggles: somnium_ui::debug::DebugToggles::from_env(),
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
+            foliage_submission: crate::profiler::FoliageCounters::default(),
             timing: crate::timing::TimingRun::from_env(),
             census_pass,
             classify_pass,
@@ -1948,7 +1951,7 @@ impl SomniumRenderer {
     ///
     /// `instance_count` doubles as the cull verdict, so counting the non-zero
     /// entries is exactly the number of draws that phase submitted.
-    fn report_cull_stats(&self, ctx: &RenderContext, draw_count: usize) {
+    fn report_cull_stats(&mut self, ctx: &RenderContext, draw_count: usize) {
         let Some(buffers) = &self.cull_stats_buffers else {
             return;
         };
@@ -1978,6 +1981,9 @@ impl SomniumRenderer {
             }
             buf.unmap();
         }
+
+        self.profiler.counters.gpu_visible_arguments =
+            Some(u32::try_from(alive[0] + alive[1]).unwrap_or(u32::MAX));
 
         tracing::info!(
             "CULLSTATS total={draw_count} phase1_drawn={} phase2_drawn={} culled={} tris_drawn={}",
@@ -2731,6 +2737,7 @@ impl SomniumRenderer {
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+        self.profiler.counters.foliage = self.foliage_submission;
         self.profiler.cpu_begin("Renderer prepare");
         self.grain_masks.advance_packed(&ctx.queue);
 
@@ -2892,6 +2899,14 @@ impl SomniumRenderer {
             let c = &mut self.profiler.counters;
             c.draw_calls = u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX);
             c.instances = c.draw_calls;
+            c.water_draws = u32::try_from(self.water_queue.len()).unwrap_or(u32::MAX);
+            c.water_bound_draws = u32::try_from(
+                self.water_queue
+                    .iter()
+                    .filter(|(id, ..)| self.water_bodies.get(*id).is_some())
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
             c.triangles = self
                 .draw_queue
                 .iter()
@@ -3869,6 +3884,13 @@ impl SomniumRenderer {
                     } else {
                         None
                     };
+                    if let Some(meshlets) = meshlets {
+                        self.profiler.counters.gpu_meshlet_arguments = self
+                            .profiler
+                            .counters
+                            .gpu_meshlet_arguments
+                            .saturating_add(u32::try_from(meshlets.len()).unwrap_or(u32::MAX));
+                    }
                     let start = self.cull_aabbs.len();
                     crate::indirect::push_cluster_args(
                         i as u32,
@@ -3890,6 +3912,8 @@ impl SomniumRenderer {
                     }
                 }
             }
+            self.profiler.counters.gpu_draw_arguments =
+                u32::try_from(self.cluster_args.len()).unwrap_or(u32::MAX);
             self.indirect
                 .upload(&ctx.device, &ctx.queue, &self.cluster_args);
             let counted_draws = self.counted_draws_active();

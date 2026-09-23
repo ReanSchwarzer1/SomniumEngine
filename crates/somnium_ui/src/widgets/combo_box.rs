@@ -93,9 +93,7 @@ impl Control for ComboBox {
                 .map(|s| s.as_str())
                 .unwrap_or("")
         };
-        let (label, _) = super::property_row::ellipsise(label, (b.w - 32.0).max(0.0), |text| {
-            ctx.font_atlas.measure_text(text, self.px, self.font_id).x
-        });
+        let (label, _) = ctx.font_atlas.ellipsise(label, (b.w - 32.0).max(0.0), self.px, self.font_id);
         ctx.push_text(
             &label,
             Vec2::new(b.x + 6.0, b.y + 4.0),
@@ -393,10 +391,11 @@ impl Control for ComboDropdown {
             } else {
                 row.x + 8.0
             };
-            let (label, _) = super::property_row::ellipsise(
+            let (label, _) = ctx.font_atlas.ellipsise(
                 item,
                 (row.x + row.w - text_x - 8.0).max(0.0),
-                |text| ctx.font_atlas.measure_text(text, self.px, self.font_id).x,
+                self.px,
+                self.font_id,
             );
             ctx.push_text(
                 &label,

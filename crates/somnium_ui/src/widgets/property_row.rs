@@ -305,9 +305,7 @@ impl Control for PropertyRow {
             ctx.push_round_rect(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0), r, accent);
         }
 
-        let (label, _truncated) = ellipsise(&self.label, m.label_w, |s| {
-            ctx.font_atlas.measure_text(s, style.px, font_id).x
-        });
+        let (label, _truncated) = ctx.font_atlas.ellipsise(&self.label, m.label_w, style.px, font_id);
         let line_h = ctx
             .font_atlas
             .measure_text("Ag", style.px, font_id)

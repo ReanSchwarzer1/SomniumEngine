@@ -684,9 +684,9 @@ impl FoliageEntry {
 /// The foliage palette: what the brush can paint (Phase 17F, extended by
 /// TSUSHIMA-I).
 ///
-/// Fixed for now. Once there is a content drawer this becomes whatever the
-/// project has imported, which is why the brush stores a palette *index* rather
-/// than anything about the mesh itself.
+/// Legacy built-in kinds retain their saved indices. A project's
+/// `foliage.palette.json` extends the picker with explicit stable IDs 128..255
+/// and authored source/primitive selections; see `foliage_palette` for its schema.
 ///
 /// All CC0 from Poly Haven — see ATTRIBUTION.md. `tools/fetch_foliage.sh`
 /// downloads every one of them and verifies it against the publisher's MD5;
@@ -1090,6 +1090,7 @@ pub struct Engine<G: GameApp> {
     /// selection means "the rows between these two", so the range has to be
     /// resolved against the order the user can actually see.
     outliner_order: Vec<somnium_ecs::entity::Entity>,
+    outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy,
     /// Seam 4: preferences, project settings, and which of them the
     /// environment has taken out of the author's hands.
     settings: crate::settings::SettingsStore,
@@ -1143,9 +1144,11 @@ pub struct Engine<G: GameApp> {
     /// Uploaded geometry per palette entry, filled in the first time each one
     /// is painted — loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
-    foliage_meshes: [Option<Vec<FoliagePart>>; FOLIAGE_PALETTE.len()],
+    foliage_meshes: [Option<Vec<FoliagePart>>; 256],
     /// Palette entries whose import failed, so we stop retrying them.
-    foliage_failed: [bool; FOLIAGE_PALETTE.len()],
+    foliage_failed: [bool; 256],
+    project_foliage: std::collections::BTreeMap<u8, crate::foliage_palette::ProjectEntry>,
+    project_foliage_sources: std::collections::HashMap<std::path::PathBuf, Vec<FoliagePart>>,
     /// Phase 17F: the foliage brush.
     foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush,
     /// When true, dragging in the viewport paints foliage instead of sculpting.
@@ -1597,6 +1600,7 @@ impl<G: GameApp + 'static> Engine<G> {
             config.project_root = Some(project.root);
         }
         let mut registration = crate::authoring::GameRegistration::default();
+        let project_foliage = crate::foliage_palette::load(&config).map_err(EngineError::Config)?;
         game.register_authoring(&mut registration);
         crate::authoring::registration::install(registration).map_err(EngineError::Config)?;
         if config.player_mode && config.startup_scene.is_none() {
@@ -1671,6 +1675,7 @@ impl<G: GameApp + 'static> Engine<G> {
             external_import_job: None,
             selection: crate::selection::Selection::default(),
             outliner_order: Vec::new(),
+            outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy::default(),
             settings: settings_store,
             camera_bookmarks: [None; 9],
             orbit_selection: false,
@@ -1689,7 +1694,9 @@ impl<G: GameApp + 'static> Engine<G> {
             gizmo_drag: None,
             marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
-            foliage_failed: [false; FOLIAGE_PALETTE.len()],
+            foliage_failed: [false; 256],
+            project_foliage,
+            project_foliage_sources: std::collections::HashMap::new(),
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
             foliage_paint_active: false,
             foliage_erase: false,
@@ -3488,8 +3495,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     Arc::clone(&window),
                 );
                 ui_manager.set_render_toggles(renderer.debug_toggles.clone());
+                ui_manager.set_foliage_palette(&self.foliage_palette_labels());
                 self.render_ctx = Some(render_ctx);
                 self.imported_uploads.clear();
+                self.project_foliage_sources.clear();
+                self.foliage_meshes = std::array::from_fn(|_| None);
+                self.foliage_failed = [false; 256];
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
@@ -4396,78 +4407,28 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .entities()
                 .filter(|e| self.world.get::<crate::AssetEditSession>(*e).is_none())
                 .collect();
-            let mut names: Vec<(u32, String, Option<u32>)> = all_entities
-                .iter()
-                .map(|&e| {
-                    let name = self
-                        .world
-                        .get::<Name>(e)
-                        .map(|n| n.as_str().to_owned())
-                        .unwrap_or_else(|| format!("Entity {}", e.index()));
-                    let parent = self.world.get::<Parent>(e).and_then(|p| {
-                        if p.entity == somnium_ecs::Entity::DANGLING {
-                            None
-                        } else {
-                            Some(p.entity.index())
-                        }
-                    });
-                    (e.index(), name, parent)
-                })
-                .collect();
-            names.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
-            let mut children: std::collections::HashMap<u32, Vec<u32>> =
-                std::collections::HashMap::new();
-            let mut name_of: std::collections::HashMap<u32, String> =
-                std::collections::HashMap::new();
-            for (id, name, parent) in &names {
-                name_of.insert(*id, name.clone());
-                if let Some(p) = parent {
-                    children.entry(*p).or_default().push(*id);
+            let mut hierarchy = std::mem::take(&mut self.outliner_hierarchy);
+            hierarchy.refresh(all_entities.iter().map(|&entity| {
+                crate::outliner_hierarchy::Source {
+                    id: entity.index(),
+                    generation: entity.generation(),
+                    name: self.world.get::<Name>(entity).map(Name::as_str),
+                    parent: self.world.get::<Parent>(entity).and_then(|parent| {
+                        (parent.entity != somnium_ecs::Entity::DANGLING)
+                            .then_some(parent.entity.index())
+                    }),
                 }
-            }
-            fn walk(
-                id: u32,
-                depth: u8,
-                name_of: &std::collections::HashMap<u32, String>,
-                children: &std::collections::HashMap<u32, Vec<u32>>,
-                out: &mut Vec<somnium_ui::OutlinerRow>,
-            ) {
-                let has = children.get(&id).map(|c| !c.is_empty()).unwrap_or(false);
-                out.push(somnium_ui::OutlinerRow {
-                    id,
-                    name: name_of.get(&id).cloned().unwrap_or_default(),
-                    depth,
-                    has_children: has,
-                    hidden: false,
-                    locked: false,
-                    script_error: false,
-                    tags: Vec::new(),
-                });
-                if let Some(kids) = children.get(&id) {
-                    for kid in kids {
-                        walk(*kid, depth.saturating_add(1), name_of, children, out);
-                    }
-                }
-            }
-            let mut tree = Vec::new();
-            for (id, _, parent) in &names {
-                let is_root = match parent {
-                    None => true,
-                    Some(p) => !name_of.contains_key(p),
-                };
-                if is_root {
-                    walk(*id, 0, &name_of, &children, &mut tree);
-                }
-            }
+            }));
+            let tree = hierarchy.rows_mut();
             // One reconciliation point per frame. Commands, undo, redo, game
             // code and the drag routes all write `selection.primary` through
             // the `&mut Option<Entity>` shim; this is where the ordered set is
             // brought back into agreement with it and with the world, so no
             // stale or orphaned handle can reach a multi-entity command.
             // Row facts: the badges and the typed filters both read them, and
-            // they are gathered here rather than in `walk` because they need
-            // the world and `walk` is a pure tree flatten.
-            for row in &mut tree {
+            // they are gathered every frame outside the retained hierarchy so
+            // component changes never wait for a structural/name change.
+            for row in tree.iter_mut() {
                 let Some(entity) = self.world.find_entity_by_index(row.id) else {
                     continue;
                 };
@@ -4475,7 +4436,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     row.hidden = flags.hidden;
                     row.locked = flags.locked;
                 }
-                row.tags = entity_tags(&self.world, entity);
+                entity_tags(&self.world, entity, &mut row.tags);
                 if self
                     .world
                     .get::<crate::prefab::PrefabMember>(entity)
@@ -4745,7 +4706,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let drop_probe_entity = self.viewport_entity_drop_pick();
             let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_outliner_tree(&tree, selected_idx);
+                ui.update_outliner_tree(tree, selected_idx);
                 ui.set_outliner_entity_handles(all_entities.iter().copied());
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
@@ -4812,6 +4773,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.refresh_modified_dots();
                 ui.refresh_inspector_filter();
             }
+            self.outliner_hierarchy = hierarchy;
         }
 
         // Phase 29: the overlay is refreshed every frame rather than on
@@ -7835,6 +7797,7 @@ impl<G: GameApp> Engine<G> {
     /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
+        let mut counts = somnium_renderer::profiler::FoliageCounters::default();
         let camera_ws = self
             .renderer
             .as_ref()
@@ -7921,13 +7884,16 @@ impl<G: GameApp> Engine<G> {
             };
             self.foliage_batch.clear();
             for inst in &t.painted_foliage {
+                counts.candidates = counts.candidates.saturating_add(1);
                 let d = inst.position - camera_local;
                 // Horizontal distance: flying up should not make ground cover
                 // vanish out from under you.
                 if d.x * d.x + d.z * d.z > cull_sq {
+                    counts.distance_culled = counts.distance_culled.saturating_add(1);
                     continue;
                 }
                 let Some(Some(parts)) = self.foliage_meshes.get(inst.kind as usize) else {
+                    counts.unavailable_mesh = counts.unavailable_mesh.saturating_add(1);
                     continue;
                 };
                 // Terrain-local placement composed with the terrain's own
@@ -7944,6 +7910,7 @@ impl<G: GameApp> Engine<G> {
                     inst.scale * lod_falloff.evaluate(horizontal_sq.sqrt() / cull_distance)
                 };
                 if scale <= 0.0 {
+                    counts.scale_culled = counts.scale_culled.saturating_add(1);
                     continue;
                 }
                 // Yaw then lean. `Ry · Rx` and not the other way round: the
@@ -7968,10 +7935,18 @@ impl<G: GameApp> Engine<G> {
                 // (trunk / branches). Past lod_distance drop the leaf/twig
                 // cutouts. Index-count is only the fallback when the glTF did
                 // not mark any part as foliage.
-                let keep_only =
-                    impostor_distance > 0.0 && dist > impostor_distance && parts.len() > 1;
-                let drop_heavy =
-                    !keep_only && lod_distance > 0.0 && dist > lod_distance && parts.len() > 1;
+                // A project entry can be a mixed planted patch. Its material
+                // parts are not tree LODs: keep all until distance culling.
+                let legacy_lod = inst.kind < 128;
+                let keep_only = legacy_lod
+                    && impostor_distance > 0.0
+                    && dist > impostor_distance
+                    && parts.len() > 1;
+                let drop_heavy = legacy_lod
+                    && !keep_only
+                    && lod_distance > 0.0
+                    && dist > lod_distance
+                    && parts.len() > 1;
                 let has_leaf = parts.iter().any(|p| p.is_leaf);
                 let cheapest = parts
                     .iter()
@@ -7983,6 +7958,7 @@ impl<G: GameApp> Engine<G> {
                     .enumerate()
                     .max_by_key(|(_, p)| p.index_count)
                     .map(|(i, _)| i);
+                let parts_before = self.foliage_batch.len();
                 for (i, part) in parts.iter().enumerate() {
                     if keep_only {
                         if has_leaf {
@@ -8004,6 +7980,11 @@ impl<G: GameApp> Engine<G> {
                     }
                     self.foliage_batch
                         .push((*part, model * placement * part.local, casts));
+                    counts.submitted_parts = counts.submitted_parts.saturating_add(1);
+                    counts.shadow_parts = counts.shadow_parts.saturating_add(u32::from(casts));
+                }
+                if self.foliage_batch.len() != parts_before {
+                    counts.submitted_instances = counts.submitted_instances.saturating_add(1);
                 }
             }
             self.foliage_batch.sort_by_key(|(part, _, _)| {
@@ -8025,6 +8006,7 @@ impl<G: GameApp> Engine<G> {
             }
         }
         if let Some(r) = self.renderer.as_mut() {
+            r.foliage_submission = counts;
             r.profiler.cpu_end();
         }
     }
@@ -8037,6 +8019,19 @@ impl<G: GameApp> Engine<G> {
     /// allowed onto ground the grass default refuses, and that is a fact about
     /// the cliff.
     fn apply_foliage_palette_defaults(&mut self) {
+        if let Some(entry) = self.project_foliage.get(&self.foliage_brush.kind) {
+            let d = &entry.brush;
+            let b = &mut self.foliage_brush;
+            b.single = d.single;
+            b.density = d.density;
+            b.layer = d.layer;
+            b.min_layer_weight = d.min_layer_weight;
+            b.max_tilt_deg = d.max_tilt_deg;
+            b.max_slope_deg = d.max_slope_deg;
+            b.scale_min = d.scale_min;
+            b.scale_max = d.scale_max;
+            return;
+        }
         let Some(entry) = FOLIAGE_PALETTE.get(self.foliage_brush.kind as usize) else {
             return;
         };
@@ -8053,6 +8048,10 @@ impl<G: GameApp> Engine<G> {
 
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
+        if kind >= 128 {
+            self.ensure_project_palette_mesh(kind);
+            return;
+        }
         let idx = kind as usize;
         if idx >= FOLIAGE_PALETTE.len()
             || self.foliage_meshes[idx].is_some()
@@ -8300,14 +8299,14 @@ impl<G: GameApp> Engine<G> {
             self.scene_dirty = true;
         }
         let total = terrain.painted_foliage.len();
-        let entry = &FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()];
+        let entry_name = self.foliage_kind_name(brush.kind).to_owned();
         if report.placed > 0 {
             info!(
                 "Foliage: painted {} of {} (total {total})",
-                report.placed, entry.name,
+                report.placed, entry_name,
             );
         } else if report.refused() {
-            self.report_refused_foliage_dab(entry.name, &brush, &report);
+            self.report_refused_foliage_dab(&entry_name, &brush, &report);
         }
         true
     }
@@ -10612,8 +10611,12 @@ impl<G: GameApp> Engine<G> {
                     FB::Radius => brush.radius = value.clamp(0.25, 200.0),
                     FB::MaxSlope => brush.max_slope_deg = value.clamp(0.0, 90.0),
                     FB::Kind => {
-                        brush.kind =
-                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                        let kind = value.round().clamp(0.0, 255.0) as u8;
+                        if (kind as usize) < FOLIAGE_PALETTE.len()
+                            || self.project_foliage.contains_key(&kind)
+                        {
+                            brush.kind = kind;
+                        }
                         // The same entry defaults `SelectFoliageKind` applies.
                         // Two ways to change one field that behave differently
                         // is how a slider ends up painting pebbles with a
@@ -11483,7 +11486,10 @@ impl<G: GameApp> Engine<G> {
                 self.foliage_brush.single = !self.foliage_brush.single;
             }
             EditorEvent::SelectFoliageKind(kind) => {
-                self.foliage_brush.kind = (kind as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                if !self.foliage_kind_exists(kind) {
+                    return;
+                }
+                self.foliage_brush.kind = kind;
                 // Trees want one-per-click, ground cover wants a spread, and
                 // debris wants a layer test and a lean. Setting the obvious
                 // default saves a second click almost every time — and reading
@@ -11492,7 +11498,7 @@ impl<G: GameApp> Engine<G> {
                 self.apply_foliage_palette_defaults();
                 info!(
                     "Foliage brush: {}",
-                    FOLIAGE_PALETTE[self.foliage_brush.kind as usize].name
+                    self.foliage_kind_name(self.foliage_brush.kind)
                 );
             }
 
@@ -11984,8 +11990,8 @@ fn apply_gizmo_drag(
 /// Derived from the components actually present rather than from a name
 /// heuristic, which is the difference between `type:light` finding the lights
 /// and `type:light` finding everything called "Lamp".
-fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> {
-    let mut tags = Vec::new();
+fn entity_tags(world: &World, entity: somnium_ecs::Entity, tags: &mut Vec<&'static str>) {
+    tags.clear();
     if world.get::<LightComponent>(entity).is_some() {
         tags.push("light");
     }
@@ -12022,7 +12028,6 @@ fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> 
     {
         tags.push("script");
     }
-    tags
 }
 
 /// The platform command that reads stdin onto the clipboard.
@@ -13005,3 +13010,5 @@ mod import_cache;
 
 #[path = "app_play_input.rs"]
 mod play_input;
+
+include!("app_project_foliage.rs");

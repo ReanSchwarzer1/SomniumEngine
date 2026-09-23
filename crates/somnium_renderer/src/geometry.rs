@@ -2,6 +2,8 @@
 
 use somnium_asset::Vertex;
 
+mod mesh_sdf;
+
 /// Information about an allocated mesh in the global buffers.
 ///
 /// `*_capacity` is the size of the underlying block, which can exceed the
@@ -553,26 +555,17 @@ fn bake_mesh_sdf(vertices: &[Vertex], indices: &[u32]) -> Option<MeshSdfBrick> {
     let bext = (bmax - bmin).max(glam::Vec3::splat(1e-4));
     let n = MESH_SDF_BRICK;
     let mut dist = vec![f32::MAX; (n * n * n) as usize];
-    let tri_count = (indices.len() / 3).min(MESH_SDF_TRI_CAP);
+    // Build once for the same capped triangle sample the brute-force bake used.
+    // A dense imported scene can have hundreds of bricks: walking 1024 triangles
+    // for every one of their 4096 cells used to stall scene restoration for minutes.
+    let triangles = mesh_sdf::TriangleQuery::new(vertices, indices, MESH_SDF_TRI_CAP);
     for z in 0..n {
         for y in 0..n {
             for x in 0..n {
                 let uvw = (glam::Vec3::new(x as f32, y as f32, z as f32) + glam::Vec3::splat(0.5))
                     / n as f32;
                 let p = bmin + uvw * bext;
-                let mut d = f32::MAX;
-                for t in 0..tri_count {
-                    let ia = indices[t * 3] as usize;
-                    let ib = indices[t * 3 + 1] as usize;
-                    let ic = indices[t * 3 + 2] as usize;
-                    if ia >= vertices.len() || ib >= vertices.len() || ic >= vertices.len() {
-                        continue;
-                    }
-                    let a = glam::Vec3::from_array(vertices[ia].position);
-                    let b = glam::Vec3::from_array(vertices[ib].position);
-                    let c = glam::Vec3::from_array(vertices[ic].position);
-                    d = d.min(point_triangle_distance(p, a, b, c));
-                }
+                let d = triangles.distance(p);
                 dist[(z * n * n + y * n + x) as usize] = d;
             }
         }

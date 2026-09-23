@@ -26,6 +26,8 @@ somnium_shader = { workspace = true }
 naga = { version = "30", features = ["wgsl-in"] }
 somnium_asset = { workspace = true }
 rayon        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
 # Phase 25K: decoding the packed terrain layer PNGs at load.
 image        = { workspace = true }
 exr          = { workspace = true }

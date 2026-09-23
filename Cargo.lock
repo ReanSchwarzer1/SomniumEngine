@@ -3969,6 +3969,8 @@ dependencies = [
  "intel_tex_2",
  "naga",
  "rayon",
+ "serde",
+ "serde_json",
  "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
