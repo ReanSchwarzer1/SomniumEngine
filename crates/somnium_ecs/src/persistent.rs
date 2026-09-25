@@ -151,17 +151,39 @@ impl World {
 
     /// Find the live entity carrying a durable id.
     ///
-    /// Linear in the number of entities: this is a load-time and
-    /// tooling-time operation, not a per-frame one. Per-frame code should
-    /// hold the [`Entity`] handle and validate it, which is what the
-    /// generation counter is for.
+    /// Constant time for an indexed id. Tooling resolves every entity this
+    /// way (authoring snapshots, checkpoint restore), which made those paths
+    /// quadratic while this was a plain scan. Hits are checked against the
+    /// live component, so structural edits never have to maintain the index.
+    /// An absent id still costs one scan, exactly as before.
     #[must_use]
     pub fn entity_by_persistent_id(&self, id: PersistentId) -> Option<Entity> {
         if id.is_none() {
             return None;
         }
-        self.entities()
-            .find(|&e| self.get::<PersistentId>(e) == Some(&id))
+        let mut index = self
+            .persistent_index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&entity) = index.get(&id)
+            && self.get::<PersistentId>(entity) == Some(&id)
+        {
+            return Some(entity);
+        }
+        let found = self
+            .entities()
+            .find(|&e| self.get::<PersistentId>(e) == Some(&id));
+        if found.is_some() {
+            // The index was stale: refresh it whole, so resolving N ids costs
+            // one extra scan rather than N. First wins, as the scan does.
+            index.clear();
+            for entity in self.entities() {
+                if let Some(&pid) = self.get::<PersistentId>(entity) {
+                    index.entry(pid).or_insert(entity);
+                }
+            }
+        }
+        found
     }
 }
 
@@ -224,6 +246,28 @@ mod tests {
         world.despawn(a);
         assert_eq!(world.entity_by_persistent_id(id_a), None);
         assert_eq!(world.entity_by_persistent_id(id_b), Some(b));
+    }
+
+    #[test]
+    fn cached_lookup_follows_moved_and_respawned_ids() {
+        let mut world = World::new();
+        let a = world.spawn((Marker,));
+        let b = world.spawn((Marker,));
+        let id = world.ensure_persistent_id(a).unwrap();
+        world.ensure_persistent_id(b).unwrap();
+        assert_eq!(world.entity_by_persistent_id(id), Some(a));
+
+        // Move the id in place; nothing is despawned, so only the hit check
+        // can notice the cached entry is wrong.
+        world.set_persistent_id(a, PersistentId::mint()).unwrap();
+        world.set_persistent_id(b, id).unwrap();
+        assert_eq!(world.entity_by_persistent_id(id), Some(b));
+
+        // A despawned slot may be reused under a new generation.
+        world.despawn(b);
+        assert_eq!(world.entity_by_persistent_id(id), None);
+        let c = world.spawn((id,));
+        assert_eq!(world.entity_by_persistent_id(id), Some(c));
     }
 
     #[test]

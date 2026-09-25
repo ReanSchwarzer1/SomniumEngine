@@ -285,6 +285,9 @@ pub struct World {
     /// Maps entity index → location (archetype + row).
     /// Indexed by `Entity::index()`. Entries for dead entities are stale.
     locations: Vec<Option<EntityLocation>>,
+
+    /// `PersistentId` lookup cache, refreshed lazily and verified on every hit.
+    pub(crate) persistent_index: std::sync::Mutex<HashMap<crate::PersistentId, Entity>>,
 }
 
 impl World {
@@ -296,6 +299,7 @@ impl World {
             archetypes: Vec::new(),
             archetype_map: HashMap::new(),
             locations: Vec::new(),
+            persistent_index: Default::default(),
         }
     }
 

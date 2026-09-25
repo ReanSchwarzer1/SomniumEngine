@@ -4109,6 +4109,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // handed to the profiler at the end of the frame and read by the timing
         // harness during the *next* one; see `GpuProfiler::frame_cpu_ms`.
         let frame_body_started = std::time::Instant::now();
+        // Queries run inside poll_authoring below. Keep in-progress markers
+        // local so diagnostics observes one complete previous frame throughout.
+        let mut frame_timings = [0.0; 6];
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
@@ -4400,7 +4403,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
         // quote about editor cost.
-        self.authoring_frame_timings[0] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[0] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Editor panels");
         }
@@ -4968,7 +4971,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        self.authoring_frame_timings[1] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[1] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Jobs & assets");
         }
@@ -5044,7 +5047,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        self.authoring_frame_timings[2] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[2] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // `on_render` is where a game publishes its active editor/player view
         // through `renderer.set_view`. Stream from that same-frame position,
         // not from a stale ECS settings transform or last frame's renderer.
@@ -5319,10 +5322,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
-        self.authoring_frame_timings[3] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[3] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         self.poll_authoring();
 
-        self.authoring_frame_timings[4] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[4] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // ── Forward log entries to the output log panel ───────────────────────
         {
             let mut entries: Vec<String> = Vec::new();
@@ -5338,7 +5341,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        self.authoring_frame_timings[5] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        frame_timings[5] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.authoring_frame_timings = frame_timings;
         // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
         if let Some(r) = &mut self.renderer {
             r.profiler.frame_cpu_ms = frame_body_started.elapsed().as_secs_f32() * 1000.0;

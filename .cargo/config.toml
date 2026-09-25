@@ -1,0 +1,13 @@
+# Game editors built from this repo (`cargo build --manifest-path games/...`)
+# run from target/debug. Unoptimised, the editor's per-frame passes over a few
+# thousand entities cost 13-17x more than optimised (headless Town probe), which
+# held dressed levels at 7-15 FPS while the GPU finished frames in 6-14 ms.
+# "*" is every non-member package: the whole engine (and Jolt/Luau C++) from a
+# game workspace, third-party crates only from this one.
+[profile.dev.package."*"]
+opt-level = 3
+
+# The game crate is its own workspace member, so "*" misses it, yet its render
+# and update hooks walk every entity each frame. Unmatched here: no effect.
+[profile.dev.package.the_somnus_fracture]
+opt-level = 3

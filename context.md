@@ -717,6 +717,8 @@ The scene layer adds durable authoring rules:
 - Scenes have thumbnails, autosave, crash recovery, and clickable undo history.
 - Assets stored in component fields use `AssetId`; renderer slots remain
   derived runtime state.
+- `World::entity_by_persistent_id` is constant time for live ids: a lazily
+  refreshed index, re-verified against the component on every hit.
 
 `somnium_core` still contains substantial editor orchestration. New work should
 prefer crate-level seams over adding more switch arms to the central app host.
@@ -3033,6 +3035,14 @@ only the render origin and never the authored data. ([MORROWIND-T](<dev records/
 
 ### Measurement
 
+**Every Somnus Fracture frame record before 2026-09-25 came from an
+opt-level 0 build.** The editor sat at 7–15 FPS in dressed levels while the GPU
+finished in 6–14 ms, which read as an MCP or level problem. A headless probe on
+the real Town scene measured per-frame world passes 13–17× faster optimised.
+Separately, each MCP request snapshotted the world through a linear
+`entity_by_persistent_id` per entity: 5.4 s on Town's 6,424 entities, now 124 ms
+optimised. ([TSF record](<games/TheSomnusFracture/dev records/MCP_PERFORMANCE_FIX_2026-09-25.md>), private)
+
 **Screen-grabbing the window produced a frame-delta metric that varied from 0.776
 to 2.018 across three runs of one identical build.** A whole session went into
 chasing that variance instead of the change. `capture.rs` exists because of it,
@@ -3217,6 +3227,11 @@ python tools/census/generate.py --check
 
 Use `-j 1` for the full Windows test run to avoid transient linker file-lock
 failures.
+
+`.cargo/config.toml` sets `opt-level = 3` for non-member packages in `dev`, and
+names the private game crate. From a game workspace that is the whole engine,
+Jolt and Luau; from this workspace it is third-party crates only. Frame numbers
+taken from an unoptimised game editor are not engine costs.
 
 ### Documentation map
 

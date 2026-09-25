@@ -121,13 +121,12 @@ impl AuthoringSession {
     }
     /// Called at request boundaries, never once per rendered frame. Detects edits
     /// from any adapter, including scripts/file reloads that bypass undo.
-    pub fn observe(&mut self, world: &mut World) -> Value {
+    pub fn observe(&mut self, world: &mut World) {
         let doc = authoring_snapshot(world);
         if self.observed.as_ref().is_some_and(|old| old != &doc) {
             self.revision += 1;
         }
-        self.observed = Some(doc.clone());
-        doc
+        self.observed = Some(doc);
     }
     pub fn check_revision(&mut self, world: &mut World, expected: u64) -> Result<()> {
         self.observe(world);
@@ -966,6 +965,17 @@ fn authoring_snapshot(world: &mut World) -> Value {
     let all: Vec<_> = world.entities().collect();
     let mut doc =
         crate::scene_schema::entities_to_json(world, &registry, &all).expect("live world identity");
+    // entities_to_json already wrote every SERIALIZE field from the same
+    // snapshot; only editable fields it skips still need adding.
+    let transient = |f: &somnium_ecs::reflect::FieldSchema| {
+        f.flags.contains(FieldFlags::EDIT)
+            && !f.read_only
+            && !f.flags.contains(FieldFlags::SERIALIZE)
+    };
+    let schemas: Vec<_> = registry
+        .iter()
+        .filter(|s| s.fields.iter().any(transient))
+        .collect();
     for entry in doc["entities"].as_array_mut().expect("entity array") {
         let Some(entity) = entry["persistent_id"]
             .as_str()
@@ -974,7 +984,7 @@ fn authoring_snapshot(world: &mut World) -> Value {
         else {
             continue;
         };
-        for schema in registry.schemas_on(world, entity) {
+        for schema in &schemas {
             let Some(values) = (schema.snapshot)(world, entity) else {
                 continue;
             };
@@ -984,7 +994,7 @@ fn authoring_snapshot(world: &mut World) -> Value {
                 .cloned()
                 .unwrap_or_default();
             for f in &schema.fields {
-                if f.flags.contains(FieldFlags::EDIT) && !f.read_only {
+                if transient(f) {
                     if let Some(v) = values.get(&f.id) {
                         fields.insert(
                             f.name.to_owned(),

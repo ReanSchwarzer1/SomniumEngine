@@ -78,20 +78,34 @@ impl Ord for ComponentId {
     }
 }
 
-/// Inner helper: assigns a unique u32 to each monomorphised `T`.
+/// Assign one process-wide ID per type; cache resolved IDs on each thread.
 fn inner_id<T: 'static>() -> u32 {
     use std::sync::OnceLock;
     static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    // Per-T static, created via monomorphisation.
+    // Function statics are shared across monomorphisations. The global map
+    // remains authoritative, but steady ECS reads must not lock it each time.
     static ID_MAP: OnceLock<std::sync::Mutex<HashMap<TypeId, u32>>> = OnceLock::new();
-    let map = ID_MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = map
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *guard
-        .entry(TypeId::of::<T>())
-        .or_insert_with(|| COUNTER.fetch_add(1, AtomicOrdering::Relaxed))
+    thread_local! {
+        static LOCAL_IDS: std::cell::RefCell<HashMap<TypeId, u32>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    LOCAL_IDS.with(|local| {
+        let type_id = TypeId::of::<T>();
+        if let Some(id) = local.borrow().get(&type_id).copied() {
+            return id;
+        }
+        let id = {
+            let map = ID_MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+            let mut guard = map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard
+                .entry(type_id)
+                .or_insert_with(|| COUNTER.fetch_add(1, AtomicOrdering::Relaxed))
+        };
+        local.borrow_mut().insert(type_id, id);
+        id
+    })
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -266,6 +280,52 @@ mod tests {
         let a = ComponentId::of::<Pos>();
         let b = ComponentId::of::<Vel>();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn component_ids_remain_shared_across_concurrent_cold_threads() {
+        struct ConcurrentA;
+        impl Component for ConcurrentA {}
+        struct ConcurrentB;
+        impl Component for ConcurrentB {}
+
+        let barrier = std::sync::Barrier::new(8);
+        let ids = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|index| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        // Both types are first registered concurrently, in
+                        // different orders, with initially empty local caches.
+                        let (a, b) = if index % 2 == 0 {
+                            (
+                                ComponentId::of::<ConcurrentA>(),
+                                ComponentId::of::<ConcurrentB>(),
+                            )
+                        } else {
+                            let b = ComponentId::of::<ConcurrentB>();
+                            (ComponentId::of::<ConcurrentA>(), b)
+                        };
+                        for _ in 0..128 {
+                            assert_eq!(ComponentId::of::<ConcurrentA>(), a);
+                            assert_eq!(ComponentId::of::<ConcurrentB>(), b);
+                        }
+                        (a, b)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let expected = (
+            ComponentId::of::<ConcurrentA>(),
+            ComponentId::of::<ConcurrentB>(),
+        );
+        assert_ne!(expected.0, expected.1);
+        assert!(ids.iter().all(|ids| *ids == expected));
     }
 
     #[test]

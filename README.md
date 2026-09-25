@@ -177,6 +177,12 @@ cargo build --workspace
 cargo run -p hello_engine        # runnable editor demo
 ```
 
+`.cargo/config.toml` optimises every non-member package in `dev` builds. A game
+built from this repo (`cargo build --manifest-path games/<game>/Cargo.toml`)
+therefore gets an optimised engine, Jolt and Luau in `target/debug`, while its
+own crate keeps fast rebuilds. The unoptimised editor had held dressed levels at
+7–15 FPS on a GPU that finished frames in 6–14 ms.
+
 Running the gates:
 
 ```sh
