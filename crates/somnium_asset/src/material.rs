@@ -139,6 +139,10 @@ pub struct MaterialAsset {
     pub metallic_roughness_map: AssetId,
     pub occlusion_map: AssetId,
     pub emissive_map: AssetId,
+    /// Parallax-occlusion height (white = high), or `NONE`.
+    pub height_map: AssetId,
+    /// Relief depth in metres spanned by the height map's full range.
+    pub height_depth: f32,
 }
 
 impl Default for MaterialAsset {
@@ -170,6 +174,8 @@ impl Default for MaterialAsset {
             metallic_roughness_map: AssetId::NONE,
             occlusion_map: AssetId::NONE,
             emissive_map: AssetId::NONE,
+            height_map: AssetId::NONE,
+            height_depth: 0.02,
         }
     }
 }
@@ -204,6 +210,10 @@ pub fn material_asset_schema() -> ComponentSchema {
             metallic_roughness_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             occlusion_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
             emissive_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE },
+            height_map { group: "Textures", asset_kind_mask: ASSET_KIND_TEXTURE,
+                doc: "Parallax-occlusion height, white high. Leave empty for flat surfaces." },
+            height_depth { group: "Textures", min: 0.0, max: 0.2, step: 0.005, precision: 3, unit: "m",
+                doc: "Relief depth the height map spans, in metres: about 0.02 for brick, 0.04 for rubble." },
         }
     }
 }
@@ -466,13 +476,14 @@ mod tests {
     #[test]
     fn schema_is_complete_and_texture_slots_reject_non_textures() {
         let schema = material_asset_schema();
-        assert_eq!(schema.fields.len(), 19);
+        // 19 plus the parallax height map and its depth.
+        assert_eq!(schema.fields.len(), 21);
         let texture_fields: Vec<_> = schema
             .fields
             .iter()
             .filter(|field| field.ty == FieldType::Asset)
             .collect();
-        assert_eq!(texture_fields.len(), 5);
+        assert_eq!(texture_fields.len(), 6);
         assert!(
             texture_fields
                 .iter()
@@ -544,6 +555,8 @@ mod tests {
                 emissive_intensity: 1.0,
                 emissive_map: None,
                 double_sided: false,
+                height_map: None,
+                height_depth: 0.0,
             }],
             ..Default::default()
         };

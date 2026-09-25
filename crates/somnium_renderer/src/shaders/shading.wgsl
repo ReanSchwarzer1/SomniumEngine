@@ -350,6 +350,66 @@ const ABLATE_TERRAIN: u32 = 4u;
 /// is no longer required.
 
 
+/// Parallax-occlusion mapping for a mesh material with a height map.
+///
+/// Marches the height field along the view ray below the surface and returns
+/// the UV where the ray meets it. Built on the triangle's own world-space
+/// `dP/du` and `dP/dv`, not the shading TBN, so it is independent of the
+/// normal-map handedness convention and `depth_m` is a real depth in metres
+/// whatever the mesh's UV density.
+///
+/// `view_ws` points from the surface to the eye. Heights are white = high, so
+/// the relief carves down to `depth_m` below the triangle's plane. Returns
+/// `uv` unchanged when the view is edge-on or the step would be degenerate.
+fn parallax_uv(
+    map: i32,
+    uv: vec2<f32>,
+    view_ws: vec3<f32>,
+    normal: vec3<f32>,
+    dpdu: vec3<f32>,
+    dpdv: vec3<f32>,
+    depth_m: f32,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> vec2<f32> {
+    let vn = dot(view_ws, normal);
+    if vn <= 0.02 {
+        return uv;
+    }
+    let lateral = view_ws - normal * vn;
+    // Where a full-depth descent along the view ray lands, in UV.
+    let travel = -lateral * (depth_m / max(vn, 0.12));
+    let full = vec2<f32>(
+        dot(travel, dpdu) / max(dot(dpdu, dpdu), 1.0e-12),
+        dot(travel, dpdv) / max(dot(dpdv, dpdv), 1.0e-12),
+    );
+    if dot(full, full) < 1.0e-12 {
+        return uv;
+    }
+    // Grazing views need more layers; head-on views barely move. Bounded for
+    // cost: streets and walls within 30 m all run this.
+    let steps = mix(18.0, 6.0, clamp(vn, 0.0, 1.0));
+    let step_uv = full / steps;
+    let layer_step = 1.0 / steps;
+    var cur = uv;
+    var layer = 0.0;
+    var depth = 1.0 - textureSampleGrad(textures[map], default_sampler, cur, ddx, ddy).r;
+    for (var i = 0; i < 20; i = i + 1) {
+        if layer >= depth || layer >= 1.0 {
+            break;
+        }
+        cur = cur + step_uv;
+        layer = layer + layer_step;
+        depth = 1.0 - textureSampleGrad(textures[map], default_sampler, cur, ddx, ddy).r;
+    }
+    // Refine between the last two samples by intersecting their depth segments.
+    let prev = cur - step_uv;
+    let after = depth - layer;
+    let before = (1.0 - textureSampleGrad(textures[map], default_sampler, prev, ddx, ddy).r) - (layer - layer_step);
+    let w = clamp(after / (after - before + 1.0e-6), 0.0, 1.0);
+    return mix(cur, prev, w);
+}
+
 /// Perspective-correct barycentric at an NDC sample (Phase 25N).
 fn vis_barycentric(
     ndc0: vec2<f32>, ndc1: vec2<f32>, ndc2: vec2<f32>,
@@ -1337,7 +1397,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv0 = vec2<f32>(v0.u, v0.v);
     let uv1 = vec2<f32>(v1.u, v1.v);
     let uv2 = vec2<f32>(v2.u, v2.v);
-    let uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+    var uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
 
     // Phase 25N: analytic UV gradients. Implicit dpdx across a vis-buffer
     // 2×2 quad straddles unrelated triangles, so foliage mips jump per pixel.
@@ -1501,6 +1561,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let handedness = select(-1.0, 1.0, tbn_det >= 0.0);
     let bitangent = cross(geo_normal, tangent) * handedness;
     let tbn       = mat3x3<f32>(tangent, bitangent, geo_normal);
+
+    // Parallax occlusion: every map below is sampled at the displaced UV.
+    // Faded out past 30 m, where the relief is sub-pixel and the march is waste.
+    if material.height_map >= 0 && material.height_depth > 0.0 && abs(tbn_det) > 1.0e-12
+        && distance(hit_point, view.camera_pos) < 30.0 {
+        let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
+        let dpdv = (edge1 * duv0.x - edge0 * duv1.x) / tbn_det;
+        uv = parallax_uv(material.height_map, uv, view_dir_early, geo_normal, dpdu, dpdv,
+            material.height_depth, uv_ddx, uv_ddy);
+    }
 
     // PBR surface setup
     var surface: Surface;

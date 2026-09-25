@@ -63,6 +63,11 @@ struct Material {
     terrain_index: i32,
     _pad1: f32,
     _pad2: f32,
+    // Parallax-occlusion height map and relief depth (metres); see `pool.rs`.
+    height_map: i32,
+    height_depth: f32,
+    _hpad0: f32,
+    _hpad1: f32,
 }
 
 struct View {

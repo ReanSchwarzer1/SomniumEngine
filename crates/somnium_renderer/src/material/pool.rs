@@ -51,8 +51,14 @@ pub struct GpuMaterial {
     /// material beside roughness rather than on the weather. Occupies what was
     /// padding, so the struct's size and alignment are unchanged.
     pub porosity: f32,
-    /// Normal-map XY strength, stored in the former tail padding; stride stays 80 bytes.
+    /// Normal-map XY strength, stored in the former tail padding.
     pub normal_scale: f32,
+    /// Bindless index of the parallax-occlusion height map (white = high), or -1.
+    pub height_map: i32,
+    /// Relief depth in metres spanned by the height map. Zero disables parallax.
+    pub height_depth: f32,
+    /// Keeps the stride at 96, a multiple of `base_color`'s 16-byte alignment.
+    pub height_pad: [f32; 2],
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -121,6 +127,9 @@ impl GpuMaterial {
             terrain_index: -1,
             porosity: asset.porosity,
             normal_scale: asset.normal_scale,
+            height_map: resolve_texture(asset.height_map),
+            height_depth: asset.height_depth,
+            height_pad: [0.0; 2],
         }
     }
 }
@@ -335,7 +344,8 @@ mod material_flag_tests {
         assert_eq!(gpu.emissive, [1.0, 2.0, 4.0]);
         assert_eq!(gpu.normal_scale, 0.2);
         assert_eq!(gpu.flags & MATERIAL_FLAG_DOUBLE_SIDED, 1);
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+        assert_eq!(gpu.height_map, -1);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 96);
     }
 
     #[test]
@@ -372,7 +382,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_gpu_material_is_the_80_byte_shader_layout() {
+    fn the_gpu_material_is_the_96_byte_shader_layout() {
         // Must match `Material` in shading.wgsl, visibility.wgsl, shadow.wgsl
         // and transparent.wgsl. A mismatch does not fail validation; the shader
         // simply reads the wrong words, which is why this is pinned.
@@ -384,7 +394,8 @@ mod material_flag_tests {
         // a multiple of the element alignment — 16 here, because of
         // `base_color` — so it rounds to 64. The padding is declared explicitly
         // rather than left implicit for the same reason this test exists.
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+        // 96 after the parallax height map and its depth (two words of pad).
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 96);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
     }
 

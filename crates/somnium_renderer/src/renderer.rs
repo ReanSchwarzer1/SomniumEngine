@@ -1221,12 +1221,17 @@ impl SomniumRenderer {
 
     /// Upload worker-decoded RGBA8 pixels into the bindless pool. Material
     /// asset jobs use this main-thread half after file IO and decode complete.
+    ///
+    /// `colour` selects sRGB decoding for albedo and emissive maps, as the
+    /// glTF import path already does; data maps (normal, ORM, height) stay
+    /// linear. Uploading a colour map as linear washes it out.
     pub fn upload_material_texture(
         &mut self,
         ctx: &RenderContext,
         rgba: &[u8],
         width: u32,
         height: u32,
+        colour: bool,
     ) -> i32 {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Material Asset Texture"),
@@ -1238,7 +1243,11 @@ impl SomniumRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: if colour {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -1320,6 +1329,7 @@ impl SomniumRenderer {
                 m.normal_map,
                 m.metallic_roughness_map,
                 m.occlusion_map,
+                m.height_map,
             ]
             .into_iter()
             .flatten()
@@ -1337,6 +1347,11 @@ impl SomniumRenderer {
             }
         }
 
+        // `write_texture` stages a CPU copy until the next submit. A scene load
+        // uploads every source before any frame submits, so unflushed staging
+        // grew with the whole level (6 GB for Town) and ran the device out of
+        // memory. Flushing every 256 MB bounds it.
+        let mut staged = 0_u64;
         let texture_indices: Vec<Option<i32>> = scene
             .textures
             .iter()
@@ -1416,6 +1431,13 @@ impl SomniumRenderer {
                     );
                 }
 
+                staged += levels.iter().map(|(_, _, data)| data.len() as u64).sum::<u64>();
+                if staged >= STAGING_FLUSH_BYTES {
+                    ctx.queue.submit(std::iter::empty());
+                    self.wait_gpu(ctx);
+                    staged = 0;
+                }
+
                 let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
                 let slot = self.add_texture(ctx, view) as i32;
                 self.imported_texture_slots.insert(key, slot);
@@ -1469,6 +1491,10 @@ impl SomniumRenderer {
                         } else {
                             0
                         },
+                        // Linear, not colour: listed with the data maps above.
+                        height_map: resolve_tex(mat.height_map),
+                        height_depth: mat.height_depth,
+                        height_pad: [0.0; 2],
                     },
                 );
                 // Phase 17D: remember double-sidedness so the visibility pass can
@@ -2587,6 +2613,9 @@ impl SomniumRenderer {
                 terrain_index: terrain.terrain_index as i32,
                 porosity: 0.5,
                 normal_scale: 1.0,
+                height_map: -1,
+                height_depth: 0.0,
+                height_pad: [0.0; 2],
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -5907,6 +5936,9 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
     }
     *hash = hash.wrapping_add(fingerprint);
 }
+
+/// Staged texture bytes after which an import submits and waits.
+const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Content and interpretation both identify a reusable GPU image.
 fn imported_texture_key(texture: &somnium_asset::LoadedTexture, colour: bool) -> [u8; 32] {

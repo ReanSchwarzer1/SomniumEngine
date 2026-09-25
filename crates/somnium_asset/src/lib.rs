@@ -130,7 +130,17 @@ pub struct LoadedMaterial {
     pub emissive_map: Option<usize>,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
     pub double_sided: bool,
+    /// Parallax-occlusion height (white = high), found beside the colour map
+    /// as `<stem>_disp_*`. glTF has no slot for it, so like `_arm` and
+    /// `_alpha` the filename is the convention that states it.
+    pub height_map: Option<usize>,
+    /// Relief depth in metres spanned by the height map: `<stem>_disp.json`
+    /// `{"depth_m": …}` beside it, else [`DEFAULT_HEIGHT_DEPTH_M`].
+    pub height_depth: f32,
 }
+
+/// Relief assumed for a height map with no depth sidecar: brick-joint scale.
+pub const DEFAULT_HEIGHT_DEPTH_M: f32 = 0.02;
 
 /// A single mesh primitive (position + normal + UV geometry + triangle indices).
 pub struct LoadedMesh {
@@ -233,6 +243,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             emissive_intensity: mat.emissive_strength().unwrap_or(1.0),
             emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
             double_sided: mat.double_sided(),
+            height_map: None,
+            height_depth: 0.0,
             albedo_map: pbr
                 .base_color_texture()
                 .map(|t| t.texture().source().index()),
@@ -260,6 +272,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             m.occlusion_map = m.metallic_roughness_map;
         }
     }
+
+    attach_sidecar_height(&document, base_dir, &mut scene);
 
     // A sidecar mask means the albedo is a cutout atlas, so the material has
     // to be alpha-tested even though the glTF called it opaque.
@@ -302,6 +316,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             emissive_intensity: 1.0,
             emissive_map: None,
             double_sided: false,
+            height_map: None,
+            height_depth: 0.0,
         });
     }
 
@@ -619,6 +635,59 @@ fn attach_sidecar_alpha(
     }
 
     masked
+}
+
+/// Give each material whose colour map is `<stem>_diff_*` the height map
+/// `<stem>_disp_*` beside it, decoded as linear grey into the red channel.
+fn attach_sidecar_height(document: &gltf::Document, base_dir: &Path, scene: &mut LoadedScene) {
+    let mut loaded: HashMap<usize, (usize, f32)> = HashMap::new();
+    for m in &mut scene.materials {
+        let Some(albedo) = m.albedo_map else { continue };
+        if let Some(&(index, depth)) = loaded.get(&albedo) {
+            m.height_map = Some(index);
+            m.height_depth = depth;
+            continue;
+        }
+        let Some(image) = document.images().nth(albedo) else { continue };
+        let gltf::image::Source::Uri { uri, .. } = image.source() else { continue };
+        let Some((path, depth)) = sidecar_height_path(base_dir, uri) else { continue };
+        let grey = match image::open(&path) {
+            Ok(img) => img.into_luma8(),
+            Err(e) => {
+                warn!("Height sidecar {path:?} failed to decode: {e}");
+                continue;
+            }
+        };
+        let (width, height) = grey.dimensions();
+        let data = grey.pixels().flat_map(|p| [p.0[0], p.0[0], p.0[0], 255]).collect();
+        scene.textures.push(LoadedTexture { data, width, height });
+        let index = scene.textures.len() - 1;
+        loaded.insert(albedo, (index, depth));
+        m.height_map = Some(index);
+        m.height_depth = depth;
+    }
+}
+
+/// `<dir>/<stem>_disp_*` beside `<stem>_diff_*`, and its depth in metres.
+fn sidecar_height_path(base_dir: &Path, uri: &str) -> Option<(std::path::PathBuf, f32)> {
+    let uri = uri.replace("%20", " ");
+    let (dir, file) = match uri.rsplit_once('/') {
+        Some((d, f)) => (base_dir.join(d), f.to_string()),
+        None => (base_dir.to_path_buf(), uri.clone()),
+    };
+    let (stem, _) = file.split_once("_diff")?;
+    let prefix = format!("{stem}_disp_");
+    let path = std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix) && (n.ends_with(".png") || n.ends_with(".jpg")))
+    })?;
+    let depth = std::fs::read_to_string(dir.join(format!("{stem}_disp.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("depth_m").and_then(serde_json::Value::as_f64))
+        .map_or(DEFAULT_HEIGHT_DEPTH_M, |d| d as f32);
+    Some((path, depth))
 }
 
 /// Resolve `<dir>/<stem-with-_diff_-swapped-for-_alpha_>.png`, if it exists.
@@ -1047,5 +1116,27 @@ mod normal_scale_tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(root.join("normal.png")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod height_sidecar_tests {
+    use super::*;
+
+    #[test]
+    fn a_disp_map_beside_the_colour_map_is_found_with_its_depth_note() {
+        let root = std::env::temp_dir().join(format!("somnium-height-sidecar-{}", std::process::id()));
+        let dir = root.join("textures");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("brick_disp_1k.png"), b"png").unwrap();
+        let (path, depth) = sidecar_height_path(&root, "textures/brick_diff_2k.jpg").expect("found");
+        assert!(path.ends_with("brick_disp_1k.png"));
+        assert_eq!(depth, DEFAULT_HEIGHT_DEPTH_M, "no note: the default depth");
+        std::fs::write(dir.join("brick_disp.json"), br#"{"depth_m": 0.035}"#).unwrap();
+        let (_, depth) = sidecar_height_path(&root, "textures/brick_diff_2k.jpg").expect("found");
+        assert!((depth - 0.035).abs() < 1e-6, "the note sets the depth");
+        assert!(sidecar_height_path(&root, "textures/stone_diff_2k.jpg").is_none(), "no map, no parallax");
+        assert!(sidecar_height_path(&root, "textures/brick.png").is_none(), "only _diff colour maps qualify");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

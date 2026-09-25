@@ -65,6 +65,11 @@ struct Material {
     // Phase CONTROL-N: water uptake, 0..1. See `pool.rs`.
     porosity: f32,
     normal_scale: f32,
+    // Parallax-occlusion height map and relief depth (metres); see `pool.rs`.
+    height_map: i32,
+    height_depth: f32,
+    _hpad0: f32,
+    _hpad1: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).

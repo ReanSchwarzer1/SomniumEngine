@@ -606,6 +606,9 @@ impl VoxelTerrain {
                 terrain_index: -1,
                 porosity: 0.5,
                 normal_scale: 1.0,
+                height_map: -1,
+                height_depth: 0.0,
+                height_pad: [0.0; 2],
             },
         );
 
@@ -2478,6 +2481,9 @@ impl GameApp for HelloGame {
                         terrain_index: -1,
                         porosity: 0.5,
                         normal_scale: 1.0,
+                        height_map: -1,
+                        height_depth: 0.0,
+                        height_pad: [0.0; 2],
                     },
                 );
 
@@ -3198,6 +3204,9 @@ fn spawn_procedural_scene(
             terrain_index: -1,
             porosity: 0.5,
             normal_scale: 1.0,
+            height_map: -1,
+            height_depth: 0.0,
+            height_pad: [0.0; 2],
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -3218,6 +3227,9 @@ fn spawn_procedural_scene(
             terrain_index: -1,
             porosity: 0.5,
             normal_scale: 1.0,
+            height_map: -1,
+            height_depth: 0.0,
+            height_pad: [0.0; 2],
         },
     );
 
@@ -3303,6 +3315,9 @@ fn spawn_procedural_scene(
                 terrain_index: -1,
                 porosity: 0.5,
                 normal_scale: 1.0,
+                height_map: -1,
+                height_depth: 0.0,
+                height_pad: [0.0; 2],
             },
         )
     };

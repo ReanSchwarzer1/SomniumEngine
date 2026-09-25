@@ -649,6 +649,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(buoyant_vessel_schema());
     registry.register(camera_settings_schema());
     registry.register(decal_schema());
+    registry.register(light_flicker_schema());
     registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
@@ -1128,6 +1129,24 @@ fn decal_schema() -> ComponentSchema {
     }
 }
 
+/// A multiplier on a local light's output; the light itself is never written.
+fn light_flicker_schema() -> ComponentSchema {
+    component_schema! {
+        crate::light_flicker::LightFlickerComponent as "somnium.LightFlicker", display "Light Flicker", version 1,
+        fields {
+            enabled { group: "Flicker" },
+            strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Flicker",
+                doc: "Depth of the continuous buzz, as a fraction of the light's output." },
+            rate { min: 0.0, soft_max: 4.0, step: 0.05, precision: 2, unit: "Hz", group: "Flicker",
+                doc: "Average stutter bursts per second." },
+            dropout { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Flicker",
+                doc: "Chance that a burst takes the fixture nearly dark." },
+            seed { step: 1.0, precision: 1, group: "Flicker",
+                doc: "Decorrelates fixtures that share every other setting." },
+        }
+    }
+}
+
 fn voxel_terrain_schema() -> ComponentSchema {
     component_schema! {
         VoxelTerrainComponent as "somnium.VoxelTerrain", display "Voxel Terrain", version 1,
@@ -1336,7 +1355,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 41);
+        assert_eq!(registry.len(), 42);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1354,6 +1373,7 @@ mod tests {
                 "somnium.ImportedMesh",
                 "somnium.Interactable",
                 "somnium.Light",
+                "somnium.LightFlicker",
                 "somnium.Material",
                 "somnium.Mesh",
                 "somnium.MeshKind",

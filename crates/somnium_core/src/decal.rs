@@ -84,6 +84,35 @@ impl Default for DecalComponent {
     }
 }
 
+/// Keep the `cap` items nearest the camera, in their original order.
+///
+/// The renderer draws at most `MAX_DECALS` and used to keep whichever came
+/// first in ECS order, so a level with more decals than that lost an arbitrary
+/// set — often the ones in front of the player. Distance decides instead, and
+/// the survivors keep their relative order because the renderer's stable
+/// priority sort takes ties from input order; reordering by distance would make
+/// two overlapping equal-priority decals swap as the camera moved.
+pub fn keep_nearest<T>(items: Vec<T>, cap: usize, distance_sq: impl Fn(&T) -> f32) -> Vec<T> {
+    if items.len() <= cap {
+        return items;
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    if cap > 0 {
+        order.select_nth_unstable_by(cap - 1, |&a, &b| {
+            distance_sq(&items[a]).total_cmp(&distance_sq(&items[b]))
+        });
+    }
+    let mut keep = vec![false; items.len()];
+    for &index in &order[..cap] {
+        keep[index] = true;
+    }
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, kept)| kept.then_some(item))
+        .collect()
+}
+
 /// The default box a freshly dropped decal gets, in metres.
 ///
 /// Two metres across and half a metre of projection depth: big enough to see
@@ -146,6 +175,16 @@ mod tests {
         assert!(t.rotation.is_finite());
         assert!(t.translation.is_finite());
         assert!(t.scale.is_finite());
+    }
+
+    #[test]
+    fn over_the_cap_the_nearest_survive_in_their_original_order() {
+        let distances = [9.0_f32, 1.0, 7.0, 2.0, 3.0];
+        let kept = keep_nearest(distances.to_vec(), 3, |d| d * d);
+        assert_eq!(kept, vec![1.0, 2.0, 3.0]);
+        let under = keep_nearest(distances.to_vec(), 8, |d| d * d);
+        assert_eq!(under, distances.to_vec(), "under the cap nothing is dropped or moved");
+        assert!(keep_nearest(distances.to_vec(), 0, |d| d * d).is_empty());
     }
 
     #[test]

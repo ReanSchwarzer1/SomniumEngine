@@ -1959,18 +1959,37 @@ impl<G: GameApp> Engine<G> {
 
     /// Reconstruct every authored material reference after scene load, without
     /// requiring the entity to be selected first.
+    ///
+    /// Runs every frame, so it walks the world once: each asset resolves once
+    /// however many entities share it, and only stale bindings are written.
+    /// Resolving per referencing entity, each walking the whole world, cost
+    /// 70 ms a frame on Town (323 decals x 10,167 entities).
     fn sync_authored_material_components(&mut self) {
-        let assets: Vec<_> = self
+        let bound: Vec<_> = self
             .world
             .entities()
-            .filter_map(|entity| self.world.get::<MaterialComponent>(entity))
-            .map(|material| material.asset)
-            .filter(|asset| *asset != somnium_asset::database::AssetId::NONE)
+            .filter_map(|entity| Some((entity, *self.world.get::<MaterialComponent>(entity)?)))
+            .filter(|(_, material)| material.asset != somnium_asset::database::AssetId::NONE)
             .collect();
-        for asset in assets {
-            if self.load_material_document(asset) {
-                self.queue_material_textures(asset);
-                self.ensure_material_runtime(asset);
+        let mut runtime = std::collections::HashMap::new();
+        for (_, material) in &bound {
+            if runtime.contains_key(&material.asset) {
+                continue;
+            }
+            let id = if self.load_material_document(material.asset) {
+                self.queue_material_textures(material.asset);
+                self.resolve_material_runtime(material.asset)
+            } else {
+                None
+            };
+            runtime.insert(material.asset, id);
+        }
+        for (entity, material) in bound {
+            if let Some(Some(id)) = runtime.get(&material.asset).copied()
+                && id != material.runtime_id
+                && let Some(component) = self.world.get_mut::<MaterialComponent>(entity)
+            {
+                component.runtime_id = id;
             }
         }
     }
@@ -5481,6 +5500,7 @@ impl<G: GameApp> Engine<G> {
             document.asset.metallic_roughness_map,
             document.asset.occlusion_map,
             document.asset.emissive_map,
+            document.asset.height_map,
         ];
         self.queue_texture_ids(&slots);
     }
@@ -5556,15 +5576,24 @@ impl<G: GameApp> Engine<G> {
     }
 
     fn ensure_material_runtime(&mut self, asset_id: somnium_asset::database::AssetId) {
-        let Some(document) = self.material_documents.get(&asset_id) else {
+        let Some(runtime_id) = self.resolve_material_runtime(asset_id) else {
             return;
         };
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        let Some(ctx) = self.render_ctx.as_ref() else {
-            return;
-        };
+        let entities: Vec<_> = self.world.entities().collect();
+        for entity in entities {
+            if let Some(material) = self.world.get_mut::<MaterialComponent>(entity)
+                && material.asset == asset_id
+            {
+                material.runtime_id = runtime_id;
+            }
+        }
+    }
+
+    /// The renderer slot for an authored material, allocated on first use.
+    fn resolve_material_runtime(&mut self, asset_id: somnium_asset::database::AssetId) -> Option<u32> {
+        let document = self.material_documents.get(&asset_id)?;
+        let renderer = self.renderer.as_mut()?;
+        let ctx = self.render_ctx.as_ref()?;
         let runtime_id = if let Some(runtime_id) = self.material_runtime.get(&asset_id).copied() {
             runtime_id
         } else {
@@ -5581,15 +5610,7 @@ impl<G: GameApp> Engine<G> {
             self.material_runtime.insert(asset_id, runtime_id);
             runtime_id
         };
-
-        let entities: Vec<_> = self.world.entities().collect();
-        for entity in entities {
-            if let Some(material) = self.world.get_mut::<MaterialComponent>(entity)
-                && material.asset == asset_id
-            {
-                material.runtime_id = runtime_id;
-            }
-        }
+        Some(runtime_id)
     }
 
     /// Detect reflected edits (including undo/redo), update the shared runtime
@@ -5731,6 +5752,11 @@ impl<G: GameApp> Engine<G> {
             self.material_texture_jobs.remove(&texture_id);
             match result {
                 Ok(texture) => {
+                    // Colour maps decode as sRGB; any other slot keeps the bytes linear.
+                    let colour = self.material_documents.values().any(|document| {
+                        document.asset.albedo_map == texture_id
+                            || document.asset.emissive_map == texture_id
+                    });
                     if let (Some(renderer), Some(ctx)) =
                         (self.renderer.as_mut(), self.render_ctx.as_ref())
                     {
@@ -5739,6 +5765,7 @@ impl<G: GameApp> Engine<G> {
                             &texture.data,
                             texture.width,
                             texture.height,
+                            colour,
                         );
                         self.material_textures.insert(texture_id, slot);
                     }
@@ -5753,6 +5780,7 @@ impl<G: GameApp> Engine<G> {
                                 material.metallic_roughness_map,
                                 material.occlusion_map,
                                 material.emissive_map,
+                                material.height_map,
                             ]
                             .contains(&texture_id)
                         })
@@ -7223,6 +7251,12 @@ impl<G: GameApp> Engine<G> {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        let camera = renderer.camera_pos;
+        let collected = crate::decal::keep_nearest(
+            collected,
+            somnium_renderer::pass::decal::MAX_DECALS,
+            |(transform, _, _)| transform.w_axis.truncate().distance_squared(camera),
+        );
         renderer.decals.clear();
         for (transform, decal, material) in collected {
             let source = material.and_then(|id| renderer.materials_pool.get(id));
@@ -10145,6 +10179,9 @@ impl<G: GameApp> Engine<G> {
                                     terrain_index: -1,
                                     porosity: 0.5,
                                     normal_scale: 1.0,
+                                    height_map: -1,
+                                    height_depth: 0.0,
+                                    height_pad: [0.0; 2],
                                 },
                             );
                             self.default_material_id = Some(id);

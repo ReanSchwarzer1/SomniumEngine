@@ -60,6 +60,8 @@ pub mod config;
 pub mod context;
 /// Phase CONTROL-O: deferred decals.
 pub mod decal;
+/// Failing-fixture flicker applied to local lights at submission.
+pub mod light_flicker;
 pub mod editor_commands;
 mod editor_gizmo;
 mod foliage_palette;
