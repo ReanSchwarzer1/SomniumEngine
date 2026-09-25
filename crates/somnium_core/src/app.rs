@@ -12170,7 +12170,10 @@ fn ray_aabb_distance(
         near = near.max(t0.min(t1));
         far = far.min(t0.max(t1));
     }
-    (far >= near.max(0.0)).then(|| near.max(0.0))
+    // A camera inside a box (a town-wide merged mesh, the room it stands in)
+    // must not report distance zero, or that box wins every click. Its exit
+    // is where the ray actually meets the enclosing surface.
+    (far >= near.max(0.0)).then(|| if near >= 0.0 { near } else { far })
 }
 
 #[cfg(test)]
@@ -12415,6 +12418,16 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+        // A town-wide mesh enclosing the camera ranks by its far side, so the
+        // small prop actually under the cursor still wins.
+        let enclosing = ray_aabb_distance(
+            origin,
+            forward,
+            glam::Vec3::splat(-50.0),
+            glam::Vec3::splat(50.0),
+        );
+        assert_eq!(enclosing, Some(50.0));
+        assert!(near.unwrap() < enclosing.unwrap());
     }
 
     #[test]
@@ -12709,10 +12722,11 @@ mod viewport_control_tests {
         assert_eq!(super::gizmo_anchor(&somnium_ecs::World::new(), None), None);
     }
 
-    /// A ray that starts inside a box hits it at zero, not at a negative
-    /// distance — otherwise a camera inside geometry would sort it last.
+    /// A ray that starts inside a box hits it where it leaves, never at a
+    /// negative distance (the box stays pickable) and never at zero (a
+    /// town-wide mesh around the camera would otherwise win every click).
     #[test]
-    fn a_ray_starting_inside_a_box_hits_it_at_zero() {
+    fn a_ray_starting_inside_a_box_hits_it_at_its_exit() {
         assert_eq!(
             ray_aabb_distance(
                 glam::Vec3::ZERO,
@@ -12720,7 +12734,7 @@ mod viewport_control_tests {
                 glam::Vec3::splat(-1.0),
                 glam::Vec3::splat(1.0),
             ),
-            Some(0.0)
+            Some(1.0)
         );
     }
 
