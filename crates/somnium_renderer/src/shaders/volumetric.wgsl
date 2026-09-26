@@ -102,6 +102,90 @@ struct VolumetricParams {
 @group(0) @binding(8) var vol_history_sampler: sampler;
 @group(0) @binding(9) var grain_masks: texture_2d_array<f32>;
 
+// TOWN-FOG: the clustered local lights, as `global_pool.wgsl` declares them
+// (the Rust `cluster.rs` structs are the single source both mirror), so
+// street lamps and lanterns scatter in the fog instead of only the sun.
+struct VolLocalLight {
+    position_ws: vec3<f32>,
+    range: f32,
+    color: vec3<f32>,
+    light_type: u32,
+    direction_ws: vec3<f32>,
+    spot_cos_outer: f32,
+    spot_cos_inner: f32,
+    radius: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+struct VolClusterOffset {
+    offset: u32,
+    count: u32,
+}
+struct VolClusterParams {
+    grid_width: u32,
+    grid_height: u32,
+    num_slices: u32,
+    tile_size: u32,
+    near: f32,
+    far: f32,
+    shading_mode: u32,
+    num_local_lights: u32,
+}
+@group(0) @binding(10) var<storage, read> vol_lights: array<VolLocalLight>;
+@group(0) @binding(11) var<storage, read> vol_light_indices: array<u32>;
+@group(0) @binding(12) var<storage, read> vol_cluster_offsets: array<VolClusterOffset>;
+@group(0) @binding(13) var<storage, read> vol_cluster: VolClusterParams;
+
+/// Lights read per froxel step; the cluster list is already culled to the cell.
+const VOL_MAX_LOCAL: u32 = 12u;
+/// Artistic gain on local-light scattering. Physically 1; the height-falloff
+/// medium is a bulk average, and the damp air round a lamp in a sea fog is what
+/// the eye reads, so the halos are lifted until they read at street distance.
+const VOL_LOCAL_GAIN: f32 = 3.0;
+
+/// In-scattered radiance per unit fog density from the local lights of the
+/// cluster containing `world_pos`, seen along `ray_dir`.
+fn local_inscatter(world_pos: vec3<f32>, ray_dir: vec3<f32>, uv: vec2<f32>, view_depth: f32) -> vec3<f32> {
+    if vol_cluster.num_local_lights == 0u {
+        return vec3<f32>(0.0);
+    }
+    let grid = vec2<f32>(f32(vol_cluster.grid_width), f32(vol_cluster.grid_height));
+    let tile = min(vec2<u32>(uv * grid), vec2<u32>(vol_cluster.grid_width - 1u, vol_cluster.grid_height - 1u));
+    var slice = 0u;
+    if view_depth >= vol_cluster.far {
+        slice = vol_cluster.num_slices - 1u;
+    } else if view_depth > vol_cluster.near {
+        slice = min(u32(f32(vol_cluster.num_slices) * log(view_depth / vol_cluster.near)
+            / log(vol_cluster.far / vol_cluster.near)), vol_cluster.num_slices - 1u);
+    }
+    let cell = vol_cluster_offsets[tile.x + tile.y * vol_cluster.grid_width
+        + slice * vol_cluster.grid_width * vol_cluster.grid_height];
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < min(cell.count, VOL_MAX_LOCAL); i = i + 1u) {
+        let l = vol_lights[vol_light_indices[cell.offset + i]];
+        if l.light_type > 1u {
+            continue; // area lights: their surfaces carry them; the fog skips them
+        }
+        let to_l = l.position_ws - world_pos;
+        let dist = length(to_l);
+        if dist >= l.range {
+            continue;
+        }
+        // Inverse square with the same smooth cut as surface shading, held
+        // finite inside the bulb's own glow so the halo has no hot pinpoint.
+        let r = dist / l.range;
+        let fade = saturate(1.0 - r * r * r * r);
+        let d = max(dist, 0.35);
+        var atten = fade * fade / (d * d);
+        let dir = to_l / max(dist, 1e-4);
+        if l.light_type == 1u {
+            atten *= smoothstep(l.spot_cos_outer, l.spot_cos_inner, dot(-dir, normalize(l.direction_ws)));
+        }
+        sum += l.color * atten * hg_phase(dot(ray_dir, dir), vol.fog_asymmetry);
+    }
+    return sum * VOL_LOCAL_GAIN;
+}
+
 /// Steps taken per slice. Each slice integrates its own segment, so total step
 /// count is this times the slice count.
 const VOL_STEPS_PER_SLICE: u32 = 2u;
@@ -302,13 +386,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 extinction += vec3<f32>(fog);
             }
 
+            // Local lights scatter in the fog medium only (the air's Rayleigh
+            // term is negligible over a street), in their own radiance units,
+            // so they join after the sun's illuminance scale.
+            var local_scatter = vec3<f32>(0.0);
+            if fog > 0.0 {
+                let local_depth = max(-(vol.view * vec4<f32>(world_pos, 1.0)).z, 0.0);
+                local_scatter = vec3<f32>(fog) * local_inscatter(world_pos, ray_dir, uv, local_depth);
+            }
+
             // Analytic integration of the segment rather than a Riemann sum:
             // the closed form is exact for a constant medium over the step and
             // stops thin media from being under-counted at low step counts.
             let step_transmittance = exp(-extinction * dt);
             let integrated = (step_scatter - step_scatter * step_transmittance)
                 / max(extinction, vec3<f32>(VOL_MIN_EXTINCTION));
-            inscatter += throughput * integrated * vol.sun_illuminance;
+            let integrated_local = (local_scatter - local_scatter * step_transmittance)
+                / max(extinction, vec3<f32>(VOL_MIN_EXTINCTION));
+            inscatter += throughput * (integrated * vol.sun_illuminance + integrated_local);
             throughput *= step_transmittance;
         }
 

@@ -943,7 +943,10 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
     // reading as a geometric cut-out.
     let depth_contact = select(
         0.0,
-        1.0 - smoothstep(0.04, 1.35, backdrop_distance),
+        // Surf piles foam over a wide band; sheltered water (authored roughness
+        // under ~0.16) only rims what it touches.
+        1.0 - smoothstep(0.04, mix(0.22, 1.35, smoothstep(0.02, 0.16, material.absorption_roughness.w)),
+            backdrop_distance),
         base_has_backdrop,
     );
     let shore_foam = max(
@@ -995,8 +998,12 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
     // one above characterises the microfacet distribution and stays fixed. This
     // one only decides how blurred the reflection is, and foam pushes it up
     // because a whitecap scatters the sky rather than mirroring it.
+    // Open water keeps the 0.4 floor that hides unresolved chop. A sheltered
+    // canal or pond (authored roughness under ~0.16) is calm enough to mirror
+    // what stands beside it, so its floor falls with the authored roughness.
+    let calm_floor = mix(0.08, 0.4, smoothstep(0.02, 0.16, base_roughness));
     let reflection_roughness = clamp(
-        (1.0 - fresnel_scalar) * foam_amount + 0.4
+        (1.0 - fresnel_scalar) * foam_amount + calm_floor
             + roughness_map * 0.08 + distance_roughness,
         0.04,
         1.0,
@@ -1174,7 +1181,10 @@ fn fs_prepass(input: VertexOutput, @builtin(front_facing) front_facing: bool) ->
     let backdrop_distance = select(authored_depth, distance(input.world_position, base_world), base_has_backdrop);
     let depth_contact = select(
         0.0,
-        1.0 - smoothstep(0.04, 1.35, backdrop_distance),
+        // Surf piles foam over a wide band; sheltered water (authored roughness
+        // under ~0.16) only rims what it touches.
+        1.0 - smoothstep(0.04, mix(0.22, 1.35, smoothstep(0.02, 0.16, material.absorption_roughness.w)),
+            backdrop_distance),
         base_has_backdrop,
     );
     let shore_foam = max(
@@ -1200,8 +1210,12 @@ fn fs_prepass(input: VertexOutput, @builtin(front_facing) front_facing: bool) ->
         fresnel_scalar = mix(fresnel_scalar, 1.0,
             smoothstep(0.96, 1.02, sin_transmitted_sq));
     }
+    // Open water keeps the 0.4 floor that hides unresolved chop. A sheltered
+    // canal or pond (authored roughness under ~0.16) is calm enough to mirror
+    // what stands beside it, so its floor falls with the authored roughness.
+    let calm_floor = mix(0.08, 0.4, smoothstep(0.02, 0.16, base_roughness));
     let reflection_roughness = clamp(
-        (1.0 - fresnel_scalar) * foam_amount + 0.4
+        (1.0 - fresnel_scalar) * foam_amount + calm_floor
             + roughness_map * 0.08 + distance_roughness,
         0.04,
         1.0,

@@ -67,6 +67,13 @@ pub struct DecalComponent {
     /// value is what it does to the surface rather than what the source
     /// material happens to say.
     pub roughness: f32,
+    /// Darken what is underneath instead of painting over it.
+    ///
+    /// Wetness, damp and grime are the surface itself gone darker and
+    /// glossier; replacing its albedo with the decal's paints a flat blob that
+    /// hides the setts and joints a puddle should show through. With this set
+    /// the decal colour is a multiplier on the surface albedo.
+    pub multiply: bool,
 }
 
 impl Component for DecalComponent {}
@@ -80,6 +87,7 @@ impl Default for DecalComponent {
             angle_fade_degrees: 60.0,
             normal_strength: 1.0,
             roughness: 0.6,
+            multiply: false,
         }
     }
 }

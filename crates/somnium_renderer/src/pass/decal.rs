@@ -29,14 +29,15 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::cluster::ClusterVolume;
 
-/// Decals a frame may carry.
+/// Decals a frame may carry (the nearest to the camera win; see
+/// `somnium_core::decal::keep_nearest`).
 ///
-/// Sized to match `MAX_LOCAL_LIGHTS`: the two share a screen and there is no
-/// reason to believe a scene wants an order of magnitude more of one than the
-/// other.
-pub const MAX_DECALS: usize = 256;
+/// Weathering is dense and small: damp at every wall foot, grime under every
+/// sill, leaves under every tree. 256 kept only a street's worth; binning is
+/// per froxel, so the cost of a larger list is its upload, not the shading.
+pub const MAX_DECALS: usize = 768;
 /// Flattened froxel → decal index entries.
-pub const MAX_DECAL_INDICES: usize = 64 * 1024;
+pub const MAX_DECAL_INDICES: usize = 128 * 1024;
 
 /// One decal, as the shading pass reads it. **Size**: 128 bytes.
 #[repr(C)]
@@ -73,7 +74,8 @@ pub struct GpuDecal {
     /// Roughness the decal writes where it is fully opaque.
     pub roughness: f32,
     /// Padding to 128 bytes.
-    pub _pad: f32,
+    /// 1 multiplies the surface albedo by the decal colour; 0 replaces it.
+    pub blend: f32,
 }
 
 /// Everything about a decal that is not its box.
@@ -100,6 +102,8 @@ pub struct DecalLook {
     pub normal_strength: f32,
     /// Roughness written where the decal is fully opaque.
     pub roughness: f32,
+    /// Multiply the surface albedo instead of replacing it.
+    pub multiply: bool,
 }
 
 impl ClusterVolume for GpuDecal {
@@ -130,6 +134,7 @@ impl GpuDecal {
             angle_fade_degrees,
             normal_strength,
             roughness,
+            multiply,
         } = look;
         let (scale, _, translation) = transform.to_scale_rotation_translation();
         // The bounding sphere has to contain the box at any rotation, so it is
@@ -148,7 +153,7 @@ impl GpuDecal {
             angle_fade_cos: angle_fade_degrees.clamp(0.0, 89.9).to_radians().cos(),
             normal_strength: normal_strength.clamp(0.0, 1.0),
             roughness: roughness.clamp(0.0, 1.0),
-            _pad: 0.0,
+            blend: if multiply { 1.0 } else { 0.0 },
         }
     }
 }
@@ -175,8 +180,8 @@ pub struct DecalGrid {
 }
 
 impl DecalGrid {
-    /// Allocate the buffers. They are sized once and never resized: 256 decals
-    /// is 32 KB and the index list is 256 KB, which is not worth a growth path.
+    /// Allocate the buffers. They are sized once and never resized: 768 decals
+    /// is 96 KB and the index list is 512 KB, which is not worth a growth path.
     #[must_use]
     pub fn new(device: &wgpu::Device) -> Self {
         let storage = |label: &str, size: u64| {
@@ -302,6 +307,7 @@ mod tests {
             angle_fade_degrees,
             normal_strength: 1.0,
             roughness: 0.5,
+            multiply: false,
         }
     }
 

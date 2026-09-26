@@ -77,7 +77,13 @@ impl PhysicsWorld {
             // Release the shape reference since Jolt took ownership internally
             jph_shape_destroy(jolt_settings.shape);
 
-            BodyId(id)
+            let body = BodyId(id);
+            if !body.is_valid() {
+                // Jolt refuses bodies past `max_bodies`; say so rather than
+                // leave a wall or door without collision.
+                tracing::warn!(max_bodies = self.config.max_bodies, "create_body: body refused (limit reached?)");
+            }
+            body
         }
     }
 

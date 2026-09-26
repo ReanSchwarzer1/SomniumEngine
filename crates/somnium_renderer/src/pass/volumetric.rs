@@ -156,6 +156,16 @@ impl VolumetricPass {
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
 
+        let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let lut = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -244,6 +254,11 @@ impl VolumetricPass {
                     },
                     count: None,
                 },
+                // TOWN-FOG: clustered local lights (lights, indices, offsets, params).
+                storage(10),
+                storage(11),
+                storage(12),
+                storage(13),
             ],
         });
 
@@ -347,6 +362,7 @@ impl VolumetricPass {
         lut_sampler: &wgpu::Sampler,
         light_buffer: &wgpu::Buffer,
         shadow_atlas: &wgpu::TextureView,
+        cluster: &crate::cluster::ClusterGrid,
     ) {
         if self.bind_group.is_some() {
             return;
@@ -394,6 +410,22 @@ impl VolumetricPass {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&self.grain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: cluster.light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: cluster.index_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: cluster.offset_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: cluster.params_buffer.as_entire_binding(),
                 },
             ],
         }));

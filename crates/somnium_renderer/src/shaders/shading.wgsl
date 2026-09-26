@@ -77,7 +77,8 @@ struct Decal {
     angle_fade_cos: f32,
     normal_strength: f32,
     roughness: f32,
-    _pad: f32,
+    /// 1 multiplies the surface albedo by the decal colour; 0 replaces it.
+    blend: f32,
 }
 
 @group(1) @binding(20) var<storage, read> decals: array<Decal>;
@@ -241,7 +242,9 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
             continue;
         }
 
-        (*surface).albedo = mix((*surface).albedo, colour.rgb, alpha);
+        // Wetness and grime darken what is there; paint and patches replace it.
+        let decal_albedo = select(colour.rgb, (*surface).albedo * colour.rgb, decal.blend > 0.5);
+        (*surface).albedo = mix((*surface).albedo, decal_albedo, alpha);
         (*surface).roughness = mix((*surface).roughness, decal.roughness, alpha);
         if decal.orm_map >= 0 {
             let orm = textureSampleLevel(

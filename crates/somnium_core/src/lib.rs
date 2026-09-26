@@ -850,6 +850,11 @@ pub struct FoliageComponent {
     /// Not a billboard — the dummy camera-facing quad was deleted. `0` keeps
     /// every remaining part.
     pub impostor_distance: f32,
+    /// Imported hierarchies only: nearer than this **horizontal** distance the
+    /// hierarchy is not drawn. The far half of a two-model LOD pair (a light
+    /// tree whose near twin is cut at the same distance). `0` draws from the
+    /// camera outward, which is every foliage authored before this existed.
+    pub near_distance: f32,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -877,6 +882,7 @@ impl Default for FoliageComponent {
             foliage_shadow_distance: 40.0,
             lod_distance: 45.0,
             impostor_distance: 90.0,
+            near_distance: 0.0,
             max_instances: 18_000,
         }
     }

@@ -27,6 +27,9 @@ pub fn imported_draw(world: &World, entity: Entity, camera: Vec3) -> Option<bool
             {
                 return None;
             }
+            if distance_sq < foliage.near_distance * foliage.near_distance {
+                return None;
+            }
             return Some(
                 foliage.foliage_shadow_distance <= 0.0
                     || distance_sq
@@ -54,4 +57,37 @@ fn world_position(world: &World, mut entity: Entity) -> Option<Vec3> {
         entity = parent.entity;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FoliageComponent;
+
+    fn plant(world: &mut World, near: f32, cull: f32) -> Entity {
+        let root = world.spawn((
+            Transform::from_translation(Vec3::new(50.0, 0.0, 0.0)),
+            FoliageComponent {
+                enabled: true,
+                cull_distance: cull,
+                near_distance: near,
+                foliage_shadow_distance: 0.0,
+                ..Default::default()
+            },
+        ));
+        world.spawn((Transform::default(), Parent { entity: root }, ImportedMesh::default()))
+    }
+
+    #[test]
+    fn near_and_far_lod_halves_hand_over_at_one_distance() {
+        let mut world = World::new();
+        let near = plant(&mut world, 0.0, 38.0);
+        let far = plant(&mut world, 38.0, 160.0);
+        let close = Vec3::new(20.0, 1.7, 0.0); // 30 m from the tree
+        let away = Vec3::new(-10.0, 1.7, 0.0); // 60 m from the tree
+        assert!(imported_draw(&world, near, close).is_some());
+        assert!(imported_draw(&world, far, close).is_none());
+        assert!(imported_draw(&world, near, away).is_none());
+        assert!(imported_draw(&world, far, away).is_some());
+    }
 }

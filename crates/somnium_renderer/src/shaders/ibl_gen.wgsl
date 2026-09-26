@@ -25,7 +25,8 @@ struct GenParams {
     roughness: f32,
     /// Source mip resolution, for the sample-count heuristic.
     _src_size: f32,
-    _pad: f32,
+    /// Cloud-deck coverage, 0..1.
+    overcast: f32,
     /// Direction TOWARD the sun, plus its colour.
     sun_direction: vec4<f32>,
     /// `.rgb` sun colour scaled by illuminance; `.w` sky-dome luminance scale.
@@ -93,6 +94,22 @@ fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
         transmittance_lut, multiscatter_lut, atmos_sampler,
         view_pos, ray_dir, sun_dir, 32,
     ) * sun_illuminance;
+
+    // A cloud deck replaces the blue dome with the CIE overcast sky: neutral,
+    // no sun disc, three times as bright at the zenith as at the horizon, and
+    // lit from below only by the ground. Without this every reflection and all
+    // ambient light under a grey sky came from a clear blue one. Its zenith is
+    // tied to the clear zenith, so exposure holds as the deck closes.
+    let cover = smoothstep(0.35, 0.95, params.overcast);
+    if cover > 0.0 {
+        let zenith = raymarch_sky(
+            transmittance_lut, multiscatter_lut, atmos_sampler,
+            view_pos, vec3<f32>(0.0, 1.0, 0.0), sun_dir, 16,
+        ) * sun_illuminance;
+        let lz = dot(zenith, vec3<f32>(0.2126, 0.7152, 0.0722)) * 1.6;
+        let dome = select(0.2, (1.0 + 2.0 * ray_dir.y) / 3.0, ray_dir.y >= 0.0);
+        radiance = mix(radiance, vec3<f32>(0.97, 1.0, 1.03) * lz * dome, cover);
+    }
 
     let moon_dir = -sun_dir;
     let moon_strength = saturate(1.0 - sun_illuminance / 10.0);

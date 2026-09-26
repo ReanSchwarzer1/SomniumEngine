@@ -980,6 +980,7 @@ fn foliage_schema() -> ComponentSchema {
             foliage_shadow_distance { min: 0.0 },
             lod_distance { min: 0.0 },
             impostor_distance { min: 0.0 },
+            near_distance { min: 0.0 },
             max_instances,
         }
     }
@@ -1125,6 +1126,8 @@ fn decal_schema() -> ComponentSchema {
             normal_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2,
                 group: "Projection", display_name: "Normal Strength" },
             roughness { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Projection" },
+            multiply { group: "Projection",
+                doc: "Darken the surface underneath (wet, damp, grime) instead of painting over it." },
         }
     }
 }

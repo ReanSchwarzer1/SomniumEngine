@@ -968,6 +968,9 @@ struct MaterialDocument {
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
+/// TOWN-PERF: longest the outliner rows may lag a rename or reparent.
+const OUTLINER_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub struct Engine<G: GameApp> {
     game: Box<G>,
     config: EngineConfig,
@@ -1091,6 +1094,10 @@ pub struct Engine<G: GameApp> {
     /// resolved against the order the user can actually see.
     outliner_order: Vec<somnium_ecs::entity::Entity>,
     outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy,
+    /// TOWN-PERF: when the outliner rows were last gathered, and the entity
+    /// count and primary selection they were gathered for. See `OUTLINER_REFRESH`.
+    outliner_refreshed: Option<std::time::Instant>,
+    outliner_seen: (usize, Option<u32>),
     /// Seam 4: preferences, project settings, and which of them the
     /// environment has taken out of the author's hands.
     settings: crate::settings::SettingsStore,
@@ -1677,6 +1684,8 @@ impl<G: GameApp + 'static> Engine<G> {
             selection: crate::selection::Selection::default(),
             outliner_order: Vec::new(),
             outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy::default(),
+            outliner_refreshed: None,
+            outliner_seen: (0, None),
             settings: settings_store,
             camera_bookmarks: [None; 9],
             orbit_selection: false,
@@ -2235,6 +2244,20 @@ impl<G: GameApp> Engine<G> {
     }
 
     /// Per-frame autosave tick, and the interval setting tracking its control.
+    /// CPU profiler zones for the frame stages that had none, so a timing
+    /// run attributes the whole frame instead of leaving a remainder.
+    fn zone_begin(&mut self, name: &'static str) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_begin(name);
+        }
+    }
+
+    fn zone_end(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_end();
+        }
+    }
+
     fn tick_autosave(&mut self, dt: f32) {
         self.autosave
             .set_interval(self.settings.project().autosave_interval_s);
@@ -4142,6 +4165,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Phase 16-F: the script profiler counters are per frame, and the
         // frame starts here.
         self.scripts.begin_frame();
+        self.zone_begin("Simulation step");
 
         let path_tracer_active = self
             .world
@@ -4252,6 +4276,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 1.0
             };
 
+        self.zone_end();
+        self.zone_begin("Game update");
         // ── Gizmo drag: update entity transform each frame while dragging ────
         // Snapping is settings, not constants (Seam 4), and `command()` held
         // during the drag inverts it.
@@ -4389,6 +4415,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.poll_script_reloads();
         self.drain_script_output();
 
+        self.zone_end();
+        self.zone_begin("Water sync");
         // Phase IV-C: ECS membership is authoritative for renderer-owned water
         // data. Delete drops textures; undo/redo recreates them from the small
         // stable descriptor, so no stale GPU handle survives in a component.
@@ -4418,6 +4446,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             renderer.water_bodies.retain_ids(&active);
         }
 
+        self.zone_end();
         // ── Update native UI panels with current frame state ─────────────────
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
@@ -4427,12 +4456,27 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             r.profiler.cpu_begin("Editor panels");
         }
         {
-            let all_entities: Vec<somnium_ecs::Entity> = self
-                .world
-                .entities()
-                .filter(|e| self.world.get::<crate::AssetEditSession>(*e).is_none())
-                .collect();
+            self.zone_begin("Outliner");
+            // TOWN-PERF: gathering, decorating and diffing a row per entity cost
+            // 4-7 ms a frame at Town's ~10k entities, for a panel that only a
+            // person reads. Rows refresh at most every `OUTLINER_REFRESH`, or at
+            // once when the entity count or the primary selection changes, so
+            // spawns, deletes and clicks still show on the frame they happen.
+            let selection_key = self.selection.primary.map(|e| e.index());
+            let refresh = self
+                .outliner_refreshed
+                .is_none_or(|at| at.elapsed() >= OUTLINER_REFRESH)
+                || self.outliner_seen != (self.world.entity_count(), selection_key);
+            let all_entities: Vec<somnium_ecs::Entity> = if refresh {
+                self.world
+                    .entities()
+                    .filter(|e| self.world.get::<crate::AssetEditSession>(*e).is_none())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut hierarchy = std::mem::take(&mut self.outliner_hierarchy);
+            if refresh {
             hierarchy.refresh(all_entities.iter().map(|&entity| {
                 crate::outliner_hierarchy::Source {
                     id: entity.index(),
@@ -4444,6 +4488,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     }),
                 }
             }));
+            }
             let tree = hierarchy.rows_mut();
             // One reconciliation point per frame. Commands, undo, redo, game
             // code and the drag routes all write `selection.primary` through
@@ -4453,7 +4498,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // Row facts: the badges and the typed filters both read them, and
             // they are gathered every frame outside the retained hierarchy so
             // component changes never wait for a structural/name change.
-            for row in tree.iter_mut() {
+            for row in tree.iter_mut().filter(|_| refresh) {
                 let Some(entity) = self.world.find_entity_by_index(row.id) else {
                     continue;
                 };
@@ -4485,10 +4530,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
             self.selection.retain_alive(&self.world);
             self.selection.reconcile();
-            self.outliner_order = tree
-                .iter()
-                .filter_map(|row| self.world.find_entity_by_index(row.id))
-                .collect();
+            if refresh {
+                self.outliner_order = tree
+                    .iter()
+                    .filter_map(|row| self.world.find_entity_by_index(row.id))
+                    .collect();
+                self.outliner_refreshed = Some(std::time::Instant::now());
+                self.outliner_seen = (self.world.entity_count(), selection_key);
+            }
+            self.zone_end();
+            self.zone_begin("Inspector state");
             let selected_idx = self.selection.primary.map(|e| e.index());
             let selected_ids: Vec<u32> = self
                 .selection
@@ -4577,9 +4628,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // because it reads the world and the script host.
             let tool_context = self.persona_tool_context();
             let sel_scripts = self.script_inspector_state();
+            self.zone_end();
+            self.zone_begin("Material sync");
             self.sync_material_sessions();
             self.sync_authored_material_components();
             self.ensure_material_session();
+            self.zone_end();
+            self.zone_begin("Panel build");
             let mut generated_panels = self
                 .selection.primary
                 .map(|entity| {
@@ -4731,8 +4786,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let drop_probe_entity = self.viewport_entity_drop_pick();
             let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_outliner_tree(tree, selected_idx);
-                ui.set_outliner_entity_handles(all_entities.iter().copied());
+                if refresh {
+                    ui.update_outliner_tree(tree, selected_idx);
+                    ui.set_outliner_entity_handles(all_entities.iter().copied());
+                }
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
                 ui.set_history(history_entries, history_position);
@@ -4798,6 +4855,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.refresh_modified_dots();
                 ui.refresh_inspector_filter();
             }
+            self.zone_end();
             self.outliner_hierarchy = hierarchy;
         }
 
@@ -5009,6 +5067,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         // Evaluate author intent before the game publishes this frame's draw data.
+        self.zone_begin("Editor tools");
         let playing = self.simulation_clock.state == SimulationState::Playing || self.stepping_now;
         let preview_dt = if self.stepping_now {
             self.simulation_clock.fixed_delta_seconds
@@ -5035,12 +5094,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             &mut self.jobs,
             preview_dt,
         );
+        self.zone_end();
+        self.zone_begin("Transforms");
         crate::propagate_transforms(&mut self.world);
+        self.zone_end();
         if playing {
             self.designer_saves.tick(preview_dt);
             self.script_behavior_update(preview_dt);
         }
 
+        self.zone_begin("Game render hook");
         {
             let mut ctx = EngineContext::new(
                 &self.time,
@@ -5066,7 +5129,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.zone_end();
         frame_timings[2] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.zone_begin("World partition & terrain");
         // `on_render` is where a game publishes its active editor/player view
         // through `renderer.set_view`. Stream from that same-frame position,
         // not from a stale ECS settings transform or last frame's renderer.
@@ -5162,6 +5227,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
+        self.zone_end();
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Scene submit");
         }
@@ -5175,6 +5241,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.zone_begin("Editor gizmos");
         // The gizmo follows the entity, not the last selection event. After
         // the game layer has propagated transforms, so a child is anchored
         // where it is drawn rather than where its parent's origin is.
@@ -5187,6 +5254,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.submit_spline_gizmos();
         }
 
+        self.zone_end();
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Environment");
@@ -5342,7 +5410,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         frame_timings[3] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.zone_begin("Authoring (MCP)");
         self.poll_authoring();
+        self.zone_end();
 
         frame_timings[4] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // ── Forward log entries to the output log panel ───────────────────────
@@ -7287,6 +7357,7 @@ impl<G: GameApp> Engine<G> {
                         angle_fade_degrees: decal.angle_fade_degrees,
                         normal_strength: decal.normal_strength,
                         roughness: decal.roughness,
+                        multiply: decal.multiply,
                     },
                 ));
         }

@@ -3603,11 +3603,17 @@ impl SomniumRenderer {
         // they depend on the atmosphere's composition, not on sun or camera.
         self.atmosphere_pass.ensure_built(&ctx.device, &ctx.queue);
 
+        let overcast = if self.cloud_pass.enabled {
+            self.cloud_pass.settings.coverage
+        } else {
+            0.0
+        };
         self.ibl_pass.generate_if_needed(
             &ctx.device,
             &ctx.queue,
             self.light_direction,
             self.light_color,
+            overcast,
         );
 
         // ── 1. Compute cascades and upload light buffer ───────────────────────
@@ -3672,6 +3678,7 @@ impl SomniumRenderer {
             bytemuck::bytes_of(&gpu_light),
         );
 
+        self.profiler.cpu_begin("Terrain draws");
         // ── 1.5 Terrain becomes ordinary draws (Phase 25A-2) ─────────────────
         //
         // Before the sort, because from here on terrain is indistinguishable
@@ -3845,6 +3852,8 @@ impl SomniumRenderer {
                 .write(&ctx.queue, terrain_index, &mat);
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Draw sort");
         // ── 2. Sort draw queue ───────────────────────────────────────────────
         // This has to happen before the instance buffer is built. Instance `i`
         // is what draw `i` pulls its model matrix and geometry offsets from, so
@@ -3877,6 +3886,7 @@ impl SomniumRenderer {
             }
         }
 
+        self.profiler.cpu_end();
         // ── 3. Build and upload instance buffer ──────────────────────────────
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
@@ -3922,6 +3932,7 @@ impl SomniumRenderer {
         self.instances.upload(&ctx.queue);
         self.profiler.cpu_end();
 
+        self.profiler.cpu_begin("Indirect args");
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
         // Argument `i` lines up with instance `i`, which the sort above keeps true.
         if self.gpu_driven {
@@ -4032,6 +4043,8 @@ impl SomniumRenderer {
             self.profiler.cpu_end();
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Shadow + cull record");
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
         //
         // Phase 24AE: cull casters too small to be worth a shadow before any of
@@ -4179,6 +4192,8 @@ impl SomniumRenderer {
         // GTAO read it. Keeping the prepass as well would draw every chunk a
         // second time, from whatever LOD state the previous frame left behind.
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Acceleration structures");
         // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
         // The top level is rebuilt each frame from the same draw queue the
         // raster path uses, so the traced scene and the drawn one cannot drift
@@ -4356,6 +4371,7 @@ impl SomniumRenderer {
         self.restir_gi_pass.clear_if_inactive(&mut encoder);
         self.profiler.end(&mut encoder);
 
+        self.profiler.cpu_end();
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
@@ -4395,6 +4411,7 @@ impl SomniumRenderer {
             self.atmosphere_pass.sampler(),
             &self.global_pool.light_buffer,
             &self.shadow_resources.atlas_depth_view,
+            &self.global_pool.cluster_grid,
         );
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Volumetrics");
