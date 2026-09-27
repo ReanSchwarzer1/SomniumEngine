@@ -550,6 +550,8 @@ mod tests {
                 alpha_cutoff: 0.5,
                 transmission: 0.0,
                 foliage: false,
+                weathering: 0.0,
+                detile: false,
                 foliage_card: false,
                 emissive: [0.0; 3],
                 emissive_intensity: 1.0,

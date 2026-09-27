@@ -65,8 +65,11 @@ impl AudioScene {
             velocity: listener_velocity,
         };
 
+        // Emitters only: resolving a world transform and spline position for
+        // every entity before discarding the non-emitters cost ~0.9 ms a frame
+        // in Town during Play.
         let authored: Vec<_> = world
-            .entities()
+            .entities_with::<AudioEmitterComponent>()
             .filter_map(|entity| {
                 let local = *world.get::<Transform>(entity)?;
                 let transform = if world.get::<Parent>(entity).is_some() {

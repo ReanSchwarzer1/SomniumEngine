@@ -58,33 +58,34 @@ pub mod character;
 pub mod clipboard;
 pub mod config;
 pub mod context;
+pub mod cpu_watchdog;
 /// Phase CONTROL-O: deferred decals.
 pub mod decal;
-/// Failing-fixture flicker applied to local lights at submission.
-pub mod light_flicker;
 pub mod editor_commands;
 mod editor_gizmo;
-mod foliage_palette;
-mod outliner_hierarchy;
 pub mod error;
 pub mod event;
+mod foliage_palette;
 pub mod foliage_visibility;
 pub mod i18n;
 pub mod input_actions;
 pub mod interaction;
-pub mod work;
-pub mod staged_mirror;
 pub mod jobs;
 pub mod landscape;
+/// Failing-fixture flicker applied to local lights at submission.
+pub mod light_flicker;
 pub mod light_units;
 pub mod log_capture;
 pub mod map;
+mod outliner_hierarchy;
 pub mod prefab;
 pub mod reflect_registry;
 pub mod save_game;
 pub mod scatter_scene;
 mod scene_delta;
 pub mod spline;
+pub mod staged_mirror;
+pub mod work;
 /// The `.somnium` container: a framed header the Content Drawer can read
 /// without parsing the scene, and the three-format routing that goes with it.
 ///
@@ -2129,68 +2130,147 @@ impl somnium_ecs::Component for ImportedMesh {}
 /// Algorithm: BFS starting from root entities (Transform + no Parent). For each
 /// root, `world_mat = Transform::to_matrix()`. For each child, `child_world =
 /// parent_world * local_transform.to_matrix()`.
+///
+/// TOWN-PERF: this ran several times a frame over every entity (2 ms at
+/// Town's ~10k), rebuilding a hash map of children each time, in scenes
+/// where almost nothing moves. The BFS order is now cached with the world
+/// and rebuilt only when the hierarchy changes (entities or `Parent`s), and
+/// the whole pass is skipped when no `Transform`, `Parent` or `WorldTransform`
+/// was written since it last ran.
 pub fn propagate_transforms(world: &mut World) {
     use somnium_ecs::ComponentId;
 
-    let t_id = ComponentId::of::<Transform>();
-
-    // Phase 1 — collect all entities with Transform, regardless of Parent
-    // component, then determine roots by checking Parent contents at runtime.
-    // This correctly handles `Parent { entity: DANGLING }` as a root.
-    let t_req = ComponentSet::from_ids(vec![t_id]);
-    let mut all_entities: Vec<(Entity, glam::Mat4)> = Vec::new();
-    for arch in world.query_archetypes(&t_req, &ComponentSet::empty()) {
-        let t_col = arch.column_index(t_id).unwrap();
-        for row in 0..arch.len() {
-            let entity = arch.entities()[row];
-            let t = unsafe { arch.column(t_col).get::<Transform>(row) };
-            all_entities.push((entity, t.to_matrix()));
-        }
+    let watched = [
+        ComponentId::of::<Transform>(),
+        ComponentId::of::<Parent>(),
+        ComponentId::of::<WorldTransform>(),
+    ];
+    let mut cache: TransformOrder = world.take_cache();
+    if cache.settled == Some(world.change_signature(&watched)) {
+        world.put_cache(cache);
+        return;
+    }
+    let hierarchy = world.change_signature(&[ComponentId::of::<Parent>()]);
+    if cache.hierarchy != Some(hierarchy) {
+        cache.rebuild(world);
+        cache.hierarchy = Some(hierarchy);
     }
 
-    // Phase 1b — seed the BFS stack with roots:
-    // root = no Parent component, OR Parent.entity is DANGLING, OR parent is dead.
-    let mut stack: Vec<(Entity, glam::Mat4)> = Vec::new();
-    for &(entity, local_mat) in &all_entities {
-        let is_root = match world.get::<Parent>(entity) {
-            None => true,
-            Some(p) => p.entity == Entity::DANGLING || !world.is_alive(p.entity),
+    cache.world.clear();
+    cache.world.reserve(cache.order.len());
+    for &(entity, parent) in &cache.order {
+        let local = world
+            .get::<Transform>(entity)
+            .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+        let matrix = match cache.world.get(parent as usize) {
+            Some(parent_world) => *parent_world * local,
+            None => local,
         };
-        if is_root {
-            stack.push((entity, local_mat));
+        cache.world.push(matrix);
+    }
+    for (&(entity, _), &matrix) in cache.order.iter().zip(&cache.world) {
+        if let Some(wt) = world.get_mut::<WorldTransform>(entity) {
+            wt.0 = matrix;
+        } else {
+            let _ = world.insert_component(entity, WorldTransform(matrix));
         }
     }
+    // Taken after the writes above, which are this pass's own.
+    cache.settled = Some(world.change_signature(&watched));
+    world.put_cache(cache);
+}
 
-    // Parent is authored; Children is a bounded editor cache and may be absent
-    // after load. Build traversal from Parent so it cannot drop restored nodes.
-    let mut children = std::collections::HashMap::<Entity, Vec<(Entity, glam::Mat4)>>::new();
-    for &(entity, local) in &all_entities {
-        if let Some(parent) = world.get::<Parent>(entity) {
-            children
-                .entry(parent.entity)
-                .or_default()
-                .push((entity, local));
-        }
-    }
-    let mut i = 0;
-    while i < stack.len() {
-        let (entity, parent_world) = stack[i];
-        i += 1;
-        if let Some(children) = children.get(&entity) {
-            for &(child, local) in children {
-                stack.push((child, parent_world * local));
+/// `propagate_transforms`' per-world state: parents before children, each
+/// with its parent's position in the order (`u32::MAX` for a root).
+#[derive(Default)]
+struct TransformOrder {
+    order: Vec<(Entity, u32)>,
+    world: Vec<glam::Mat4>,
+    hierarchy: Option<u64>,
+    settled: Option<u64>,
+}
+
+impl TransformOrder {
+    /// Roots are entities with a `Transform` and no live parent (no `Parent`,
+    /// `Parent { entity: DANGLING }`, or a dead one). Children are found
+    /// through `Parent`, which is authored; `Children` is an editor cache.
+    /// A child whose parent has no `Transform`, or that sits in a cycle, is
+    /// never reached, exactly as before.
+    fn rebuild(&mut self, world: &World) {
+        let transformed: Vec<Entity> = world.entities_with::<Transform>().collect();
+        let mut children = std::collections::HashMap::<Entity, Vec<Entity>>::new();
+        self.order.clear();
+        for &entity in &transformed {
+            match world.get::<Parent>(entity) {
+                Some(p) if p.entity != Entity::DANGLING && world.is_alive(p.entity) => {
+                    children.entry(p.entity).or_default().push(entity);
+                }
+                _ => self.order.push((entity, u32::MAX)),
             }
         }
+        let mut i = 0;
+        while i < self.order.len() {
+            let (entity, _) = self.order[i];
+            if let Some(kids) = children.get(&entity) {
+                let at = u32::try_from(i).unwrap_or(u32::MAX);
+                self.order.extend(kids.iter().map(|&child| (child, at)));
+            }
+            i += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod propagate_tests {
+    use super::*;
+    use glam::Vec3;
+
+    fn at(world: &World, e: Entity) -> Vec3 {
+        world
+            .get::<WorldTransform>(e)
+            .unwrap()
+            .0
+            .transform_point3(Vec3::ZERO)
     }
 
-    // Phase 2 — write WorldTransform. All immutable borrows from phase 1 are
-    // released here; &mut self borrows are safe.
-    for (entity, world_mat) in stack {
-        if let Some(wt) = world.get_mut::<WorldTransform>(entity) {
-            wt.0 = world_mat;
-        } else {
-            let _ = world.insert_component(entity, WorldTransform(world_mat));
-        }
+    #[test]
+    fn cached_order_follows_moves_reparenting_and_dead_parents() {
+        let mut world = World::new();
+        let root = world.spawn((Transform::from_translation(Vec3::X),));
+        let child = world.spawn((
+            Transform::from_translation(Vec3::Y),
+            Parent { entity: root },
+        ));
+        let grandchild = world.spawn((
+            Transform::from_translation(Vec3::Z),
+            Parent { entity: child },
+        ));
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(1.0, 1.0, 1.0));
+
+        // Nothing written: the pass is skipped and results stand.
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(1.0, 1.0, 1.0));
+
+        // A local move reaches the whole subtree.
+        world.get_mut::<Transform>(root).unwrap().translation = Vec3::new(5.0, 0.0, 0.0);
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(5.0, 1.0, 1.0));
+
+        // Reparenting rebuilds the order.
+        world.get_mut::<Parent>(grandchild).unwrap().entity = root;
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(5.0, 0.0, 1.0));
+
+        // A dead parent makes its child a root.
+        world.despawn(root);
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, child), Vec3::Y);
+
+        // A direct write to WorldTransform is corrected, as before caching.
+        world.get_mut::<WorldTransform>(child).unwrap().0 = glam::Mat4::IDENTITY;
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, child), Vec3::Y);
     }
 }
 

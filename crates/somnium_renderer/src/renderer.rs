@@ -484,6 +484,17 @@ pub struct SomniumRenderer {
     /// How many times each mesh appears in this frame's draw queue, used to
     /// decide whether cluster expansion is worth it (Phase 17G).
     instanced_counts: std::collections::HashMap<u32, u32>,
+    /// What `cluster_args` / `cull_aabbs` were expanded from (draw geometry,
+    /// sidedness, meshlet mode) and the meshlet count, so an unchanged draw
+    /// list reuses them. See `draw_list_signature`.
+    cluster_source: Option<u64>,
+    cluster_meshlet_arguments: u32,
+    /// Whole-mesh cull entries of skinned draws in the cached expansion,
+    /// `(entry index, vertex_offset, two-sided)`: refreshed each frame.
+    cluster_posed: Vec<(usize, u32, bool)>,
+    /// The player's graphics tier, laid over the scene's authored settings
+    /// by the engine each frame. See `quality`.
+    graphics_preset: crate::quality::GraphicsPreset,
     /// When true, a draw is expanded into one indirect argument per cluster so
     /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
     /// forces the whole-mesh path, for A/B measurement.
@@ -1137,6 +1148,10 @@ impl SomniumRenderer {
             cull_aabbs: Vec::with_capacity(256),
             cluster_args: Vec::with_capacity(256),
             instanced_counts: std::collections::HashMap::new(),
+            cluster_source: None,
+            cluster_meshlet_arguments: 0,
+            cluster_posed: Vec::new(),
+            graphics_preset: crate::quality::GraphicsPreset::from_env(),
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             cpu_frustum_cull: !cpu_frustum_env_off(),
@@ -1431,7 +1446,10 @@ impl SomniumRenderer {
                     );
                 }
 
-                staged += levels.iter().map(|(_, _, data)| data.len() as u64).sum::<u64>();
+                staged += levels
+                    .iter()
+                    .map(|(_, _, data)| data.len() as u64)
+                    .sum::<u64>();
                 if staged >= STAGING_FLUSH_BYTES {
                     ctx.queue.submit(std::iter::empty());
                     self.wait_gpu(ctx);
@@ -1494,7 +1512,8 @@ impl SomniumRenderer {
                         // Linear, not colour: listed with the data maps above.
                         height_map: resolve_tex(mat.height_map),
                         height_depth: mat.height_depth,
-                        height_pad: [0.0; 2],
+                        weathering: mat.weathering,
+                        detile: if mat.detile { 1.0 } else { 0.0 },
                     },
                 );
                 // Phase 17D: remember double-sidedness so the visibility pass can
@@ -2615,7 +2634,8 @@ impl SomniumRenderer {
                 normal_scale: 1.0,
                 height_map: -1,
                 height_depth: 0.0,
-                height_pad: [0.0; 2],
+                weathering: 0.0,
+                detile: 0.0,
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -3201,6 +3221,7 @@ impl SomniumRenderer {
         };
         self.profiler.end(&mut encoder); // Frame
         self.profiler.end_frame(&mut encoder);
+        let submit_started = std::time::Instant::now();
         ctx.queue.submit(std::iter::once(encoder.finish()));
         // Must follow the submit: the map would otherwise race the copy that
         // fills the buffer it is reading.
@@ -3347,6 +3368,7 @@ impl SomniumRenderer {
         // so the present is ordered against submitted work explicitly rather
         // than implicitly by the texture's lifetime.
         ctx.queue.present(output);
+        self.profiler.submit_present_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
 
         self.clear_frame_queues();
     }
@@ -3549,6 +3571,7 @@ impl SomniumRenderer {
         );
         self.decals = decals;
         self.decals.clear();
+        self.profiler.cpu_begin("View + light upload");
         // ── 0. Upload view buffer ────────────────────────────────────────────
         //
         // Through the encoder, not `write_buffer`: see `stage_view_buffer`.
@@ -3678,6 +3701,7 @@ impl SomniumRenderer {
             bytemuck::bytes_of(&gpu_light),
         );
 
+        self.profiler.cpu_end();
         self.profiler.cpu_begin("Terrain draws");
         // ── 1.5 Terrain becomes ordinary draws (Phase 25A-2) ─────────────────
         //
@@ -3954,64 +3978,83 @@ impl SomniumRenderer {
             // each mesh appears and fall back to one whole-mesh argument once
             // it is clearly being instanced.
             self.profiler.cpu_begin("Cluster cull");
-            self.instanced_counts.clear();
-            for cmd in &self.draw_queue {
-                *self
-                    .instanced_counts
-                    .entry(cmd.vertex_offset)
-                    .or_insert(0u32) += 1;
-            }
-
-            self.cluster_args.clear();
-            self.cull_aabbs.clear();
-            for pass_two_sided in [false, true] {
-                if pass_two_sided {
-                    self.single_sided_args = self.cluster_args.len();
-                }
-                for (i, cmd) in self.draw_queue.iter().enumerate() {
-                    if self.is_double_sided(cmd.material_id) != pass_two_sided {
-                        continue;
-                    }
-                    let heavily_instanced = self
+            // TOWN-PERF: expanding ~4.7k draws into cluster arguments and
+            // bounds cost ~1 ms a frame and gives the same arrays whenever the
+            // draw list is unchanged, which for a still camera is every frame.
+            // The arguments are still uploaded (the cull shader zeroes culled
+            // counts in place); the bounds only when they change.
+            let source = self.draw_list_signature();
+            let reuse = self.cluster_source == Some(source);
+            let posed: std::collections::HashSet<u32> =
+                self.animated_geometry.posed_offsets().collect();
+            if !reuse {
+                self.cluster_posed.clear();
+                self.instanced_counts.clear();
+                for cmd in &self.draw_queue {
+                    *self
                         .instanced_counts
-                        .get(&cmd.vertex_offset)
-                        .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
-                    // Skip cluster expansion once a mesh is clearly instanced,
-                    // but keep one argument per draw. Folding copies into
-                    // `instance_count > 1` made the cull shader (which writes
-                    // 0 or 1) keep only the first tree and drop the rest.
-                    let meshlets = if self.meshlet_draws && !heavily_instanced {
-                        self.geometry.mesh_meshlets(cmd.vertex_offset)
-                    } else {
-                        None
-                    };
-                    if let Some(meshlets) = meshlets {
-                        self.profiler.counters.gpu_meshlet_arguments = self
-                            .profiler
-                            .counters
-                            .gpu_meshlet_arguments
-                            .saturating_add(u32::try_from(meshlets.len()).unwrap_or(u32::MAX));
-                    }
-                    let start = self.cull_aabbs.len();
-                    crate::indirect::push_cluster_args(
-                        i as u32,
-                        cmd.index_count,
-                        1,
-                        meshlets,
-                        self.geometry.mesh_aabb(cmd.vertex_offset),
-                        &mut self.cluster_args,
-                        &mut self.cull_aabbs,
-                    );
-                    // Normal-cone rejection assumes the vis pass culls back
-                    // faces. Two-sided foliage keeps those faces, so a trunk
-                    // cluster that faces away is still the bark you should see
-                    // from the other side of a second tree.
+                        .entry(cmd.vertex_offset)
+                        .or_insert(0u32) += 1;
+                }
+
+                self.cluster_args.clear();
+                self.cull_aabbs.clear();
+                for pass_two_sided in [false, true] {
                     if pass_two_sided {
-                        for aabb in &mut self.cull_aabbs[start..] {
-                            aabb.cone[3] = 2.0;
+                        self.single_sided_args = self.cluster_args.len();
+                    }
+                    for (i, cmd) in self.draw_queue.iter().enumerate() {
+                        if self.is_double_sided(cmd.material_id) != pass_two_sided {
+                            continue;
+                        }
+                        let heavily_instanced = self
+                            .instanced_counts
+                            .get(&cmd.vertex_offset)
+                            .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
+                        // Skip cluster expansion once a mesh is clearly instanced,
+                        // but keep one argument per draw. Folding copies into
+                        // `instance_count > 1` made the cull shader (which writes
+                        // 0 or 1) keep only the first tree and drop the rest.
+                        let meshlets = if self.meshlet_draws && !heavily_instanced {
+                            self.geometry.mesh_meshlets(cmd.vertex_offset)
+                        } else {
+                            None
+                        };
+                        if let Some(meshlets) = meshlets {
+                            self.profiler.counters.gpu_meshlet_arguments =
+                                self.profiler.counters.gpu_meshlet_arguments.saturating_add(
+                                    u32::try_from(meshlets.len()).unwrap_or(u32::MAX),
+                                );
+                        }
+                        let start = self.cull_aabbs.len();
+                        if meshlets.is_none() && posed.contains(&cmd.vertex_offset) {
+                            self.cluster_posed
+                                .push((start, cmd.vertex_offset, pass_two_sided));
+                        }
+                        crate::indirect::push_cluster_args(
+                            i as u32,
+                            cmd.index_count,
+                            1,
+                            meshlets,
+                            self.geometry.mesh_aabb(cmd.vertex_offset),
+                            &mut self.cluster_args,
+                            &mut self.cull_aabbs,
+                        );
+                        // Normal-cone rejection assumes the vis pass culls back
+                        // faces. Two-sided foliage keeps those faces, so a trunk
+                        // cluster that faces away is still the bark you should see
+                        // from the other side of a second tree.
+                        if pass_two_sided {
+                            for aabb in &mut self.cull_aabbs[start..] {
+                                aabb.cone[3] = 2.0;
+                            }
                         }
                     }
                 }
+                self.cluster_source = Some(source);
+                self.cluster_meshlet_arguments = self.profiler.counters.gpu_meshlet_arguments;
+            } else {
+                self.profiler.counters.gpu_meshlet_arguments = self.cluster_meshlet_arguments;
             }
             self.profiler.counters.gpu_draw_arguments =
                 u32::try_from(self.cluster_args.len()).unwrap_or(u32::MAX);
@@ -4021,7 +4064,7 @@ impl SomniumRenderer {
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
-                &self.cull_aabbs,
+                (!reuse).then_some(self.cull_aabbs.as_slice()),
                 // Un-jittered: a visibility decision must not depend on a
                 // sub-pixel sampling offset. With the jittered matrix the
                 // frustum planes — and the Hi-Z occlusion test behind them —
@@ -4040,6 +4083,24 @@ impl SomniumRenderer {
                 self.single_sided_args,
                 counted_draws,
             );
+            if reuse && !self.cluster_posed.is_empty() {
+                let patches: Vec<_> = self
+                    .cluster_posed
+                    .iter()
+                    .filter_map(|&(index, offset, two_sided)| {
+                        let (min, max) = self.geometry.mesh_aabb(offset)?;
+                        let mut aabb = crate::culling::GpuCullAabb::from_aabb(min, max);
+                        if two_sided {
+                            aabb.cone[3] = 2.0;
+                        }
+                        Some((index, aabb))
+                    })
+                    .collect();
+                for &(index, aabb) in &patches {
+                    self.cull_aabbs[index] = aabb;
+                }
+                self.cull_pass.patch_aabbs(&ctx.queue, &patches);
+            }
             self.profiler.cpu_end();
         }
 
@@ -4372,6 +4433,7 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
 
         self.profiler.cpu_end();
+        self.profiler.cpu_begin("Screen passes record");
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
@@ -4778,6 +4840,8 @@ impl SomniumRenderer {
             }
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Shading record");
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");
         // Phase DOOM-A: reserved *before* the pass, because the reservation
@@ -4985,6 +5049,8 @@ impl SomniumRenderer {
             .composite(&mut encoder, &self.postprocess_pass.hdr_view);
         self.profiler.end(&mut encoder);
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Water + blend record");
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         self.water_pass.clear_surface(&mut encoder);
         if !self.water_queue.is_empty() {
@@ -5158,6 +5224,8 @@ impl SomniumRenderer {
             }
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Post record");
         // ── 7.8 TAA resolve (Phase 24F) ──────────────────────────────────────
         // Between the last thing that writes HDR and the metering, so exposure
         // is measured on the resolved image rather than on a jittered one.
@@ -5504,8 +5572,45 @@ impl SomniumRenderer {
         // ever looks at — the whole reason to separate them is that the scene
         // budget and the editor budget are answerable to different questions.
         self.profiler.end(&mut encoder);
+        self.profiler.cpu_end(); // Post record
 
         capture_now
+    }
+
+    /// The active graphics tier.
+    pub fn graphics_preset(&self) -> crate::quality::GraphicsPreset {
+        self.graphics_preset
+    }
+
+    /// Switch graphics tier; takes effect from the next frame's settings push.
+    pub fn set_graphics_preset(&mut self, preset: crate::quality::GraphicsPreset) {
+        if preset != self.graphics_preset {
+            tracing::info!(preset = preset.name(), "graphics preset");
+        }
+        self.graphics_preset = preset;
+    }
+
+    /// What the active tier allows.
+    pub fn graphics_budget(&self) -> crate::quality::GraphicsBudget {
+        self.graphics_preset.budget()
+    }
+
+    /// FNV-1a over what the cluster expansion reads from the draw queue: each
+    /// draw's mesh, index count and sidedness, plus the meshlet switch.
+    fn draw_list_signature(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        let mut word = |w: u32| h = (h ^ u64::from(w)).wrapping_mul(0x0100_0000_01b3);
+        word(u32::from(self.meshlet_draws));
+        let revision = self.geometry.bounds_revision();
+        word(revision as u32);
+        word((revision >> 32) as u32);
+        word(u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX));
+        for cmd in &self.draw_queue {
+            word(cmd.vertex_offset);
+            word(cmd.index_count);
+            word(u32::from(self.is_double_sided(cmd.material_id)));
+        }
+        h
     }
 
     /// Empty every per-frame submission queue.

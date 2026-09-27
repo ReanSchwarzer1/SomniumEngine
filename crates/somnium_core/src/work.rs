@@ -167,7 +167,7 @@ pub fn update_with_contact(
 ) -> WorkFrame {
     let targets: Vec<_> = ctx
         .world
-        .entities()
+        .entities_with::<WorkTarget>()
         .filter_map(|e| {
             let w = ctx.world.get::<WorkTarget>(e)?;
             let t = ctx.world.get::<Transform>(e)?;

@@ -57,8 +57,12 @@ pub struct GpuMaterial {
     pub height_map: i32,
     /// Relief depth in metres spanned by the height map. Zero disables parallax.
     pub height_depth: f32,
-    /// Keeps the stride at 96, a multiple of `base_color`'s 16-byte alignment.
-    pub height_pad: [f32; 2],
+    /// Authored weathering, `0..1`: world-space staining, streaks, damp and
+    /// ledge grime added in `shading.wgsl`. Occupies what was padding.
+    pub weathering: f32,
+    /// 1 to de-tile the maps (two offset reads blended; see `shading.wgsl`
+    /// `detile`), 0 to read them once. Keeps the stride at 96.
+    pub detile: f32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -129,7 +133,8 @@ impl GpuMaterial {
             normal_scale: asset.normal_scale,
             height_map: resolve_texture(asset.height_map),
             height_depth: asset.height_depth,
-            height_pad: [0.0; 2],
+            weathering: 0.0,
+            detile: 0.0,
         }
     }
 }

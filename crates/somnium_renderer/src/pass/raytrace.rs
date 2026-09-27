@@ -52,6 +52,23 @@ pub struct RaytracePass {
     max_instances: u32,
     /// True when this frame's draw queue exceeded `max_instances`.
     overflowed: bool,
+    /// Hash of the instance list the current TLAS was built from.
+    built: Option<u64>,
+}
+
+/// FNV-1a over the words that decide a TLAS: slot order, mesh and transform.
+fn instance_signature(instances: &[(u32, u32, glam::Mat4)]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    let mut word = |w: u32| h = (h ^ u64::from(w)).wrapping_mul(0x0100_0000_01b3);
+    word(u32::try_from(instances.len()).unwrap_or(u32::MAX));
+    for (index, vertex_offset, model) in instances {
+        word(*index);
+        word(*vertex_offset);
+        for v in model.to_cols_array() {
+            word(v.to_bits());
+        }
+    }
+    h
 }
 
 /// Upper bound requested for the top-level structure.
@@ -74,6 +91,7 @@ impl RaytracePass {
                 instance_count: 0,
                 max_instances: 0,
                 overflowed: false,
+                built: None,
             };
         }
 
@@ -112,6 +130,7 @@ impl RaytracePass {
             instance_count: 0,
             max_instances,
             overflowed: false,
+            built: None,
         }
     }
 
@@ -235,6 +254,17 @@ impl RaytracePass {
         let Some(tlas) = self.tlas.as_mut() else {
             return;
         };
+        // TOWN-PERF: a static scene submits the same instances every frame;
+        // re-encoding thousands of them cost ~1 ms of CPU for an identical
+        // structure. Rebuilt when a BLAS changed or any instance differs.
+        let signature = instance_signature(instances);
+        if self.pending_blas.is_empty()
+            && self.built == Some(signature)
+            && self.bind_group.is_some()
+        {
+            return;
+        }
+        self.built = Some(signature);
 
         // ── Bottom level ────────────────────────────────────────────────────
         // A BLAS is described by offsets into the engine's single global

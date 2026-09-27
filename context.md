@@ -3043,6 +3043,16 @@ Separately, each MCP request snapshotted the world through a linear
 `entity_by_persistent_id` per entity: 5.4 s on Town's 6,424 entities, now 124 ms
 optimised. ([TSF record](<games/TheSomnusFracture/dev records/MCP_PERFORMANCE_FIX_2026-09-25.md>), private)
 
+**A CPU-bound frame is found by the engine, not by a profiling session.**
+Town's optimised build still held 31 ms of CPU a frame (2026-09-26) from
+full-world scans, components rewritten every frame, and draw lists rebuilt
+from scratch; the editor now spends 21 ms and the shipped player waits on the
+GPU. Two guards keep it that way in every project and level:
+`somnium_core::cpu_watchdog` warns in the log, naming the frame stage, when
+more than 85% of a sub-55 fps frame is CPU work for three seconds, and
+`tests/full_scan_ratchet.rs` fails on any new `.entities()` scan. The fix
+pattern is component queries plus caches keyed on `World::change_signature`.
+
 **Screen-grabbing the window produced a frame-delta metric that varied from 0.776
 to 2.018 across three runs of one identical build.** A whole session went into
 chasing that variance instead of the change. `capture.rs` exists because of it,

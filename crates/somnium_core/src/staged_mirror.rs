@@ -84,7 +84,7 @@ pub fn reversed_indices(indices: &[u32]) -> Vec<u32> {
 /// stays closed; staging geometry remains responsible for scene occlusion.
 pub fn active(world: &World, eye: Vec3, view_projection: Mat4) -> Option<MirrorView> {
     world
-        .entities()
+        .entities_with::<StagedMirror>()
         .filter_map(|entity| {
             let m = world.get::<StagedMirror>(entity)?;
             if !m.enabled

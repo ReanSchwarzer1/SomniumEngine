@@ -288,6 +288,39 @@ pub struct World {
 
     /// `PersistentId` lookup cache, refreshed lazily and verified on every hit.
     pub(crate) persistent_index: std::sync::Mutex<HashMap<crate::PersistentId, Entity>>,
+
+    /// Write counters, so a per-frame system can tell that nothing it reads
+    /// has changed and reuse last frame's result. See [`Self::change_signature`].
+    changes: ChangeTicks,
+
+    /// State that per-frame systems keep with the world they describe (a
+    /// cached hierarchy order, a draw list); see [`Self::take_cache`].
+    caches: HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// Monotonic write counters: one for structure (spawn, despawn, component
+/// insert/remove, raw archetype access) and one per component type, bumped
+/// by every `get_mut` of that type.
+#[derive(Default)]
+struct ChangeTicks {
+    structure: u64,
+    by_type: Vec<u64>,
+}
+
+impl ChangeTicks {
+    #[inline]
+    fn touch(&mut self, id: ComponentId) {
+        let i = id.raw() as usize;
+        if i >= self.by_type.len() {
+            self.by_type.resize(i + 1, 0);
+        }
+        self.by_type[i] += 1;
+    }
+
+    #[inline]
+    fn of(&self, id: ComponentId) -> u64 {
+        self.by_type.get(id.raw() as usize).copied().unwrap_or(0)
+    }
 }
 
 impl World {
@@ -300,6 +333,8 @@ impl World {
             archetype_map: HashMap::new(),
             locations: Vec::new(),
             persistent_index: Default::default(),
+            changes: ChangeTicks::default(),
+            caches: HashMap::new(),
         }
     }
 
@@ -307,6 +342,7 @@ impl World {
     ///
     /// Returns the new entity handle.
     pub fn spawn<B: ComponentBundle>(&mut self, bundle: B) -> Entity {
+        self.changes.structure += 1;
         let entity = self.entities.allocate();
 
         // Build the component set for this bundle.
@@ -345,6 +381,7 @@ impl World {
         let Some(loc) = self.locations.get(idx).and_then(|l| *l) else {
             return false;
         };
+        self.changes.structure += 1;
 
         // Remove from archetype.
         let arch = &mut self.archetypes[loc.archetype_id.raw() as usize];
@@ -389,8 +426,10 @@ impl World {
             return None;
         }
         let loc = self.locations[entity.index() as usize]?;
+        let id = ComponentId::of::<T>();
         let arch = &mut self.archetypes[loc.archetype_id.raw() as usize];
-        let col_idx = arch.column_index(ComponentId::of::<T>())?;
+        let col_idx = arch.column_index(id)?;
+        self.changes.touch(id);
         Some(unsafe { arch.column_mut(col_idx).get_mut::<T>(loc.row) })
     }
 
@@ -501,6 +540,7 @@ impl World {
     ) -> Result<(), EcsError> {
         let loc = self.location_of(entity)?;
         let old_idx = loc.archetype_id.raw() as usize;
+        self.changes.touch(info.id);
 
         // Already present: drop the old value and overwrite the slot. No
         // archetype change, so no migration.
@@ -520,6 +560,7 @@ impl World {
             return Ok(());
         }
 
+        self.changes.structure += 1;
         let new_set = self.archetypes[old_idx].component_set().with(info.id);
         let mut infos: Vec<ComponentInfo> =
             self.archetypes[old_idx].column_infos().cloned().collect();
@@ -583,6 +624,8 @@ impl World {
         if !self.archetypes[old_idx].component_set().contains(id) {
             return Ok(false);
         }
+        self.changes.structure += 1;
+        self.changes.touch(id);
 
         let new_set = self.archetypes[old_idx].component_set().without(id);
         let infos: Vec<ComponentInfo> = self.archetypes[old_idx]
@@ -663,11 +706,87 @@ impl World {
         required: &ComponentSet,
         excluded: &ComponentSet,
     ) -> impl Iterator<Item = &'w mut Archetype> {
+        // Raw column access bypasses `get_mut`, so count it as a change to
+        // everything rather than guess what the caller writes.
+        self.changes.structure += 1;
         self.archetypes.iter_mut().filter(move |arch| {
             arch.component_set().contains_all(required)
                 && (excluded.is_empty() || arch.component_set().contains_none(excluded))
                 && !arch.is_empty()
         })
+    }
+
+    // ── Change detection and component queries ─────────────────────
+
+    /// Structural changes so far: spawns, despawns, component inserts and
+    /// removals, and raw archetype access.
+    #[must_use]
+    pub fn structure_tick(&self) -> u64 {
+        self.changes.structure
+    }
+
+    /// Writes to component `id` so far (every `get_mut` and insert of it).
+    #[must_use]
+    pub fn change_tick(&self, id: ComponentId) -> u64 {
+        self.changes.of(id)
+    }
+
+    /// One number that moves whenever any of `ids` is written or the world's
+    /// structure changes. Two equal signatures mean none of those components
+    /// was touched in between, so whatever a system derived from them still
+    /// holds. The counters only grow, so their sum only grows too.
+    #[must_use]
+    pub fn change_signature(&self, ids: &[ComponentId]) -> u64 {
+        ids.iter().fold(self.changes.structure, |sum, id| {
+            sum.wrapping_add(self.changes.of(*id))
+        })
+    }
+
+    /// Every entity with a `T` and its value, visiting only the archetypes
+    /// that hold `T`: the query form of `entities().filter_map(get::<T>)`,
+    /// which costs a lookup per entity in the world.
+    pub fn iter_with<T: Component>(&self) -> impl Iterator<Item = (Entity, &T)> + '_ {
+        let id = ComponentId::of::<T>();
+        self.archetypes
+            .iter()
+            .filter(move |arch| !arch.is_empty() && arch.component_set().contains(id))
+            .flat_map(move |arch| {
+                let col = arch.column_index(id).expect("archetype declares T");
+                arch.entities()
+                    .iter()
+                    .enumerate()
+                    // SAFETY: the column holds `T` (it is `T`'s id) and `row`
+                    // is in bounds of this archetype.
+                    .map(move |(row, &entity)| (entity, unsafe { arch.column(col).get::<T>(row) }))
+            })
+    }
+
+    /// Entities that have a `T`.
+    pub fn entities_with<T: Component>(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.iter_with::<T>().map(|(entity, _)| entity)
+    }
+
+    /// The first `T` in the world and its entity (singletons: settings,
+    /// post-processing, the sky).
+    #[must_use]
+    pub fn first_with<T: Component>(&self) -> Option<(Entity, &T)> {
+        self.iter_with::<T>().next()
+    }
+
+    /// Remove and return this world's cached `C` (or a default one). Paired
+    /// with [`Self::put_cache`] so the cache and `&mut World` can both be
+    /// held while a system runs.
+    pub fn take_cache<C: Default + Send + Sync + 'static>(&mut self) -> C {
+        self.caches
+            .remove(&std::any::TypeId::of::<C>())
+            .and_then(|boxed| boxed.downcast::<C>().ok())
+            .map_or_else(C::default, |boxed| *boxed)
+    }
+
+    /// Store `cache` with this world until the next [`Self::take_cache`].
+    pub fn put_cache<C: Send + Sync + 'static>(&mut self, cache: C) {
+        self.caches
+            .insert(std::any::TypeId::of::<C>(), Box::new(cache));
     }
 
     // ── Internal helpers ────────────────────────────────────────────
@@ -864,5 +983,48 @@ mod tests {
         }
         assert_eq!(world.entity_count(), 1000);
         assert_eq!(world.get::<Pos>(entities[999]).unwrap().x, 999.0);
+    }
+
+    #[test]
+    fn change_signature_moves_only_for_the_components_written() {
+        let mut world = World::new();
+        let e = world.spawn((Pos { x: 0.0, y: 0.0 }, Vel { dx: 1.0, dy: 0.0 }));
+        let pos = [ComponentId::of::<Pos>()];
+        let vel = [ComponentId::of::<Vel>()];
+        let (p0, v0) = (world.change_signature(&pos), world.change_signature(&vel));
+        let _ = world.get::<Pos>(e);
+        assert_eq!(world.change_signature(&pos), p0, "reads are not writes");
+        world.get_mut::<Pos>(e).unwrap().x = 2.0;
+        assert_ne!(world.change_signature(&pos), p0);
+        assert_eq!(
+            world.change_signature(&vel),
+            v0,
+            "a Pos write leaves Vel readers alone"
+        );
+        let v1 = world.change_signature(&vel);
+        world.despawn(e);
+        assert_ne!(
+            world.change_signature(&vel),
+            v1,
+            "structure moves every signature"
+        );
+    }
+
+    #[test]
+    fn iter_with_matches_a_full_scan_and_caches_round_trip() {
+        let mut world = World::new();
+        let a = world.spawn((Pos { x: 1.0, y: 0.0 },));
+        let _b = world.spawn((Vel { dx: 0.0, dy: 0.0 },));
+        let c = world.spawn((Pos { x: 3.0, y: 0.0 }, Vel { dx: 0.0, dy: 0.0 }));
+        let mut found: Vec<_> = world.iter_with::<Pos>().map(|(e, p)| (e, p.x)).collect();
+        found.sort_by_key(|(e, _)| e.index());
+        assert_eq!(found, vec![(a, 1.0), (c, 3.0)]);
+        assert!(world.first_with::<Vel>().is_some());
+        world.put_cache(vec![7_u32]);
+        assert_eq!(world.take_cache::<Vec<u32>>(), vec![7]);
+        assert!(
+            world.take_cache::<Vec<u32>>().is_empty(),
+            "taking leaves a default behind"
+        );
     }
 }

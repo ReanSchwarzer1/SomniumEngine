@@ -397,7 +397,7 @@ pub(crate) fn simulate_particles_reflected(
     let mut gpu_particles = Vec::new();
 
     let emitter_entities: Vec<somnium_ecs::Entity> = world
-        .entities()
+        .entities_with::<ParticleEmitter>()
         .filter(|e| world.get::<ParticleEmitter>(*e).is_some())
         .collect();
 

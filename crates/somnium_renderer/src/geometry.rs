@@ -86,6 +86,9 @@ pub struct GeometryPool {
     /// every remesh would cost more than the culling saves, and a chunk is
     /// already small enough to cull as a unit.
     meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
+    /// Bumped whenever any mesh's bounds or clusters change, so a cache of
+    /// cull data built from them knows to rebuild.
+    bounds_revision: u64,
 
     /// Packed unsigned triangle SDF per static mesh (Phase 24P).
     sdf_bricks: std::collections::HashMap<u32, std::sync::Arc<MeshSdfBrick>>,
@@ -165,6 +168,7 @@ impl GeometryPool {
             free_blocks: Vec::new(),
             aabbs: std::collections::HashMap::new(),
             meshlets: std::collections::HashMap::new(),
+            bounds_revision: 0,
             sdf_bricks: std::collections::HashMap::new(),
             vertex_spans: std::collections::HashMap::new(),
             index_spans: std::collections::HashMap::new(),
@@ -216,6 +220,7 @@ impl GeometryPool {
         self.write_mesh(queue, &alloc, vertices, indices);
         if !build.meshlets.is_empty() {
             self.meshlets.insert(v_offset, build.meshlets);
+            self.bounds_revision += 1;
         }
         if let Some(brick) = bake_mesh_sdf(vertices, indices) {
             self.sdf_bricks.insert(v_offset, std::sync::Arc::new(brick));
@@ -371,6 +376,7 @@ impl GeometryPool {
     pub fn release_vertices(&mut self, offset: u32) {
         if let Some(count) = self.vertex_spans.remove(&offset) {
             self.aabbs.remove(&offset);
+            self.bounds_revision += 1;
             return_free_span(&mut self.free_vertex_spans, offset, count);
         }
     }
@@ -395,6 +401,7 @@ impl GeometryPool {
             return;
         }
         self.aabbs.insert(offset, compute_aabb(vertices));
+        self.bounds_revision += 1;
         queue.write_buffer(
             &self.vertex_buffer,
             offset as u64 * std::mem::size_of::<Vertex>() as u64,
@@ -422,6 +429,7 @@ impl GeometryPool {
         self.sdf_bricks.remove(&alloc.vertex_offset);
         self.aabbs.remove(&alloc.vertex_offset);
         self.meshlets.remove(&alloc.vertex_offset);
+        self.bounds_revision += 1;
         self.free_blocks.push(FreeBlock {
             vertex_offset: alloc.vertex_offset,
             vertex_capacity: alloc.vertex_capacity,
@@ -470,6 +478,11 @@ impl GeometryPool {
         })
     }
 
+    /// Changes whenever any mesh's bounds or clusters do.
+    pub fn bounds_revision(&self) -> u64 {
+        self.bounds_revision
+    }
+
     /// Local-space bounds of the mesh at `vertex_offset`, if it is known.
     pub fn mesh_aabb(&self, vertex_offset: u32) -> Option<([f32; 3], [f32; 3])> {
         self.aabbs.get(&vertex_offset).copied()
@@ -478,6 +491,9 @@ impl GeometryPool {
     /// Refresh a GPU-deformed span's conservative bounds before culling.
     pub fn set_mesh_bounds(&mut self, offset: u32, bounds: ([f32; 3], [f32; 3])) {
         if self.aabbs.contains_key(&offset) {
+            // Deliberately not a `bounds_revision` change: skinned spans are
+            // re-bounded every frame and the renderer patches just those
+            // entries of its cached cull data (see `cluster_posed`).
             self.aabbs.insert(offset, bounds);
         }
     }
@@ -498,6 +514,7 @@ impl GeometryPool {
         // funnel through here, so every mesh gets one.
         self.aabbs
             .insert(alloc.vertex_offset, compute_aabb(vertices));
+        self.bounds_revision += 1;
 
         // Phase 15C: the visibility buffer packs the primitive index into 16
         // bits, so a larger mesh would wrap and shade the wrong triangle.

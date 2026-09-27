@@ -615,7 +615,7 @@ impl AnimationAuthoringSystem {
             return Vec::new();
         }
         let entities: Vec<_> = world
-            .entities()
+            .entities_with::<AnimationAuthoring>()
             .filter(|e| world.get::<AnimationAuthoring>(*e).is_some())
             .collect();
         let removed: Vec<_> = self
@@ -1015,7 +1015,7 @@ fn advance_rig(
     let mut matrices = vec![Mat4::IDENTITY; state.skeleton.len()];
     pose.to_model_space(&state.skeleton, &mut matrices);
     let markers: Vec<_> = world
-        .entities()
+        .entities_with::<AnimationPreviewJoint>()
         .filter_map(|e| {
             world
                 .get::<AnimationPreviewJoint>(e)

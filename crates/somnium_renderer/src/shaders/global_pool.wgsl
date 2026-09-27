@@ -68,8 +68,10 @@ struct Material {
     // Parallax-occlusion height map and relief depth (metres); see `pool.rs`.
     height_map: i32,
     height_depth: f32,
-    _hpad0: f32,
-    _hpad1: f32,
+    // Authored weathering 0..1 (`pool.rs` `weathering`); see `shading.wgsl`.
+    weathering: f32,
+    // 1 = read each map twice at noise-picked offsets (`shading.wgsl` `detile`).
+    detile: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).

@@ -53,7 +53,7 @@ fn normalize_post_process_singleton(
     selected_entity: &mut Option<somnium_ecs::Entity>,
 ) {
     let entities: Vec<_> = world
-        .entities()
+        .entities_with::<PostProcessComponent>()
         .filter(|entity| world.get::<PostProcessComponent>(*entity).is_some())
         .collect();
     if entities.is_empty() {
@@ -984,6 +984,8 @@ pub struct Engine<G: GameApp> {
     type_registry: somnium_ecs::reflect::TypeRegistry,
     authoring: Option<authoring_host::AuthoringHost>,
     authoring_frame_timings: [f64; 6],
+    /// Logs when the CPU, not the GPU, is holding the frame rate down.
+    cpu_watchdog: crate::cpu_watchdog::CpuWatchdog,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
     audio_scene: crate::audio_scene::AudioScene,
@@ -1642,6 +1644,7 @@ impl<G: GameApp + 'static> Engine<G> {
             type_registry: crate::reflect_registry::component_registry(),
             authoring: None,
             authoring_frame_timings: [0.0; 6],
+            cpu_watchdog: crate::cpu_watchdog::CpuWatchdog::default(),
             physics: None,
             audio: None,
             audio_scene: crate::audio_scene::AudioScene::default(),
@@ -1772,10 +1775,13 @@ impl<G: GameApp> Engine<G> {
             WorldPartition,
         };
 
-        let owner = self.world.entities().find(|entity| {
-            self.world.get::<TerrainComponent>(*entity).is_some()
-                && self.world.get::<WorldPartitionComponent>(*entity).is_some()
-        });
+        let owner = self
+            .world
+            .entities_with::<WorldPartitionComponent>()
+            .find(|entity| {
+                self.world.get::<TerrainComponent>(*entity).is_some()
+                    && self.world.get::<WorldPartitionComponent>(*entity).is_some()
+            });
         let Some(owner) = owner else {
             // Deleting/reloading the terrain must not strand streamed actors
             // in the ECS. Drain the coordinator before dropping it; empty
@@ -1976,7 +1982,7 @@ impl<G: GameApp> Engine<G> {
     fn sync_authored_material_components(&mut self) {
         let bound: Vec<_> = self
             .world
-            .entities()
+            .entities_with::<MaterialComponent>()
             .filter_map(|entity| Some((entity, *self.world.get::<MaterialComponent>(entity)?)))
             .filter(|(_, material)| material.asset != somnium_asset::database::AssetId::NONE)
             .collect();
@@ -4169,7 +4175,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         let path_tracer_active = self
             .world
-            .entities()
+            .entities_with::<PostProcessComponent>()
             .find_map(|entity| self.world.get::<PostProcessComponent>(entity))
             .is_some_and(|post| post.path_tracer);
         synchronize_path_trace_pause(
@@ -4422,7 +4428,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // stable descriptor, so no stale GPU handle survives in a component.
         let water_descriptors: Vec<_> = self
             .world
-            .entities()
+            .entities_with::<WaterComponent>()
             .filter(|entity| !crate::is_hidden(&self.world, *entity))
             .filter_map(|entity| {
                 let water = self.world.get::<WaterComponent>(entity).copied()?;
@@ -4455,7 +4461,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Editor panels");
         }
-        {
+        if self.config.player_mode {
+            // A shipped player has no outliner, inspector or panels to feed.
+            // Resolving authored materials to runtime ids is the one part of
+            // this block a running game depends on.
+            self.zone_begin("Material sync");
+            self.sync_authored_material_components();
+            self.zone_end();
+        } else {
             self.zone_begin("Outliner");
             // TOWN-PERF: gathering, decorating and diffing a row per entity cost
             // 4-7 ms a frame at Town's ~10k entities, for a panel that only a
@@ -4477,17 +4490,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             };
             let mut hierarchy = std::mem::take(&mut self.outliner_hierarchy);
             if refresh {
-            hierarchy.refresh(all_entities.iter().map(|&entity| {
-                crate::outliner_hierarchy::Source {
-                    id: entity.index(),
-                    generation: entity.generation(),
-                    name: self.world.get::<Name>(entity).map(Name::as_str),
-                    parent: self.world.get::<Parent>(entity).and_then(|parent| {
-                        (parent.entity != somnium_ecs::Entity::DANGLING)
-                            .then_some(parent.entity.index())
-                    }),
-                }
-            }));
+                hierarchy.refresh(all_entities.iter().map(|&entity| {
+                    crate::outliner_hierarchy::Source {
+                        id: entity.index(),
+                        generation: entity.generation(),
+                        name: self.world.get::<Name>(entity).map(Name::as_str),
+                        parent: self.world.get::<Parent>(entity).and_then(|parent| {
+                            (parent.entity != somnium_ecs::Entity::DANGLING)
+                                .then_some(parent.entity.index())
+                        }),
+                    }
+                }));
             }
             let tree = hierarchy.rows_mut();
             // One reconciliation point per frame. Commands, undo, redo, game
@@ -5163,7 +5176,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 crate::particle::simulation_delta(&self.simulation_clock, self.stepping_now, dt);
             let sprite_entities: Vec<_> = self
                 .world
-                .entities()
+                .entities_with::<crate::ParticleEmitter>()
                 .filter_map(|e| {
                     self.world
                         .get::<crate::ParticleEmitter>(e)
@@ -5435,6 +5448,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
         if let Some(r) = &mut self.renderer {
             r.profiler.frame_cpu_ms = frame_body_started.elapsed().as_secs_f32() * 1000.0;
+            // Waits on the GPU and vsync sit inside the render stage; the
+            // present half is last frame's, which is close enough for a mean.
+            let wait_ms = r.profiler.surface_acquire_ms + r.profiler.submit_present_ms;
+            if let Some(report) = self.cpu_watchdog.frame(dt * 1000.0, frame_timings, wait_ms) {
+                warn!("{report}");
+            }
         }
 
         self.time.wait_for_frame_budget();
@@ -5660,7 +5679,10 @@ impl<G: GameApp> Engine<G> {
     }
 
     /// The renderer slot for an authored material, allocated on first use.
-    fn resolve_material_runtime(&mut self, asset_id: somnium_asset::database::AssetId) -> Option<u32> {
+    fn resolve_material_runtime(
+        &mut self,
+        asset_id: somnium_asset::database::AssetId,
+    ) -> Option<u32> {
         let document = self.material_documents.get(&asset_id)?;
         let renderer = self.renderer.as_mut()?;
         let ctx = self.render_ctx.as_ref()?;
@@ -7171,11 +7193,15 @@ impl<G: GameApp> Engine<G> {
     /// before `apply_post_process` pushes the authored values they replace.
     fn apply_time_of_day(&mut self, dt: f32) {
         self.day_state = None;
-        let Some(entity) = self.world.entities().find(|e| {
-            self.world
-                .get::<crate::time_of_day::TimeOfDayComponent>(*e)
-                .is_some()
-        }) else {
+        let Some(entity) = self
+            .world
+            .entities_with::<crate::time_of_day::TimeOfDayComponent>()
+            .find(|e| {
+                self.world
+                    .get::<crate::time_of_day::TimeOfDayComponent>(*e)
+                    .is_some()
+            })
+        else {
             return;
         };
         // The clock only runs during a play session. An editor that advanced
@@ -7220,7 +7246,7 @@ impl<G: GameApp> Engine<G> {
         // The sun is the first directional light. Not a named entity: a scene
         // that renamed "SunLight" would silently stop having a day cycle, and
         // a name is not a type.
-        let sun = self.world.entities().find(|e| {
+        let sun = self.world.entities_with::<LightComponent>().find(|e| {
             self.world
                 .get::<LightComponent>(*e)
                 .is_some_and(|light| light.light_type == LightType::Directional)
@@ -7257,7 +7283,7 @@ impl<G: GameApp> Engine<G> {
     fn apply_sky(&mut self, dt: f32) {
         let sky = self
             .world
-            .entities()
+            .entities_with::<crate::sky::SkyComponent>()
             .find_map(|e| self.world.get::<crate::sky::SkyComponent>(e).copied());
         let coverage_override = self.day_state.and_then(|state| state.cloud_coverage);
         let Some(renderer) = self.renderer.as_mut() else {
@@ -7300,7 +7326,7 @@ impl<G: GameApp> Engine<G> {
     fn submit_decals(&mut self) {
         let collected: Vec<(glam::Mat4, crate::decal::DecalComponent, Option<u32>)> = self
             .world
-            .entities()
+            .entities_with::<crate::decal::DecalComponent>()
             .filter_map(|entity| {
                 if crate::is_hidden(&self.world, entity) {
                     return None;
@@ -7373,11 +7399,14 @@ impl<G: GameApp> Engine<G> {
     /// fields that are themselves saved, and a world that got dirty by raining
     /// would make "unsaved changes" meaningless.
     fn apply_weather(&mut self, dt: f32) {
-        let weather = self.world.entities().find_map(|e| {
-            self.world
-                .get::<crate::weather::WeatherComponent>(e)
-                .copied()
-        });
+        let weather = self
+            .world
+            .entities_with::<crate::weather::WeatherComponent>()
+            .find_map(|e| {
+                self.world
+                    .get::<crate::weather::WeatherComponent>(e)
+                    .copied()
+            });
         let Some(weather) = weather else {
             self.weather_state = crate::weather::WeatherState::default();
             return;
@@ -7400,11 +7429,17 @@ impl<G: GameApp> Engine<G> {
             // water already had — not through a second "storminess" knob.
             let bodies: Vec<somnium_ecs::Entity> = self
                 .world
-                .entities()
+                .entities_with::<WaterComponent>()
                 .filter(|e| self.world.get::<WaterComponent>(*e).is_some())
                 .collect();
             for entity in bodies {
-                if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                // Compare first: `get_mut` marks the component changed, and a
+                // write every frame would rebuild every cache keyed on water.
+                let stale = self
+                    .world
+                    .get::<WaterComponent>(entity)
+                    .is_some_and(|w| w.wind_speed != speed);
+                if let Some(water) = stale.then(|| self.world.get_mut::<WaterComponent>(entity)).flatten() {
                     water.wind_speed = speed;
                 }
             }
@@ -7448,7 +7483,9 @@ impl<G: GameApp> Engine<G> {
     ) {
         use crate::weather::Precipitation;
 
-        let falling = weather.enabled && state.rate > 0.01;
+        // No particle rate means wet ground without visible rain: no emitter
+        // to move with the camera every frame.
+        let falling = weather.enabled && state.rate > 0.01 && weather.particle_rate > 0.0;
         if !falling {
             if let Some(entity) = self.precipitation_entity.take() {
                 // Despawned rather than left with a zero rate: an emitter with
@@ -7596,11 +7633,14 @@ impl<G: GameApp> Engine<G> {
     /// a cycle you are about to scrub — while the driver must do nothing at
     /// all when it is off.
     fn publish_time_of_day(&mut self) {
-        let hour = self.world.entities().find_map(|e| {
-            self.world
-                .get::<crate::time_of_day::TimeOfDayComponent>(e)
-                .map(|tod| tod.hour.rem_euclid(24.0))
-        });
+        let hour = self
+            .world
+            .entities_with::<crate::time_of_day::TimeOfDayComponent>()
+            .find_map(|e| {
+                self.world
+                    .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                    .map(|tod| tod.hour.rem_euclid(24.0))
+            });
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.update_time_of_day(hour);
         }
@@ -7623,10 +7663,13 @@ impl<G: GameApp> Engine<G> {
             .and_then(|e| self.world.get::<PostProcessComponent>(e).cloned())
             .or_else(|| {
                 self.world
-                    .entities()
+                    .entities_with::<PostProcessComponent>()
                     .find_map(|e| self.world.get::<PostProcessComponent>(e).cloned())
             });
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
+            // The player's graphics tier: gates and scales what the scene
+            // authored, never enables what it left off (see `quality`).
+            let budget = r.graphics_budget();
             // Phase 24A: exposure is now derived from EV100 rather than being a
             // free multiplier. Auto-exposure overrides it on the GPU from the
             // metered histogram, so this value is what a manual camera would use
@@ -7642,8 +7685,16 @@ impl<G: GameApp> Engine<G> {
                 .and_then(|state| state.exposure_compensation)
                 .unwrap_or(pp.exposure_compensation);
             r.shading_mode = u32::from(pp.cel_shading)
-                | if pp.pcss_enabled { 2 } else { 0 }
-                | if pp.contact_shadows_enabled { 4 } else { 0 }
+                | if pp.pcss_enabled && budget.soft_shadows {
+                    2
+                } else {
+                    0
+                }
+                | if pp.contact_shadows_enabled && budget.contact_shadows {
+                    4
+                } else {
+                    0
+                }
                 | if pp.analytic_grad { 8 } else { 0 };
             let path_active = pp.path_tracer && r.raytrace_pass.supported();
             // The path tracer already owns temporal accumulation. Feeding that
@@ -7666,27 +7717,34 @@ impl<G: GameApp> Engine<G> {
             let fsr_fallback = pp.fsr_enabled() && !path_active && !fsr_active;
             r.taa_pass
                 .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !path_active);
-            r.gtao_pass.enabled = pp.gtao_enabled && !path_active;
+            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
-            r.dof_pass.enabled = pp.dof_enabled && !path_active;
+            r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !path_active;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
-            r.restir_pass.enabled = pp.restir_enabled && !path_active;
-            let restir_gi_active =
-                pp.restir_gi_enabled && r.restir_gi_pass.supported() && !path_active;
+            r.restir_pass.enabled = pp.restir_enabled && budget.traced_direct && !path_active;
+            let restir_gi_active = pp.restir_gi_enabled
+                && budget.traced_gi
+                && r.restir_gi_pass.supported()
+                && !path_active;
+            // A tier without traced GI keeps the scene lit indirectly with
+            // probes rather than dropping bounce light altogether.
+            let gi_stand_in = pp.restir_gi_enabled && !budget.traced_gi && budget.probes;
             r.restir_gi_pass.enabled = restir_gi_active;
             // `probes` is the pre-AB scene field. Treat it as a compatibility
             // request for the portable tier; ReSTIR remains the explicit
             // higher-quality winner if both old/new fields are authored.
-            let ddgi_active = (pp.ddgi_enabled || pp.probes) && !restir_gi_active && !path_active;
+            let ddgi_active = ((pp.ddgi_enabled || pp.probes) && budget.probes || gi_stand_in)
+                && !restir_gi_active
+                && !path_active;
             r.ddgi_pass.configure(
                 ddgi_active,
                 somnium_renderer::pass::ddgi::DdgiConfig {
                     spacing: pp.ddgi_probe_spacing_m,
                     update_budget: pp.ddgi_update_budget,
                     hysteresis: pp.ddgi_hysteresis,
-                    intensity: if pp.ddgi_enabled {
+                    intensity: if pp.ddgi_enabled || gi_stand_in {
                         pp.ddgi_intensity
                     } else {
                         pp.probe_intensity
@@ -7694,13 +7752,14 @@ impl<G: GameApp> Engine<G> {
                 },
             );
             r.water_reflection_pass.enabled =
-                pp.rt_reflect_enabled && r.water_reflection_pass.supported();
+                pp.rt_reflect_enabled && budget.traced_water && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
-                pp.rt_refract_enabled && r.water_reflection_pass.supported();
+                pp.rt_refract_enabled && budget.traced_water && r.water_reflection_pass.supported();
             r.cas_pass.enabled = pp.cas_enabled && !fsr_active;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
-            r.motion_blur_pass.enabled = pp.motion_blur_enabled && !path_active;
+            r.motion_blur_pass.enabled =
+                pp.motion_blur_enabled && budget.camera_effects && !path_active;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
             r.restir_gi_pass.intensity = pp.restir_gi_intensity;
             r.gtao_pass.radius = pp.gtao_radius;
@@ -7712,7 +7771,7 @@ impl<G: GameApp> Engine<G> {
                 .unwrap_or(pp.fog_density);
             r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
-            r.volumetric_pass.fog.shafts = pp.light_shafts;
+            r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
             {
                 use somnium_renderer::pass::lighting_extra::{
@@ -7726,10 +7785,10 @@ impl<G: GameApp> Engine<G> {
                     // wastes work and risks cross-mode history contamination.
                     flags = FLAG_PATH;
                 } else {
-                    if pp.world_cache && rt && !ddgi_active {
+                    if pp.world_cache && budget.traced_gi && rt && !ddgi_active {
                         flags |= FLAG_CACHE;
                     }
-                    if pp.specular_gi && rt {
+                    if pp.specular_gi && budget.traced_gi && rt {
                         flags |= FLAG_SPECULAR;
                     }
                     if ddgi_active || (pp.mesh_sdf && !pp.world_cache) {
@@ -7798,9 +7857,18 @@ impl<G: GameApp> Engine<G> {
     fn apply_camera_settings(&mut self) {
         let settings = self
             .world
-            .entities()
+            .entities_with::<CameraSettingsComponent>()
             .find_map(|e| self.world.get::<CameraSettingsComponent>(e).copied());
-        let Some(cam) = settings else { return };
+        let Some(cam) = settings else {
+            // No Camera entity: the renderer keeps its own scale, capped by the tier.
+            if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+                let cap = r.graphics_budget().render_scale;
+                if cap < 1.0 {
+                    r.set_graphics_scale(c, cap);
+                }
+            }
+            return;
+        };
         if let Some(r) = self.renderer.as_mut() {
             r.set_cpu_frustum(cam.frustum_cull);
         }
@@ -7808,7 +7876,8 @@ impl<G: GameApp> Engine<G> {
         // render context as well — switching the controller off resizes the
         // scene targets back to the base extent there and then.
         if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
-            r.set_graphics_scale(c, cam.graphics_scalability.scale());
+            let cap = r.graphics_budget().render_scale;
+            r.set_graphics_scale(c, cam.graphics_scalability.scale().min(cap));
             r.set_dynamic_resolution(
                 c,
                 cam.dynamic_resolution,
@@ -7827,7 +7896,7 @@ impl<G: GameApp> Engine<G> {
     fn sync_terrain_colliders(&mut self) {
         let terrains: Vec<(u32, glam::Vec3)> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
                 let pos = self
@@ -7924,7 +7993,7 @@ impl<G: GameApp> Engine<G> {
             somnium_ecs::curve::Curve,
         )> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 if crate::is_hidden(&self.world, e) {
                     return None;
@@ -8646,7 +8715,7 @@ impl<G: GameApp> Engine<G> {
     fn submit_terrains(&mut self) {
         let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 // The Outliner's eye means "not drawn", for a terrain exactly
                 // as for a mesh.
@@ -10252,7 +10321,8 @@ impl<G: GameApp> Engine<G> {
                                     normal_scale: 1.0,
                                     height_map: -1,
                                     height_depth: 0.0,
-                                    height_pad: [0.0; 2],
+                                    weathering: 0.0,
+                                    detile: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);

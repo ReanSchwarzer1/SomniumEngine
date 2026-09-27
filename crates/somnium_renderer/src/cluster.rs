@@ -179,6 +179,12 @@ pub trait ClusterVolume {
     fn centre_ws(&self) -> [f32; 3];
     /// Radius of the bounding sphere, metres.
     fn bounding_radius(&self) -> f32;
+    /// World-space corners of a tighter box, when the volume has one. A flat
+    /// ground decal's sphere is mostly empty air: projected at a grazing
+    /// angle it covers several times the froxels its box does.
+    fn corners_ws(&self) -> Option<[glam::Vec3; 8]> {
+        None
+    }
 }
 
 impl ClusterVolume for GpuLocalLight {
@@ -240,11 +246,29 @@ fn volume_froxel_bounds<V: ClusterVolume>(
     let (x1, _) = project_to_screen(pos_vs.x + range, pos_vs.y, depth);
     let (_, y0) = project_to_screen(pos_vs.x, pos_vs.y - range, depth);
     let (_, y1) = project_to_screen(pos_vs.x, pos_vs.y + range, depth);
+    let (mut sx0, mut sx1, mut sy0, mut sy1) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+    let (mut z_min, mut z_max) = (z_min, z_max);
 
-    let px_min_x = x0.min(x1).max(0.0);
-    let px_max_x = x0.max(x1).min(sw);
-    let px_min_y = y0.min(y1).max(0.0);
-    let px_max_y = y0.max(y1).min(sh);
+    // A box, when every corner is in front of the near plane: its projected
+    // corners bound it exactly. A corner behind the camera does not project,
+    // so a box the camera stands in keeps the sphere.
+    if let Some(corners) = light.corners_ws() {
+        let vs = corners.map(|c| view * c.extend(1.0));
+        if vs.iter().all(|v| -v.z >= near) {
+            (sx0, sx1, sy0, sy1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            (z_min, z_max) = (f32::MAX, f32::MIN);
+            for v in vs {
+                let (px, py) = project_to_screen(v.x, v.y, -v.z);
+                (sx0, sx1, sy0, sy1) = (sx0.min(px), sx1.max(px), sy0.min(py), sy1.max(py));
+                (z_min, z_max) = (z_min.min(-v.z), z_max.max(-v.z));
+            }
+        }
+    }
+
+    let px_min_x = sx0.max(0.0);
+    let px_max_x = sx1.min(sw);
+    let px_min_y = sy0.max(0.0);
+    let px_max_y = sy1.min(sh);
 
     if px_min_x >= px_max_x || px_min_y >= px_max_y {
         return None;
@@ -725,6 +749,64 @@ mod tests {
         assert!(
             total <= MAX_FROXELS,
             "4K grid is {total}, exceeds MAX_FROXELS {MAX_FROXELS}"
+        );
+    }
+
+    /// A flat box on the ground, 2.6 x 0.2 x 0.8 m (a puddle decal).
+    struct Slab {
+        centre: glam::Vec3,
+        boxed: bool,
+    }
+
+    impl ClusterVolume for Slab {
+        fn centre_ws(&self) -> [f32; 3] {
+            self.centre.to_array()
+        }
+        fn bounding_radius(&self) -> f32 {
+            glam::Vec3::new(2.6, 0.2, 0.8).length() * 0.5
+        }
+        fn corners_ws(&self) -> Option<[glam::Vec3; 8]> {
+            self.boxed.then(|| {
+                std::array::from_fn(|i| {
+                    let h = glam::Vec3::new(1.3, 0.1, 0.4);
+                    let sign = |bit: usize| if i & bit == 0 { -1.0 } else { 1.0 };
+                    self.centre + h * glam::Vec3::new(sign(1), sign(2), sign(4))
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn a_ground_decal_is_binned_by_its_box_not_its_sphere() {
+        // Eye height, looking down the street at a puddle 6 m ahead.
+        let view = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 1.6, 0.0),
+            glam::Vec3::new(0.0, 0.0, -10.0),
+            glam::Vec3::Y,
+        );
+        let proj = glam::Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 10.0, 0.1, 1000.0);
+        let (sw, sh, near, far) = (2160.0, 1350.0, 0.1, 1000.0);
+        let (gw, gh) = (68, 43);
+        let froxels = |b: FroxelBounds| {
+            (b.tile_max_x - b.tile_min_x + 1) * (b.tile_max_y - b.tile_min_y + 1) * (b.slice_max - b.slice_min + 1)
+        };
+        let centre = glam::Vec3::new(0.0, 0.0, -6.0);
+        let sphere = volume_froxel_bounds(&Slab { centre, boxed: false }, view, proj, sw, sh, near, far, gw, gh)
+            .expect("on screen");
+        let boxed = volume_froxel_bounds(&Slab { centre, boxed: true }, view, proj, sw, sh, near, far, gw, gh)
+            .expect("on screen");
+        assert!(froxels(boxed) * 2 < froxels(sphere), "box {boxed:?} vs sphere {sphere:?}");
+        // Still covers the puddle's own centre.
+        let clip = proj * view * centre.extend(1.0);
+        let px = ((clip.x / clip.w * 0.5 + 0.5) * sw) as u32 / TILE_SIZE;
+        let py = ((1.0 - (clip.y / clip.w * 0.5 + 0.5)) * sh) as u32 / TILE_SIZE;
+        assert!((boxed.tile_min_x..=boxed.tile_max_x).contains(&px));
+        assert!((boxed.tile_min_y..=boxed.tile_max_y).contains(&py));
+        // A box the camera stands in falls back to the sphere.
+        let under = glam::Vec3::new(0.0, 1.6, 0.0);
+        assert_eq!(
+            volume_froxel_bounds(&Slab { centre: under, boxed: true }, view, proj, sw, sh, near, far, gw, gh),
+            volume_froxel_bounds(&Slab { centre: under, boxed: false }, view, proj, sw, sh, near, far, gw, gh),
         );
     }
 }

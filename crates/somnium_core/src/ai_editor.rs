@@ -397,7 +397,7 @@ pub struct NavigationEditor {
 impl NavigationEditor {
     fn owns_runtime(&self, world: &World) -> bool {
         let active = world
-            .entities()
+            .entities_with::<NavigationRuntimeOwner>()
             .filter_map(|e| world.get::<NavigationRuntimeOwner>(e).map(|owner| owner.0))
             .max();
         active.map_or(self.ownership == 0, |owner| owner == self.ownership)
@@ -595,7 +595,7 @@ impl NavigationEditor {
     ) {
         if self.owner.is_none() {
             let first_profile = world
-                .entities()
+                .entities_with::<NavigationProfile>()
                 .find(|e| world.get::<NavigationProfile>(*e).is_some());
             if let Some(profile) = first_profile {
                 let _ = self.inspect(world, profile);
@@ -626,7 +626,7 @@ impl NavigationEditor {
             return;
         }
         let desired: BTreeMap<_, _> = world
-            .entities()
+            .entities_with::<NavigationObstacle>()
             .filter_map(|e| {
                 let obstacle = world.get::<NavigationObstacle>(e)?;
                 (obstacle.enabled && obstacle.size.is_finite() && obstacle.size.min_element() > 0.0)
@@ -671,7 +671,7 @@ impl NavigationEditor {
             }
         }
         let wanted_links: BTreeMap<_, _> = world
-            .entities()
+            .entities_with::<NavigationLink>()
             .filter_map(|entity| {
                 let link = world.get::<NavigationLink>(entity)?;
                 link.enabled.then(|| {
@@ -742,7 +742,7 @@ impl NavigationEditor {
             self.step_agents(world, dt);
         }
         self.agent_paths = world
-            .entities()
+            .entities_with::<AgentExecution>()
             .filter_map(|e| world.get::<AgentExecution>(e))
             .filter_map(|e| e.agent.path())
             .flat_map(|p| p.points.windows(2).map(|pair| [pair[0], pair[1]]))
@@ -751,7 +751,7 @@ impl NavigationEditor {
     }
     fn step_agents(&mut self, world: &mut World, dt: f32) {
         let entities: Vec<_> = world
-            .entities()
+            .entities_with::<NavigationAgent>()
             .filter(|e| world.get::<NavigationAgent>(*e).is_some())
             .collect();
         let positions: Vec<_> = entities

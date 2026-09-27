@@ -63,6 +63,16 @@ pub enum AlphaMode {
     Blend,
 }
 
+/// A number from a glTF material's extras (`somnium_weathering`,
+/// `somnium_detile`), clamped to `0..1`; 0 when absent or unreadable.
+fn material_extra(mat: &gltf::Material<'_>, key: &str) -> f32 {
+    mat.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|v| v.get(key).and_then(serde_json::Value::as_f64))
+        .map_or(0.0, |w| (w as f32).clamp(0.0, 1.0))
+}
+
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
     /// Source material name, used for editable `.sommat` sibling naming.
@@ -100,6 +110,16 @@ pub struct LoadedMaterial {
     /// **Not** the same claim as [`Self::foliage_card`], and the two were one
     /// field until the difference cost a phase of grass that looked shattered.
     pub foliage: bool,
+    /// How weathered the surface is, `0..1` (glTF material extras
+    /// `somnium_weathering`). The shading pass adds world-space staining,
+    /// rain streaks, rising damp at the object's foot and grime on ledges in
+    /// proportion; 0 leaves the scan exactly as captured.
+    pub weathering: f32,
+    /// Break up visible tiling (glTF material extras `somnium_detile`): each
+    /// map is read at two noise-picked offsets and blended. Only for
+    /// stochastic scans (plaster, render, asphalt); an offset brick or board
+    /// texture would misalign its courses.
+    pub detile: bool,
     /// This material is painted on **flat cut-out cards whose `uv.x` runs
     /// across the blade**, which is what `shading.wgsl`'s curved-card normal
     /// needs to be true.
@@ -236,6 +256,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission: mat.transmission().map_or(0.0, |t| t.transmission_factor()),
             // Set below, where the sidecar cutout mask identifies vegetation.
             foliage: false,
+            weathering: material_extra(&mat, "somnium_weathering"),
+            detile: material_extra(&mat, "somnium_detile") > 0.5,
             // Authored only: see the field's own note on why no import can
             // honestly infer it.
             foliage_card: false,
@@ -311,6 +333,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             alpha_cutoff: 0.5,
             transmission: 0.0,
             foliage: false,
+            weathering: 0.0,
+            detile: false,
             foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
@@ -1115,6 +1139,25 @@ mod normal_scale_tests {
         assert_eq!(&strengths[..4], &[0.0, 0.25, 1.0, 1.0]);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(root.join("normal.png")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn material_extras_carry_weathering_and_detile() {
+        let root = std::env::temp_dir().join(format!("somnium-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[
+                {"extras":{"somnium_weathering":0.6,"somnium_detile":1}},
+                {"extras":{"somnium_weathering":3.0}}, {}]
+        });
+        let path = root.join("extras.gltf");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        let got: Vec<_> = loaded.materials.iter().map(|m| (m.weathering, m.detile)).collect();
+        assert_eq!(&got[..3], &[(0.6, true), (1.0, false), (0.0, false)]);
+        std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 }

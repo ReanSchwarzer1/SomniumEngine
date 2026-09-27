@@ -46,6 +46,14 @@ A couple of conventions keep this codebase coherent — please follow them:
    feature exists, and older plans preserve the tree they were written against.
 5. **Match the surrounding style.** New code should read like the code around it —
    naming, comment density, and idiom.
+6. **Per-frame code never scans the whole world.** Query by component
+   (`iter_with` / `entities_with` / `first_with`), rebuild caches only when
+   `World::change_signature` changes, and write a component only when its value
+   changes (a write every frame defeats every cache that reads it).
+   `crates/somnium_core/tests/full_scan_ratchet.rs` fails on a new
+   `.entities()` scan in the engine or any game, and at run time
+   `cpu_watchdog` logs a warning naming the frame stage whenever a scene goes
+   CPU-bound — read `editor.log` before profiling.
 
 ## A note on AI assistance
 

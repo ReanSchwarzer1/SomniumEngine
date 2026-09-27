@@ -155,30 +155,13 @@ fn specular_gi(@builtin(global_invocation_id) gid: vec3<u32>) {
     var radiance = vec3<f32>(0.0);
     var conf = 0.0;
 
-    // Short SSR: if the mirror lands on screen with nearby depth, take it.
-    var ss_hit = false;
-    var t_ss = 0.4;
-    for (var i = 0u; i < 12u; i++) {
-        let p = pos + dir * t_ss;
-        let clip = view.view_proj * vec4<f32>(p, 1.0);
-        if clip.w <= 0.0 { break; }
-        let ndc = clip.xy / clip.w;
-        let suv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-        if any(suv < vec2<f32>(0.0)) || any(suv > vec2<f32>(1.0)) { break; }
-        let scoord = vec2<i32>(suv * vec2<f32>(textureDimensions(depth_tex)));
-        let sd = textureLoad(depth_tex, scoord, 0);
-        let sw = reconstruct_world(suv, sd);
-        if sd < 1.0 && abs(length(sw - extra.camera_pos) - length(p - extra.camera_pos)) < t_ss * 0.15 {
-            radiance = textureLoad(gi_tex, scoord, 0).rgb
-                + textureSampleLevel(env_cube, env_sampler, dir, extra.spec_rough * 5.0).rgb * 0.15;
-            conf = 0.65;
-            ss_hit = true;
-            break;
-        }
-        t_ss *= 1.45;
-    }
-
-    if !ss_hit && (extra.flags & 2u) != 0u {
+    // Traced, not screen-space. The SSR shortcut that stood here returned the
+    // ReSTIR GI buffer at the hit pixel: that pixel's *indirect* light, not
+    // its lit colour, so every reflection of on-screen geometry (a facade in
+    // a puddle, the street in a window) came out close to black. The pass
+    // only runs where ray tracing is available, and the trace below shades
+    // its hit with sun, sky and emission.
+    if (extra.flags & 2u) != 0u {
         let hit = rt_trace(pos + n * 0.05, dir, 0.05, 400.0);
         if hit.hit {
             var hit_surface: Surface;

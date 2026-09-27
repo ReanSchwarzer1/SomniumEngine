@@ -266,6 +266,11 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
             let mapped = normalize(t * tangent_normal.x + n * tangent_normal.z + b * tangent_normal.y);
             (*surface).normal = normalize(mix(
                 (*surface).normal, mapped, alpha * decal.normal_strength));
+        } else if decal.roughness < 0.1 {
+            // A mirror-smooth decal with no relief of its own is a liquid
+            // film: standing water fills the joints and lies level, so it
+            // reflects as one sheet instead of scattering off every cobble.
+            (*surface).normal = normalize(mix((*surface).normal, axis, alpha));
         }
     }
 }
@@ -485,6 +490,121 @@ fn transmitted_light(
 /// fraction of the blade's final colour, and the sky is blue.
 fn specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
     return saturate(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
+}
+
+// ── Authored weathering (TOWN-W) ─────────────────────────────────────────────
+//
+// A tiled scan repeats and stays as clean as the day it was photographed. Real
+// masonry, render and painted timber are uneven in colour across a whole wall,
+// streaked where rain runs off ledges, dark and damp at the foot, and grimy on
+// every upward face. `Material.weathering` (0..1, glTF material extras
+// `somnium_weathering`) adds those in *world* space, so the variation runs
+// across neighbouring meshes and never repeats with the texture. 0 leaves the
+// scan untouched, which is every material that does not ask for it.
+fn weather_hash(p: vec3<f32>) -> f32 {
+    let q = fract(p * 0.3183099 + vec3<f32>(0.71, 0.113, 0.419)) * 17.0;
+    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+fn weather_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let x00 = mix(weather_hash(i), weather_hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(weather_hash(i + vec3<f32>(0.0, 1.0, 0.0)), weather_hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(weather_hash(i + vec3<f32>(0.0, 0.0, 1.0)), weather_hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(weather_hash(i + vec3<f32>(0.0, 1.0, 1.0)), weather_hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+fn weather_fbm(p: vec3<f32>) -> f32 {
+    return 0.5 * weather_noise(p) + 0.3 * weather_noise(p * 2.03 + 11.0) + 0.2 * weather_noise(p * 4.07 + 23.0);
+}
+
+/// Texture de-tiling (material `detile`), after Quilez, "Texture repetition",
+/// technique 3. A low-frequency noise over UV picks one of eight offsets per
+/// region; every map is read at its region's offset and at the next one's and
+/// the two are blended across the band where the noise steps, so a scan's
+/// stains and blotches stop repeating in a grid. Offsets are constant within a
+/// region, so the plain UV's gradients stay valid. `t` is refined from the
+/// albedo pair (the blend favours the darker read, which hides the seam) and
+/// then shared by every map so they stay registered.
+struct Detile {
+    a: vec2<f32>,
+    b: vec2<f32>,
+    f: f32,
+    t: f32,
+}
+
+fn detile_uv(uv: vec2<f32>) -> Detile {
+    let l = weather_noise(vec3<f32>(uv * 0.45, 0.5)) * 8.0;
+    let i = floor(l);
+    var d: Detile;
+    d.a = uv + sin(vec2<f32>(3.0, 7.0) * i);
+    d.b = uv + sin(vec2<f32>(3.0, 7.0) * (i + 1.0));
+    d.f = l - i;
+    d.t = smoothstep(0.2, 0.8, d.f);
+    return d;
+}
+
+/// One material map at `uv`: de-tiled, with analytic gradients, or implicit.
+fn sample_material_map(
+    map: i32,
+    uv: vec2<f32>,
+    d: Detile,
+    detiled: bool,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    analytic: bool,
+) -> vec4<f32> {
+    if detiled {
+        let a = textureSampleGrad(textures[map], default_sampler, d.a, ddx, ddy);
+        let b = textureSampleGrad(textures[map], default_sampler, d.b, ddx, ddy);
+        return mix(a, b, d.t);
+    }
+    if analytic {
+        return textureSampleGrad(textures[map], default_sampler, uv, ddx, ddy);
+    }
+    return textureSample(textures[map], default_sampler, uv);
+}
+
+/// Apply `amount` of weathering to `surface` at `world_pos`, facing `normal`
+/// (geometric, world space), `local_height` metres above its object's origin
+/// (grounded assets sit on it, so this is height above their foot), with
+/// `crevice` the scan's own occlusion.
+fn apply_weathering(
+    surface: ptr<function, Surface>,
+    amount: f32,
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    local_height: f32,
+    crevice: f32,
+) {
+    let vertical = 1.0 - abs(normal.y);
+    // Along a vertical face, horizontally: streaks and the damp line follow it.
+    let along = world_pos.x * normal.z - world_pos.z * normal.x;
+    // Uneven colour across the whole surface, a few metres a blotch.
+    let macro_v = weather_fbm(world_pos * 0.22);
+    // Rain streaks: narrow across the wall, long down it, in runs.
+    let streak = smoothstep(0.3, 0.62,
+        weather_noise(vec3<f32>(along * 7.0, world_pos.y * 0.5, 3.7))
+        * weather_noise(vec3<f32>(along * 1.9, world_pos.y * 0.12, 9.1)) * 1.6) * vertical;
+    // Rising damp: dark to a ragged line 0.3-0.9 m above the foot.
+    let line = 0.3 + 0.6 * weather_noise(vec3<f32>(along * 1.3, 0.0, 5.3));
+    let damp = (1.0 - smoothstep(line * 0.45, line, local_height)) * vertical
+        * step(-0.25, local_height);
+    // Grime and moss where dirt settles: ledges, sills, copings, treads.
+    let up = saturate(normal.y);
+    let moss = up * smoothstep(0.42, 0.72, weather_fbm(world_pos * 2.3 + 17.0));
+
+    var albedo = (*surface).albedo * mix(1.0, 0.8 + 0.4 * macro_v, amount);
+    albedo *= 1.0 - amount * (0.26 * streak + 0.34 * damp);
+    albedo = mix(albedo, albedo * vec3<f32>(0.52, 0.6, 0.36), amount * 0.55 * moss);
+    albedo *= mix(1.0, 0.78 + 0.22 * crevice, amount);
+    (*surface).albedo = albedo;
+    (*surface).roughness = clamp(
+        (*surface).roughness + amount * (0.06 * streak - 0.14 * damp + (0.5 - macro_v) * 0.08),
+        0.05, 1.0);
 }
 
 /// Lambert irradiance of a quad (Phase 24R). Linearly Transformed Cosines
@@ -1579,8 +1699,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var surface: Surface;
     surface.albedo    = material.base_color.rgb;
     surface.normal    = geo_normal;
+    // De-tiling needs the analytic gradients: implicit ones jump at every
+    // region's offset and would pick the finest mip along the seams.
+    let detiled = material.detile > 0.5 && analytic_grad;
+    var dt = detile_uv(uv);
     if material.albedo_map >= 0 {
-        if analytic_grad {
+        if detiled {
+            let a = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.a, uv_ddx, uv_ddy).rgb;
+            let b = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.b, uv_ddx, uv_ddy).rgb;
+            dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
+            surface.albedo *= mix(a, b, dt.t);
+        } else if analytic_grad {
             surface.albedo *= textureSampleGrad(
                 textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
         } else {
@@ -1592,11 +1721,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     surface.roughness = max(material.roughness, 0.05);
     surface.metallic  = material.metallic;
     if material.metallic_roughness_map >= 0 {
-        let mr = select(
-            textureSample(textures[material.metallic_roughness_map], default_sampler, uv),
-            textureSampleGrad(textures[material.metallic_roughness_map], default_sampler, uv, uv_ddx, uv_ddy),
-            analytic_grad,
-        );
+        let mr = sample_material_map(material.metallic_roughness_map, uv, dt, detiled, uv_ddx, uv_ddy,
+            analytic_grad);
         surface.roughness = max(mr.g, 0.05);
         surface.metallic  = mr.b;
     }
@@ -1628,12 +1754,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Foliage leans on this heavily — a grass tuft's interior sits in its own
     // shade, and without it every blade receives full open sky.
     if material.occlusion_map >= 0 {
-        let material_occlusion = select(
-            textureSample(textures[material.occlusion_map], default_sampler, uv).r,
-            textureSampleGrad(
-                textures[material.occlusion_map], default_sampler, uv, uv_ddx, uv_ddy).r,
-            analytic_grad,
-        );
+        let material_occlusion = sample_material_map(material.occlusion_map, uv, dt, detiled, uv_ddx,
+            uv_ddy, analytic_grad).r;
         // GTAO and the authored map see different scales. Keep both instead of
         // replacing the screen-space visibility on every mapped material.
         surface.occlusion *= material_occlusion;
@@ -1643,11 +1765,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var normal_variance = 0.0;
     if material.normal_map >= 0 && tbn_valid {
-        let nm_sample = select(
-            textureSample(textures[material.normal_map], default_sampler, uv).rgb,
-            textureSampleGrad(textures[material.normal_map], default_sampler, uv, uv_ddx, uv_ddy).rgb,
-            analytic_grad,
-        );
+        let nm_sample = sample_material_map(material.normal_map, uv, dt, detiled, uv_ddx, uv_ddy,
+            analytic_grad).rgb;
         let source_normal = nm_sample * 2.0 - vec3<f32>(1.0);
         var tangent_n = source_normal;
         tangent_n = vec3<f32>(tangent_n.xy * material.normal_scale, tangent_n.z);
@@ -1670,6 +1789,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if normal_variance > 0.0 {
         let alpha = surface.roughness * surface.roughness;
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
+    }
+
+    // Authored weathering; see `apply_weathering`. After the maps and the
+    // normal-variance widening, before any path that overrides the surface.
+    if material.weathering > 0.0 {
+        let up_axis = instance.model[1].xyz;
+        let local_height = dot(hit_point - instance.model[3].xyz, up_axis)
+            / max(dot(up_axis, up_axis), 1.0e-6);
+        apply_weathering(&surface, material.weathering, hit_point, geo_normal, local_height,
+            micro_occlusion);
     }
 
     // ── Foliage: curved card normals (Phase 17E, re-gated in TSUSHIMA-J) ─────

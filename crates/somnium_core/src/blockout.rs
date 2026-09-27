@@ -226,7 +226,7 @@ pub(crate) fn sync(
         )
     };
     let dirty: Vec<_> = world
-        .entities()
+        .entities_with::<BlockoutComponent>()
         .filter_map(|entity| {
             let blockout = *world.get::<BlockoutComponent>(entity)?;
             let material = world
@@ -245,7 +245,7 @@ pub(crate) fn sync(
     // Scatter bakes may contain thousands of identical blockouts. Reuse the
     // same immutable allocation rather than uploading every instance again.
     let mut allocations: std::collections::BTreeMap<_, _> = world
-        .entities()
+        .entities_with::<Uploaded>()
         .filter_map(|entity| {
             let uploaded = world.get::<Uploaded>(entity)?;
             Some((

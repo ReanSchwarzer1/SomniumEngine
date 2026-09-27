@@ -440,6 +440,9 @@ pub struct GpuProfiler {
     /// reconciles a small GPU `Frame` with a large `Frame wall`. Kept separate
     /// from [`Self::frame_cpu_ms`], which contains it.
     pub surface_acquire_ms: f32,
+    /// Queue submit through present, one frame late (after the frame's
+    /// profiler scope closes); the rest of `Frame CPU` outside the zones.
+    pub submit_present_ms: f32,
     /// The frame most recently collected, for the "is this stale" question the
     /// overlay would otherwise have to guess at.
     collected: u64,
@@ -553,6 +556,7 @@ impl GpuProfiler {
             cpu_raw_results: Vec::new(),
             frame_cpu_ms: 0.0,
             surface_acquire_ms: 0.0,
+            submit_present_ms: 0.0,
             collected: 0,
             frame_index: 0,
             counters: FrameCounters::default(),

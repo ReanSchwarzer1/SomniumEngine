@@ -11,40 +11,65 @@ pub fn imported_draw(world: &World, entity: Entity, camera: Vec3) -> Option<bool
     if world.get::<ImportedMesh>(entity).is_none() {
         return Some(true);
     }
+    let Some(owner) = foliage_owner(world, entity) else {
+        return Some(true);
+    };
+    let Some(position) = world_position(world, owner) else {
+        return Some(true);
+    };
+    let foliage = world
+        .get::<FoliageComponent>(owner)
+        .expect("owner carries foliage");
+    distance_policy(foliage, position, camera, 1.0, 1.0)
+}
+
+/// The entity whose enabled `FoliageComponent` governs `entity`'s drawing:
+/// itself or its nearest such ancestor. Split out so a renderer can resolve
+/// it once and keep it, rather than walk the hierarchy for every part.
+pub fn foliage_owner(world: &World, entity: Entity) -> Option<Entity> {
     let mut owner = entity;
     // Bound corrupt parent cycles without allocating per mesh part.
     for _ in 0..64 {
-        if let Some(foliage) = world.get::<FoliageComponent>(owner)
-            && foliage.enabled
+        if world
+            .get::<FoliageComponent>(owner)
+            .is_some_and(|f| f.enabled)
         {
-            let Some(position) = world_position(world, owner) else {
-                return Some(true);
-            };
-            let delta = position - camera;
-            let distance_sq = delta.x * delta.x + delta.z * delta.z;
-            if foliage.cull_distance > 0.0
-                && distance_sq > foliage.cull_distance * foliage.cull_distance
-            {
-                return None;
-            }
-            if distance_sq < foliage.near_distance * foliage.near_distance {
-                return None;
-            }
-            return Some(
-                foliage.foliage_shadow_distance <= 0.0
-                    || distance_sq
-                        <= foliage.foliage_shadow_distance * foliage.foliage_shadow_distance,
-            );
+            return Some(owner);
         }
-        let Some(parent) = world.get::<Parent>(owner) else {
-            break;
-        };
-        owner = parent.entity;
+        owner = world.get::<Parent>(owner)?.entity;
     }
-    Some(true)
+    None
 }
 
-fn world_position(world: &World, mut entity: Entity) -> Option<Vec3> {
+/// [`imported_draw`]'s verdict for a part governed by `foliage` whose owner
+/// stands at `position` (horizontal distances only). `reach` scales the draw
+/// distances -- the cull and the near hand-over together, so a tree's near
+/// and far halves still meet -- and `shadow_reach` the shadow distance; both
+/// are 1.0 except under a lower graphics tier.
+pub fn distance_policy(
+    foliage: &FoliageComponent,
+    position: Vec3,
+    camera: Vec3,
+    reach: f32,
+    shadow_reach: f32,
+) -> Option<bool> {
+    let delta = position - camera;
+    let distance_sq = delta.x * delta.x + delta.z * delta.z;
+    let cull = foliage.cull_distance * reach;
+    if foliage.cull_distance > 0.0 && distance_sq > cull * cull {
+        return None;
+    }
+    let near = foliage.near_distance * reach;
+    if distance_sq < near * near {
+        return None;
+    }
+    let shadow = foliage.foliage_shadow_distance * shadow_reach;
+    Some(foliage.foliage_shadow_distance <= 0.0 || distance_sq <= shadow * shadow)
+}
+
+/// World position of `entity`: its `WorldTransform` if it has one, else its
+/// local transforms composed up to the nearest ancestor that has one.
+pub fn world_position(world: &World, mut entity: Entity) -> Option<Vec3> {
     let mut local = Mat4::IDENTITY;
     for _ in 0..64 {
         if let Some(transform) = world.get::<WorldTransform>(entity) {
@@ -75,7 +100,11 @@ mod tests {
                 ..Default::default()
             },
         ));
-        world.spawn((Transform::default(), Parent { entity: root }, ImportedMesh::default()))
+        world.spawn((
+            Transform::default(),
+            Parent { entity: root },
+            ImportedMesh::default(),
+        ))
     }
 
     #[test]

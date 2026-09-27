@@ -60,7 +60,9 @@ pub struct DecalComponent {
     pub angle_fade_degrees: f32,
     /// Strength of the material's normal map through the decal, `0..1`.
     pub normal_strength: f32,
-    /// Roughness the decal writes where it is fully opaque.
+    /// Roughness the decal writes where it is fully opaque. Under 0.1 with no
+    /// normal map the decal is a liquid film (a puddle): it also lays the
+    /// surface's normal flat, the way water fills the relief it stands in.
     ///
     /// Separate from the material's own roughness because a decal is usually a
     /// *wet* or *scorched* patch on something, and the interesting authored

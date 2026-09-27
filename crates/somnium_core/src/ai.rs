@@ -265,7 +265,7 @@ pub fn tick_behaviors_with(
     dt: f32,
     host: &mut impl somnium_ai::behavior::TaskHost,
 ) -> Vec<(somnium_ecs::Entity, somnium_ai::behavior::Status)> {
-    let entities: Vec<_> = world.entities().collect();
+    let entities: Vec<_> = world.entities_with::<BehaviorComponent>().collect();
     entities
         .into_iter()
         .filter_map(|entity| {
