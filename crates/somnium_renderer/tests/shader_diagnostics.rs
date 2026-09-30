@@ -31,6 +31,9 @@ const MODULES: &[&str] = &[
     // raster material. `terrain_material.wgsl` includes it too, so leaving it
     // out here fails composition outright rather than subtly.
     "terrain_splat_core.wgsl",
+    // Shading re-sways the reconstructed triangle with the foliage wind.
+    "wind.wgsl",
+    "sky_eye.wgsl",
 ];
 
 fn shader_dir() -> std::path::PathBuf {

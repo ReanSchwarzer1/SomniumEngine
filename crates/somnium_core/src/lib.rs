@@ -856,6 +856,13 @@ pub struct FoliageComponent {
     /// tree whose near twin is cut at the same distance). `0` draws from the
     /// camera outward, which is every foliage authored before this existed.
     pub near_distance: f32,
+    /// Imported hierarchies only, with a `near_distance`: nearer than it, this
+    /// (far, light) half is still submitted *shadow-only*, so a two-model LOD
+    /// pair casts its shadow from the light model everywhere and the heavy near
+    /// half can stop casting (give it a tiny `foliage_shadow_distance`). A tree
+    /// shadow is a soft shape on the ground; a quarter of the triangles draws
+    /// the same shape. Off for everything authored before it existed.
+    pub shadow_proxy: bool,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -884,6 +891,7 @@ impl Default for FoliageComponent {
             lod_distance: 45.0,
             impostor_distance: 90.0,
             near_distance: 0.0,
+            shadow_proxy: false,
             max_instances: 18_000,
         }
     }
@@ -1180,6 +1188,10 @@ pub struct PostProcessComponent {
     pub motion_blur_shutter: f32,
     /// Strength of the traced indirect diffuse (Phase 24L).
     pub restir_gi_intensity: f32,
+    /// Metres a traced indirect bounce ray may travel. A bounce from farther
+    /// than this is left to the sky and probes; in a dense wood most of a
+    /// 200 m ray is spent walking canopy the fog hides anyway.
+    pub restir_gi_distance: f32,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -1367,6 +1379,7 @@ impl Default for PostProcessComponent {
             motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
             motion_blur_shutter: 0.5,
             restir_gi_intensity: 1.0,
+            restir_gi_distance: 200.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: std::env::var("SOMNIUM_LIGHT_SHAFTS").as_deref() != Ok("0"),
             fog_density: 0.0002,

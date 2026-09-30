@@ -41,6 +41,7 @@ pub mod timing;
 pub mod view;
 pub mod viewport_resolution;
 pub mod water_body;
+pub mod wind;
 
 pub use bindless::{GlobalResourcePool, MAX_BINDLESS_TEXTURES};
 pub use command::{DrawCommand, SortKey};
@@ -49,3 +50,35 @@ pub use pass::gizmo::{GizmoAxis, GizmoMode, gizmo_hit_test};
 pub use quality::{GraphicsBudget, GraphicsPreset};
 pub use renderer::{SceneTarget, SomniumRenderer, UploadedNode};
 pub use viewport_resolution::{VIEWPORT_RESOLUTION_LABELS, scene_size_for_preset};
+
+/// The eye drawn in the sky by the shading pass (from `somnium.SkyEye`).
+/// `intensity` 0 draws none.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyEyeParams {
+    /// World direction toward the eye's centre.
+    pub direction: glam::Vec3,
+    /// tan(half the angular width).
+    pub tan_half_width: f32,
+    pub color: glam::Vec3,
+    /// cd/m² at the iris's hottest ring.
+    pub intensity: f32,
+    pub openness: f32,
+    pub pupil: f32,
+    pub pulse_hz: f32,
+    pub glow: f32,
+}
+
+impl Default for SkyEyeParams {
+    fn default() -> Self {
+        Self {
+            direction: glam::Vec3::NEG_Z,
+            tan_half_width: 0.4,
+            color: glam::Vec3::ZERO,
+            intensity: 0.0,
+            openness: 0.42,
+            pupil: 0.14,
+            pulse_hz: 0.0,
+            glow: 0.0,
+        }
+    }
+}

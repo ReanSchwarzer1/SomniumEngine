@@ -5795,6 +5795,14 @@ impl<G: GameApp> Engine<G> {
         if !cfg!(debug_assertions) {
             return;
         }
+        // A timed or automated run must be able to pin the compiled shaders
+        // even while another author edits files in the shared checkout.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| {
+            std::env::var("SOMNIUM_SHADER_HOT_RELOAD").as_deref() != Ok("0")
+        }) {
+            return;
+        }
         const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         let now = std::time::Instant::now();
         if now.duration_since(self.last_shader_poll) < INTERVAL {
@@ -7281,6 +7289,16 @@ impl<G: GameApp> Engine<G> {
     /// for, and the reason coverage is a track on the clock rather than a
     /// second slider on the sky.
     fn apply_sky(&mut self, dt: f32) {
+        // The eye in the sky: the first one that is not hidden (a visibility
+        // gate hides it by hiding its entity).
+        let eye = self
+            .world
+            .entities_with::<crate::sky::SkyEyeComponent>()
+            .filter(|e| !crate::is_hidden(&self.world, *e))
+            .find_map(|e| self.world.get::<crate::sky::SkyEyeComponent>(e).copied());
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.sky_eye = eye.map_or_else(somnium_renderer::SkyEyeParams::default, |e| e.to_params());
+        }
         let sky = self
             .world
             .entities_with::<crate::sky::SkyComponent>()
@@ -7409,6 +7427,9 @@ impl<G: GameApp> Engine<G> {
             });
         let Some(weather) = weather else {
             self.weather_state = crate::weather::WeatherState::default();
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_foliage_wind([0.0, 0.0], 0.0);
+            }
             return;
         };
         self.weather_state = weather.step(self.weather_state, dt);
@@ -7424,6 +7445,8 @@ impl<G: GameApp> Engine<G> {
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.cloud_pass.settings.wind = state.wind;
                 renderer.water_pass.rain_ripple = state.ripples;
+                // Plants: a uniform, not a component write (`wind.rs`).
+                renderer.set_foliage_wind(state.wind, weather.foliage_sway);
             }
             // The sea roughens because the wind does, through the spectrum the
             // water already had — not through a second "storminess" knob.
@@ -7445,6 +7468,7 @@ impl<G: GameApp> Engine<G> {
             }
         } else if let Some(renderer) = self.renderer.as_mut() {
             renderer.water_pass.rain_ripple = 0.0;
+            renderer.set_foliage_wind([0.0, 0.0], 0.0);
         }
 
         // ── Wetness ──────────────────────────────────────────────────────────
@@ -7552,6 +7576,7 @@ impl<G: GameApp> Engine<G> {
                     Name::new("Precipitation"),
                     WorldTransform::identity(),
                     emitter,
+                    crate::weather::PrecipitationEmitter,
                 ));
                 self.precipitation_entity = Some(entity);
             }
@@ -7762,6 +7787,7 @@ impl<G: GameApp> Engine<G> {
                 pp.motion_blur_enabled && budget.camera_effects && !path_active;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
             r.restir_gi_pass.intensity = pp.restir_gi_intensity;
+            r.restir_gi_pass.max_distance = pp.restir_gi_distance;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled && !path_active;
@@ -10323,6 +10349,7 @@ impl<G: GameApp> Engine<G> {
                                     height_depth: 0.0,
                                     weathering: 0.0,
                                     detile: 0.0,
+                                    wind: [0.0; 4],
                                 },
                             );
                             self.default_material_id = Some(id);

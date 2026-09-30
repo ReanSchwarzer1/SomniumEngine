@@ -164,6 +164,13 @@ pub struct SomniumRenderer {
     pub camera_pos: glam::Vec3,
     /// The elapsed engine time in seconds.
     pub time: f32,
+    /// Foliage wind (`wind.rs`), set by the scene's weather.
+    pub foliage_wind: crate::wind::FoliageWind,
+    /// The wind's own clock, advanced by wall time once per frame so plants
+    /// sway in the editor as well as in Play; `.1` is last frame's value, for
+    /// motion vectors.
+    wind_clock: (f32, f32),
+    wind_clock_at: Option<std::time::Instant>,
 
     /// Directional light direction (toward the light, world space, normalized).
     pub light_direction: glam::Vec3,
@@ -448,6 +455,9 @@ pub struct SomniumRenderer {
     /// Phase CONTROL-M: volumetric clouds. Public because the editor drives
     /// every one of its parameters from `SkyComponent`.
     pub cloud_pass: crate::pass::clouds::CloudPass,
+    /// The eye drawn in the sky this frame (`intensity` 0: none). Set by the
+    /// app from `somnium.SkyEye` every frame.
+    pub sky_eye: crate::SkyEyeParams,
     /// Phase CONTROL-O: deferred decals, binned through the same froxel grid
     /// as the local lights.
     pub decal_grid: crate::pass::decal::DecalGrid,
@@ -661,10 +671,11 @@ impl SomniumRenderer {
         let materials_pool = MaterialPool::new(&ctx.device);
         let instances = InstancePool::new(&ctx.device);
 
-        // Phase 11D/13: View buffer expanded to 224 bytes to include raw `view` matrix and `time`.
+        // Phase 11D/13: View buffer expanded to 224 bytes to include raw `view` matrix and `time`;
+        // 256 with the foliage wind and its clock (`wind.rs`), one full view slot.
         let view_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("View Buffer"),
-            size: 224,
+            size: VIEW_SLOT_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -929,6 +940,9 @@ impl SomniumRenderer {
             &cloud_pass.shadow_params,
             &decal_grid,
             grain_masks.packed(),
+            if std::env::var("SOMNIUM_LOCAL_SHADOWS").as_deref() != Ok("0") {
+                raytrace_pass.tlas()
+            } else { None },
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -954,6 +968,9 @@ impl SomniumRenderer {
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
+            &volumetric_pass.view,
+            &volumetric_pass.sampler,
+            shading_pass.volumetric_range_buffer(),
         );
         let water_reflection_pass = crate::pass::water_reflection::WaterReflectionPass::new(
             &ctx.device,
@@ -979,6 +996,8 @@ impl SomniumRenderer {
             &ctx.device,
             &shaders,
             &vis_pass.depth_view,
+            &vis_pass.view,
+            &global_pool.layout,
             ctx.config.width,
             ctx.config.height,
         );
@@ -1014,6 +1033,9 @@ impl SomniumRenderer {
             view_proj: glam::Mat4::IDENTITY,
             camera_pos: glam::Vec3::ZERO,
             time: 0.0,
+            foliage_wind: crate::wind::FoliageWind::default(),
+            wind_clock: (0.0, 0.0),
+            wind_clock_at: None,
             brdf_multiscatter: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MS"),
             brdf_rough_diffuse: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_DIFFUSE"),
             brdf_micro_shadow: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MICROSHADOW"),
@@ -1137,6 +1159,7 @@ impl SomniumRenderer {
             ibl_pass,
             volumetric_pass,
             cloud_pass,
+            sky_eye: crate::SkyEyeParams::default(),
             decal_grid,
             decals: Vec::new(),
             hiz_pass,
@@ -1514,6 +1537,7 @@ impl SomniumRenderer {
                         height_depth: mat.height_depth,
                         weathering: mat.weathering,
                         detile: if mat.detile { 1.0 } else { 0.0 },
+                        wind: [mat.wind_bend, mat.wind_flutter, 0.0, 0.0],
                     },
                 );
                 // Phase 17D: remember double-sidedness so the visibility pass can
@@ -1629,7 +1653,7 @@ impl SomniumRenderer {
     fn view_buffer_bytes(&self, view_proj: glam::Mat4) -> Vec<u8> {
         let inv_view_proj = view_proj.inverse();
         let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
-        let mut view_data = Vec::with_capacity(224);
+        let mut view_data = Vec::with_capacity(VIEW_SLOT_BYTES as usize);
         view_data.extend_from_slice(bytemuck::bytes_of(&view_proj.to_cols_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&inv_view_proj.to_cols_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.view_matrix.to_cols_array()));
@@ -1637,7 +1661,37 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
         view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        let mut wind = self.foliage_wind;
+        let budget = self.graphics_budget();
+        if !budget.foliage_wind {
+            wind.strength = 0.0;
+        }
+        wind.fade_distance *= budget.draw_distance;
+        view_data.extend_from_slice(bytemuck::bytes_of(&wind.uniform()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&[self.wind_clock.0, self.wind_clock.1, 0.0, 0.0]));
         view_data
+    }
+
+    /// The scene's wind for plants: velocity over the ground (m/s, x and z)
+    /// and how strongly they answer it (`Weather.foliage_sway`). Zero strength
+    /// stills every plant; the graphics preset can only lower it.
+    pub fn set_foliage_wind(&mut self, vector: [f32; 2], strength: f32) {
+        self.foliage_wind.vector = vector;
+        self.foliage_wind.strength = strength.max(0.0);
+    }
+
+    /// Advance the wind clock by wall time, once per frame.
+    fn tick_wind_clock(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = self
+            .wind_clock_at
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        self.wind_clock_at = Some(now);
+        // Wrapped well before f32 loses the sub-millisecond steps the phase needs.
+        self.wind_clock = ((self.wind_clock.0 + dt) % 3600.0, self.wind_clock.0);
+        if self.wind_clock.0 < self.wind_clock.1 {
+            self.wind_clock.1 = self.wind_clock.0 - dt;
+        }
     }
 
     fn write_view_buffer(&self, queue: &wgpu::Queue, view_proj: glam::Mat4) {
@@ -2265,8 +2319,13 @@ impl SomniumRenderer {
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.ldr_width = 0;
             self.ldr_height = 0;
-            self.velocity_pass
-                .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
+            self.velocity_pass.resize(
+                &ctx.device,
+                &self.vis_pass.depth_view,
+                &self.vis_pass.view,
+                width,
+                height,
+            );
             self.water_pass.resize(&ctx.device, width, height);
             self.water_reflection_pass
                 .resize(&ctx.device, width, height);
@@ -2636,6 +2695,7 @@ impl SomniumRenderer {
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
+                wind: [0.0; 4],
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -2843,6 +2903,7 @@ impl SomniumRenderer {
         game_ui: Option<&mut dyn somnium_ui::GameUi>,
         scene_target: Option<SceneTarget<'_>>,
     ) {
+        self.tick_wind_clock();
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
@@ -3551,6 +3612,7 @@ impl SomniumRenderer {
             1000.0, // far
             shading_mode,
         );
+        self.restir_gi_pass.update_local_lights(&self.local_lights);
         self.local_lights.clear();
 
         // Phase CONTROL-O: the same grid geometry, the same matrices, the same
@@ -3694,6 +3756,11 @@ impl SomniumRenderer {
             )
             .to_array(),
             moon_intensity: self.moon_intensity,
+            eye_direction: self.sky_eye.direction.normalize_or_zero().to_array(),
+            eye_tan_half_width: self.sky_eye.tan_half_width,
+            eye_color: self.sky_eye.color.to_array(),
+            eye_intensity: self.sky_eye.intensity,
+            eye_shape: [self.sky_eye.openness, self.sky_eye.pupil, self.sky_eye.pulse_hz, self.sky_eye.glow],
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,
@@ -4261,10 +4328,23 @@ impl SomniumRenderer {
         // apart. Bottom-level structures are rebuilt only where the geometry
         // changed — a sculpt stroke, or a mesh's first frame (Phase 25B).
         if self.raytrace_pass.supported() {
+            // Small instances (ground-cover patches, litter, hand props) are left
+            // out of the traced scene: they barely shade indirect light or show
+            // in a reflection, and a level carpeted in ground cover has five
+            // figures of them. Before this the TLAS took the draw queue in
+            // material order and truncated it at its cap, so *which* trees and
+            // walls rays could see depended on how materials happened to sort.
+            let geometry = &self.geometry;
             let instances: Vec<(u32, u32, glam::Mat4)> = self
                 .draw_queue
                 .iter()
                 .enumerate()
+                .filter(|(_, cmd)| {
+                    geometry.mesh_aabb(cmd.vertex_offset).is_none_or(|(min, max)| {
+                        let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
+                        cmd.transform.transform_vector3(half).length() >= TLAS_MIN_RADIUS
+                    })
+                })
                 .map(|(i, cmd)| {
                     (
                         u32::try_from(i).unwrap_or(0),
@@ -4310,6 +4390,7 @@ impl SomniumRenderer {
                     &ctx.device,
                     &ctx.queue,
                     &mut encoder,
+                    &mut self.profiler,
                     &self.global_pool.bind_group,
                     tlas,
                     &self.vis_pass.depth_view,
@@ -4445,6 +4526,7 @@ impl SomniumRenderer {
         self.velocity_pass.record(
             &ctx.queue,
             &mut encoder,
+            &self.global_pool.bind_group,
             self.view_proj_unjittered,
             self.render_width,
             self.render_height,
@@ -4507,6 +4589,8 @@ impl SomniumRenderer {
             &self.vis_pass.depth_view,
             &self.volumetric_pass.view,
         );
+        self.cloud_pass.sky_eye = self.sky_eye;
+        self.cloud_pass.time = self.time;
         self.cloud_pass.record(
             &mut encoder,
             &ctx.queue,
@@ -4705,6 +4789,7 @@ impl SomniumRenderer {
                 clipmap: false,
                 debug: self.shading_debug != 0.0,
                 terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+                terrain_active_layers: 0,
                 live_terrain: false,
                 // Phase DOOM-B. Read once at startup and held constant for the
                 // process: an ablation that could change mid-run would recreate
@@ -4737,6 +4822,7 @@ impl SomniumRenderer {
                     continue;
                 }
                 spec.live_terrain = true;
+                spec.terrain_active_layers |= t.splatmap.painted_layers();
                 spec.hex |= t.hex_tiling;
                 spec.pom |= t.parallax_scale > 0.0;
                 if !t.hero_bank_only {
@@ -4747,6 +4833,20 @@ impl SomniumRenderer {
             // first terrain does not have to wait on a pipeline rebuild.
             if self.terrain_queue.is_empty() {
                 spec.live_terrain = true;
+                spec.terrain_active_layers = u32::MAX;
+            }
+            // Same binary A/B, default off: the sparse mask regressed Gardens
+            // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
+            // full palette until a specialization is measured faster.
+            static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*PAINTED_LAYERS.get_or_init(|| {
+                std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")
+            }) {
+                spec.terrain_active_layers = u32::MAX;
+            }
+            // Measurement rail only: how much of terrain shading is the splat scan.
+            if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
+                spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
             }
             self.shading_pass.ensure_pipeline(&ctx.device, spec);
 
@@ -5851,6 +5951,7 @@ impl SomniumRenderer {
                 &cascade_planes,
                 self.camera_pos,
                 &self.geometry,
+                &self.materials_pool,
                 &mut self.shadow_caster_scratch,
                 &mut self.cascade_shadow_revisions,
             );
@@ -5866,6 +5967,7 @@ impl SomniumRenderer {
                 &cascade_planes,
                 self.camera_pos,
                 &self.geometry,
+                &self.materials_pool,
                 &mut self.shadow_caster_scratch,
                 &mut self.cascade_shadow_revisions,
             );
@@ -5996,6 +6098,7 @@ fn consider_shadow_caster(
     cascade_planes: &[[[f32; 4]; 6]],
     camera_pos: glam::Vec3,
     geometry: &crate::geometry::GeometryPool,
+    materials: &MaterialPool,
     out: &mut Vec<crate::pass::shadow::ShadowCaster>,
     cascade_revisions: &mut [u64; crate::shadow::NUM_CASCADES],
 ) {
@@ -6005,6 +6108,14 @@ fn consider_shadow_caster(
     let caster = crate::pass::shadow::ShadowCaster {
         instance_index,
         index_count: cmd.index_count,
+        // MaterialPool's CPU copy is uploaded verbatim by add/set_material.
+        // Re-evaluate every frame, including material/texture slot edits.
+        // This is the exact shadow fragment predicate for finite cutoffs;
+        // unknown data conservatively retains the reference fragment stage.
+        opaque_depth_only: materials.get(cmd.material_id).is_some_and(|material| {
+            material.alpha_cutoff.is_finite()
+                && !(material.alpha_cutoff > 0.0 && material.albedo_map >= 0)
+        }),
     };
     let Some((min, max)) = geometry.mesh_aabb(cmd.vertex_offset) else {
         out.push(caster);
@@ -6058,6 +6169,9 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
     }
     *hash = hash.wrapping_add(fingerprint);
 }
+
+/// World-space bounding radius below which a draw stays out of the TLAS (metres).
+const TLAS_MIN_RADIUS: f32 = 1.0;
 
 /// Staged texture bytes after which an import submits and waits.
 const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;

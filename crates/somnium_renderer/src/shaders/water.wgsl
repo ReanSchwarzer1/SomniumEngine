@@ -125,6 +125,27 @@ struct VirtualShadowParams {
 @group(0) @binding(12) var virtual_shadow_sampler: sampler_comparison;
 @group(0) @binding(13) var<storage, read> virtual_shadow_pages: array<u32>;
 @group(0) @binding(14) var<uniform> virtual_shadow: VirtualShadowParams;
+// The froxel fog, as shading.wgsl applies it to opaque surfaces: rgb = log
+// in-scattering to this depth, a = transmittance; range.x = metres, 0 = off.
+@group(0) @binding(15) var volumetrics: texture_3d<f32>;
+@group(0) @binding(16) var volumetric_sampler: sampler;
+@group(0) @binding(17) var<uniform> volumetric_range: vec4<f32>;
+
+/// Fog between the camera and the water surface. Water draws after shading
+/// fogged everything else, so without this a pond in mist reads as a black
+/// cutout. (The refracted bed was already fogged to its own depth; at the
+/// clarity woodland water has, the doubled segment is not visible.)
+fn apply_volumetric_fog(colour: vec3<f32>, world_pos: vec3<f32>, screen_uv: vec2<f32>) -> vec3<f32> {
+    if volumetric_range.x <= 0.0 {
+        return colour;
+    }
+    let dist = length(world_pos - view.camera_pos);
+    let slices = f32(textureDimensions(volumetrics).z);
+    let w = saturate(dist / volumetric_range.x - 0.5 / slices);
+    let fog = textureSampleLevel(volumetrics, volumetric_sampler, vec3<f32>(screen_uv, w), 0.0);
+    let fade = saturate(dist / (volumetric_range.x / slices));
+    return colour * mix(1.0, fog.a, fade) + exp(fog.rgb) * fade;
+}
 
 @group(1) @binding(0) var<uniform> material: WaterMaterial;
 @group(1) @binding(1) var body_mask: texture_2d<f32>;
@@ -1085,7 +1106,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Sh
 
     return ShadeOutput(
         vec4<f32>(
-            min(final_color, vec3<f32>(60000.0)),
+            min(apply_volumetric_fog(final_color, input.world_position, screen_uv), vec3<f32>(60000.0)),
             coverage * soft_edge(input.clip_pos, input.world_position),
         ),
     );

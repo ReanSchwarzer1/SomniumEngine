@@ -35,6 +35,8 @@ impl VelocityPass {
         device: &wgpu::Device,
         shaders: &crate::shaders::Shaders,
         depth_view: &wgpu::TextureView,
+        vis_view: &wgpu::TextureView,
+        global_layout: &wgpu::BindGroupLayout,
         width: u32,
         height: u32,
     ) -> Self {
@@ -61,6 +63,18 @@ impl VelocityPass {
                     },
                     count: None,
                 },
+                // The visibility buffer: which instance, so foliage wind can be
+                // reconstructed (`wind.wgsl`).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -72,7 +86,7 @@ impl VelocityPass {
         });
 
         let (texture, view) = Self::alloc(device, width, height);
-        let bind_group = Self::make_bind_group(device, &layout, depth_view, &params);
+        let bind_group = Self::make_bind_group(device, &layout, depth_view, vis_view, &params);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Velocity Shader"),
@@ -80,7 +94,7 @@ impl VelocityPass {
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Velocity PL"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(global_layout), Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -152,6 +166,7 @@ impl VelocityPass {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         depth_view: &wgpu::TextureView,
+        vis_view: &wgpu::TextureView,
         params: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -166,6 +181,10 @@ impl VelocityPass {
                     binding: 1,
                     resource: params.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(vis_view),
+                },
             ],
         })
     }
@@ -174,13 +193,15 @@ impl VelocityPass {
         &mut self,
         device: &wgpu::Device,
         depth_view: &wgpu::TextureView,
+        vis_view: &wgpu::TextureView,
         width: u32,
         height: u32,
     ) {
         let (texture, view) = Self::alloc(device, width, height);
         self.texture = texture;
         self.view = view;
-        self.bind_group = Self::make_bind_group(device, &self.layout, depth_view, &self.params);
+        self.bind_group =
+            Self::make_bind_group(device, &self.layout, depth_view, vis_view, &self.params);
         // The depth this reprojects from is a different image now.
         self.history_valid = false;
     }
@@ -192,6 +213,7 @@ impl VelocityPass {
         &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        global: &wgpu::BindGroup,
         view_proj_unjittered: glam::Mat4,
         width: u32,
         height: u32,
@@ -225,7 +247,8 @@ impl VelocityPass {
             occlusion_query_set: None,
         });
         rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, &self.bind_group, &[]);
+        rpass.set_bind_group(0, global, &[]);
+        rpass.set_bind_group(1, &self.bind_group, &[]);
         rpass.draw(0..3, 0..1);
         drop(rpass);
 

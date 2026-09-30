@@ -956,13 +956,37 @@ mod tests {
         assert_eq!(world.get::<Name>(e).unwrap().as_str(), "designer");
         assert!(world.is_alive(e));
     }
+    #[test]
+    fn runtime_precipitation_is_not_an_edit() {
+        let mut world = World::new();
+        let mut s = AuthoringSession::new("test", "session");
+        s.observe(&mut world);
+        let rain = world.spawn((
+            Name::new("Precipitation"),
+            Transform::default(),
+            crate::weather::PrecipitationEmitter,
+        ));
+        s.observe(&mut world);
+        world.get_mut::<Transform>(rain).unwrap().translation.y = 14.0;
+        s.observe(&mut world);
+        assert_eq!(s.revision, 0, "the rain following the camera moved the revision");
+        assert!(!crate::scene_schema::scene_to_json(&mut world, &crate::reflect_registry::editor_registry())
+            .to_string()
+            .contains("Precipitation"));
+        world.spawn((Name::new("authored"), Transform::default()));
+        s.observe(&mut world);
+        assert_eq!(s.revision, 1);
+    }
 }
 
 /// Authoring includes editable transient fields (preview requests, asset
 /// sessions); save_scene_schema still writes only persistent scene fields.
 fn authoring_snapshot(world: &mut World) -> Value {
     let registry = crate::reflect_registry::editor_registry();
-    let all: Vec<_> = world.entities().collect();
+    let all: Vec<_> = world
+        .entities()
+        .filter(|e| world.get::<crate::weather::PrecipitationEmitter>(*e).is_none())
+        .collect();
     let mut doc =
         crate::scene_schema::entities_to_json(world, &registry, &all).expect("live world identity");
     // entities_to_json already wrote every SERIALIZE field from the same

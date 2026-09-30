@@ -120,6 +120,13 @@ pub struct LoadedMaterial {
     /// stochastic scans (plaster, render, asphalt); an offset brick or board
     /// texture would misalign its courses.
     pub detile: bool,
+    /// Foliage wind lean per metre² of height above the plant's base (glTF
+    /// material extras `somnium_wind_bend`; the renderer's `wind.rs`). A
+    /// trunk and its needles carry the same value so they bend together.
+    pub wind_bend: f32,
+    /// Foliage wind flutter amplitude in metres (extras
+    /// `somnium_wind_flutter`): needles, leaves and blades, never a trunk.
+    pub wind_flutter: f32,
     /// This material is painted on **flat cut-out cards whose `uv.x` runs
     /// across the blade**, which is what `shading.wgsl`'s curved-card normal
     /// needs to be true.
@@ -258,6 +265,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             foliage: false,
             weathering: material_extra(&mat, "somnium_weathering"),
             detile: material_extra(&mat, "somnium_detile") > 0.5,
+            wind_bend: material_extra(&mat, "somnium_wind_bend"),
+            wind_flutter: material_extra(&mat, "somnium_wind_flutter"),
             // Authored only: see the field's own note on why no import can
             // honestly infer it.
             foliage_card: false,
@@ -335,6 +344,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             foliage: false,
             weathering: 0.0,
             detile: false,
+            wind_bend: 0.0,
+            wind_flutter: 0.0,
             foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
@@ -1157,6 +1168,15 @@ mod normal_scale_tests {
         let loaded = super::load_gltf(&path).unwrap();
         let got: Vec<_> = loaded.materials.iter().map(|m| (m.weathering, m.detile)).collect();
         assert_eq!(&got[..3], &[(0.6, true), (1.0, false), (0.0, false)]);
+        assert_eq!(loaded.materials[0].wind_bend, 0.0, "no extras, no sway");
+        std::fs::remove_file(&path).unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[{"extras":{"somnium_wind_bend":0.00035,"somnium_wind_flutter":0.02}}]
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        assert_eq!((loaded.materials[0].wind_bend, loaded.materials[0].wind_flutter), (0.00035, 0.02));
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(root).unwrap();
     }

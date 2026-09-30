@@ -63,8 +63,11 @@ pub const CASCADE_UV_OFFSETS: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.0), (0.0, 0
 /// offset 312 :  sun_angular_radius f32           (4 bytes)  Phase 24E
 /// offset 316 :  _pad2         f32                (4 bytes)  debug flag
 /// offset 320 :  moon_direction vec3<f32>         (12 bytes) Phase 25M-2
-/// offset 332 :  _pad3         f32                (4 bytes)
-///              total                             336 bytes
+/// offset 332 :  moon_intensity f32               (4 bytes)
+/// offset 336 :  eye_direction vec3<f32>, eye_tan_half_width f32   (16) sky eye
+/// offset 352 :  eye_color     vec3<f32>, eye_intensity f32        (16)
+/// offset 368 :  eye_shape     vec4<f32> openness, pupil, pulse_hz, glow (16)
+///              total                             384 bytes
 /// ```
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -94,6 +97,13 @@ pub struct GpuDirectionalLight {
     pub moon_direction: [f32; 3],
     /// Directional moonlight illuminance in lux (Phase 25M-2).
     pub moon_intensity: f32,
+    /// The sky eye (`SkyEyeParams`); `eye_intensity` 0 draws none. Only the
+    /// shading pass declares these; every other pass binds the first 336 bytes.
+    pub eye_direction: [f32; 3],
+    pub eye_tan_half_width: f32,
+    pub eye_color: [f32; 3],
+    pub eye_intensity: f32,
+    pub eye_shape: [f32; 4],
 }
 
 impl Default for GpuDirectionalLight {
@@ -118,6 +128,11 @@ impl Default for GpuDirectionalLight {
             _pad2: 0.0,
             moon_direction: [0.0, -1.0, 0.0],
             moon_intensity: 0.010,
+            eye_direction: [0.0, 0.0, -1.0],
+            eye_tan_half_width: 0.4,
+            eye_color: [0.0; 3],
+            eye_intensity: 0.0,
+            eye_shape: [0.42, 0.14, 0.0, 0.0],
         }
     }
 }

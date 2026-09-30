@@ -68,6 +68,11 @@ struct Material {
     height_depth: f32,
     _hpad0: f32,
     _hpad1: f32,
+    // Foliage wind response (`pool.rs` `wind`): bend, flutter; see `wind.wgsl`.
+    wind_bend: f32,
+    wind_flutter: f32,
+    _wind_pad0: f32,
+    _wind_pad1: f32,
 }
 
 struct View {

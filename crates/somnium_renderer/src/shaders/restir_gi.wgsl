@@ -61,14 +61,28 @@ struct GiParams {
     // would sit at offset 112 and round the struct to 128 against Rust's 112 —
     // which is exactly what wgpu rejected the first time this pass dispatched.
     // Same trap as `TerrainMaterial`'s trailing pad, one struct further on.
-    _pad0: f32,
+    /// GI grid step in full-resolution pixels (1 full, 2 half). Each GI texel
+    /// owns a scale x scale block and traces one of its pixels, turning per frame.
+    scale: f32,
     _pad1: f32,
     _pad2: f32,
 }
 
+/// The full-resolution pixel a GI texel traces this frame.
+fn gi_full_coord(g: vec2<u32>, full: vec2<u32>) -> vec2<i32> {
+    let s = max(u32(gi.scale), 1u);
+    let o = vec2<u32>(gi.frame % s, (gi.frame / s) % s);
+    return vec2<i32>(min(g * s + o, full - vec2<u32>(1u)));
+}
+
+fn gi_grid(full: vec2<u32>) -> vec2<u32> {
+    let s = max(u32(gi.scale), 1u);
+    return (full + vec2<u32>(s - 1u)) / s;
+}
+
 /// A reservoir over *sample points* rather than over light directions.
 ///
-/// 96 bytes. `radiance` is what leaves the sample point toward the shading
+/// 48 bytes. `radiance` is what leaves the sample point toward the shading
 /// point; `w` is the unbiased contribution weight that lets the single kept
 /// sample stand in for every candidate it beat; `m` is the confidence weight,
 /// capped so the reservoir keeps responding to change.
@@ -156,25 +170,107 @@ fn gi_visible(origin: vec3<f32>, to: vec3<f32>, t_min: f32) -> bool {
     return rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE;
 }
 
-/// Direct sun radiance leaving a point toward wherever it is being viewed from.
-///
-/// One shadow ray. This is the "first bounce is lit" half of a one-bounce
-/// solution: without it every sample point would be black and the whole pass
-/// would return nothing.
-fn gi_direct_at(p: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
-    let l = normalize(light.direction);
-    let ndl = dot(n, l);
-    if ndl <= 0.0 {
+struct GiLightSample {
+    position: vec3<f32>,
+    irradiance: vec3<f32>,
+}
+
+/// Incident irradiance divided by the uniform emitter-surface PDF. The pool
+/// stores flux/(4*pi). A one-sided Lambertian panel therefore contributes
+/// 4*color*cos(emitter)*cos(receiver)/distance^2 after cancelling its area.
+/// This is sampled area transport, not a second inverse-square applied to LTC.
+fn gi_sample_local(ll: GpuLocalLight, p: vec3<f32>, n: vec3<f32>, u: vec2<f32>) -> GiLightSample {
+    var emitter_pos = ll.position_ws;
+    let is_area = ll.light_type == 2u || ll.light_type == 3u;
+    var axis = vec3<f32>(0.0, -1.0, 0.0);
+    if ll.light_type != 0u {
+        axis = normalize(ll.direction_ws);
+    }
+    if is_area {
+        let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(axis.y) > 0.95);
+        let t = normalize(cross(up, axis));
+        let b = cross(axis, t);
+        var xy = (2.0 * u - 1.0) * vec2<f32>(max(ll._pad1, 0.05), max(ll._pad2, 0.05));
+        if ll.light_type == 3u {
+            // Same inscribed octagon as the direct-light integrator. Each of
+            // eight equal triangles is sampled uniformly in surface area.
+            let sector = min(u.x * 8.0, 7.999999);
+            let angle = floor(sector) * 0.785398163;
+            let a = vec2<f32>(cos(angle), sin(angle));
+            let c = vec2<f32>(cos(angle + 0.785398163), sin(angle + 0.785398163));
+            xy = sqrt(fract(sector)) * mix(a, c, u.y) * max(ll.radius, 0.05);
+        }
+        emitter_pos += t * xy.x + b * xy.y;
+    } else if ll.light_type == 4u {
+        // Retain the renderer's closest-point tube approximation.
+        let half_length = max(ll._pad1, 0.05);
+        emitter_pos += axis * clamp(dot(p - emitter_pos, axis), -half_length, half_length);
+    }
+    let delta = emitter_pos - p;
+    let distance = length(delta);
+    let l = delta / max(distance, 1.0e-4);
+    let range_distance = select(distance, length(ll.position_ws - p), is_area);
+    let q = range_distance / max(ll.range, 1.0e-4);
+    let fade = max(1.0 - q * q * q * q, 0.0);
+    var attenuation = fade * fade / max(distance * distance, 0.01);
+    if is_area {
+        attenuation *= 4.0 * max(dot(axis, -l), 0.0);
+    } else if ll.light_type == 1u {
+        attenuation *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, dot(axis, -l));
+    } else if ll.light_type == 4u {
+        attenuation *= max(length(cross(l, axis)), 0.15);
+    }
+    return GiLightSample(emitter_pos, ll.color * (attenuation * max(dot(n, l), 0.0)));
+}
+
+/// Four uniform candidates, resampled using unoccluded irradiance. Only the
+/// survivor needs a visibility ray. N/4 and the selection probability preserve
+/// the sum over all lights, including when some candidates have zero weight.
+fn gi_local_irradiance(p: vec3<f32>, n: vec3<f32>, seed: ptr<function, u32>) -> vec3<f32> {
+    let count = cluster_params.num_local_lights;
+    if count == 0u { return vec3<f32>(0.0); }
+    var selected = GiLightSample(p, vec3<f32>(0.0));
+    var weight_sum = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        let index = min(u32(gi_rand(seed) * f32(count)), count - 1u);
+        let uv = vec2<f32>(gi_rand(seed), gi_rand(seed));
+        let candidate = gi_sample_local(local_lights[index], p, n, uv);
+        let weight = gi_luma(candidate.irradiance);
+        weight_sum += weight;
+        if weight > 0.0 && gi_rand(seed) * weight_sum < weight {
+            selected = candidate;
+        }
+    }
+    if weight_sum <= 0.0 || !gi_visible(p + n * 0.02, selected.position, 0.02) {
         return vec3<f32>(0.0);
     }
-    if !gi_visible(p + n * 0.02, p + l * 4000.0, 0.02) {
-        return vec3<f32>(0.0);
+    return selected.irradiance * (weight_sum * f32(count) / (4.0 * gi_luma(selected.irradiance)));
+}
+
+/// Direct radiance leaving a secondary hit: sun plus shadowed local fixtures.
+/// One sun ray and at most one local-light shadow ray, independent of count.
+fn gi_direct_at(p: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>, terrain_index: i32, seed: ptr<function, u32>) -> vec3<f32> {
+    let l = normalize(light.direction);
+    let ndl = dot(n, l);
+    var irradiance = gi_local_irradiance(p, n, seed);
+    if ndl > 0.0 && gi_luma(light.color) > 1.0e-6 && gi_visible(p + n * 0.02, p + l * 4000.0, 0.02) {
+        // Retain the established outdoor sun-bounce grading. Previously the
+        // final IBL composite multiplied the whole reservoir by this value;
+        // applying it here preserves that sun response while keeping practical
+        // bounce independent of the sky-fill control.
+        irradiance += light.color * (ndl * light.ibl_intensity);
+    }
+    var direct_albedo = albedo;
+    if rt_gi_deferred_terrain_albedo && terrain_index >= 0 {
+        // Same lookup, position and arithmetic as eager rt_resolve; only its
+        // timing changes. Ordinary textured/MASK hits still resolve there.
+        direct_albedo = rt_terrain_albedo(u32(terrain_index), p);
     }
     // Lambert: albedo/π times irradiance.
     // `light.color` is already premultiplied by intensity (see
     // `DirectionalLight` in the pool) — the sort of detail that silently costs
     // a factor of 100 000 if assumed rather than checked.
-    return albedo * (1.0 / 3.14159265) * light.color * ndl;
+    return direct_albedo * (1.0 / 3.14159265) * irradiance;
 }
 
 /// Luminance, the target function ReSTIR resamples against.
@@ -259,13 +355,31 @@ const GI_M_CAP: f32 = 24.0;
 const GI_SPATIAL_TAPS: u32 = 4u;
 /// Spatial search radius in pixels. Bevy uses 30; smaller here because this
 /// pass has no G-buffer to reject dissimilar neighbours with beyond depth.
-const GI_SPATIAL_RADIUS: f32 = 16.0;
+const GI_SPATIAL_RADIUS: f32 = 10.0;   // GI texels (at half resolution, 20 pixels)
 
 /// Reconstruct the primary surface from depth and the visibility buffer.
 struct GiSurface {
     valid: bool,
     pos: vec3<f32>,
     normal: vec3<f32>,
+}
+
+// This cache stores exactly the geometry reconstructed by pass 1, at float32
+// precision. Pass 2 can reuse it instead of loading and transforming the same
+// triangle for every spatial neighbour. It is current-frame data, never history.
+override gi_cache_surfaces: bool = false;
+struct GiCachedSurface {
+    position_valid: vec4<f32>,
+    normal: vec4<f32>,
+}
+@group(1) @binding(9) var<storage, read_write> gi_surfaces: array<GiCachedSurface>;
+
+fn gi_spatial_surface(index: u32, coord: vec2<i32>, dims: vec2<u32>) -> GiSurface {
+    if gi_cache_surfaces {
+        let cached = gi_surfaces[index];
+        return GiSurface(cached.position_valid.w > 0.0, cached.position_valid.xyz, cached.normal.xyz);
+    }
+    return gi_primary_surface(coord, dims);
 }
 
 fn gi_primary_surface(coord: vec2<i32>, dims: vec2<u32>) -> GiSurface {
@@ -315,19 +429,16 @@ fn gi_primary_surface(coord: vec2<i32>, dims: vec2<u32>) -> GiSurface {
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(depth_tex);
+    let full = textureDimensions(depth_tex);
+    let dims = gi_grid(full);
     if gid.x >= dims.x || gid.y >= dims.y {
         return;
     }
-    let coord = vec2<i32>(gid.xy);
+    let coord = gi_full_coord(gid.xy, full);
     let index = gid.y * dims.x + gid.x;
 
-    // This NO_WORLD_CACHE estimator can only light a bounce point from the
-    // directional sun. Once atmospheric transmittance switches the sun off,
-    // this sun-only estimator has no remaining contribution. Empty both
-    // reservoir stages; pass 2 writes alpha zero and shading keeps its separate
-    // environment diffuse term.
-    if gi_luma(light.color) <= 1.0e-6 {
+    // A room can be lit entirely by practicals with the directional sun off.
+    if gi_luma(light.color) <= 1.0e-6 && cluster_params.num_local_lights == 0u {
         gi_b[index] = gi_empty();
         return;
     }
@@ -337,7 +448,12 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         seed = seed ^ u32(grain.a * 4294967295.0);
     }
 
-    let surface = gi_primary_surface(coord, dims);
+    let surface = gi_primary_surface(coord, full);
+    if gi_cache_surfaces {
+        gi_surfaces[index] = GiCachedSurface(
+            vec4<f32>(surface.pos, select(0.0, 1.0, surface.valid)),
+            vec4<f32>(surface.normal, 0.0));
+    }
     if !surface.valid {
         gi_b[index] = gi_empty();
         return;
@@ -353,7 +469,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // rare hits produces high-variance fireflies that wander under temporal
     // and spatial reuse. Emissive GI needs a light-sampling strategy of its own.
     if hit.hit && all(hit.emissive <= vec3<f32>(0.0)) {
-        let radiance = gi_direct_at(hit.pos, hit.normal, hit.albedo);
+        let radiance = gi_direct_at(hit.pos, hit.normal, hit.albedo, hit.terrain_index, &seed);
         let p_hat = gi_luma(radiance);
         if p_hat > 0.0 {
             r.sample_pos = hit.pos;
@@ -402,16 +518,18 @@ fn initial_and_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(depth_tex);
+    let full = textureDimensions(depth_tex);
+    let dims = gi_grid(full);
     if gid.x >= dims.x || gid.y >= dims.y {
         return;
     }
-    let coord = vec2<i32>(gid.xy);
+    let g = vec2<i32>(gid.xy);
+    let coord = gi_full_coord(gid.xy, full);
     let index = gid.y * dims.x + gid.x;
 
     if gi_luma(light.color) <= 1.0e-6 {
         gi_a[index] = gi_empty();
-        textureStore(out_tex, coord, vec4<f32>(0.0));
+        textureStore(out_tex, g, vec4<f32>(0.0));
         return;
     }
     var seed = index * 26699u + gi.frame * 15487u + 91u;
@@ -420,9 +538,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
         seed = seed ^ u32(grain.r * 4294967295.0);
     }
 
-    let surface = gi_primary_surface(coord, dims);
+    let surface = gi_spatial_surface(index, coord, full);
     if !surface.valid {
-        textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(out_tex, g, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -437,14 +555,15 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < GI_SPATIAL_TAPS; i = i + 1u) {
         let a = gi_rand(&seed) * 6.28318530718;
         let rad = sqrt(gi_rand(&seed)) * GI_SPATIAL_RADIUS;
-        let nc = clamp(
-            coord + vec2<i32>(i32(cos(a) * rad), i32(sin(a) * rad)),
+        let ng = clamp(
+            g + vec2<i32>(i32(cos(a) * rad), i32(sin(a) * rad)),
             vec2<i32>(0),
             vec2<i32>(i32(dims.x) - 1, i32(dims.y) - 1),
         );
-        if nc.x == coord.x && nc.y == coord.y {
+        if ng.x == g.x && ng.y == g.y {
             continue;
         }
+        let nc = gi_full_coord(vec2<u32>(ng), full);
         // Reject neighbours on different geometry. Without this a reservoir
         // crosses a silhouette and the background's bounce light bleeds onto
         // the foreground — the classic ReSTIR halo.
@@ -452,11 +571,11 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
         if nd >= 1.0 || abs(nd - depth_here) > depth_here * 0.02 {
             continue;
         }
-        let ns = gi_primary_surface(nc, dims);
+        let ns = gi_spatial_surface(u32(ng.y) * dims.x + u32(ng.x), nc, full);
         if !ns.valid || dot(ns.normal, surface.normal) < 0.9 {
             continue;
         }
-        let neighbour = gi_b[u32(nc.y) * dims.x + u32(nc.x)];
+        let neighbour = gi_b[u32(ng.y) * dims.x + u32(ng.x)];
         gi_merge(&r, surface.pos, surface.normal, neighbour, ns.pos, &seed);
     }
 
@@ -485,5 +604,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The shading pass multiplies by the surface albedo — this pass does not
     // know it, and must not, or two different albedos would be applied.
     let indirect = r.radiance * r.w * ndl * gi.intensity;
-    textureStore(out_tex, coord, vec4<f32>(max(indirect, vec3<f32>(0.0)), 1.0));
+    // Alpha carries the traced surface's camera distance (0 = nothing traced):
+    // the shading pass's upsample weights by it so light never crosses an edge.
+    textureStore(out_tex, g, vec4<f32>(max(indirect, vec3<f32>(0.0)), max(length(surface.pos - gi.camera_pos), 1.0e-3)));
 }

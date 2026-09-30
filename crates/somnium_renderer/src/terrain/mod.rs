@@ -715,12 +715,13 @@ impl TerrainData {
             }
         }
 
+        let tiling = textures::layer_tiling_at(asset_dir);
         let layers = LAYER_NAMES
             .iter()
             .enumerate()
             .map(|(i, name)| TerrainLayer {
                 name: (*name).to_string(),
-                tiling: textures::LAYER_TILING[i],
+                tiling: tiling[i],
                 blend: blend::LAYER_BLENDS[i],
             })
             .collect();

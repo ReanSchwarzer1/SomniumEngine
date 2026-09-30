@@ -39,6 +39,13 @@ pub struct FeedbackRequest {
     pub params: Value,
     pub expected_revision: u64,
 }
+impl FeedbackRequest {
+    /// Read-only observation of a running world, explicitly opted into by the
+    /// caller. Imports and default captures retain their revision guards.
+    pub fn live_capture(&self) -> bool {
+        self.kind == FeedbackKind::Capture && self.params["live"].as_bool() == Some(true)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackReceipt {
@@ -92,6 +99,13 @@ impl FeedbackQueue {
         if request_id.is_empty() || request_id.len() > 256 || !params.is_object() {
             return Err("request_id must contain 1–256 bytes and params must be an object".into());
         }
+        let live = match params.get("live") {
+            Some(value) => value.as_bool().ok_or("live must be boolean")?,
+            None => false,
+        };
+        if live && (kind != FeedbackKind::Capture || params.get("expected_revision").is_some()) {
+            return Err("live is only valid for a capture without expected_revision".into());
+        }
         if let Some(entry) = self
             .entries
             .values()
@@ -99,7 +113,7 @@ impl FeedbackQueue {
         {
             if entry.request.kind != kind
                 || entry.request.params != params
-                || entry.request.expected_revision != revision
+                || (!entry.request.live_capture() && entry.request.expected_revision != revision)
             {
                 return Err("request_id was already used with different inputs".into());
             }
@@ -222,8 +236,13 @@ impl FeedbackQueue {
     }
 
     /// Called only after real main-thread publication / GPU readback. A capture
-    /// must identify the requested authoring revision; newer is not equivalent.
+    /// identifies the requested authoring revision unless it explicitly opts
+    /// into live observation. A live receipt records the publication revision.
     pub fn succeed(&mut self, job_id: &str, revision: u64, result: Value) -> Result<(), String> {
+        let live = self
+            .entries
+            .get(job_id)
+            .is_some_and(|entry| entry.request.live_capture());
         let receipt = self.receipt_mut(job_id)?;
         if !matches!(
             receipt.status,
@@ -231,7 +250,7 @@ impl FeedbackQueue {
         ) {
             return Err("only running work can complete".into());
         }
-        if receipt.kind == FeedbackKind::Capture && revision != receipt.expected_revision {
+        if receipt.kind == FeedbackKind::Capture && !live && revision != receipt.expected_revision {
             return Err("capture revision differs from the requested revision".into());
         }
         receipt.status = FeedbackStatus::Succeeded;
@@ -320,5 +339,54 @@ mod tests {
             Some(4)
         );
         assert!(queue.fail(&receipt.job_id, "late error").is_err());
+    }
+    #[test]
+    fn live_capture_can_publish_while_simulation_advances() {
+        let mut queue = FeedbackQueue::new("session");
+        let receipt = queue
+            .submit("live", FeedbackKind::Capture, json!({"live":true}), 4)
+            .unwrap();
+        queue.start(&receipt.job_id).unwrap();
+        queue
+            .succeed(&receipt.job_id, 7, json!({"capture":{"frame":14}}))
+            .unwrap();
+        assert_eq!(queue.get(&receipt.job_id).unwrap().expected_revision, 4);
+        assert_eq!(
+            queue.get(&receipt.job_id).unwrap().published_revision,
+            Some(7)
+        );
+        // Retrying one read-only live request returns its receipt even after
+        // animation advanced again; it must not enqueue a duplicate screenshot.
+        assert_eq!(
+            queue
+                .submit("live", FeedbackKind::Capture, json!({"live":true}), 8)
+                .unwrap()
+                .job_id,
+            receipt.job_id
+        );
+    }
+    #[test]
+    fn live_capture_cannot_relax_imports_or_explicit_revision_contracts() {
+        let mut queue = FeedbackQueue::new("session");
+        assert!(
+            queue
+                .submit("import", FeedbackKind::Import, json!({"live":true}), 4)
+                .is_err()
+        );
+        assert!(
+            queue
+                .submit(
+                    "ambiguous",
+                    FeedbackKind::Capture,
+                    json!({"live":true,"expected_revision":4}),
+                    4
+                )
+                .is_err()
+        );
+        assert!(
+            queue
+                .submit("invalid", FeedbackKind::Capture, json!({"live":"true"}), 4)
+                .is_err()
+        );
     }
 }

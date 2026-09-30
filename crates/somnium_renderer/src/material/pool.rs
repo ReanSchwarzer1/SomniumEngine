@@ -61,8 +61,14 @@ pub struct GpuMaterial {
     /// ledge grime added in `shading.wgsl`. Occupies what was padding.
     pub weathering: f32,
     /// 1 to de-tile the maps (two offset reads blended; see `shading.wgsl`
-    /// `detile`), 0 to read them once. Keeps the stride at 96.
+    /// `detile`), 0 to read them once.
     pub detile: f32,
+    /// Foliage wind response: `[bend, flutter, 0, 0]` (glTF extras
+    /// `somnium_wind_bend` / `somnium_wind_flutter`; see `wind.rs`). A plant's
+    /// trunk and needles carry the same bend so they sway together; flutter is
+    /// for needles, leaves and blades only. Zeroes are still. Took the stride
+    /// from 96 to 112.
+    pub wind: [f32; 4],
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -135,6 +141,7 @@ impl GpuMaterial {
             height_depth: asset.height_depth,
             weathering: 0.0,
             detile: 0.0,
+            wind: [0.0; 4],
         }
     }
 }
@@ -350,7 +357,7 @@ mod material_flag_tests {
         assert_eq!(gpu.normal_scale, 0.2);
         assert_eq!(gpu.flags & MATERIAL_FLAG_DOUBLE_SIDED, 1);
         assert_eq!(gpu.height_map, -1);
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 96);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
     }
 
     #[test]
@@ -387,7 +394,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_gpu_material_is_the_96_byte_shader_layout() {
+    fn the_gpu_material_is_the_112_byte_shader_layout() {
         // Must match `Material` in shading.wgsl, visibility.wgsl, shadow.wgsl
         // and transparent.wgsl. A mismatch does not fail validation; the shader
         // simply reads the wrong words, which is why this is pinned.
@@ -400,7 +407,8 @@ mod material_flag_tests {
         // `base_color` — so it rounds to 64. The padding is declared explicitly
         // rather than left implicit for the same reason this test exists.
         // 96 after the parallax height map and its depth (two words of pad).
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 96);
+        // 112 after the foliage wind vec4 (`wind.wgsl`).
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
     }
 

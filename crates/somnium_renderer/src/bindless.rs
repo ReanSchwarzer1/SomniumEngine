@@ -126,9 +126,14 @@ impl GlobalResourcePool {
                     },
                     count: std::num::NonZeroU32::new(MAX_BINDLESS_TEXTURES),
                 },
+                // Materials reach the vertex stage for foliage wind (`wind.wgsl`):
+                // the visibility and shadow rasters displace by the material's
+                // bend and flutter.
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                    visibility: wgpu::ShaderStages::VERTEX
+                        | wgpu::ShaderStages::FRAGMENT
+                        | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,

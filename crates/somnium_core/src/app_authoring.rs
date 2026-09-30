@@ -24,6 +24,7 @@ struct CaptureWork {
     id: String,
     path: PathBuf,
     revision: u64,
+    live: bool,
     frame: u64,
     started: Instant,
 }
@@ -396,6 +397,16 @@ impl<G: GameApp> Engine<G> {
                 }
                 result["input_keys"] =
                     json!(INPUT_KEYS.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+                result["capture_schema"] = json!({
+                    "type":"object","required":["action","request_id"],
+                    "properties":{
+                        "action":{"const":"capture"},
+                        "request_id":{"type":"string","minLength":1,"maxLength":256},
+                        "include_editor":{"type":"boolean","default":false,"description":"Include game HUD and editor UI in the PNG."},
+                        "live":{"type":"boolean","default":false,"description":"Read-only observation during Play; allows runtime revision drift and records request/publication revisions. Cannot be combined with expected_revision."},
+                        "expected_revision":{"type":"integer","minimum":0,"description":"Strict capture of this exact authoring revision; omitted defaults to the current revision unless live is true."}
+                    }
+                });
                 result["execute_actions"] = json!([
                     "terrain_settings",
                     "foliage_settings",
@@ -732,7 +743,9 @@ impl<G: GameApp> Engine<G> {
             "capture"|"import"=>{
                 host.session.observe(&mut self.world);
                 let revision=params["expected_revision"].as_u64().unwrap_or(host.session.revision);
-                host.session.check_revision(&mut self.world,revision).map_err(|e|e.message)?;
+                if !(kind=="capture" && params["live"].as_bool()==Some(true)) {
+                    host.session.check_revision(&mut self.world,revision).map_err(|e|e.message)?;
+                }
                 if kind=="import" {
                     let path=Path::new(required(params,"path")?);
                     let allowed=path.starts_with(&host.project.manifest.content)||path.starts_with(&host.project.manifest.source_assets);
@@ -834,7 +847,7 @@ impl<G: GameApp> Engine<G> {
             }
             host.session.observe(&mut self.world);
             let result = (|| -> Result<Value, String> {
-                if host.session.revision != work.revision {
+                if !work.live && host.session.revision != work.revision {
                     return Err(
                         "World changed before capture completed; request a fresh revision".into(),
                     );
@@ -849,14 +862,21 @@ impl<G: GameApp> Engine<G> {
                     return Err("Renderer output has empty dimensions".into());
                 }
                 Ok(
-                    json!({"capture":{"path":work.path,"width":width,"height":height,"revision":work.revision,
+                    json!({"capture":{"path":work.path,"width":width,"height":height,
+                    "revision":if work.live {host.session.revision} else {work.revision},
+                    "requested_revision":work.revision,"revision_policy":if work.live {"live"} else {"strict"},
                     "frame":self.time.frame_count(),"requested_frame":work.frame,
                     "camera":self.renderer.as_ref().map(|r|r.camera_pos.to_array())}}),
                 )
             })();
             match result {
                 Ok(value) => {
-                    let _ = host.feedback.succeed(&work.id, work.revision, value);
+                    let revision = if work.live {
+                        host.session.revision
+                    } else {
+                        work.revision
+                    };
+                    let _ = host.feedback.succeed(&work.id, revision, value);
                 }
                 Err(error) => {
                     let _ = host.feedback.fail(&work.id, error);
@@ -881,9 +901,11 @@ impl<G: GameApp> Engine<G> {
         let id = &request.job_id;
         let _ = host.feedback.start(id);
         let result = (|| -> Result<(), String> {
-            host.session
-                .check_revision(&mut self.world, request.expected_revision)
-                .map_err(|e| e.message)?;
+            if !request.live_capture() {
+                host.session
+                    .check_revision(&mut self.world, request.expected_revision)
+                    .map_err(|e| e.message)?;
+            }
             match request.kind {
                 FeedbackKind::Capture => {
                     let name = format!(
@@ -908,6 +930,7 @@ impl<G: GameApp> Engine<G> {
                         id: id.clone(),
                         path,
                         revision: request.expected_revision,
+                        live: request.live_capture(),
                         frame: self.time.frame_count(),
                         started: Instant::now(),
                     });

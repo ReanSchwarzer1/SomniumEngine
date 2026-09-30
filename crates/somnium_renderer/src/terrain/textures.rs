@@ -417,6 +417,34 @@ pub const LAYER_TILING: [f32; TERRAIN_LAYER_COUNT as usize] = [
     1.0 / 20.0,
 ];
 
+/// [`LAYER_TILING`] with a project's own widths applied. A project whose packs
+/// replace a slot's pixels (or that walks its terrain at eye level, where the
+/// shipped 15–30 m aerial repeats blur to mush) states each pack's physical
+/// width in `<asset_dir>/layer_tiling.json` as `{ "<LAYER_MATERIALS name>":
+/// metres }`; named slots tile at `1 / metres`, the rest keep the default.
+/// Keys that are not numbers (a `"_note"`) are ignored.
+pub fn layer_tiling_at(asset_dir: &Path) -> [f32; TERRAIN_LAYER_COUNT as usize] {
+    let mut tiling = LAYER_TILING;
+    let Ok(text) = std::fs::read_to_string(asset_dir.join("layer_tiling.json")) else {
+        return tiling;
+    };
+    let widths: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(&text) {
+        Ok(map) => map,
+        Err(err) => {
+            tracing::warn!("{}: {err}", asset_dir.join("layer_tiling.json").display());
+            return tiling;
+        }
+    };
+    for (slot, name) in LAYER_MATERIALS.iter().enumerate() {
+        if let Some(metres) = widths.get(*name).and_then(serde_json::Value::as_f64) {
+            if metres > 0.0 {
+                tiling[slot] = (1.0 / metres) as f32;
+            }
+        }
+    }
+    tiling
+}
+
 /// Moisture affinity 0..1 from the XV-A manifest (porous-wetting weights).
 pub const LAYER_MOISTURE: [f32; TERRAIN_LAYER_COUNT as usize] = [
     0.55, 0.70, 0.25, 0.15, 0.60, 0.95, 0.45, 0.20, 0.35, 0.90, 0.40, 0.50, 0.55, 0.85, 0.20, 0.40,
@@ -1759,6 +1787,21 @@ pub struct Splatmap {
     pub height: u32,
     /// Dirty texel region `(x_min, z_min, x_max, z_max)` inclusive, if any.
     pub dirty: Option<(u32, u32, u32, u32)>,
+    /// Layers present in the uploaded rows. Partial edits conservatively retain
+    /// old bits; a complete upload rebuilds the mask. Never omits a GPU weight.
+    painted_layers: u32,
+}
+
+fn merge_painted_layers(previous: u32, texels: &[SplatTexel], replaces_all: bool) -> u32 {
+    let mut mask = if replaces_all { 0 } else { previous };
+    for texel in texels {
+        for (layer, &weight) in texel.iter().enumerate() {
+            if weight != 0 {
+                mask |= 1u32 << layer;
+            }
+        }
+    }
+    mask
 }
 
 impl Splatmap {
@@ -1803,6 +1846,7 @@ impl Splatmap {
             width,
             height,
             dirty: None,
+            painted_layers: 0,
         };
         splat.mark_dirty(0, 0, width - 1, height - 1);
         splat.upload_dirty(queue);
@@ -1818,6 +1862,12 @@ impl Splatmap {
         });
     }
 
+    /// Conservative layer mask for specializing the material shader without
+    /// moving or discarding painted layers, including layers in the extra bank.
+    pub fn painted_layers(&self) -> u32 {
+        self.painted_layers
+    }
+
     /// Upload the dirty region to all splat textures (whole rows).
     pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
         let Some((_, z0, _, z1)) = self.dirty.take() else {
@@ -1827,6 +1877,11 @@ impl Splatmap {
         let offset = (z0 * self.width) as usize;
         let texels = (rows * self.width) as usize;
         let slice = &self.data[offset..offset + texels];
+        self.painted_layers = merge_painted_layers(
+            self.painted_layers,
+            slice,
+            z0 == 0 && z1 + 1 == self.height,
+        );
 
         let mut groups: [Vec<u8>; super::splat::SPLAT_MAP_COUNT] =
             std::array::from_fn(|_| Vec::with_capacity(texels * 4));
@@ -1864,6 +1919,23 @@ impl Splatmap {
 #[cfg(test)]
 mod doom_i_tests {
     use super::*;
+
+    #[test]
+    fn painted_layers_preserve_high_slots_and_partial_undo() {
+        let mut low = [0; TERRAIN_LAYER_COUNT as usize];
+        low[6] = 128;
+        low[11] = 127;
+        let mut high = [0; TERRAIN_LAYER_COUNT as usize];
+        high[23] = 100;
+        high[31] = 155;
+        let first = merge_painted_layers(0, &[low, high], true);
+        assert_eq!(first, (1 << 6) | (1 << 11) | (1 << 23) | (1 << 31));
+        // Repainting just one uploaded row cannot remove another row's layer.
+        assert_eq!(merge_painted_layers(first, &[low], false), first);
+        // A full scene load/undo replaces every GPU texel, so stale bits go away.
+        assert_eq!(merge_painted_layers(first, &[low], true), (1 << 6) | (1 << 11));
+        assert_eq!(merge_painted_layers(first, &[[0; 32]], true), 0);
+    }
 
     /// The table and the inline transfer function must agree exactly.
     #[test]
@@ -1914,6 +1986,30 @@ mod doom_i_tests {
                     new[c]
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod layer_tiling_tests {
+    use super::*;
+
+    #[test]
+    fn a_project_retiles_only_the_slots_it_names() {
+        let dir = std::env::temp_dir().join(format!("somnium-layer-tiling-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(layer_tiling_at(&dir), LAYER_TILING, "no file keeps the defaults");
+        std::fs::write(
+            dir.join("layer_tiling.json"),
+            r#"{"_note": "scan widths", "forest_leaves_02": 3.0, "aerial_sand": 2.0, "not_a_slot": 9.0}"#,
+        )
+        .unwrap();
+        let tiling = layer_tiling_at(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!((tiling[23] - 1.0 / 3.0).abs() < 1e-6);
+        assert!((tiling[8] - 0.5).abs() < 1e-6);
+        for slot in (0..32).filter(|s| ![8, 23].contains(s)) {
+            assert_eq!(tiling[slot], LAYER_TILING[slot], "slot {slot}");
         }
     }
 }

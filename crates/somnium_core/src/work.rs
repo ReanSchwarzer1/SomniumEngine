@@ -1,9 +1,9 @@
 //! Interruptible work shared by games, Details and authoring. Progress advances
 //! only after contact, with valid aim/reach/visibility and the required tool.
 use crate::{EngineContext, Transform, WorldTransform};
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use somnium_ecs::{
-    Component, Entity, component_schema,
+    Component, Entity, World, component_schema,
     reflect::{FieldFlags, FieldType, TypeRegistry},
 };
 
@@ -58,6 +58,13 @@ impl Default for WorkTarget {
     }
 }
 impl WorkTarget {
+    fn available(&self) -> bool {
+        self.enabled
+            && !self.complete
+            && self.kind <= 1
+            && self.seconds.is_finite()
+            && (0.25..=60.0).contains(&self.seconds)
+    }
     /// Reset runtime work without modifying authored settings.
     pub fn reset(&mut self) {
         self.progress = 0.0;
@@ -75,12 +82,7 @@ impl WorkTarget {
         if self.reset_requested {
             self.reset();
         }
-        let valid = self.enabled
-            && !self.complete
-            && self.kind <= 1
-            && self.seconds.is_finite()
-            && (0.25..=60.0).contains(&self.seconds);
-        let working = eligible && valid;
+        let working = eligible && self.available();
         let dt = dt.min(0.1);
         self.contact = (self.contact + if working { dt / 0.25 } else { -dt / 0.2 }).clamp(0.0, 1.0);
         if !working {
@@ -131,6 +133,8 @@ pub fn register(registry: &mut TypeRegistry) {
 pub struct WorkFrame {
     /// Incomplete target under the reticle.
     pub target: Option<Entity>,
+    /// A selected target can start work with the current tool and free hand.
+    pub ready: bool,
     /// Completion event sources. Usually at most one.
     pub completed: Vec<Entity>,
     /// Smoothed contact, plus true for the lighter hand and false for repair.
@@ -163,7 +167,40 @@ pub fn update_with_contact(
     held: bool,
     flame: bool,
     hands_free: bool,
+    contact_eligible: impl FnMut(u32, Vec3, Vec3) -> bool,
+) -> WorkFrame {
+    update_with_contact_and_aim(
+        ctx,
+        eye,
+        forward,
+        held,
+        flame,
+        hands_free,
+        contact_eligible,
+        |_, _, work, matrix, eye, forward| {
+            aimed_anchor(eye, forward, matrix.transform_point3(work.anchor))
+        },
+    )
+}
+
+/// Default aim for small work contacts. Large visible surfaces may use a game
+/// callback without moving the actual hand anchor or bypassing contact checks.
+pub fn aimed_anchor(eye: Vec3, forward: Vec3, at: Vec3) -> Option<Vec3> {
+    ((at - eye).normalize_or_zero().dot(forward) > 0.9).then_some(at)
+}
+
+/// Select a visible work surface separately from the hand contact. Both points
+/// must remain within authored reach and unobstructed; rig eligibility still
+/// tests the actual anchor. Existing callers retain the default anchor cone.
+pub fn update_with_contact_and_aim(
+    ctx: &mut EngineContext,
+    eye: Vec3,
+    forward: Vec3,
+    held: bool,
+    flame: bool,
+    hands_free: bool,
     mut contact_eligible: impl FnMut(u32, Vec3, Vec3) -> bool,
+    mut aim: impl FnMut(&World, Entity, &WorkTarget, Mat4, Vec3, Vec3) -> Option<Vec3>,
 ) -> WorkFrame {
     let targets: Vec<_> = ctx
         .world
@@ -183,13 +220,24 @@ pub fn update_with_contact(
                 .transpose()
                 .transform_vector3(Vec3::Z)
                 .try_normalize()?;
-            Some((e, w.clone(), matrix.transform_point3(w.anchor), normal))
+            Some((
+                e,
+                w.clone(),
+                matrix.transform_point3(w.anchor),
+                normal,
+                aim(ctx.world, e, w, matrix, eye, forward),
+            ))
         })
         .collect();
     let selected = targets
         .iter()
-        .filter(|(_, w, at, normal)| {
-            in_contact_reach(w, eye, forward, *at, *normal, &mut contact_eligible)
+        .filter(|(_, w, at, normal, aimed)| {
+            in_contact_reach(w, eye, *at, *normal, &mut contact_eligible)
+                && aimed.is_some_and(|point| {
+                    point.is_finite()
+                        && point.distance(eye) <= w.reach
+                        && (point.distance_squared(*at) < 1e-10 || visible(ctx, eye, point))
+                })
                 && visible(ctx, eye, *at)
         })
         .min_by(|a, b| {
@@ -199,16 +247,19 @@ pub fn update_with_contact(
         .map(|v| v.0);
     let returning = targets
         .iter()
-        .any(|(e, w, _, _)| Some(*e) != selected && w.contact > 0.0);
+        .any(|(e, w, _, _, _)| Some(*e) != selected && w.contact > 0.0);
     let mut frame = WorkFrame {
         target: selected,
         ..Default::default()
     };
-    for (entity, config, at, normal) in targets {
+    for (entity, config, at, normal, _) in targets {
         let selected = selected == Some(entity);
         let tool = config.kind != 0 || flame;
-        let eligible =
-            selected && !returning && hands_free && tool && (held || config.preview_held);
+        let ready = ready_to_work(&config, selected, returning, hands_free, flame);
+        if selected {
+            frame.ready = ready;
+        }
+        let eligible = ready && (held || config.preview_held);
         if let Some(w) = ctx.world.get_mut::<WorkTarget>(entity) {
             if w.tick(ctx.simulation.fixed_delta_seconds, eligible) {
                 frame.completed.push(entity);
@@ -237,10 +288,18 @@ pub fn update_with_contact(
     }
     frame
 }
+fn ready_to_work(
+    work: &WorkTarget,
+    selected: bool,
+    returning: bool,
+    hands_free: bool,
+    flame: bool,
+) -> bool {
+    selected && !returning && hands_free && (work.kind != 0 || flame) && work.available()
+}
 fn in_contact_reach(
     work: &WorkTarget,
     eye: Vec3,
-    forward: Vec3,
     at: Vec3,
     normal: Vec3,
     contact_eligible: &mut impl FnMut(u32, Vec3, Vec3) -> bool,
@@ -249,7 +308,6 @@ fn in_contact_reach(
     work.enabled
         && !work.complete
         && delta.length() <= work.reach
-        && delta.normalize_or_zero().dot(forward) > 0.9
         && contact_eligible(work.kind, at, normal)
 }
 fn visible(ctx: &EngineContext, eye: Vec3, at: Vec3) -> bool {
@@ -273,12 +331,46 @@ fn visible(ctx: &EngineContext, eye: Vec3, at: Vec3) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn contextual_readiness_requires_the_tool_and_a_free_hand() {
+        let burn = WorkTarget {
+            kind: 0,
+            ..Default::default()
+        };
+        assert!(
+            !ready_to_work(&burn, true, false, true, false),
+            "unlit lighter cannot start burning"
+        );
+        assert!(ready_to_work(&burn, true, false, true, true));
+        let repair = WorkTarget::default();
+        assert!(ready_to_work(&repair, true, false, true, false));
+        assert!(!ready_to_work(&repair, true, false, false, false));
+        assert!(!ready_to_work(&repair, true, true, true, false));
+        assert!(!ready_to_work(&repair, false, false, true, false));
+        assert!(!ready_to_work(
+            &WorkTarget {
+                complete: true,
+                ..repair.clone()
+            },
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(!ready_to_work(
+            &WorkTarget { kind: 2, ..repair },
+            true,
+            false,
+            true,
+            true
+        ));
+    }
+    #[test]
     fn rig_contact_gate_prevents_remote_repair_and_can_distinguish_burning() {
         let mut work = WorkTarget::default();
         let eye = Vec3::new(0.0, 1.7, 0.0);
         let at = eye + Vec3::NEG_Z;
         let mut eligibility = |kind, _, _| kind == 0;
-        let reachable = in_contact_reach(&work, eye, Vec3::NEG_Z, at, Vec3::Z, &mut eligibility);
+        let reachable = in_contact_reach(&work, eye, at, Vec3::Z, &mut eligibility);
         assert!(!reachable);
         for _ in 0..100 {
             assert!(!work.tick(0.1, reachable));
@@ -286,23 +378,9 @@ mod tests {
         assert_eq!(work.progress, 0.0);
         assert_eq!(work.contact, 0.0);
         work.kind = 0;
-        assert!(in_contact_reach(
-            &work,
-            eye,
-            Vec3::NEG_Z,
-            at,
-            Vec3::Z,
-            &mut eligibility
-        ));
+        assert!(in_contact_reach(&work, eye, at, Vec3::Z, &mut eligibility));
         work.complete = true;
-        assert!(!in_contact_reach(
-            &work,
-            eye,
-            Vec3::NEG_Z,
-            at,
-            Vec3::Z,
-            &mut eligibility
-        ));
+        assert!(!in_contact_reach(&work, eye, at, Vec3::Z, &mut eligibility));
     }
     #[test]
     fn repair_retains_progress_and_completes_only_once_after_contact() {

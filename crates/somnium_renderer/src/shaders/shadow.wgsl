@@ -15,6 +15,7 @@
 // front end and passed. The resolver hoists and de-duplicates `enable`
 // lines, so a module that includes this one inherits it.
 enable wgpu_binding_array;
+//!include "wind.wgsl"
 
 struct Vertex {
     pos_x: f32, pos_y: f32, pos_z: f32,
@@ -87,12 +88,33 @@ struct Material {
     height_depth: f32,
     _hpad0: f32,
     _hpad1: f32,
+    // Foliage wind response (`pool.rs` `wind`): bend, flutter; see `wind.wgsl`.
+    wind_bend: f32,
+    wind_flutter: f32,
+    _wind_pad0: f32,
+    _wind_pad1: f32,
+}
+
+// The view buffer's prefix up to the wind: foliage casts the shadow of where
+// it has swayed to, not of its rest pose.
+struct View {
+    view_proj:     mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    view:          mat4x4<f32>,
+    camera_pos:    vec3<f32>,
+    _padding:      f32,
+    time:          f32,
+    _time_pad0:    f32,
+    _time_pad1:    f32,
+    _time_pad2:    f32,
+    wind:          vec4<f32>,
+    wind_time:     vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> vertices:  array<Vertex>;
 @group(0) @binding(1) var<storage, read> indices:   array<u32>;
 @group(0) @binding(2) var<storage, read> instances: array<Instance>;
-// binding 3 (view) is present in the layout but unused here.
+@group(0) @binding(3) var<storage, read> view: View;
 @group(0) @binding(4) var textures: binding_array<texture_2d<f32>>;
 @group(0) @binding(5) var<storage, read> materials: array<Material>;
 @group(0) @binding(6) var<storage, read> light: DirectionalLight;
@@ -116,7 +138,11 @@ fn vs_main(
     let instance  = instances[inst_idx];
     let index     = indices[instance.index_offset + v_idx];
     let vert      = vertices[instance.vertex_offset + index];
-    let world_pos = instance.model * vec4<f32>(vert.pos_x, vert.pos_y, vert.pos_z, 1.0);
+    var world_pos = instance.model * vec4<f32>(vert.pos_x, vert.pos_y, vert.pos_z, 1.0);
+    // Terrain draws through its own pass; everything here may carry wind.
+    let m = materials[instance.material_id];
+    world_pos = vec4<f32>(world_pos.xyz + wind_offset(world_pos.xyz, instance.model[3].xyz, m.wind_bend,
+                          m.wind_flutter, view.wind_time.x, view.wind, view.camera_pos), 1.0);
     var vp        = light.view_proj[cascade.index];
     if cascade.virtual_page != 0u {
         vp = cascade.page_view_proj;

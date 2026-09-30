@@ -22,6 +22,8 @@ No mutation is automatically retried after a timeout/disconnect: its outcome may
 
 Successful execute/job results may carry `capture:{path,width,height,revision,frame}` (directly, or under `result`, `receipt`, or `job`). The adapter embeds a PNG only from the selected project, only with a PNG signature, and with a 4 MiB limit. The engine must report success only after the requested revision/frame has actually been rendered and read back; this adapter does not infer freshness from a filename.
 
+For running gameplay, `authoring.execute` capture accepts explicit `live:true` without `expected_revision`. This read-only mode permits simulation revision changes between queueing and real PNG readback; the receipt records both revisions and the result declares `revision_policy:"live"`. Default captures remain strict. Set `include_editor:true` to include the game HUD. Discover the current `capture_schema` before use.
+
 ## Verification
 
 Protocol and error tests launch the real stdio adapter subprocess and verify unavailable-editor failures without pretending to exercise an engine:

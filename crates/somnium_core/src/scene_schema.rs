@@ -403,7 +403,10 @@ fn attachment_from_json(
 pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::Value {
     let all: Vec<Entity> = world
         .entities()
-        .filter(|e| world.get::<crate::AssetEditSession>(*e).is_none())
+        .filter(|e| {
+            world.get::<crate::AssetEditSession>(*e).is_none()
+                && world.get::<crate::weather::PrecipitationEmitter>(*e).is_none()
+        })
         .collect();
     entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")
 }

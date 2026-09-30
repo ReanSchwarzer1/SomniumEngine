@@ -175,6 +175,7 @@ export type SomniumDecal = {
 	angle_fade_degrees: number,
 	normal_strength: number,
 	roughness: number,
+	multiply: boolean,
 }
 
 --- `somnium.EditorFlags` (schema version 1).
@@ -199,6 +200,7 @@ export type SomniumFoliage = {
 	foliage_shadow_distance: number,
 	lod_distance: number,
 	impostor_distance: number,
+	near_distance: number,
 	max_instances: number,
 }
 
@@ -238,6 +240,15 @@ export type SomniumLight = {
 	moon_intensity: number,
 	area_width: number,
 	area_height: number,
+}
+
+--- `somnium.LightFlicker` (schema version 1).
+export type SomniumLightFlicker = {
+	enabled: boolean,
+	strength: number,
+	rate: number,
+	dropout: number,
+	seed: number,
 }
 
 --- `somnium.Material` (schema version 2).
@@ -394,6 +405,7 @@ export type SomniumPostProcess = {
 	motion_blur_enabled: boolean,
 	motion_blur_shutter: number,
 	restir_gi_intensity: number,
+	restir_gi_distance: number,
 	volumetrics_enabled: boolean,
 	light_shafts: boolean,
 	fog_density: number,
@@ -611,6 +623,7 @@ export type SomniumWeather = {
 	temperature_c: number,
 	wind_speed: number,
 	wind_direction_deg: number,
+	foliage_sway: number,
 	wetness_target: number,
 	wetting_seconds: number,
 	drying_seconds: number,
@@ -672,6 +685,7 @@ export type SelfComponents = {
 	importedMesh: SomniumImportedMesh?,
 	interactable: SomniumInteractable?,
 	light: SomniumLight?,
+	lightFlicker: SomniumLightFlicker?,
 	material: SomniumMaterial?,
 	mesh: SomniumMesh?,
 	meshKind: SomniumMeshKind?,

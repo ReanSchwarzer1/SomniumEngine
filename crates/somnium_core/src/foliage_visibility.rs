@@ -41,6 +41,16 @@ pub fn foliage_owner(world: &World, entity: Entity) -> Option<Entity> {
     None
 }
 
+/// How an imported foliage part is submitted this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedDraw {
+    Hidden,
+    /// Drawn into the shadow maps only: a `shadow_proxy` far half inside its
+    /// `near_distance`.
+    ShadowOnly,
+    Visible { casts_shadow: bool },
+}
+
 /// [`imported_draw`]'s verdict for a part governed by `foliage` whose owner
 /// stands at `position` (horizontal distances only). `reach` scales the draw
 /// distances -- the cull and the near hand-over together, so a tree's near
@@ -53,18 +63,37 @@ pub fn distance_policy(
     reach: f32,
     shadow_reach: f32,
 ) -> Option<bool> {
+    match draw_policy(foliage, position, camera, reach, shadow_reach) {
+        ImportedDraw::Visible { casts_shadow } => Some(casts_shadow),
+        _ => None,
+    }
+}
+
+/// [`distance_policy`] with the shadow-only case a `shadow_proxy` asks for.
+pub fn draw_policy(
+    foliage: &FoliageComponent,
+    position: Vec3,
+    camera: Vec3,
+    reach: f32,
+    shadow_reach: f32,
+) -> ImportedDraw {
     let delta = position - camera;
     let distance_sq = delta.x * delta.x + delta.z * delta.z;
     let cull = foliage.cull_distance * reach;
     if foliage.cull_distance > 0.0 && distance_sq > cull * cull {
-        return None;
-    }
-    let near = foliage.near_distance * reach;
-    if distance_sq < near * near {
-        return None;
+        return ImportedDraw::Hidden;
     }
     let shadow = foliage.foliage_shadow_distance * shadow_reach;
-    Some(foliage.foliage_shadow_distance <= 0.0 || distance_sq <= shadow * shadow)
+    let casts_shadow = foliage.foliage_shadow_distance <= 0.0 || distance_sq <= shadow * shadow;
+    let near = foliage.near_distance * reach;
+    if distance_sq < near * near {
+        return if foliage.shadow_proxy && casts_shadow {
+            ImportedDraw::ShadowOnly
+        } else {
+            ImportedDraw::Hidden
+        };
+    }
+    ImportedDraw::Visible { casts_shadow }
 }
 
 /// World position of `entity`: its `WorldTransform` if it has one, else its
@@ -105,6 +134,28 @@ mod tests {
             Parent { entity: root },
             ImportedMesh::default(),
         ))
+    }
+
+    /// A proxy far half casts the pair's shadow up close without being drawn,
+    /// and only inside its shadow distance; an ordinary far half does neither.
+    #[test]
+    fn a_shadow_proxy_far_half_casts_shadow_only_up_close() {
+        let mut far = FoliageComponent {
+            enabled: true,
+            cull_distance: 160.0,
+            near_distance: 38.0,
+            foliage_shadow_distance: 60.0,
+            shadow_proxy: true,
+            ..Default::default()
+        };
+        let tree = Vec3::new(50.0, 0.0, 0.0);
+        assert_eq!(draw_policy(&far, tree, Vec3::new(30.0, 1.7, 0.0), 1.0, 1.0), ImportedDraw::ShadowOnly);
+        assert_eq!(draw_policy(&far, tree, Vec3::new(0.0, 1.7, 0.0), 1.0, 1.0),
+                   ImportedDraw::Visible { casts_shadow: true });
+        assert_eq!(draw_policy(&far, tree, Vec3::new(-20.0, 1.7, 0.0), 1.0, 1.0),
+                   ImportedDraw::Visible { casts_shadow: false });
+        far.shadow_proxy = false;
+        assert_eq!(draw_policy(&far, tree, Vec3::new(30.0, 1.7, 0.0), 1.0, 1.0), ImportedDraw::Hidden);
     }
 
     #[test]

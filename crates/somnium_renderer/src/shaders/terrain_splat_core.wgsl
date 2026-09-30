@@ -73,6 +73,18 @@ const TERRAIN_LAYERS: u32 = 32u;
 /// Maximum splat layers considered by this pipeline variant.
 override terrain_scan: u32 = 32u;
 
+// CPU union of layers actually uploaded for live terrain. Default is the full
+// palette for clipmap and ray-query roots, which do not specialize this value.
+override terrain_active_layers: u32 = 0xffffffffu;
+
+fn terrain_layer_is_active(layer: u32) -> bool {
+    return (terrain_active_layers & (1u << layer)) != 0u;
+}
+
+fn terrain_splat_group_is_active(group: u32) -> bool {
+    return (terrain_active_layers & (15u << (group * 4u))) != 0u;
+}
+
 fn terrain_splat_groups() -> u32 {
     return (min(terrain_scan, TERRAIN_LAYERS) + 3u) / 4u;
 }
@@ -96,13 +108,28 @@ fn terrain_unpack_splats(s: array<vec4<f32>, 8>) -> array<f32, 32> {
     }
     total = max(total, 0.0001);
     for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        if !terrain_layer_is_active(i) { continue; }
         w[i] = w[i] / total;
     }
     return w;
 }
 
 /// Deterministic strongest-four. Lower index wins ties.
+override terrain_branchless_select: bool = false;
+
 fn terrain_strongest_four(weight: ptr<function, array<f32, 32>>) -> array<u32, 4> {
+    if terrain_branchless_select {
+        var best = vec4<f32>(-1.0);
+        var selected = vec4<u32>(0u);
+        for (var i = 0u; i < terrain_scan; i = i + 1u) {
+            let w = (*weight)[i];
+            let enters = vec4<f32>(w) > best;
+            let shifts = vec4<bool>(false, enters.x, enters.y, enters.z);
+            best = select(best, select(vec4<f32>(w), vec4<f32>(0.0, best.xyz), shifts), enters);
+            selected = select(selected, select(vec4<u32>(i), vec4<u32>(0u, selected.xyz), shifts), enters);
+        }
+        return array<u32, 4>(selected.x, selected.y, selected.z, selected.w);
+    }
     var b0 = -1.0;
     var b1 = -1.0;
     var b2 = -1.0;

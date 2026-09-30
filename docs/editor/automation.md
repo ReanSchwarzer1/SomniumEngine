@@ -79,6 +79,18 @@ Picking uses the same transformed bounds as the viewport, not exact mesh triangl
 
 Keyboard input accepts letters, digits, function keys, modifiers, arrows, navigation, punctuation and numpad keys; `authoring.discover.input_keys` lists exact names. Input is delivered to the game callback. Editor actions use native commands or semantic operations.
 
+### Capturing running gameplay
+
+Captures normally require an unchanged authoring revision from request through PNG publication. For a read-only screenshot while Play advances, opt into live observation:
+
+```json
+{"action":"capture","request_id":"unique-live-frame","live":true,"include_editor":true}
+```
+
+`include_editor:true` includes the game HUD as well as editor UI; false captures the pre-UI game display. Poll the returned job until it succeeds. A live receipt reports both `expected_revision` (when queued) and `published_revision` (when PNG readback completed). Its capture result includes `revision_policy:"live"`, `requested_revision`, `requested_frame` and the publication `frame`. Live captures do not claim that simulation remained on the requested revision. They never save or mutate a scene.
+
+Do not combine `live:true` with `expected_revision`. Leave `live` absent or false for strict captures; imports and editing operations retain all revision guards. The current argument schema is available at `authoring.discover.capture_schema`.
+
 `workspace` localisation edits share the visible grid and reject stale table views. Ctrl-Z/Ctrl-Y use the same grid history. Content paths stay inside the active project's content directory, and existing filenames are never overwritten by creation or rename. Terrain shading and foliage brush controls expose their actual native ranges and require the queried previous value; they retain native session-preview persistence.
 
 Games can inspect actual Kira playback through `SoundHandle::position_seconds()` and `is_paused()`. This supports cue/subtitle synchronisation and pause diagnostics without advancing a separate estimated clock.

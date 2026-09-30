@@ -36,6 +36,13 @@ override enable_pom: bool = true;
 /// find neither path.
 override enable_live_terrain: bool = true;
 
+// Raster shading enables direct material storage reads after native A/B/A
+// validation. Other roots keep this reference default until separately measured.
+// The pointer chain avoids spilling a dynamically indexed value array to
+// Function storage. The explicit index identifies the same `tm`; sample
+// coordinates, layer selection and blend arithmetic stay unchanged.
+override terrain_storage_reads: bool = false;
+
 /// Below this weight a layer cannot change the result, so it is not sampled.
 ///
 /// This is what makes eight layers cheaper than the four used to be. Splat
@@ -56,25 +63,76 @@ const LAYER_WEIGHT_EPSILON: f32 = 0.002;
 /// crawls as the camera moves.
 const FAR_LAYER_EPSILON: f32 = 0.2;
 
-fn terrain_layer_tiling(tm: TerrainMaterial, layer: u32) -> f32 {
+fn terrain_layer_tiling(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].layer_tiling[layer / 4u][layer % 4u];
+    }
     return tm.layer_tiling[layer / 4u][layer % 4u];
 }
 
-fn terrain_height_scale(tm: TerrainMaterial, layer: u32) -> f32 {
+fn terrain_height_scale(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].layer_height_scale[layer / 4u][layer % 4u];
+    }
     return tm.layer_height_scale[layer / 4u][layer % 4u];
 }
 
 /// Transition-band width, floored so the depth blend never divides by zero.
-fn terrain_blend_width(tm: TerrainMaterial, layer: u32) -> f32 {
+fn terrain_blend_width(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return max(terrain_materials[terrain_index].layer_blend_width[layer / 4u][layer % 4u], 0.001);
+    }
     return max(tm.layer_blend_width[layer / 4u][layer % 4u], 0.001);
 }
 
-fn terrain_weight_clamp(tm: TerrainMaterial, layer: u32) -> f32 {
+fn terrain_weight_clamp(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].layer_weight_clamp[layer / 4u][layer % 4u];
+    }
     return tm.layer_weight_clamp[layer / 4u][layer % 4u];
 }
 
-fn terrain_parallax_depth(tm: TerrainMaterial, layer: u32) -> f32 {
+fn terrain_parallax_depth(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].layer_parallax[layer / 4u][layer % 4u];
+    }
     return tm.layer_parallax[layer / 4u][layer % 4u];
+}
+
+fn terrain_layer_albedo_map(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> i32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].albedo_maps[layer / 4u][layer % 4u];
+    }
+    return tm.albedo_maps[layer / 4u][layer % 4u];
+}
+
+fn terrain_layer_surface_map(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> i32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].surface_maps[layer / 4u][layer % 4u];
+    }
+    return tm.surface_maps[layer / 4u][layer % 4u];
+}
+
+fn terrain_layer_fallback_albedo(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> vec3<f32> {
+    if terrain_storage_reads {
+        return max(terrain_materials[terrain_index].layer_albedo[layer].rgb, vec3<f32>(0.02));
+    }
+    return max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+}
+
+// Raster-local wrapper: ray-query callers keep the shared helper unchanged.
+fn terrain_layer_moisture(tm: TerrainMaterial, terrain_index: u32, layer: u32) -> f32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].layer_moisture[layer / 4u][layer % 4u];
+    }
+    return terrain_moisture(tm, layer);
+}
+
+fn terrain_splat_map(tm: TerrainMaterial, terrain_index: u32, group: u32) -> i32 {
+    if terrain_storage_reads {
+        return terrain_materials[terrain_index].splat_maps[group / 4u][group % 4u];
+    }
+    return tm.splat_maps[group / 4u][group % 4u];
 }
 
 /// Value noise on the integer lattice, smoothstep-interpolated.
@@ -164,6 +222,7 @@ fn terrain_perturb_weights(
     let scale = max(tm.weight_noise_scale, 1.0e-4);
     var total = 0.0;
     for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        if !terrain_layer_is_active(i) { continue; }
         var w = (*weight)[i];
         // Splat weights are sparse — two or three layers meet at any texel and
         // the rest are exactly zero. Skipping those is what keeps this from
@@ -179,6 +238,7 @@ fn terrain_perturb_weights(
     }
     let inv = 1.0 / max(total, 0.0001);
     for (var i = 0u; i < terrain_scan; i = i + 1u) {
+        if !terrain_layer_is_active(i) { continue; }
         (*weight)[i] = (*weight)[i] * inv;
     }
 }
@@ -257,8 +317,8 @@ fn resolve_surfgrad(n_geo: vec3<f32>, g: vec3<f32>) -> vec3<f32> {
 //   relief look lit rather than merely displaced.
 
 /// One height sample of `layer` at a texture coordinate.
-fn terrain_parallax_height(tm: TerrainMaterial, layer: u32, uv: vec2<f32>) -> f32 {
-    let map = tm.albedo_maps[layer / 4u][layer % 4u];
+fn terrain_parallax_height(tm: TerrainMaterial, terrain_index: u32, layer: u32, uv: vec2<f32>) -> f32 {
+    let map = terrain_layer_albedo_map(tm, terrain_index, layer);
     if map < 0 {
         return 0.5;
     }
@@ -283,6 +343,7 @@ fn terrain_parallax_height(tm: TerrainMaterial, layer: u32, uv: vec2<f32>) -> f3
 /// offset to add to `uv`.
 fn terrain_parallax_march(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     uv: vec2<f32>,
     step_uv: vec2<f32>,
@@ -292,7 +353,7 @@ fn terrain_parallax_march(
     var offset = vec2<f32>(0.0);
     var ray_depth = 0.0;
     // The height map is 1 at the peak; the ray starts at the peak and descends.
-    var surface = 1.0 - terrain_parallax_height(tm, layer, uv);
+    var surface = 1.0 - terrain_parallax_height(tm, terrain_index, layer, uv);
 
     var i = 0.0;
     loop {
@@ -301,7 +362,7 @@ fn terrain_parallax_march(
         }
         offset += step_uv;
         ray_depth += layer_depth;
-        surface = 1.0 - terrain_parallax_height(tm, layer, uv + offset);
+        surface = 1.0 - terrain_parallax_height(tm, terrain_index, layer, uv + offset);
         i = i + 1.0;
     }
 
@@ -311,7 +372,7 @@ fn terrain_parallax_march(
     // the difference is below a pixel.
     let prev_offset = offset - step_uv;
     let after = surface - ray_depth;
-    let before = (1.0 - terrain_parallax_height(tm, layer, uv + prev_offset))
+    let before = (1.0 - terrain_parallax_height(tm, terrain_index, layer, uv + prev_offset))
         - ray_depth + layer_depth;
     let denom = after - before;
     let weight = select(0.0, after / denom, abs(denom) > 1e-6);
@@ -324,6 +385,7 @@ fn terrain_parallax_march(
 /// frame: xy along (tangent, bitangent), z along the normal.
 fn terrain_parallax_offset(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     local_xz: vec2<f32>,
     tiling: f32,
@@ -360,7 +422,7 @@ fn terrain_parallax_offset(
         return vec2<f32>(0.0);
     }
     return terrain_parallax_march(
-        tm, layer, local_xz * tiling, step_xz * tiling, layers) / tiling;
+        tm, terrain_index, layer, local_xz * tiling, step_xz * tiling, layers) / tiling;
 }
 
 /// Parallax offset inside one projection plane's own texture coordinate.
@@ -377,6 +439,7 @@ fn terrain_parallax_offset(
 /// convert a tangent-space ray into world XZ first, that needs one.
 fn terrain_projected_offset(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     uv: vec2<f32>,
     view_pl: vec3<f32>,
@@ -389,7 +452,7 @@ fn terrain_projected_offset(
     let steepness = max(abs(view_pl.z), 0.05);
     let layers = max(mix(steps, 1.0, steepness), 1.0);
     let step_uv = -view_pl.xy / steepness * depth * (1.0 / layers);
-    return terrain_parallax_march(tm, layer, uv, step_uv, layers);
+    return terrain_parallax_march(tm, terrain_index, layer, uv, step_uv, layers);
 }
 
 /// How much of the relief shadows itself from the sun (Phase 25H).
@@ -403,6 +466,7 @@ fn terrain_projected_offset(
 /// Returns 1 for fully lit.
 fn terrain_parallax_shadow(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     local_xz: vec2<f32>,
     tiling: f32,
@@ -422,7 +486,7 @@ fn terrain_parallax_shadow(
     // does: the height fetch is shared with the view march and takes a texture
     // coordinate, not metres.
     let uv = local_xz * tiling;
-    let start = 1.0 - terrain_parallax_height(tm, layer, uv);
+    let start = 1.0 - terrain_parallax_height(tm, terrain_index, layer, uv);
     let step = 1.0 / f32(steps);
     let step_ts = light_ts.xy / light_ts.z * depth * step;
     let step_uv = (tangent_xz * step_ts.x + bitangent_xz * step_ts.y) * tiling;
@@ -433,7 +497,7 @@ fn terrain_parallax_shadow(
     for (var i = 0u; i < steps; i = i + 1u) {
         offset += step_uv;
         ray -= step;
-        let h = 1.0 - terrain_parallax_height(tm, layer, uv + offset);
+        let h = 1.0 - terrain_parallax_height(tm, terrain_index, layer, uv + offset);
         // Weighted by how far along the march it is, as O3DE does: an occluder
         // right beside the point casts a harder shadow than one at the far end
         // of the trace, which is what keeps the contact edge sharp.
@@ -708,6 +772,7 @@ fn terrain_vt_table_entry(mip: u32, page: vec2<u32>, source_size: u32) -> u32 {
 /// the already-computed mean layer material.
 fn terrain_sample_virtual(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     uv: vec2<f32>,
     ddx_uv: vec2<f32>,
@@ -758,7 +823,7 @@ fn terrain_sample_virtual(
         }
         mip += 1u;
     }
-    out.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+    out.albedo = terrain_layer_fallback_albedo(tm, terrain_index, layer);
     out.height = 0.5;
     out.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
     out.roughness = 0.8;
@@ -828,6 +893,7 @@ fn terrain_stochastic_sample(
 /// tap. Three taps per map is the whole cost of the technique.
 fn terrain_sample_layer(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
@@ -835,18 +901,18 @@ fn terrain_sample_layer(
     hex: bool,
 ) -> TerrainLayerSample {
     if terrain_virtual_texture.w > 0 {
-        return terrain_sample_virtual(tm, layer, uv, ddx, ddy);
+        return terrain_sample_virtual(tm, terrain_index, layer, uv, ddx, ddy);
     }
     var s: TerrainLayerSample;
-    let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
-    let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
+    let albedo_map = terrain_layer_albedo_map(tm, terrain_index, layer);
+    let surface_map = terrain_layer_surface_map(tm, terrain_index, layer);
 
     // Hero-bank mode deliberately leaves layers 16..31 at -1. Their splat
     // groups are also unbound, but guard the final sampling boundary as well:
     // a stale/corrupt splat texel must never turn -1 into an out-of-bounds
     // bindless texture access (the source of intermittent white terrain).
     if albedo_map < 0 || surface_map < 0 {
-        s.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+        s.albedo = terrain_layer_fallback_albedo(tm, terrain_index, layer);
         s.height = 0.5;
         s.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
         s.roughness = 0.8;
@@ -906,12 +972,13 @@ fn terrain_sample_layer(
 /// nobody authored.
 fn terrain_append_height(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     weight: f32,
     height: f32,
 ) -> f32 {
-    let h = height * terrain_height_scale(tm, layer);
-    return weight + h * min(1.0, terrain_weight_clamp(tm, layer) * weight);
+    let h = height * terrain_height_scale(tm, terrain_index, layer);
+    return weight + h * min(1.0, terrain_weight_clamp(tm, terrain_index, layer) * weight);
 }
 
 // ── The macro tier (Phase 25D) ───────────────────────────────────────────────
@@ -1024,19 +1091,20 @@ fn terrain_detail_fade(tm: TerrainMaterial, distance: f32) -> f32 {
 
 fn terrain_sample_projected_maps(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     uv: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
 ) -> TerrainLayerSample {
     if terrain_virtual_texture.w > 0 {
-        return terrain_sample_virtual(tm, layer, uv, ddx, ddy);
+        return terrain_sample_virtual(tm, terrain_index, layer, uv, ddx, ddy);
     }
     var s: TerrainLayerSample;
-    let albedo_map = tm.albedo_maps[layer / 4u][layer % 4u];
-    let surface_map = tm.surface_maps[layer / 4u][layer % 4u];
+    let albedo_map = terrain_layer_albedo_map(tm, terrain_index, layer);
+    let surface_map = terrain_layer_surface_map(tm, terrain_index, layer);
     if albedo_map < 0 || surface_map < 0 {
-        s.albedo = max(tm.layer_albedo[layer].rgb, vec3<f32>(0.02));
+        s.albedo = terrain_layer_fallback_albedo(tm, terrain_index, layer);
         s.height = 0.5;
         s.normal_ts = vec3<f32>(0.0, 0.0, 1.0);
         s.roughness = 0.8;
@@ -1077,6 +1145,7 @@ fn terrain_sample_projected_maps(
 /// uses, because it was written to take a coordinate rather than a metre.
 fn terrain_projected_pbr(
     tm: TerrainMaterial,
+    terrain_index: u32,
     layer: u32,
     world_pos: vec3<f32>,
     n: vec3<f32>,
@@ -1115,7 +1184,7 @@ fn terrain_projected_pbr(
         f32(tm.parallax_steps) * (1.0 - terrain_detail_fade(tm, length(to_camera))),
         enable_pom && tm.parallax_steps >= 4u,
     );
-    let pom_depth = terrain_parallax_depth(tm, layer) * tiling;
+    let pom_depth = terrain_parallax_depth(tm, terrain_index, layer) * tiling;
     let v = normalize(to_camera);
     // Marching a plane that contributes a few percent buys nothing and costs a
     // full march, so the gate is far above the 0.001 the sample gate uses.
@@ -1133,10 +1202,10 @@ fn terrain_projected_pbr(
         var uv_x = p.zy;
         if pom_steps >= 4.0 && w.x > pom_min_weight && pom_depth > 0.0 {
             uv_x += terrain_projected_offset(
-                tm, layer, uv_x, vec3<f32>(v.z, v.y, v.x * sign(n.x)), pom_depth, pom_steps);
+                tm, terrain_index, layer, uv_x, vec3<f32>(v.z, v.y, v.x * sign(n.x)), pom_depth, pom_steps);
         }
         let s = terrain_sample_projected_maps(
-            tm, layer, uv_x, dpdx.zy, dpdy.zy);
+            tm, terrain_index, layer, uv_x, dpdx.zy, dpdy.zy);
         out.albedo += s.albedo * w.x;
         out.height += s.height * w.x;
         out.roughness += s.roughness * w.x;
@@ -1149,10 +1218,10 @@ fn terrain_projected_pbr(
         var uv_y = p.xz;
         if pom_steps >= 4.0 && w.y > pom_min_weight && pom_depth > 0.0 {
             uv_y += terrain_projected_offset(
-                tm, layer, uv_y, vec3<f32>(v.x, v.z, v.y * sign(n.y)), pom_depth, pom_steps);
+                tm, terrain_index, layer, uv_y, vec3<f32>(v.x, v.z, v.y * sign(n.y)), pom_depth, pom_steps);
         }
         let s = terrain_sample_projected_maps(
-            tm, layer, uv_y, dpdx.xz, dpdy.xz);
+            tm, terrain_index, layer, uv_y, dpdx.xz, dpdy.xz);
         out.albedo += s.albedo * w.y;
         out.height += s.height * w.y;
         out.roughness += s.roughness * w.y;
@@ -1165,10 +1234,10 @@ fn terrain_projected_pbr(
         var uv_z = p.xy;
         if pom_steps >= 4.0 && w.z > pom_min_weight && pom_depth > 0.0 {
             uv_z += terrain_projected_offset(
-                tm, layer, uv_z, vec3<f32>(v.x, v.y, v.z * sign(n.z)), pom_depth, pom_steps);
+                tm, terrain_index, layer, uv_z, vec3<f32>(v.x, v.y, v.z * sign(n.z)), pom_depth, pom_steps);
         }
         let s = terrain_sample_projected_maps(
-            tm, layer, uv_z, dpdx.xy, dpdy.xy);
+            tm, terrain_index, layer, uv_z, dpdx.xy, dpdy.xy);
         out.albedo += s.albedo * w.z;
         out.height += s.height * w.z;
         out.roughness += s.roughness * w.z;
@@ -1204,13 +1273,15 @@ fn terrain_stable_tangent(n: vec3<f32>) -> vec3<f32> {
 
 fn terrain_fetch_splats(
     tm: TerrainMaterial,
+    terrain_index: u32,
     splat_uv: vec2<f32>,
     splat_ddx: vec2<f32>,
     splat_ddy: vec2<f32>,
 ) -> array<vec4<f32>, 8> {
     var splat_s = array<vec4<f32>, 8>();
     for (var g = 0u; g < terrain_splat_groups(); g = g + 1u) {
-        let id = tm.splat_maps[g / 4u][g % 4u];
+        if !terrain_splat_group_is_active(g) { continue; }
+        let id = terrain_splat_map(tm, terrain_index, g);
         if id >= 0 {
             splat_s[g] = textureSampleGrad(
                 textures[id], default_sampler, splat_uv, splat_ddx, splat_ddy);
@@ -1231,7 +1302,7 @@ fn terrain_generate_texel(
     let splat_ddx = world_ddx * tm.inv_world_size;
     let splat_ddy = world_ddy * tm.inv_world_size;
     let local_xz = world_xz - tm.terrain_origin;
-    var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
+    var splat_s = terrain_fetch_splats(tm, terrain_index, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats_painted(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
@@ -1261,11 +1332,11 @@ fn terrain_generate_texel(
             adjusted[s] = 0.0;
             continue;
         }
-        let tiling = terrain_layer_tiling(tm, i);
+        let tiling = terrain_layer_tiling(tm, terrain_index, i);
         samples[s] = terrain_sample_layer(
-            tm, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
+            tm, terrain_index, i, local_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         if tm.height_blend != 0u {
-            adjusted[s] = terrain_append_height(tm, i, sel_w[s], samples[s].height);
+            adjusted[s] = terrain_append_height(tm, terrain_index, i, sel_w[s], samples[s].height);
         } else {
             adjusted[s] = sel_w[s];
         }
@@ -1278,7 +1349,7 @@ fn terrain_generate_texel(
             continue;
         }
         max_w = max(max_w, adjusted[s]);
-        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, i));
+        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, terrain_index, i));
     }
     var blend: array<f32, 4>;
     var blend_sum = 0.0;
@@ -1286,7 +1357,7 @@ fn terrain_generate_texel(
         var b = 0.0;
         let i = selected[s];
         if sel_w[s] >= epsilon {
-            let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
+            let local_min = max(min_depth, max_w - terrain_blend_width(tm, terrain_index, i));
             b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
         }
         blend[s] = b;
@@ -1309,7 +1380,7 @@ fn terrain_generate_texel(
         roughness += samples[s].roughness * b;
         occlusion += samples[s].occlusion * b;
         height += samples[s].height * b;
-        moisture += terrain_moisture(tm, selected[s]) * b;
+        moisture += terrain_layer_moisture(tm, terrain_index, selected[s]) * b;
     }
     let macro_c = terrain_macro_sample(tm, splat_uv, splat_ddx, splat_ddy);
     albedo = terrain_macro_blend(albedo, macro_c.rgb, tm.macro_mode, macro_c.a);
@@ -1345,7 +1416,7 @@ fn evaluate_terrain_material(
     // Hoisted above the unpack because TSUSHIMA-G's perturbation is indexed by
     // world position and runs inside it.
     let local_xz = world_pos.xz - tm.terrain_origin;
-    var splat_s = terrain_fetch_splats(tm, splat_uv, splat_ddx, splat_ddy);
+    var splat_s = terrain_fetch_splats(tm, terrain_index, splat_uv, splat_ddx, splat_ddy);
     var weight = terrain_unpack_splats_painted(splat_s, tm, local_xz);
     let selected = terrain_strongest_four(&weight);
     var kept = 0.0;
@@ -1407,19 +1478,19 @@ fn evaluate_terrain_material(
                     dominant = selected[s];
                 }
             }
-            let depth = terrain_parallax_depth(tm, dominant);
+            let depth = terrain_parallax_depth(tm, terrain_index, dominant);
             if depth > 0.0 {
-                let tiling = terrain_layer_tiling(tm, dominant);
+                let tiling = terrain_layer_tiling(tm, terrain_index, dominant);
                 let v = normalize(view.camera_pos - world_pos);
                 let view_ts = vec3<f32>(dot(v, tangent), dot(v, bitangent), dot(v, geo_normal));
                 march_xz = terrain_parallax_offset(
-                    tm, dominant, local_xz, tiling, view_ts,
+                    tm, terrain_index, dominant, local_xz, tiling, view_ts,
                     tangent.xz, bitangent.xz, depth, parallax_steps,
                 );
                 let l = normalize(light.direction);
                 let light_ts = vec3<f32>(dot(l, tangent), dot(l, bitangent), dot(l, geo_normal));
                 parallax_shadow = terrain_parallax_shadow(
-                    tm, dominant, local_xz + march_xz, tiling, light_ts,
+                    tm, terrain_index, dominant, local_xz + march_xz, tiling, light_ts,
                     tangent.xz, bitangent.xz, depth, tm.parallax_shadow_steps,
                 );
                 parallax_shadow = mix(parallax_shadow, 1.0, fade);
@@ -1437,12 +1508,12 @@ fn evaluate_terrain_material(
             adjusted[s] = 0.0;
             continue;
         }
-        let tiling = terrain_layer_tiling(tm, i);
+        let tiling = terrain_layer_tiling(tm, terrain_index, i);
         samples[s] = terrain_sample_layer(
-            tm, i, parallax_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
+            tm, terrain_index, i, parallax_xz * tiling, world_ddx * tiling, world_ddy * tiling, hex);
         taps += select(2u, 6u, hex);
         if tm.height_blend != 0u {
-            adjusted[s] = terrain_append_height(tm, i, sel_w[s], samples[s].height);
+            adjusted[s] = terrain_append_height(tm, terrain_index, i, sel_w[s], samples[s].height);
         } else {
             adjusted[s] = sel_w[s];
         }
@@ -1456,7 +1527,7 @@ fn evaluate_terrain_material(
             continue;
         }
         max_w = max(max_w, adjusted[s]);
-        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, i));
+        min_depth = max(min_depth, adjusted[s] - terrain_blend_width(tm, terrain_index, i));
     }
 
     var blend: array<f32, 4>;
@@ -1465,7 +1536,7 @@ fn evaluate_terrain_material(
         var b = 0.0;
         let i = selected[s];
         if sel_w[s] >= epsilon {
-            let local_min = max(min_depth, max_w - terrain_blend_width(tm, i));
+            let local_min = max(min_depth, max_w - terrain_blend_width(tm, terrain_index, i));
             b = max((adjusted[s] - local_min) / max(max_w - local_min, 1e-4), 0.0);
         }
         blend[s] = b;
@@ -1502,10 +1573,11 @@ fn evaluate_terrain_material(
         let local_pos = world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y);
         let cliff = terrain_projected_pbr(
             tm,
+            terrain_index,
             tm.cliff_layer,
             local_pos,
             geo_normal,
-            terrain_layer_tiling(tm, tm.cliff_layer),
+            terrain_layer_tiling(tm, terrain_index, tm.cliff_layer),
             world_ddx,
             world_ddy,
         );
@@ -1521,11 +1593,11 @@ fn evaluate_terrain_material(
     for (var s = 0u; s < 4u; s = s + 1u) {
         let b = blend[s] / blend_sum;
         if b > 0.0 {
-            moisture += terrain_moisture(tm, selected[s]) * b;
+            moisture += terrain_layer_moisture(tm, terrain_index, selected[s]) * b;
         }
     }
     if cliff_blend > 0.0 {
-        moisture = mix(moisture, terrain_moisture(tm, tm.cliff_layer), cliff_blend);
+        moisture = mix(moisture, terrain_layer_moisture(tm, terrain_index, tm.cliff_layer), cliff_blend);
     }
     let wet = saturate(tm.wetness * moisture);
     albedo *= mix(1.0, tm.wetness_darken, wet);

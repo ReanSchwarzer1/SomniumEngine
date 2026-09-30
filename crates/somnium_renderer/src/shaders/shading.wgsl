@@ -2,6 +2,7 @@
 // `format!` of `include_str!` calls at this pass's construction site. The
 // resolver (`somnium_shader`) emits each module once, in this order, and
 // hoists every `enable` above everything.
+//!include "sky_eye.wgsl"
 //!include "global_pool.wgsl"
 //!include "brdf.wgsl"
 //!include "sampling.wgsl"
@@ -9,6 +10,60 @@
 //!include "hextile.wgsl"
 //!include "terrain_material.wgsl"
 //!include "clipmap_shade.wgsl"
+//!include "wind.wgsl"
+//!if LOCAL_SHADOWS
+enable wgpu_ray_query;
+@group(1) @binding(29) var local_shadow_accel: acceleration_structure;
+//!endif
+
+/// Direct practical shadows use the same built scene as indirect transport.
+/// One visibility ray per contributing light. The caller samples the emitting
+/// surface; the existing temporal resolve accumulates finite-source penumbrae.
+fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3<f32>) -> f32 {
+    //!if LOCAL_SHADOWS
+    if (cluster_params.shading_mode & 16u) != 0u {
+        let origin = p + geometric_normal * 0.012;
+        let delta = emitter - origin;
+        let distance = length(delta);
+        if distance > 0.10 {
+            var rq: ray_query;
+            // Stop 6 cm short of the centre so the diffuser/enclosure does not
+            // shadow its own authored source. This is a world-space fixture
+            // tolerance, not a distance-dependent leak across room partitions.
+            rayQueryInitialize(&rq, local_shadow_accel,
+                RayDesc(0x4u, 0xffu, 0.008, distance - 0.06, origin, delta / distance));
+            rayQueryProceed(&rq);
+            return select(0.0, 1.0, rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE);
+        }
+    }
+    //!endif
+    return 1.0;
+}
+
+/// One emitter-surface sample per pixel/frame, decorrelated between fixtures.
+/// Visibility modulates the analytic finite-area lobe, so partial occlusion is
+/// still an approximation; it no longer casts a large panel's point-hard edge.
+fn practical_emitter_sample(ll: GpuLocalLight, p: vec3<f32>, pixel: vec2<f32>, light_index: u32) -> vec3<f32> {
+    let frame = u32(view.wind_time.x * 60.0);
+    let u = vec2<f32>(
+        interleaved_gradient_noise(pixel, frame + light_index * 719u),
+        interleaved_gradient_noise(pixel.yx + vec2<f32>(37.0, 11.0), frame + light_index * 1237u));
+    var axis = normalize(p - ll.position_ws);
+    if ll.light_type == 2u || ll.light_type == 3u { axis = normalize(ll.direction_ws); }
+    let up = select(vec3<f32>(0.0,1.0,0.0),vec3<f32>(1.0,0.0,0.0),abs(axis.y)>0.95);
+    let t = normalize(cross(up,axis));
+    let b = cross(axis,t);
+    var xy = sqrt(u.x) * max(ll.radius,0.0) * vec2<f32>(cos(6.2831853*u.y),sin(6.2831853*u.y));
+    if ll.light_type == 2u {
+        xy = (2.0*u-1.0) * vec2<f32>(max(ll._pad1,0.05),max(ll._pad2,0.05));
+    } else if ll.light_type == 3u {
+        let sector = min(u.x*8.0,7.999999);
+        let angle = floor(sector)*0.785398163;
+        xy = sqrt(fract(sector)) * mix(vec2<f32>(cos(angle),sin(angle)),
+            vec2<f32>(cos(angle+0.785398163),sin(angle+0.785398163)),u.y) * max(ll.radius,0.05);
+    }
+    return ll.position_ws + t*xy.x + b*xy.y;
+}
 
 // Somnium Engine — Visibility Buffer Shading Pass
 // Phase 12: Clustered Local Lights + Cel-Shading Mode
@@ -618,6 +673,10 @@ fn ltc_quad_diffuse(
     half_x: f32,
     half_y: f32,
 ) -> f32 {
+    // Local -Z is the emitting normal, not the receiving side of the panel.
+    if dot(light_n, pos - center) <= 0.0 {
+        return 0.0;
+    }
     var up = vec3<f32>(0.0, 1.0, 0.0);
     if abs(dot(light_n, up)) > 0.95 {
         up = vec3<f32>(1.0, 0.0, 0.0);
@@ -644,7 +703,9 @@ fn ltc_quad_diffuse(
             sum += h * dot(x / xl, n);
         }
     }
-    return max(sum, 0.0) * 0.5 / 3.14159265;
+    // These corners wind around light_n. Seen from an illuminated receiver,
+    // the projected edge integral has the opposite orientation.
+    return max(-sum, 0.0) * 0.5 / 3.14159265;
 }
 
 fn ltc_disc_diffuse(
@@ -654,6 +715,9 @@ fn ltc_disc_diffuse(
     light_n: vec3<f32>,
     radius: f32,
 ) -> f32 {
+    if dot(light_n, pos - center) <= 0.0 {
+        return 0.0;
+    }
     var up = vec3<f32>(0.0, 1.0, 0.0);
     if abs(dot(light_n, up)) > 0.95 {
         up = vec3<f32>(1.0, 0.0, 0.0);
@@ -677,13 +741,24 @@ fn ltc_disc_diffuse(
         }
         prev = p;
     }
-    return max(sum, 0.0) * 0.5 / 3.14159265;
+    return max(-sum, 0.0) * 0.5 / 3.14159265;
 }
 
 fn closest_on_segment(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
     let ab = b - a;
     let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
     return a + ab * t;
+}
+
+// GPU local colours retain the shared flux/(4*pi) convention. A one-sided
+// uniform emitter has radiance flux/(pi*area); the normalized LTC integral
+// already includes solid angle, distance and receiver cosine. Only the finite
+// range fade remains. Applying point attenuation here would fall off as d^-4.
+fn area_irradiance_scale(integral: f32, area: f32, dist: f32, range: f32) -> f32 {
+    let ratio = dist / max(range, 0.0001);
+    let ratio2 = ratio * ratio;
+    let cutoff = clamp(1.0 - ratio2 * ratio2, 0.0, 1.0);
+    return integral * (12.5663706 / max(area, 0.0001)) * cutoff * cutoff;
 }
 
 fn sh_irradiance(n: vec3<f32>, base: u32) -> vec3<f32> {
@@ -759,6 +834,38 @@ fn sh_probe_volume_weight(pos: vec3<f32>) -> f32 {
 /// ReSTIR estimates directional-light bounce only: escaped rays carry no sky
 /// energy and local lights are not sampled. Keep environment illumination and
 /// add the measured bounce, including when a valid reservoir measures zero.
+/// ReSTIR GI arrives on a coarser grid (restir_gi.rs `GI_SCALE`): each texel
+/// traced one pixel of its block and stored that surface's camera distance in
+/// alpha (0: none). Bilinear weights, each also asking that the texel's surface
+/// be as far from the camera as this pixel's, so indirect light is smooth
+/// across a surface and never bleeds across a silhouette. `a` of the result is
+/// 1 when any texel could vouch for this pixel.
+fn gi_upsample(pixel: vec2<f32>, dist: f32) -> vec4<f32> {
+    let gdims = vec2<i32>(textureDimensions(restir_gi));
+    let ratio = vec2<f32>(textureDimensions(vis_buffer)) / vec2<f32>(gdims);
+    let gp = pixel / ratio - 0.5;
+    let g0 = vec2<i32>(floor(gp));
+    let f = gp - floor(gp);
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = 0; k < 4; k = k + 1) {
+        let d = vec2<i32>(k & 1, k >> 1);
+        let t = textureLoad(restir_gi, clamp(g0 + d, vec2<i32>(0), gdims - 1), 0);
+        if t.a <= 0.0 {
+            continue;
+        }
+        let wb = select(1.0 - f.x, f.x, d.x == 1) * select(1.0 - f.y, f.y, d.y == 1);
+        let wd = exp(-abs(t.a - dist) / (dist * 0.025 + 0.05));
+        let w = (wb + 0.02) * wd;
+        sum += t.rgb * w;
+        wsum += w;
+    }
+    if wsum < 1.0e-4 {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sum / wsum, 1.0);
+}
+
 fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
 
@@ -772,7 +879,7 @@ fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
     let irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
     let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
-    var diffuse = irradiance * surface.albedo * kd;
+    var diffuse = irradiance * light.ibl_intensity * surface.albedo * kd;
     if traced_diffuse.a > 0.5 {
         diffuse += traced_diffuse.rgb * surface.albedo * kd;
     }
@@ -861,10 +968,11 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         surface.roughness,
     );
 
-    // Match the single-scatter path: the reservoir contains sun bounce, not
-    // the environment irradiance gathered here.
+    // The environment control scales the sky, not traced transport from the
+    // sun or local lamps. Lowering outdoor sky fill must not extinguish a
+    // hospital's practical-light bounce.
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
-    var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
+    var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb * light.ibl_intensity;
     if traced_diffuse.a > 0.5 {
         irradiance += traced_diffuse.rgb;
     }
@@ -877,18 +985,18 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         * (1.0 - surface.metallic);
 
     let spec_ao = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
-    return fss_ess * radiance * spec_ao
+    return fss_ess * radiance * light.ibl_intensity * spec_ao
         + (fms_ems + k_d) * irradiance * surface.occlusion;
 }
 
 fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     if brdf_multiscatter {
-        return evaluate_ibl_ms(surface, traced_diffuse) * light.ibl_intensity;
+        return evaluate_ibl_ms(surface, traced_diffuse);
     }
     // Occlusion applies to indirect light only. The sun already has shadow
     // maps, and multiplying it by AO as well double-darkens lit surfaces.
-    return (evaluate_ibl_diffuse(surface, traced_diffuse)
-        + evaluate_ibl_specular(surface)) * light.ibl_intensity;
+    return evaluate_ibl_diffuse(surface, traced_diffuse)
+        + evaluate_ibl_specular(surface) * light.ibl_intensity;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
@@ -1463,8 +1571,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let moon_dir = normalize(light.moon_direction);
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
         let detail = sky_detail(ray_dir, sun_dir, sun_illuminance, moon_dir, moon_strength);
+        // The eye in the sky (somnium.SkyEye): drawn here, behind the cloud
+        // composite, where fog does not reach.
+        let eye = sky_eye(ray_dir, normalize(light.eye_direction), light.eye_tan_half_width, light.eye_color,
+                          light.eye_intensity, light.eye_shape, view.time);
 
-        return vec4<f32>(sky + detail, 1.0);
+        return vec4<f32>((sky + detail) * (1.0 - eye.a) + eye.rgb, 1.0);
     }
 
     // ── PBR surface ─────────────────────────────────────────────────────────
@@ -1502,13 +1614,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let v1 = vertices[instance.vertex_offset + i1];
     let v2 = vertices[instance.vertex_offset + i2];
 
-    let p0 = (instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0)).xyz;
-    let p1 = (instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0)).xyz;
-    let p2 = (instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0)).xyz;
+    var p0 = (instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0)).xyz;
+    var p1 = (instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0)).xyz;
+    var p2 = (instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0)).xyz;
+    // The triangle the visibility pass rasterised, wind included (visibility.wgsl):
+    // reconstructing the rest pose would shade a leaf where it is not drawn.
+    if material.terrain_index < 0 {
+        let pivot = instance.model[3].xyz;
+        p0 += wind_offset(p0, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+        p1 += wind_offset(p1, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+        p2 += wind_offset(p2, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+    }
 
-    let c0 = view.view_proj * instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0);
-    let c1 = view.view_proj * instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0);
-    let c2 = view.view_proj * instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0);
+    let c0 = view.view_proj * vec4<f32>(p0, 1.0);
+    let c1 = view.view_proj * vec4<f32>(p1, 1.0);
+    let c2 = view.view_proj * vec4<f32>(p2, 1.0);
 
     let ndc0 = c0.xy / c0.w;
     let ndc1 = c1.xy / c1.w;
@@ -1574,16 +1694,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // authored density of the dominant painted layer, including when
             // the visible colour comes from a clipmap. This is deliberately
             // not a claim about cache residency or cliff-projection stretch.
-            let tm = terrain_materials[u32(material.terrain_index)];
-            let splats = terrain_fetch_splats(tm, uv,
+            let terrain_index = u32(material.terrain_index);
+            let tm = terrain_materials[terrain_index];
+            let splats = terrain_fetch_splats(tm, terrain_index, uv,
                 dpdx(hit_point.xz) * tm.inv_world_size,
                 dpdy(hit_point.xz) * tm.inv_world_size);
             var weights = terrain_unpack_splats_painted(splats, tm, hit_point.xz - tm.terrain_origin);
             let dominant = terrain_strongest_four(&weights)[0];
-            let map = tm.albedo_maps[dominant / 4u][dominant % 4u];
+            let map = terrain_layer_albedo_map(tm, terrain_index, dominant);
             if map >= 0 && weights[dominant] > 0.0 {
                 let dims = vec2<f32>(textureDimensions(textures[map], 0));
-                density = sqrt(dims.x * dims.y) * abs(terrain_layer_tiling(tm, dominant));
+                density = sqrt(dims.x * dims.y) * abs(terrain_layer_tiling(tm, terrain_index, dominant));
             }
         } else if material.albedo_map >= 0 {
             let world_area = length(face_cross);
@@ -1886,10 +2007,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // it cannot delete either body, and occupancy is the union of both.
         if !enable_live_terrain {
             terrain = evaluate_clipmap_material(
-                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+                terrain_materials[tm_idx], tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else if enable_clipmap && terrain_materials[tm_idx].clipmap_enabled != 0u {
             terrain = evaluate_clipmap_material(
-                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+                terrain_materials[tm_idx], tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else {
             terrain = evaluate_terrain_material(
                 tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
@@ -2454,7 +2575,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 surface, light_dir, light_color, material.transmission) * shadow_factor;
         }
 
-        let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
+        let gi_texel = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
         var ambient = evaluate_ibl(surface, gi_texel);
         let extra_flags = bitcast<u32>(lighting_extra.x);
         let vol_uvw = world_volume_uvw(hit_point);
@@ -2519,6 +2640,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             for (var i = 0u; i < cluster_data.count; i++) {
                 let light_idx = light_index_list[cluster_data.offset + i];
                 let ll = local_lights[light_idx];
+                if max(ll.color.x, max(ll.color.y, ll.color.z)) <= 0.0 { continue; }
 
                 if ll.light_type == 4u {
                     let axis = normalize(ll.direction_ws);
@@ -2530,7 +2652,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let dist_t = length(to_l);
                     if dist_t > ll.range { continue; }
                     let Lt = to_l / max(dist_t, 1e-4);
-                    let atten_t = smooth_distance_attenuation(dist_t, ll.range);
+                    let atten_t = smooth_distance_attenuation(dist_t, ll.range)
+                        * practical_visibility(hit_point, shadow_normal, q);
                     let r = max(ll.radius, 0.01);
                     let angular = atan(r / max(dist_t, 1e-3));
                     let facing = max(length(cross(Lt, axis)), 0.15);
@@ -2551,10 +2674,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let ln = normalize(ll.direction_ws);
                     let irr = ltc_quad_diffuse(
                         hit_point, surface.normal, ll.position_ws, ln, half_x, half_y);
-                    let eq_r = sqrt(half_x * half_y / 3.14159265);
+                    if irr <= 0.0 { continue; }
+                    let area = 4.0 * half_x * half_y;
+                    let eq_r = sqrt(area / 3.14159265);
                     let angular = atan(eq_r / max(dist, 1e-3));
-                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
-                        * ll.color * atten_val * irr * 3.14159265;
+                    local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
+                        * practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
                     continue;
                 }
                 if ll.light_type == 3u {
@@ -2562,9 +2688,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let ln = normalize(ll.direction_ws);
                     let irr = ltc_disc_diffuse(
                         hit_point, surface.normal, ll.position_ws, ln, r);
+                    if irr <= 0.0 { continue; }
                     let angular = atan(r / max(dist, 1e-3));
-                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
-                        * ll.color * atten_val * irr * 3.14159265;
+                    // Match the area of the inscribed eight-sided integration
+                    // polygon so the authored flux stays constant with radius.
+                    let area = 2.82842712 * r * r;
+                    local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
+                        * practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
                     continue;
                 }
                 if ll.light_type == 1u {
@@ -2577,6 +2708,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // and that is what stops its highlight being a single pixel on
                 // anything polished.
                 let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
+                if atten_val > 0.0 {
+                    atten_val *= practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
+                }
                 local_light_contrib += clamp_specular_lobe(
                     evaluate_brdf_area(surface, L, angular), surface.roughness,
                 ) * ll.color * atten_val;
@@ -2678,7 +2812,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(t, 0.2 * (1.0 - t), 1.0 - t, 1.0) * 4.0;
         }
         if dbg < 25.5 {
-            let gi = textureLoad(restir_gi, pixel_coords, 0);
+            let gi = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
             return vec4<f32>(gi.rgb * 4.0, 1.0);
         }
         if dbg < 26.5 {

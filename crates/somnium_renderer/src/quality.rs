@@ -54,6 +54,9 @@ pub struct GraphicsBudget {
     pub light_shafts: bool,
     /// Depth of field and motion blur.
     pub camera_effects: bool,
+    /// Plants sway in the scene's wind (`wind.rs`). Nearly free on the GPU,
+    /// but a still forest is the cheapest thing a low tier can give up.
+    pub foliage_wind: bool,
 }
 
 impl GraphicsPreset {
@@ -104,6 +107,7 @@ impl GraphicsPreset {
             contact_shadows: true,
             light_shafts: true,
             camera_effects: true,
+            foliage_wind: true,
         };
         match self {
             Self::Somnium => all,
@@ -135,6 +139,7 @@ impl GraphicsPreset {
                 contact_shadows: false,
                 light_shafts: false,
                 camera_effects: false,
+                foliage_wind: false,
             },
         }
     }
@@ -160,6 +165,7 @@ mod tests {
                     b.contact_shadows,
                     b.light_shafts,
                     b.camera_effects,
+                    b.foliage_wind,
                 ]
                 .iter()
                 .filter(|f| **f)

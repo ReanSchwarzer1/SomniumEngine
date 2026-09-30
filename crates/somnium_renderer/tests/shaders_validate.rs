@@ -29,17 +29,13 @@ use somnium_renderer::shaders::{Shaders, define};
 // Modules that compose nothing still validate on their own, so their text is
 // still read directly. Everything with dependencies goes through `Shaders`.
 const SPD: &str = include_str!("../src/shaders/spd.wgsl");
-const VELOCITY: &str = include_str!("../src/shaders/velocity.wgsl");
 const MOTION_BLUR: &str = include_str!("../src/shaders/motion_blur.wgsl");
 const CAS: &str = include_str!("../src/shaders/cas.wgsl");
 const PRESENT: &str = include_str!("../src/shaders/present.wgsl");
-const VISIBILITY: &str = include_str!("../src/shaders/visibility.wgsl");
-const SHADOW: &str = include_str!("../src/shaders/shadow.wgsl");
 const WATER: &str = include_str!("../src/shaders/water.wgsl");
 const WATER_SPECTRUM: &str = include_str!("../src/shaders/water_spectrum.wgsl");
 const UNDERWATER: &str = include_str!("../src/shaders/underwater.wgsl");
 const CLOUDS_NOISE: &str = include_str!("../src/shaders/clouds_noise.wgsl");
-const CLOUDS_COMPOSITE: &str = include_str!("../src/shaders/clouds_composite.wgsl");
 
 /// Parse and validate one module, panicking with naga's own diagnostic.
 fn check(label: &str, source: &str) {
@@ -133,7 +129,7 @@ fn the_shading_module_validates() {
 fn the_cloud_modules_validate() {
     check("clouds_noise", CLOUDS_NOISE);
     check("clouds", &composed("clouds.wgsl"));
-    check("clouds_composite", CLOUDS_COMPOSITE);
+    check("clouds_composite", &composed("clouds_composite.wgsl"));
 }
 
 /// Phase DOOM-B/C. The census and the classifier share `pixel_class.wgsl`,
@@ -173,6 +169,17 @@ fn the_restir_gi_module_validates() {
 }
 
 #[test]
+fn practical_shadows_compile_only_for_the_ray_query_variant() {
+    let shaders = Shaders::new();
+    let flags = somnium_renderer::shaders::define::DREAMS_STF
+        .with(somnium_renderer::shaders::define::LOCAL_SHADOWS);
+    check("shading+local-shadows", &shaders.source("shading.wgsl", flags).unwrap());
+    let portable = shaders.source_or_panic("shading.wgsl");
+    assert!(!portable.contains("var local_shadow_accel"));
+    assert!(!portable.contains("enable wgpu_ray_query"));
+}
+
+#[test]
 fn the_lighting_extra_module_validates() {
     check("lighting_extra", &composed("lighting_extra.wgsl"));
 }
@@ -191,7 +198,6 @@ fn the_water_reflection_module_validates() {
 #[test]
 fn the_standalone_post_modules_validate() {
     check("spd", SPD);
-    check("velocity", VELOCITY);
     check("motion_blur", MOTION_BLUR);
     check("cas", CAS);
     check("present", PRESENT);
@@ -199,12 +205,87 @@ fn the_standalone_post_modules_validate() {
 
 #[test]
 fn the_visibility_module_validates() {
-    check("visibility", VISIBILITY);
+    check("visibility", &composed("visibility.wgsl"));
 }
 
 #[test]
 fn the_shadow_module_validates() {
-    check("shadow", SHADOW);
+    check("shadow", &composed("shadow.wgsl"));
+}
+
+/// The velocity pass composes the global pool and the wind, so it can follow a
+/// swaying leaf as well as the camera.
+#[test]
+fn the_velocity_module_validates() {
+    check("velocity", &composed("velocity.wgsl"));
+}
+
+#[test]
+fn gi_current_surface_cache_matches_its_32_byte_storage_stride() {
+    let source = composed("restir_gi.wgsl");
+    let module = naga::front::wgsl::parse_str(&source).expect("GI parses");
+    let (_, ty) = module.types.iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("GiCachedSurface"))
+        .expect("current surface cache declared");
+    let naga::TypeInner::Struct { members, span } = &ty.inner else {
+        panic!("surface cache must be a storage-compatible structure");
+    };
+    assert_eq!(*span, 32);
+    assert_eq!(members.iter().map(|m| m.offset).collect::<Vec<_>>(), [0, 16]);
+}
+
+/// **Foliage wind is one displacement, applied everywhere geometry is placed.**
+///
+/// If the raster swayed and the shading reconstruction did not, every leaf
+/// would be shaded from a triangle that is not where it was drawn (barycentrics
+/// outside the triangle, textures smeared); if the shadow pass did not, shadows
+/// would stand still under moving crowns; if velocity did not, TAA would smear
+/// the sway into ghosts. Each pass must compose `wind.wgsl` and call it with
+/// the material's own response and the view's wind.
+#[test]
+fn foliage_wind_is_applied_in_every_pass_that_positions_geometry() {
+    let wind = include_str!("../src/shaders/wind.wgsl");
+    assert!(wind.contains("fn wind_offset("));
+    for root in ["visibility.wgsl", "shadow.wgsl", "shading.wgsl", "velocity.wgsl"] {
+        let source = composed(root);
+        assert_eq!(source.matches("fn wind_offset(").count(), 1, "{root} composes wind.wgsl once");
+        let calls = source.matches("wind_offset(").count() - 1;
+        assert!(calls >= 1, "{root} never displaces by the wind");
+        assert!(source.contains("wind_bend") && source.contains("view.wind"), "{root} reads the material and the view");
+    }
+    // Shading displaces all three corners of the reconstructed triangle.
+    let shading = composed("shading.wgsl");
+    for corner in ["p0 += wind_offset(p0", "p1 += wind_offset(p1", "p2 += wind_offset(p2"] {
+        assert!(shading.contains(corner), "shading does not sway {corner}");
+    }
+    // Velocity returns to the rest pose at this frame's clock and advances to
+    // last frame's.
+    let velocity = composed("velocity.wgsl");
+    assert!(velocity.contains("view.wind_time.x") && velocity.contains("view.wind_time.y"));
+}
+
+/// Every WGSL mirror of `Material` is the 112-byte `GpuMaterial`, with the wind
+/// in its last four words, and the view buffer's wind sits where
+/// `renderer.rs` writes it.
+#[test]
+fn material_mirrors_and_the_view_carry_the_wind_where_rust_puts_it() {
+    for root in ["shading.wgsl", "visibility.wgsl", "shadow.wgsl", "transparent.wgsl", "velocity.wgsl"] {
+        let source = composed(root);
+        let module = naga::front::wgsl::parse_str(&source).expect("parses");
+        let span = |name: &str| {
+            let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some(name))?;
+            let naga::TypeInner::Struct { members, span } = &ty.inner else { return None };
+            let off = |m: &str| members.iter().find(|x| x.name.as_deref() == Some(m)).map(|x| x.offset);
+            Some((*span, off("wind_bend"), off("wind_flutter"), off("wind"), off("wind_time")))
+        };
+        let (mat, bend, flutter, _, _) = span("Material").expect("Material declared");
+        assert_eq!((mat, bend, flutter), (112, Some(96), Some(100)), "{root} Material");
+        if let Some((view, _, _, wind, wind_time)) = span("View") {
+            if wind.is_some() {
+                assert_eq!((view, wind, wind_time), (256, Some(224), Some(240)), "{root} View");
+            }
+        }
+    }
 }
 
 /// The forward transparent pass, which composes nothing.
@@ -787,7 +868,7 @@ fn cliff_parallax_reaches_the_projected_sampler() {
             .find(&format!("{plane} += terrain_projected_offset("))
             .unwrap_or_else(|| panic!("{plane} no longer takes a parallax offset"));
         let sampled = body
-            .find(&format!("tm, layer, {plane},"))
+            .find(&format!("tm, terrain_index, layer, {plane},"))
             .unwrap_or_else(|| panic!("{plane} is no longer what the maps are sampled at"));
         assert!(
             offset < sampled,
@@ -801,6 +882,58 @@ fn cliff_parallax_reaches_the_projected_sampler() {
         source.contains("let allow_pom = cliff_blend < 0.05;"),
         "the UV-space march is no longer excluded on cliffs"
     );
+}
+
+/// Vulkan's Naga backend cannot dynamically index an array value without
+/// spilling it to Function storage. Reproduce the exact material access shape
+/// with the shipped material declaration, then compare the emitted SPIR-V.
+/// This establishes a lowering difference, not a driver-level speedup.
+#[cfg(target_os = "windows")]
+#[test]
+fn direct_terrain_storage_access_avoids_the_value_array_spill() {
+    use naga::back::spv;
+    let core = include_str!("../src/shaders/terrain_splat_core.wgsl");
+    let start = core.find("struct TerrainMaterial {").unwrap();
+    let end = start + core[start..].find("\n}").unwrap() + 2;
+    let material = &core[start..end];
+    let compile = |access: &str| {
+        let source = format!(
+            "{material}\n\
+             @group(0) @binding(0) var<storage, read> materials: array<TerrainMaterial, 4>;\n\
+             @group(0) @binding(1) var<storage, read_write> result: array<vec4<f32>, 32>;\n\
+             @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
+                 let terrain_index = id.y % 4u;\n\
+                 let layer = id.x % 32u;\n\
+                 {access}\n\
+             }}"
+        );
+        let module = naga::front::wgsl::parse_str(&source).expect("lowering fixture parses");
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("lowering fixture validates");
+        spv::write_vec(&module, &info, &spv::Options::default(), Some(&spv::PipelineOptions {
+            shader_stage: naga::ShaderStage::Compute,
+            entry_point: "main".into(),
+        })).expect("lowering fixture emits SPIR-V")
+    };
+    let function_variables = |words: &[u32]| {
+        let mut count = 0;
+        let mut offset = 5; // SPIR-V module header.
+        while offset < words.len() {
+            let length = (words[offset] >> 16) as usize;
+            assert!(length > 0 && offset + length <= words.len());
+            // OpVariable: result type, result id, storage class. Function=7.
+            if words[offset] & 0xffff == 59 && words[offset + 3] == 7 {
+                count += 1;
+            }
+            offset += length;
+        }
+        count
+    };
+    let value = compile("let tm = materials[terrain_index]; result[layer] = tm.layer_albedo[layer];");
+    let direct = compile("result[layer] = materials[terrain_index].layer_albedo[layer];");
+    assert!(function_variables(&value) > 0, "value-index fixture no longer reproduces a spill");
+    assert_eq!(function_variables(&direct), 0, "direct storage indexing unexpectedly creates a function temporary");
 }
 
 /// Both parallax paths share one march.
@@ -839,4 +972,31 @@ fn the_taa_dynamic_coverage_module_validates() {
 fn close_surface_ao_and_fsr_reactivity_validate() {
     check("gtao.wgsl", &composed("gtao.wgsl"));
     check("fsr_sanitize.wgsl", &composed("fsr_sanitize.wgsl"));
+}
+
+/// Water draws after the shading pass has fogged every opaque surface, so it
+/// applies the same froxel fetch itself. Without it a pond in mist was a black
+/// cutout and anything standing in it read as lit white by contrast.
+#[test]
+fn the_sky_eye_is_drawn_on_sky_pixels() {
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    let atmosphere = include_str!("../src/shaders/sky_eye.wgsl");
+    let pool = include_str!("../src/shaders/global_pool.wgsl");
+    assert!(atmosphere.contains("fn sky_eye("), "the eye is an analytic sky term");
+    assert!(shading.contains("(sky + detail) * (1.0 - eye.a) + eye.rgb"), "the eye covers the sky it sits in");
+    assert!(pool.contains("eye_shape:"), "the light uniform carries the eye");
+    let composite = include_str!("../src/shaders/clouds_composite.wgsl");
+    assert!(composite.contains("sky_eye(dir"), "the eye burns through the cloud deck");
+}
+
+#[test]
+fn water_surfaces_receive_the_volumetric_fog() {
+    let water = WATER;
+    assert!(water.contains("@group(0) @binding(15) var volumetrics: texture_3d<f32>;"));
+    assert!(water.contains("@group(0) @binding(17) var<uniform> volumetric_range: vec4<f32>;"));
+    assert!(
+        water.contains("min(apply_volumetric_fog(final_color, input.world_position, screen_uv)"),
+        "the shaded water colour leaves without the fog"
+    );
+    check("water.wgsl", &composed("water.wgsl"));
 }

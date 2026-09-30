@@ -16,6 +16,8 @@ struct RtHit {
     emissive: vec3<f32>,
     roughness: f32,
     metallic: f32,
+    /// Material slot for the optional deferred GI terrain lookup; -1 on miss.
+    terrain_index: i32,
     /// Ray `t` of this intersection. 0 on a true miss. A cutout reject keeps
     /// the card's `t` so `rt_trace` can continue through the hole.
     t: f32,
@@ -30,6 +32,7 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
     out.emissive = vec3<f32>(0.0);
     out.roughness = 1.0;
     out.metallic = 0.0;
+    out.terrain_index = -1;
     out.t = 0.0;
     return out;
 }
@@ -39,6 +42,17 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
 /// The full composite is what the shading pass does per pixel and is far too
 /// much for a bounce or a reflection ray. The means cost two texture reads
 /// and are right to within each layer's own variation.
+// Diagnostic only until measured. Indexing an array inside a value copy of
+// TerrainMaterial can make Naga's SPIR-V backend spill that array to function
+// storage. A storage access chain keeps the exact same values and arithmetic
+// while loading only the selected entries. Other ray-query roots stay unchanged.
+override rt_terrain_direct_storage: bool = false;
+
+// GI-only measurement candidate. Other ray-query roots leave this false and
+// retain eager hit albedo. GI can avoid splat/material work for terrain hits
+// rejected by its emissive, sun-facing or sun-visibility tests.
+override rt_gi_deferred_terrain_albedo: bool = false;
+
 fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     let tm = terrain_materials[terrain_index];
     let uv = (world_pos.xz - tm.terrain_origin) * tm.inv_world_size;
@@ -68,8 +82,13 @@ fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
     var moisture = 0.0;
     for (var s = 0u; s < 4u; s = s + 1u) {
         let i = selected[s];
-        c += tm.layer_albedo[i].rgb * weight[i];
-        moisture += terrain_moisture(tm, i) * weight[i];
+        if rt_terrain_direct_storage {
+            c += terrain_materials[terrain_index].layer_albedo[i].rgb * weight[i];
+            moisture += terrain_materials[terrain_index].layer_moisture[i / 4u][i % 4u] * weight[i];
+        } else {
+            c += tm.layer_albedo[i].rgb * weight[i];
+            moisture += terrain_moisture(tm, i) * weight[i];
+        }
         total += weight[i];
     }
     let wet = saturate(tm.wetness * moisture / max(total, 0.0001));
@@ -116,9 +135,13 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
     out.emissive = vec3<f32>(mat.emissive_r, mat.emissive_g, mat.emissive_b);
     out.roughness = clamp(mat.roughness, 0.04, 1.0);
     out.metallic = clamp(mat.metallic, 0.0, 1.0);
+    out.terrain_index = mat.terrain_index;
 
     if mat.terrain_index >= 0 {
-        out.albedo = rt_terrain_albedo(u32(mat.terrain_index), out.pos);
+        out.albedo = vec3<f32>(0.0);
+        if !rt_gi_deferred_terrain_albedo {
+            out.albedo = rt_terrain_albedo(u32(mat.terrain_index), out.pos);
+        }
         out.roughness = 0.55;
         out.metallic = 0.0;
     } else {
@@ -150,7 +173,40 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
     return out;
 }
 
+// Measurement candidate: keep traversal alive while rejecting transparent
+// triangles instead of restarting from the root after every leaf-card hole.
+// Off by default until native timing and image comparisons establish its cost.
+override rt_candidate_alpha: bool = false;
+
+fn rt_candidate_is_covered(isect: RayIntersection) -> bool {
+    let inst = instances[isect.instance_custom_data];
+    let mat = materials[inst.material_id];
+    if mat.terrain_index >= 0 || mat.alpha_cutoff <= 0.0 || mat.albedo_map < 0 {
+        return true;
+    }
+    let base = inst.index_offset + isect.primitive_index * 3u;
+    let v0 = vertices[inst.vertex_offset + indices[base]];
+    let v1 = vertices[inst.vertex_offset + indices[base + 1u]];
+    let v2 = vertices[inst.vertex_offset + indices[base + 2u]];
+    let b = isect.barycentrics;
+    let uv = vec2<f32>(v0.u, v0.v) * (1.0 - b.x - b.y)
+        + vec2<f32>(v1.u, v1.v) * b.x + vec2<f32>(v2.u, v2.v) * b.y;
+    return textureSampleLevel(textures[mat.albedo_map], default_sampler, uv, 0.0).a >= mat.alpha_cutoff;
+}
+
 fn rt_trace(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, t_max: f32) -> RtHit {
+    if rt_candidate_alpha {
+        var rq: ray_query;
+        // ForceNonOpaque exposes triangle candidates even though existing
+        // BLASes were built opaque. All geometries in this scene are triangles.
+        rayQueryInitialize(&rq, accel, RayDesc(0x2u, 0xffu, t_min, t_max, origin, dir));
+        while rayQueryProceed(&rq) {
+            if rt_candidate_is_covered(rayQueryGetCandidateIntersection(&rq)) {
+                rayQueryConfirmIntersection(&rq);
+            }
+        }
+        return rt_resolve(origin, dir, rayQueryGetCommittedIntersection(&rq));
+    }
     var t = t_min;
     for (var hop = 0u; hop < 4u; hop++) {
         var rq: ray_query;

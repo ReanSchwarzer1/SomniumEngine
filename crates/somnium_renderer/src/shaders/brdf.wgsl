@@ -246,7 +246,7 @@ fn clamp_specular_lobe(specular: vec3<f32>, roughness: f32) -> vec3<f32> {
 /// The correction applies to the **specular term only**. Diffuse reflection
 /// does not care how large the source is, only how much light arrives, so
 /// scaling it here would darken every lit surface as a side effect.
-fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
+fn evaluate_brdf_area_lobe(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
     let angular = get_angular_info(surface.normal, surface.view_dir, l);
 
     let alpha = surface.roughness * surface.roughness;
@@ -280,7 +280,13 @@ fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> ve
         );
     }
 
-    return (kD * Fd + Fr) * angular.n_dot_l;
+    return kD * Fd + Fr;
+}
+
+// Directional/point sources still need the receiver cosine. Finite emitter
+// integrals already include it and use evaluate_brdf_area_lobe directly.
+fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
+    return evaluate_brdf_area_lobe(surface, l, angular_radius) * saturate(dot(surface.normal, l));
 }
 
 fn evaluate_brdf(surface: Surface, l: vec3<f32>) -> vec3<f32> {

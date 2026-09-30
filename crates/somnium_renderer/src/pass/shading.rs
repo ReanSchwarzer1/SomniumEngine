@@ -19,6 +19,9 @@ pub struct ShadingSpec {
     pub clipmap: bool,
     pub debug: bool,
     pub terrain_scan: u32,
+    /// Union of uploaded painted layers across live terrain draws. Unpainted
+    /// slots can leave the shader without changing the authored material mix.
+    pub terrain_active_layers: u32,
     /// Keep `evaluate_terrain_material` in the module (Phase DF audit).
     ///
     /// False only when every terrain queued this frame shades through its
@@ -76,11 +79,23 @@ impl ShadingSpec {
         clipmap: false,
         debug: false,
         terrain_scan: 16,
+        terrain_active_layers: u32::MAX,
         live_terrain: true,
         ablate: ablate::OFF,
     };
 
-    fn constants(self) -> [(&'static str, f64); 9] {
+    fn constants(self) -> [(&'static str, f64); 12] {
+        static BRANCHLESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let branchless = *BRANCHLESS.get_or_init(|| {
+            std::env::var("SOMNIUM_TERRAIN_BRANCHLESS_SELECT").as_deref() == Ok("1")
+        });
+        static STORAGE_READS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let storage_reads = *STORAGE_READS.get_or_init(|| {
+            // Native A/B/A reduced terrain shading from ~17 to ~7.4 ms with
+            // the same material values, coordinates and quality. Keep an
+            // explicit reference opt-out for regression diagnosis.
+            std::env::var("SOMNIUM_TERRAIN_STORAGE_READS").as_deref() != Ok("0")
+        });
         [
             ("enable_hex", f64::from(u32::from(self.hex))),
             ("enable_pom", f64::from(u32::from(self.pom))),
@@ -94,6 +109,9 @@ impl ShadingSpec {
                 f64::from(u32::from(self.live_terrain)),
             ),
             ("shade_ablate", f64::from(self.ablate)),
+            ("terrain_active_layers", f64::from(self.terrain_active_layers)),
+            ("terrain_branchless_select", f64::from(u32::from(branchless))),
+            ("terrain_storage_reads", f64::from(u32::from(storage_reads))),
         ]
     }
 }
@@ -156,6 +174,8 @@ pub struct ShadingPass {
     restir_view: wgpu::TextureView,
     /// Phase 24L: traced indirect diffuse.
     restir_gi_view: wgpu::TextureView,
+    /// Shared scene structure; absent on devices without ray queries.
+    local_shadow_tlas: Option<wgpu::Tlas>,
     /// Phases 24U/25I: froxel volume, its sampler, and the range uniform.
     volumetric_view: wgpu::TextureView,
     volumetric_sampler: wgpu::Sampler,
@@ -217,10 +237,9 @@ impl ShadingPass {
         cloud_shadow_params: &wgpu::Buffer,
         decals: &crate::pass::decal::DecalGrid,
         grain_packed: &wgpu::Buffer,
+        local_shadow_tlas: Option<&wgpu::Tlas>,
     ) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shading Pass Bind Group Layout"),
-            entries: &[
+        let mut layout_entries = vec![
                 // binding 0: vis_buffer (R32Uint)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -514,7 +533,17 @@ impl ShadingPass {
                     },
                     count: None,
                 },
-            ],
+            ];
+        if local_shadow_tlas.is_some() {
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 29,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                count: None,
+            });
+        }
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shading Pass Bind Group Layout"), entries: &layout_entries,
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -632,11 +661,15 @@ impl ShadingPass {
             &virtual_shadow_page_table,
             &virtual_shadow_params,
             grain_packed,
+            local_shadow_tlas,
         );
 
         // MORROWIND-C: composition is declared in `shading.wgsl` and
         // resolved by `somnium_shader`; this site no longer knows the order.
-        let defines = crate::shaders::define::DREAMS_STF;
+        let mut defines = crate::shaders::define::DREAMS_STF;
+        if local_shadow_tlas.is_some() {
+            defines = defines.with(crate::shaders::define::LOCAL_SHADOWS);
+        }
         let shader_source = shaders
             .source("shading.wgsl", defines)
             .unwrap_or_else(|error| panic!("shading.wgsl composition failed: {error}"));
@@ -748,6 +781,7 @@ impl ShadingPass {
             depth_view: depth_view.clone(),
             restir_view: restir_view.clone(),
             restir_gi_view: restir_gi_view.clone(),
+            local_shadow_tlas: local_shadow_tlas.cloned(),
             volumetric_view: volumetric_view.clone(),
             volumetric_sampler: volumetric_sampler.clone(),
             volumetric_range,
@@ -1158,11 +1192,9 @@ impl ShadingPass {
         virtual_shadow_page_table: &wgpu::Buffer,
         virtual_shadow_params: &wgpu::Buffer,
         grain_packed: &wgpu::Buffer,
+        local_shadow_tlas: Option<&wgpu::Tlas>,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shading Pass Bind Group"),
-            layout,
-            entries: &[
+        let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(visibility_view),
@@ -1279,7 +1311,14 @@ impl ShadingPass {
                     binding: 28,
                     resource: grain_packed.as_entire_binding(),
                 },
-            ],
+            ];
+        if let Some(tlas) = local_shadow_tlas {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 29, resource: wgpu::BindingResource::AccelerationStructure(tlas),
+            });
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shading Pass Bind Group"), layout, entries: &entries,
         })
     }
 
@@ -1476,6 +1515,7 @@ impl ShadingPass {
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
             &self.grain_packed,
+            self.local_shadow_tlas.as_ref(),
         );
     }
 
@@ -1519,6 +1559,7 @@ impl ShadingPass {
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
             &self.grain_packed,
+            self.local_shadow_tlas.as_ref(),
         );
     }
 
@@ -1545,6 +1586,11 @@ impl ShadingPass {
     }
 
     /// Publish the volume's range for this frame. 0 disables the lookup.
+    /// The volume's range uniform (x = metres, 0 when off), shared with water.
+    pub fn volumetric_range_buffer(&self) -> &wgpu::Buffer {
+        &self.volumetric_range
+    }
+
     pub fn set_volumetric_range(&self, queue: &wgpu::Queue, range: f32) {
         queue.write_buffer(
             &self.volumetric_range,

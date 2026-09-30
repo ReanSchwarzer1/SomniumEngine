@@ -72,6 +72,11 @@ struct Material {
     weathering: f32,
     // 1 = read each map twice at noise-picked offsets (`shading.wgsl` `detile`).
     detile: f32,
+    // Foliage wind response (`pool.rs` `wind`): bend, flutter; see `wind.wgsl`.
+    wind_bend: f32,
+    wind_flutter: f32,
+    _wind_pad0: f32,
+    _wind_pad1: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).
@@ -85,6 +90,14 @@ struct View {
     // debug_flags at offset 208 would need buffer expansion; instead we repurpose _padding:
     // bit 0 of _padding (reinterpreted as u32) = cascade debug overlay enable.
     // We use a separate f32 field below for clarity.
+    time:          f32,           // offset 208  simulation seconds
+    _time_pad0:    f32,
+    _time_pad1:    f32,
+    _time_pad2:    f32,
+    // Foliage wind (`wind.rs`): xy m/s over the ground, z strength, w fade metres.
+    wind:          vec4<f32>,     // offset 224
+    // x: the wind clock this frame, y: last frame (for motion vectors).
+    wind_time:     vec4<f32>,     // offset 240
 }
 
 // GpuDirectionalLight (336 bytes) — matches shadow/mod.rs::GpuDirectionalLight.
@@ -101,6 +114,13 @@ struct DirectionalLight {
     _pad2_z:         f32,                     // offset 316
     moon_direction:  vec3<f32>,               // offset 320  Phase 25M-2: physical lunar orbit
     moon_intensity:  f32,                     // offset 332  Phase 25M-2: moonlight illuminance in lux
+    // The sky eye (somnium.SkyEye); eye_intensity 0 draws none. Passes that
+    // declare the 336-byte struct above this line bind the same buffer unchanged.
+    eye_direction:      vec3<f32>,            // offset 336
+    eye_tan_half_width: f32,                  // offset 348
+    eye_color:          vec3<f32>,            // offset 352
+    eye_intensity:      f32,                  // offset 364
+    eye_shape:          vec4<f32>,            // offset 368  openness, pupil, pulse_hz, glow
 }
 
 struct GpuLocalLight {

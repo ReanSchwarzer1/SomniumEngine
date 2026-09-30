@@ -675,6 +675,7 @@ pub fn component_registry() -> TypeRegistry {
     crate::blockout::register(&mut registry);
     crate::scatter_scene::register(&mut registry);
     registry.register(sky_schema());
+    registry.register(sky_eye_schema());
     registry.register(terrain_schema());
     registry.register(world_partition_schema());
     registry.register(ui_canvas_schema());
@@ -801,6 +802,7 @@ fn post_process_schema() -> ComponentSchema {
             motion_blur_enabled { group: "Motion Blur" },
             motion_blur_shutter { min: 0.0, max: 1.0, step: 0.01, group: "Motion Blur" },
             restir_gi_intensity { min: 0.0, step: 0.01, group: "Ray Tracing" },
+            restir_gi_distance { min: 1.0, step: 1.0, unit: "m", group: "Ray Tracing" },
             volumetrics_enabled { group: "Volumetrics" }, light_shafts { group: "Volumetrics" },
             fog_density { min: 0.0, step: 0.0001, precision: 5, group: "Volumetrics" },
             fog_height_falloff { min: 0.0, step: 1.0, unit: "m", group: "Volumetrics" },
@@ -981,6 +983,8 @@ fn foliage_schema() -> ComponentSchema {
             lod_distance { min: 0.0 },
             impostor_distance { min: 0.0 },
             near_distance { min: 0.0 },
+            shadow_proxy { group: "Level of Detail", display_name: "Shadow Proxy",
+                doc: "Far half of a LOD pair: also casts the pair's shadow, shadow-only, nearer than Near Distance." },
             max_instances,
         }
     }
@@ -1078,6 +1082,25 @@ fn sky_schema() -> ComponentSchema {
     schema
 }
 
+/// A burning eye in the sky (2026-09-28): see [`crate::sky::SkyEyeComponent`].
+fn sky_eye_schema() -> ComponentSchema {
+    component_schema! {
+        crate::sky::SkyEyeComponent as "somnium.SkyEye", display "Sky Eye", version 1,
+        fields {
+            enabled { group: "Eye" },
+            yaw_deg { min: -360.0, max: 360.0, step: 1.0, unit: "°", group: "Placement", display_name: "Bearing" },
+            pitch_deg { min: -10.0, max: 89.0, step: 0.5, unit: "°", group: "Placement", display_name: "Elevation" },
+            size_deg { min: 1.0, max: 170.0, step: 0.5, unit: "°", group: "Placement", display_name: "Angular Width" },
+            color { group: "Eye", display_name: "Iris Colour" },
+            intensity { min: 0.0, soft_max: 2000.0, step: 1.0, unit: "cd/m²", group: "Eye" },
+            openness { min: 0.05, max: 1.0, step: 0.01, precision: 2, group: "Shape" },
+            pupil { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shape", display_name: "Pupil Width" },
+            pulse_hz { min: 0.0, soft_max: 2.0, step: 0.01, precision: 2, unit: "Hz", group: "Eye", display_name: "Pulse" },
+            glow { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Eye" },
+        }
+    }
+}
+
 /// CONTROL-N. Weather as a set of causes, not a pile of sliders.
 fn weather_schema() -> ComponentSchema {
     component_schema! {
@@ -1091,6 +1114,8 @@ fn weather_schema() -> ComponentSchema {
                 group: "Wind", display_name: "Wind Speed" },
             wind_direction_deg { min: 0.0, max: 360.0, step: 1.0, precision: 1,
                 group: "Wind", display_name: "Wind Direction" },
+            foliage_sway { min: 0.0, max: 2.0, step: 0.05, precision: 2,
+                group: "Wind", display_name: "Foliage Sway" },
             wetness_target { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness",
                 display_name: "Wetness Target" },
             wetting_seconds { min: 0.1, soft_max: 120.0, step: 0.5, precision: 2, unit: "s",
@@ -1358,7 +1383,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 42);
+        assert_eq!(registry.len(), 43);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1393,6 +1418,7 @@ mod tests {
                 "somnium.SaveSettings",
                 "somnium.ScatterSettings",
                 "somnium.Sky",
+                "somnium.SkyEye",
                 "somnium.Spline",
                 "somnium.StagedMirror",
                 "somnium.SurfaceTags",
@@ -1587,6 +1613,18 @@ mod tests {
             LightShadowTechnique::Virtual,
             "the original enum encoding remains loadable"
         );
+    }
+
+    #[test]
+    fn the_gi_ray_distance_is_editable_and_old_scenes_keep_200_m() {
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.PostProcess").unwrap();
+        let distance = schema.field_by_name("restir_gi_distance").unwrap();
+        assert_eq!(distance.ty, FieldType::F64);
+        assert_eq!(distance.group, Some("Ray Tracing"));
+        assert_eq!(distance.min, Some(1.0));
+        // A scene saved without the field loads the default: the pass's old constant.
+        assert_eq!(crate::PostProcessComponent::default().restir_gi_distance, 200.0);
     }
 
     #[test]
