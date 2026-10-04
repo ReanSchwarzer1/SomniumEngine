@@ -144,7 +144,7 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
 
 #[test]
 #[ignore = "Requires hardware ray queries; run for practical shadow changes"]
-fn practical_shadow_traces_real_geometry_and_respects_the_direct_rt_switch() {
+fn practical_shadow_respects_switch_and_caster_policy_without_hiding_gi_geometry() {
     use wgpu::util::DeviceExt;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = gpu::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -169,8 +169,6 @@ fn practical_shadow_traces_real_geometry_and_respects_the_direct_rt_switch() {
     });
     let mut scene = somnium_renderer::pass::raytrace::RaytracePass::new(&device,true);
     scene.register_mesh(&device,0,4,0,6);
-    let mut encoder = device.create_command_encoder(&Default::default());
-    scene.build(&device,&mut encoder,&vertex_buffer,&index_buffer,&[(0,0,glam::Mat4::IDENTITY)]);
     let function = item(include_str!("../src/shaders/shading.wgsl"),"fn practical_visibility(");
     let source = format!(r#"
         enable wgpu_ray_query;
@@ -186,6 +184,13 @@ fn practical_shadow_traces_real_geometry_and_respects_the_direct_rt_switch() {
             output_values[2] = practical_visibility(vec3f(0),vec3f(0,1,0),vec3f(0,0.5,0));
             cluster_params.shading_mode = 0u;
             output_values[3] = practical_visibility(vec3f(0),vec3f(0,1,0),vec3f(0,2,0));
+            // GI and reflection intersections must still see a non-caster.
+            var rq: ray_query;
+            rayQueryInitialize(&rq, local_shadow_accel,
+                RayDesc(0u, 0xffu, 0.008, 2.0, vec3f(0), vec3f(0,1,0)));
+            rayQueryProceed(&rq);
+            output_values[4] = select(0.0, 1.0,
+                rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE);
         }}
     "#);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -195,10 +200,10 @@ fn practical_shadow_traces_real_geometry_and_respects_the_direct_rt_switch() {
         label: None, layout: None, module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None,
     });
     let output = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None, size: 16, usage: wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
+        label: None, size: 20, usage: wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
     });
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None, size: 16, usage: wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        label: None, size: 20, usage: wgpu::BufferUsages::MAP_READ|wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None, layout: &pipeline.get_bind_group_layout(0), entries: &[
@@ -206,15 +211,26 @@ fn practical_shadow_traces_real_geometry_and_respects_the_direct_rt_switch() {
             wgpu::BindGroupEntry { binding:1,resource:output.as_entire_binding() },
         ],
     });
-    {
-        let mut pass=encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(1,1,1);
+    // Only the authored flag changes: this also catches a TLAS cache signature
+    // that accidentally omits shadow participation and reuses the old mask.
+    for casts_shadow in [true, false, true] {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        scene.build(&device, &mut encoder, &vertex_buffer, &index_buffer,
+            &[(0, 0, glam::Mat4::IDENTITY, casts_shadow)]);
+        assert_eq!(scene.instance_count(), 1, "non-casters must remain in the TLAS");
+        {
+            let mut pass=encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);pass.set_bind_group(0,&bind,&[]);pass.dispatch_workgroups(1,1,1);
+        }
+        encoder.copy_buffer_to_buffer(&output,0,&readback,0,20);queue.submit([encoder.finish()]);
+        let (send,recv)=std::sync::mpsc::channel();
+        readback.slice(..).map_async(wgpu::MapMode::Read,move |r|send.send(r).unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();recv.recv().unwrap().unwrap();
+        let mapped=readback.slice(..).get_mapped_range().unwrap();
+        let actual: &[f32]=bytemuck::cast_slice(&mapped);
+        let blocked = if casts_shadow { 0.0 } else { 1.0 };
+        assert_eq!(actual,&[blocked,1.0,1.0,1.0,1.0], "casts_shadow={casts_shadow}");
+        drop(mapped);
+        readback.unmap();
     }
-    encoder.copy_buffer_to_buffer(&output,0,&readback,0,16);queue.submit([encoder.finish()]);
-    let (send,recv)=std::sync::mpsc::channel();
-    readback.slice(..).map_async(wgpu::MapMode::Read,move |r|send.send(r).unwrap());
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();recv.recv().unwrap().unwrap();
-    let mapped=readback.slice(..).get_mapped_range().unwrap();
-    let actual: &[f32]=bytemuck::cast_slice(&mapped);
-    assert_eq!(actual,&[0.0,1.0,1.0,1.0]);
 }

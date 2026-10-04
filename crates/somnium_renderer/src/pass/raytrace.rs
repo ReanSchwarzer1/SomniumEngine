@@ -56,14 +56,15 @@ pub struct RaytracePass {
     built: Option<u64>,
 }
 
-/// FNV-1a over the words that decide a TLAS: slot order, mesh and transform.
-fn instance_signature(instances: &[(u32, u32, glam::Mat4)]) -> u64 {
+/// FNV-1a over the words that decide a TLAS, including shadow participation.
+fn instance_signature(instances: &[(u32, u32, glam::Mat4, bool)]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
     let mut word = |w: u32| h = (h ^ u64::from(w)).wrapping_mul(0x0100_0000_01b3);
     word(u32::try_from(instances.len()).unwrap_or(u32::MAX));
-    for (index, vertex_offset, model) in instances {
+    for (index, vertex_offset, model, casts_shadow) in instances {
         word(*index);
         word(*vertex_offset);
+        word(u32::from(*casts_shadow));
         for v in model.to_cols_array() {
             word(v.to_bits());
         }
@@ -218,35 +219,37 @@ impl RaytracePass {
 
     /// Remove acceleration data before a scene-owned vertex reservation is reused.
     pub fn unregister_mesh(&mut self, vertex_offset: u32) {
-        self.blas.remove(&vertex_offset);
+        if self.blas.remove(&vertex_offset).is_some() {
+            // The TLAS may still name this BLAS; force the next build to
+            // re-encode even if the new scene's instance words happen to match.
+            self.built = None;
+        }
         self.pending_blas.retain(|offset| *offset != vertex_offset);
     }
 
     /// Build any BLAS whose geometry changed, and a TLAS from `instances`.
-    ///
-    /// `instances` is `(vertex_offset, model matrix)`, matching what the draw
-    /// queue already carries, so the traced scene and the rasterised one cannot
-    /// drift apart.
     ///
     /// The bottom level is rebuilt **only for geometry that changed** — see
     /// `pending_blas`. Reissuing every BLAS per frame was affordable with a
     /// handful of meshes and is not with a terrain's worth of chunks.
     /// Build the acceleration structures for this frame.
     ///
-    /// `instances` is `(instance_buffer_index, vertex_offset, model)`. The first
+    /// `instances` is `(instance_buffer_index, vertex_offset, model, casts_shadow)`. The first
     /// field is Phase 24L's requirement: `instance_index` on an intersection is
     /// the TLAS *slot*, which is not the instance-buffer index — instances
     /// without a BLAS are skipped below, so the two drift apart the moment one
     /// mesh is missing. Carrying the real index in custom data makes
     /// `instances[hit.instance_custom_data]` exact, and lets a ray hit resolve
-    /// through the same array the visibility buffer uses.
+    /// through the same array the visibility buffer uses. Every instance keeps
+    /// visibility bit 1 for GI/reflections; shadow rays select bit 0, which is
+    /// present only on authored shadow casters.
     pub fn build(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
-        instances: &[(u32, u32, glam::Mat4)],
+        instances: &[(u32, u32, glam::Mat4, bool)],
     ) {
         if !self.supported {
             return;
@@ -309,7 +312,7 @@ impl RaytracePass {
         // terrain chunks sorted ahead of it.
         let mut count = 0u32;
         let mut dropped = 0u32;
-        for (instance_index, vertex_offset, model) in instances.iter() {
+        for (instance_index, vertex_offset, model, casts_shadow) in instances.iter() {
             let Some(mesh) = self.blas.get(vertex_offset) else {
                 continue;
             };
@@ -336,7 +339,9 @@ impl RaytracePass {
                 // resolves to geometry and material through the same array the
                 // visibility buffer uses — one resolve path, not two.
                 *instance_index,
-                0xff,
+                // Keep non-casters visible to GI and reflection intersections.
+                // Shadow-only queries use mask 0x1; general queries use 0xff.
+                0x2 | u8::from(*casts_shadow),
             ));
             count += 1;
         }

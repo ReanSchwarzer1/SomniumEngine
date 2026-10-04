@@ -201,6 +201,7 @@ export type SomniumFoliage = {
 	lod_distance: number,
 	impostor_distance: number,
 	near_distance: number,
+	shadow_proxy: boolean,
 	max_instances: number,
 }
 
@@ -440,6 +441,7 @@ export type SomniumPostProcess = {
 	ddgi_hysteresis: number,
 	analytic_grad: boolean,
 	shaft_intensity: number,
+	fog_sky_occlusion: number,
 	fsr_sharpness: number,
 }
 
@@ -491,6 +493,20 @@ export type SomniumSky = {
 	max_distance: number,
 	quality: number --[[ Quarter Resolution | Half Resolution | Full Resolution ]],
 	temporal_jitter: boolean,
+}
+
+--- `somnium.SkyEye` (schema version 1).
+export type SomniumSkyEye = {
+	enabled: boolean,
+	yaw_deg: number,
+	pitch_deg: number,
+	size_deg: number,
+	color: Vec3,
+	intensity: number,
+	openness: number,
+	pupil: number,
+	pulse_hz: number,
+	glow: number,
 }
 
 --- `somnium.Spline` (schema version 2).
@@ -702,6 +718,7 @@ export type SelfComponents = {
 	saveSettings: SomniumSaveSettings?,
 	scatterSettings: SomniumScatterSettings?,
 	sky: SomniumSky?,
+	skyEye: SomniumSkyEye?,
 	spline: SomniumSpline?,
 	stagedMirror: SomniumStagedMirror?,
 	surfaceTags: SomniumSurfaceTags?,

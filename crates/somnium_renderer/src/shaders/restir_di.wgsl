@@ -132,7 +132,7 @@ fn occluded(origin: vec3<f32>, dir: vec3<f32>, t_min: f32) -> bool {
         accel,
         // Terminate on first hit: a shadow ray only needs to know whether
         // anything is in the way, not what or how far.
-        RayDesc(0x4u, 0xffu, t_min, 10000.0, origin, dir),
+        RayDesc(0x4u, 0x1u, t_min, 10000.0, origin, dir),
     );
     rayQueryProceed(&rq);
     return rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE;

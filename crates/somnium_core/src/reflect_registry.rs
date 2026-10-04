@@ -835,6 +835,8 @@ fn post_process_schema() -> ComponentSchema {
             ddgi_hysteresis { min: 0.0, max: 0.99, step: 0.01, group: "Global Illumination", display_name: "DDGI Hysteresis",
                 doc: "Previous radiance retained per update; higher is steadier but slower." },
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
+            fog_sky_occlusion { min: 0.0, max: 1.0, step: 0.01, group: "Volumetrics", display_name: "Fog Sky Occlusion",
+                doc: "How far the sun's shadow also hides skylight from the fog; stops roofed interiors glowing with haze." },
              fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
     };

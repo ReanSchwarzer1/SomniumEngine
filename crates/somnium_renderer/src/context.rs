@@ -502,7 +502,7 @@ impl RenderContext {
         };
 
         let mut limits = wgpu::Limits::default();
-        limits.max_binding_array_elements_per_shader_stage = 1024;
+        limits.max_binding_array_elements_per_shader_stage = crate::bindless::MAX_BINDLESS_TEXTURES;
         limits.max_storage_buffers_per_shader_stage = 16;
         // Phase 24AC / FSR: SPD writes six mip UAVs from one dispatch, and FSR's
         // luma pyramid binds those plus two more. wgpu's default ceiling is four

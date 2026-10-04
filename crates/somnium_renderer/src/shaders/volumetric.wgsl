@@ -88,6 +88,8 @@ struct VolumetricParams {
     jitter: f32,
     frame: u32,
     grain_enabled: u32,
+    /// How far the sun's shadow map also hides skylight from the fog, 0..1.
+    fog_sky_occlusion: f32,
 }
 
 @group(0) @binding(0) var<uniform> vol: VolumetricParams;
@@ -339,7 +341,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             var sun_vis = 1.0;
-            if vol.shafts_enabled != 0u {
+            var sky_vis = 1.0;
+            if vol.shafts_enabled != 0u || vol.fog_sky_occlusion > 0.0 {
                 // Cascade splits are camera/view depth, not radial ray length.
                 // They only match at screen centre; using t selected a wrong
                 // cascade toward the edges and made shafts appear absent.
@@ -352,7 +355,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // single scattering unchanged and only remove direct light in
                 // shadowed fog. Values above one mean full contrast so old
                 // scenes using the former 1.5 default remain sensible.
-                sun_vis = mix(1.0, shadow_vis, saturate(vol.shaft_intensity));
+                if vol.shafts_enabled != 0u {
+                    sun_vis = mix(1.0, shadow_vis, saturate(vol.shaft_intensity));
+                }
+                // Skylight has no shadow map, but air under a roof or a dense
+                // canopy is also in the sun's shadow. Without this the fog in
+                // a closed room glowed with the whole sky (the Forest lodge).
+                sky_vis = mix(1.0, shadow_vis, saturate(vol.fog_sky_occlusion));
             }
 
             var step_scatter = (scatter_rayleigh * rayleigh + scatter_mie * mie)
@@ -382,7 +391,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // it is the same term the air already uses, so the two media
                 // now agree about what is illuminating them.
                 step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance
-                    + vec3<f32>(fog) * multiscatter;
+                    + vec3<f32>(fog) * multiscatter * sky_vis;
                 extinction += vec3<f32>(fog);
             }
 

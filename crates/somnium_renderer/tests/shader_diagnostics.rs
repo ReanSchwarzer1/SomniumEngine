@@ -46,6 +46,7 @@ fn system_with(broken: Option<(&str, usize, &str)>) -> ShaderSystem {
     let mut system = ShaderSystem::new();
     system.register_define(0, "SKINNED");
     system.register_define(1, "DREAMS_STF");
+    system.register_define(2, "LOCAL_SHADOWS");
     for name in MODULES {
         let text = std::fs::read_to_string(shader_dir().join(name))
             .unwrap_or_else(|error| panic!("{name}: {error}"));

@@ -4429,6 +4429,13 @@ impl UiManager {
         self.recent_menu_items.push((separator, String::new()));
         let recents = self.recent_scenes.clone();
         for (path, exists) in recents {
+            // An empty path separates the project's levels from recent files.
+            if path.is_empty() {
+                let separator =
+                    crate::editor::parts::scope_separator(&mut self.native_ui, self.file_menu_stack);
+                self.recent_menu_items.push((separator, String::new()));
+                continue;
+            }
             let label = std::path::Path::new(&path)
                 .file_name()
                 .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());

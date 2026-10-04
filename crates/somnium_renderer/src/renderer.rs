@@ -151,6 +151,12 @@ pub struct SomniumRenderer {
     /// Terrain descriptors are scene-owned; imported asset descriptors are not.
     terrain_texture_slots: Vec<u32>,
     imported_texture_slots: std::collections::HashMap<[u8; 32], i32>,
+    /// How many live imported materials sample each imported slot. Identical
+    /// images are shared across sources, so a slot is freed only at zero.
+    imported_texture_refs: std::collections::HashMap<i32, u32>,
+    /// The imported slots each imported material was counted against, so a
+    /// release decrements exactly what its upload incremented, once.
+    material_texture_refs: std::collections::HashMap<u32, Vec<i32>>,
     /// Per-frame instance storage.
     pub instances: InstancePool,
 
@@ -1027,6 +1033,8 @@ impl SomniumRenderer {
             texture_pool,
             terrain_texture_slots: Vec::new(),
             imported_texture_slots: Default::default(),
+            imported_texture_refs: Default::default(),
+            material_texture_refs: Default::default(),
             instances,
             view_matrix: glam::Mat4::IDENTITY,
             proj_matrix: glam::Mat4::IDENTITY,
@@ -1246,6 +1254,9 @@ impl SomniumRenderer {
     /// Add a texture to the global bindless pool.
     pub fn add_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
         let index = self.texture_pool.add_texture(view.clone());
+        if index == crate::texture_pool::FALLBACK_SLOT {
+            return index;
+        }
         self.global_pool.texture_views[index as usize] = view;
         self.global_pool.update_textures(&ctx.device);
         index
@@ -1495,7 +1506,8 @@ impl SomniumRenderer {
         let material_ids: Vec<u32> = scene
             .materials
             .iter()
-            .map(|mat| {
+            .enumerate()
+            .map(|(index, mat)| {
                 let id = self.materials_pool.add_material(
                     &ctx.queue,
                     GpuMaterial {
@@ -1507,7 +1519,12 @@ impl SomniumRenderer {
                         metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
                         occlusion_map: resolve_tex(mat.occlusion_map),
                         transmission: mat.transmission,
-                        emissive: mat.emissive,
+                        // KHR_materials_emissive_strength, as the authored
+                        // material pool already applies it. Dropping it here
+                        // left every imported lamp glass and bulb at 1/12 to
+                        // 1/250 of its authored luminance: lit, but unlit-looking.
+                        emissive: (glam::Vec3::from(mat.emissive) * mat.emissive_intensity)
+                            .to_array(),
                         emissive_map: resolve_tex(mat.emissive_map),
                         terrain_index: -1,
                         porosity: 0.5,
@@ -1546,11 +1563,92 @@ impl SomniumRenderer {
                 // Phase 21: remember which materials are blended so `submit` can
                 // route their draws to the forward transparent pass.
                 self.set_material_blend(id, mat.alpha_mode == somnium_asset::AlphaMode::Blend);
+                // Count only materials a node draws with: those are the ones
+                // `release_uploads` is handed back, and an unused material that
+                // shares a slot must not hold it open forever.
+                if used_materials.contains(&index) {
+                    let mut slots: Vec<i32> = [
+                        mat.albedo_map,
+                        mat.emissive_map,
+                        mat.normal_map,
+                        mat.metallic_roughness_map,
+                        mat.occlusion_map,
+                        mat.height_map,
+                    ]
+                    .into_iter()
+                    .map(resolve_tex)
+                    .filter(|slot| *slot >= 0)
+                    .collect();
+                    slots.sort_unstable();
+                    slots.dedup();
+                    for slot in &slots {
+                        *self.imported_texture_refs.entry(*slot).or_default() += 1;
+                    }
+                    self.material_texture_refs.insert(id, slots);
+                }
                 id
             })
             .collect();
 
         material_ids
+    }
+
+    /// Hand back what a scene's imported uploads hold: geometry spans and their
+    /// BLAS for `vertex_offsets`, and for `material_ids` every imported texture
+    /// no other live material still samples.
+    ///
+    /// Call with the GPU idle (`wait_gpu`). Unknown offsets and ids are ignored,
+    /// and releasing twice is harmless, so callers may over-report. A material
+    /// that is released keeps its slot id but loses its maps, so a stray draw
+    /// shows untextured instead of whatever image reuses the freed slot.
+    pub fn release_uploads(
+        &mut self,
+        ctx: &RenderContext,
+        vertex_offsets: impl IntoIterator<Item = u32>,
+        material_ids: impl IntoIterator<Item = u32>,
+    ) -> (usize, usize) {
+        let mut meshes = 0;
+        for offset in vertex_offsets {
+            if self.geometry.release_static_mesh(offset) {
+                self.raytrace_pass.unregister_mesh(offset);
+                meshes += 1;
+            }
+        }
+        let mut textures = 0;
+        for id in material_ids {
+            let Some(slots) = self.material_texture_refs.remove(&id) else {
+                continue;
+            };
+            for slot in slots {
+                let Some(count) = self.imported_texture_refs.get_mut(&slot) else {
+                    continue;
+                };
+                *count -= 1;
+                if *count > 0 {
+                    continue;
+                }
+                self.imported_texture_refs.remove(&slot);
+                self.imported_texture_slots.retain(|_, live| *live != slot);
+                if self.texture_pool.release(slot as u32) {
+                    self.global_pool.texture_views[slot as usize] =
+                        self.texture_pool.dummy_view.clone();
+                    textures += 1;
+                }
+            }
+            if let Some(mut material) = self.materials_pool.get(id) {
+                material.albedo_map = -1;
+                material.normal_map = -1;
+                material.metallic_roughness_map = -1;
+                material.occlusion_map = -1;
+                material.emissive_map = -1;
+                material.height_map = -1;
+                self.materials_pool.set_material(&ctx.queue, id, material);
+            }
+        }
+        if textures > 0 {
+            self.global_pool.update_textures(&ctx.device);
+        }
+        (meshes, textures)
     }
 
     pub fn upload_scene(
@@ -4335,22 +4433,23 @@ impl SomniumRenderer {
             // material order and truncated it at its cap, so *which* trees and
             // walls rays could see depended on how materials happened to sort.
             let geometry = &self.geometry;
-            let instances: Vec<(u32, u32, glam::Mat4)> = self
+            let instances: Vec<(u32, u32, glam::Mat4, bool)> = self
                 .draw_queue
                 .iter()
                 .enumerate()
-                .filter(|(_, cmd)| {
-                    geometry.mesh_aabb(cmd.vertex_offset).is_none_or(|(min, max)| {
+                .filter_map(|(i, cmd)| {
+                    let radius = geometry.mesh_aabb(cmd.vertex_offset).map_or(f32::MAX, |(min, max)| {
                         let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
-                        cmd.transform.transform_vector3(half).length() >= TLAS_MIN_RADIUS
+                        cmd.transform.transform_vector3(half).length()
+                    });
+                    (radius >= TLAS_MIN_RADIUS).then(|| {
+                        (
+                            u32::try_from(i).unwrap_or(0),
+                            cmd.vertex_offset,
+                            cmd.transform,
+                            traces_shadow(cmd.casts_shadow, radius),
+                        )
                     })
-                })
-                .map(|(i, cmd)| {
-                    (
-                        u32::try_from(i).unwrap_or(0),
-                        cmd.vertex_offset,
-                        cmd.transform,
-                    )
                 })
                 .collect();
             self.profiler.begin(&mut encoder, "TLAS build");
@@ -6173,6 +6272,23 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
 /// World-space bounding radius below which a draw stays out of the TLAS (metres).
 const TLAS_MIN_RADIUS: f32 = 1.0;
 
+/// Instances at least this large occlude shadow rays whatever their authored
+/// `casts_shadow`.
+const RT_SHADOW_MIN_RADIUS: f32 = 1.5;
+
+/// Whether a traced instance stops shadow rays.
+///
+/// Foliage authors `casts_shadow` from its shadow distance, a shadow-*map*
+/// budget (and far tree LODs author it off entirely). Taken as-is by shadow
+/// rays it made every tree past that distance transparent to the sun: its
+/// trunk stood in full sun under its own canopy and glowed white through the
+/// fog, and the ground beneath went unshadowed. A ray pays nothing for a tree
+/// it was going to traverse anyway, so only small things — grass, the case
+/// the authored cut exists for — keep it.
+fn traces_shadow(authored: bool, radius: f32) -> bool {
+    authored || radius >= RT_SHADOW_MIN_RADIUS
+}
+
 /// Staged texture bytes after which an import submits and waits.
 const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -6310,6 +6426,18 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
         for texel in data.chunks_exact_mut(4) {
             texel[3] = (f32::from(texel[3]) * scale).round().clamp(0.0, 255.0) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod traced_shadow_tests {
+    use super::traces_shadow;
+
+    #[test]
+    fn a_far_tree_still_shadows_while_far_grass_does_not() {
+        assert!(traces_shadow(false, 6.0), "a tree past its foliage shadow distance");
+        assert!(!traces_shadow(false, 1.1), "a grass patch past its distance");
+        assert!(traces_shadow(true, 1.1), "an authored caster");
     }
 }
 

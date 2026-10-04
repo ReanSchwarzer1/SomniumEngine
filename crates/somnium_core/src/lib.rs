@@ -1284,6 +1284,10 @@ pub struct PostProcessComponent {
     pub analytic_grad: bool,
     /// Light-shaft shadow contrast. 0 is neutral; 1 (or greater) is full.
     pub shaft_intensity: f32,
+    /// How far the sun's shadow map also hides skylight from the fog, 0..=1.
+    /// 0 (default) lights fog with the whole sky everywhere; toward 1, fog
+    /// under roofs and dense canopy loses its skylit glow.
+    pub fog_sky_occlusion: f32,
     /// FSR RCAS sharpness, 0..=1. Default 0.8.
     pub fsr_sharpness: f32,
 }
@@ -1434,6 +1438,7 @@ impl Default for PostProcessComponent {
             ddgi_hysteresis: 0.95,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
+            fog_sky_occlusion: 0.0,
             aa,
             smaa_preset,
             // Off unless asked for. `SOMNIUM_OIT=1` is the A/B route; the

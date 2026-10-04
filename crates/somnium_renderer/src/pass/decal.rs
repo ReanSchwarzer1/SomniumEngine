@@ -36,10 +36,12 @@ use crate::cluster::ClusterVolume;
 /// sill, leaves under every tree. 256 kept only a street's worth; binning is
 /// per froxel, so the cost of a larger list is its upload, not the shading.
 pub const MAX_DECALS: usize = 768;
-/// Flattened froxel → decal index entries (2 MB). Entries past it are
-/// dropped from the far end of the grid, so a decal-dense view loses its
-/// distant decals first; `assign_and_upload` warns when that happens.
-pub const MAX_DECAL_INDICES: usize = 512 * 1024;
+/// Flattened froxel → decal index entries (8 MB). The shared counting sort
+/// caps its list at the light grid's size, so this matches it: a smaller
+/// buffer would leave the far froxels' offsets pointing past the upload.
+/// Entries past it are dropped from the far end of the grid, so a
+/// decal-dense view loses its distant decals first; `assign_and_upload` warns.
+pub const MAX_DECAL_INDICES: usize = crate::cluster::MAX_LIGHT_INDICES;
 
 /// One decal, as the shading pass reads it. **Size**: 128 bytes.
 #[repr(C)]
@@ -196,7 +198,7 @@ pub struct DecalGrid {
 
 impl DecalGrid {
     /// Allocate the buffers. They are sized once and never resized: 768 decals
-    /// is 96 KB and the index list is 2 MB, which is not worth a growth path.
+    /// is 96 KB and the index list is 8 MB, which is not worth a growth path.
     #[must_use]
     pub fn new(device: &wgpu::Device) -> Self {
         let storage = |label: &str, size: u64| {

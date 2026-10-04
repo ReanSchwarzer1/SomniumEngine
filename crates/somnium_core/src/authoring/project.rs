@@ -19,6 +19,11 @@ pub struct ProjectManifest {
     pub logs: PathBuf,
     pub captures: PathBuf,
     pub runtime: PathBuf,
+    /// The game's levels in play order, relative to the project. The editor's
+    /// File menu lists them ahead of recent files so every level is always one
+    /// click away; when empty it lists the scenes folder instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<PathBuf>,
 }
 
 /// Resolved project with one authority for source and generated paths.
@@ -99,6 +104,36 @@ impl ProjectPaths {
             std::fs::create_dir_all(resolved).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    /// Scenes the editor offers as levels: the declared `levels` in order, or
+    /// else every `*.scene.json` directly in the scenes folder by name, minus
+    /// `_`-prefixed scratch scenes. Paths that escape the project are dropped.
+    pub fn level_scenes(&self) -> Vec<PathBuf> {
+        if !self.manifest.levels.is_empty() {
+            return self
+                .manifest
+                .levels
+                .iter()
+                .filter_map(|level| self.resolve(level).ok())
+                .collect();
+        }
+        let Ok(dir) = self.resolve(&self.manifest.scenes) else {
+            return Vec::new();
+        };
+        let mut scenes: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".scene.json") && !name.starts_with('_'))
+            })
+            .collect();
+        scenes.sort();
+        scenes
     }
 }
 
@@ -195,6 +230,7 @@ mod tests {
             logs: "logs".into(),
             captures: "captures".into(),
             runtime: "runtime".into(),
+            levels: Vec::new(),
         };
         std::fs::write(
             root.join("game.project.json"),
@@ -212,5 +248,40 @@ mod tests {
         );
         std::fs::remove_file(root.join("game.project.json")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn levels_are_declared_order_or_else_the_scenes_folder() {
+        let root = std::env::temp_dir().join(format!("somnium-levels-test-{}", std::process::id()));
+        let scenes = root.join("scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        for name in ["b.scene.json", "a.scene.json", "_scratch.scene.json", "notes.txt"] {
+            std::fs::write(scenes.join(name), b"{}").unwrap();
+        }
+        let manifest = |levels: &str| {
+            format!(
+                r#"{{"version":1,"id":"t","name":"T","content":"assets","scenes":"scenes",
+                "source_assets":"s","documents":"d","cooked":"c","staging":"st","saves":"sv",
+                "logs":"l","captures":"cp","runtime":"r"{levels}}}"#
+            )
+        };
+        let names = |project: &ProjectPaths| {
+            project
+                .level_scenes()
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        std::fs::write(root.join("game.project.json"), manifest("")).unwrap();
+        let project = ProjectPaths::open(&root).unwrap();
+        assert_eq!(names(&project), ["a.scene.json", "b.scene.json"]);
+        std::fs::write(
+            root.join("game.project.json"),
+            manifest(r#","levels":["scenes/b.scene.json","../escape.scene.json","scenes/a.scene.json"]"#),
+        )
+        .unwrap();
+        let project = ProjectPaths::open(&root).unwrap();
+        assert_eq!(names(&project), ["b.scene.json", "a.scene.json"], "declared order, escapes dropped");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

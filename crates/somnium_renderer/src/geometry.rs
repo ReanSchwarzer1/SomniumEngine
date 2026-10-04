@@ -48,17 +48,26 @@ struct FreeBlock {
 ///
 /// Raised from 64 MB in Phase 17E: a single photoscanned tree runs to millions
 /// of triangles, and the previous budget could not hold one alongside the rest
-/// of a scene. 256 MB covers roughly 8 million vertices.
+/// of a scene. Raised again from 256 MB to 512 MB (~16.7 M vertices): TSF's Town
+/// alone imports 7.2 M vertices (218 MB) before foliage and primitives.
 ///
 /// Clamped at construction to the device's `max_storage_buffer_binding_size` —
 /// these are bound as storage buffers for programmable vertex pulling, and
 /// wgpu's default ceiling is 128 MB. Binding one larger than the limit is a
 /// validation error at bind-group creation, not at buffer creation, so it
 /// surfaces as a crash on the first frame rather than a clean failure.
-const VERTEX_POOL_BYTES: u64 = 1024 * 1024 * 256;
+const VERTEX_POOL_BYTES: u64 = 1024 * 1024 * 512;
 
-/// Index pool size we ask for — 128 MB, about 32 million indices.
-const INDEX_POOL_BYTES: u64 = 1024 * 1024 * 128;
+/// Index pool size we ask for — 256 MB, about 64 million indices.
+const INDEX_POOL_BYTES: u64 = 1024 * 1024 * 256;
+
+/// Where a releasable static upload lives (see [`GeometryPool::release_static_mesh`]).
+#[derive(Debug, Clone, Copy)]
+struct StaticSpan {
+    vertex_count: u32,
+    index_offset: u32,
+    index_count: u32,
+}
 
 /// Manages large GPU buffers for all scene geometry.
 pub struct GeometryPool {
@@ -104,6 +113,11 @@ pub struct GeometryPool {
     index_spans: std::collections::HashMap<u32, u32>,
     free_vertex_spans: Vec<(u32, u32)>,
     free_index_spans: Vec<(u32, u32)>,
+
+    /// Static uploads by `vertex_offset`, so a scene switch can hand them back.
+    /// Without this every level ever opened stayed resident and the next one
+    /// found the pool full ("Mesh skipped"), which hid whole interiors.
+    static_meshes: std::collections::HashMap<u32, StaticSpan>,
 
     /// Actual pool sizes after clamping to the device limit.
     vertex_bytes: u64,
@@ -174,6 +188,7 @@ impl GeometryPool {
             index_spans: std::collections::HashMap::new(),
             free_vertex_spans: Vec::new(),
             free_index_spans: Vec::new(),
+            static_meshes: std::collections::HashMap::new(),
             vertex_bytes,
             index_bytes,
         }
@@ -188,9 +203,6 @@ impl GeometryPool {
         material_id: u32,
     ) -> MeshAllocation {
         debug_assert_indices_in_range(vertices.len(), indices);
-        if let Some(empty) = self.reject_if_full(vertices.len(), indices.len(), material_id) {
-            return empty;
-        }
 
         // Phase 15D: cluster the mesh and upload the permuted index buffer, so
         // each meshlet is a contiguous range that 15F can draw directly.
@@ -202,11 +214,36 @@ impl GeometryPool {
             &build.indices
         };
 
-        let v_offset = self.next_vertex;
-        let i_offset = self.next_index;
-
-        self.next_vertex += vertices.len() as u32;
-        self.next_index += indices.len() as u32;
+        let (v_count, i_count) = (vertices.len() as u32, indices.len() as u32);
+        let Some((v_offset, i_offset)) = self.allocate_static(v_count, i_count) else {
+            tracing::error!(
+                "geometry pool full: mesh of {v_count} vertices / {i_count} indices does not fit \
+                 the {:.0}/{:.0} MB pool even after released spans. Mesh skipped.",
+                self.vertex_bytes as f64 / 1048576.0,
+                self.index_bytes as f64 / 1048576.0,
+            );
+            return MeshAllocation {
+                vertex_offset: 0,
+                vertex_count: 0,
+                index_offset: 0,
+                index_count: 0,
+                material_id,
+                vertex_capacity: 0,
+                index_capacity: 0,
+            };
+        };
+        // An empty mesh owns nothing, and its offset can coincide with the next
+        // real upload's, so recording it would let its release free that one.
+        if v_count > 0 {
+            self.static_meshes.insert(
+                v_offset,
+                StaticSpan {
+                    vertex_count: v_count,
+                    index_offset: i_offset,
+                    index_count: i_count,
+                },
+            );
+        }
 
         let alloc = MeshAllocation {
             vertex_offset: v_offset,
@@ -377,14 +414,84 @@ impl GeometryPool {
         if let Some(count) = self.vertex_spans.remove(&offset) {
             self.aabbs.remove(&offset);
             self.bounds_revision += 1;
-            return_free_span(&mut self.free_vertex_spans, offset, count);
+            release_span(&mut self.free_vertex_spans, &mut self.next_vertex, offset, count);
         }
     }
 
     pub fn release_indices(&mut self, offset: u32) {
         if let Some(count) = self.index_spans.remove(&offset) {
-            return_free_span(&mut self.free_index_spans, offset, count);
+            release_span(&mut self.free_index_spans, &mut self.next_index, offset, count);
         }
+    }
+
+    /// Vertex and index space for a static upload: released spans first, then
+    /// the bump pointer. Both or neither, so a half-fit leaks nothing.
+    fn allocate_static(&mut self, vertices: u32, indices: u32) -> Option<(u32, u32)> {
+        let vertex_stride = std::mem::size_of::<Vertex>() as u64;
+        let vertex = if vertices == 0 {
+            self.next_vertex
+        } else {
+            take_free_span(&mut self.free_vertex_spans, vertices).or_else(|| {
+                reserve_span(&mut self.next_vertex, vertices, vertex_stride, self.vertex_bytes)
+            })?
+        };
+        let index = if indices == 0 {
+            Some(self.next_index)
+        } else {
+            take_free_span(&mut self.free_index_spans, indices)
+                .or_else(|| reserve_span(&mut self.next_index, indices, 4, self.index_bytes))
+        };
+        match index {
+            Some(index) => Some((vertex, index)),
+            None => {
+                if vertices > 0 {
+                    release_span(&mut self.free_vertex_spans, &mut self.next_vertex, vertex, vertices);
+                }
+                None
+            }
+        }
+    }
+
+    /// Return a static upload's spans (and its bounds, clusters and SDF) to the
+    /// pool. Only offsets [`GeometryPool::upload_mesh`] handed out are known, so
+    /// pooled, reserved or already-released offsets are ignored and `false`.
+    ///
+    /// The caller owns the rest of the mesh's identity: its BLAS must be
+    /// unregistered too (`SomniumRenderer::release_uploads` does both).
+    pub fn release_static_mesh(&mut self, vertex_offset: u32) -> bool {
+        let Some(span) = self.static_meshes.remove(&vertex_offset) else {
+            return false;
+        };
+        self.aabbs.remove(&vertex_offset);
+        self.meshlets.remove(&vertex_offset);
+        self.sdf_bricks.remove(&vertex_offset);
+        self.bounds_revision += 1;
+        release_span(
+            &mut self.free_vertex_spans,
+            &mut self.next_vertex,
+            vertex_offset,
+            span.vertex_count,
+        );
+        if span.index_count > 0 {
+            release_span(
+                &mut self.free_index_spans,
+                &mut self.next_index,
+                span.index_offset,
+                span.index_count,
+            );
+        }
+        true
+    }
+
+    /// Bytes of the vertex and index pools below their high-water marks that
+    /// are not on a free list. A diagnostic for scene-switch residency.
+    pub fn live_bytes(&self) -> (u64, u64) {
+        let free = |spans: &[(u32, u32)]| spans.iter().map(|s| u64::from(s.1)).sum::<u64>();
+        (
+            (u64::from(self.next_vertex) - free(&self.free_vertex_spans))
+                * std::mem::size_of::<Vertex>() as u64,
+            (u64::from(self.next_index) - free(&self.free_index_spans)) * 4,
+        )
     }
 
     pub fn reserved_span_counts(&self) -> (usize, usize) {
@@ -563,6 +670,18 @@ fn return_free_span(free: &mut Vec<(u32, u32)>, offset: u32, count: u32) {
         } else {
             i += 1;
         }
+    }
+}
+
+/// Free a span, and lower the high-water mark when the freed space reaches it,
+/// so releasing a whole scene gives the next one the pool's contiguous top.
+fn release_span(free: &mut Vec<(u32, u32)>, next: &mut u32, offset: u32, count: u32) {
+    return_free_span(free, offset, count);
+    if let Some(&(top, len)) = free.last()
+        && top + len == *next
+    {
+        free.pop();
+        *next = top;
     }
 }
 

@@ -23,7 +23,13 @@ use crate::cluster::ClusterGrid;
 use wgpu;
 
 /// Maximum number of sampled textures in the bindless array.
-pub const MAX_BINDLESS_TEXTURES: u32 = 1024;
+///
+/// 2048 since TSF's Town alone references ~880 imported images before
+/// terrain, foliage and authored materials; at 1024 opening it after any other
+/// level exhausted the pool, which panics. Scene switches now release imported
+/// slots (`SomniumRenderer::release_uploads`), so this bounds one level, not
+/// a session.
+pub const MAX_BINDLESS_TEXTURES: u32 = 2048;
 
 /// A global pool of resources mapped to a single bind group.
 ///

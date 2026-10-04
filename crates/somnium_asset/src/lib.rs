@@ -73,6 +73,16 @@ fn material_extra(mat: &gltf::Material<'_>, key: &str) -> f32 {
         .map_or(0.0, |w| (w as f32).clamp(0.0, 1.0))
 }
 
+/// glTF material extras `somnium_interior_depth`: metres of room behind a
+/// window whose colour map is that room's back wall. 0 when absent.
+fn interior_depth(mat: &gltf::Material<'_>) -> f32 {
+    mat.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|v| v.get("somnium_interior_depth").and_then(serde_json::Value::as_f64))
+        .map_or(0.0, |d| (d as f32).clamp(0.0, 8.0))
+}
+
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
     /// Source material name, used for editable `.sommat` sibling naming.
@@ -163,6 +173,8 @@ pub struct LoadedMaterial {
     pub height_map: Option<usize>,
     /// Relief depth in metres spanned by the height map: `<stem>_disp.json`
     /// `{"depth_m": …}` beside it, else [`DEFAULT_HEIGHT_DEPTH_M`].
+    /// Negative: the material is a window onto a room that deep (interior
+    /// mapping, glTF extras `somnium_interior_depth`), and no height map.
     pub height_depth: f32,
 }
 
@@ -275,7 +287,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
             double_sided: mat.double_sided(),
             height_map: None,
-            height_depth: 0.0,
+            height_depth: -interior_depth(&mat),
             albedo_map: pbr
                 .base_color_texture()
                 .map(|t| t.texture().source().index()),
@@ -678,6 +690,9 @@ fn attach_sidecar_height(document: &gltf::Document, base_dir: &Path, scene: &mut
     let mut loaded: HashMap<usize, (usize, f32)> = HashMap::new();
     for m in &mut scene.materials {
         let Some(albedo) = m.albedo_map else { continue };
+        if m.height_depth < 0.0 {
+            continue; // a window onto a room: its depth is the room's, not a relief
+        }
         if let Some(&(index, depth)) = loaded.get(&albedo) {
             m.height_map = Some(index);
             m.height_depth = depth;
@@ -1177,6 +1192,17 @@ mod normal_scale_tests {
         std::fs::write(&path, document.to_string()).unwrap();
         let loaded = super::load_gltf(&path).unwrap();
         assert_eq!((loaded.materials[0].wind_bend, loaded.materials[0].wind_flutter), (0.00035, 0.02));
+        assert_eq!(loaded.materials[0].height_depth, 0.0, "no extras, no room");
+        std::fs::remove_file(&path).unwrap();
+        // A window onto a room carries the room's depth as a negative height depth.
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[{"extras":{"somnium_interior_depth":1.2}}]
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        assert_eq!(loaded.materials[0].height_depth, -1.2);
+        assert!(loaded.materials[0].height_map.is_none());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(root).unwrap();
     }

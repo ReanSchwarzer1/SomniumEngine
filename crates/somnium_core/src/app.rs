@@ -1122,6 +1122,9 @@ pub struct Engine<G: GameApp> {
     pending_recovery: Option<crate::autosave::Recovery>,
     /// Most-recently-opened scenes, newest first.
     recent_scenes: Vec<std::path::PathBuf>,
+    /// The project's levels (`ProjectPaths::level_scenes`), listed in the File
+    /// menu ahead of recents so no level depends on having been opened lately.
+    level_scenes: Vec<std::path::PathBuf>,
     /// The entity clipboard. Values, never handles — see `clipboard.rs`.
     entity_clipboard: crate::clipboard::EntityClipboard,
     /// Pending "frame this" request for the game-owned editor camera:
@@ -1600,6 +1603,7 @@ impl<G: GameApp + 'static> Engine<G> {
         } else {
             config.content_root = resolved_root;
         }
+        let mut level_scenes = Vec::new();
         if let Some(root) = &config.project_root {
             let project =
                 crate::authoring::project::ProjectPaths::open(root).map_err(EngineError::Config)?;
@@ -1607,6 +1611,7 @@ impl<G: GameApp + 'static> Engine<G> {
             config.content_root = project
                 .resolve(&project.manifest.content)
                 .map_err(EngineError::Config)?;
+            level_scenes = project.level_scenes();
             config.project_root = Some(project.root);
         }
         let mut registration = crate::authoring::GameRegistration::default();
@@ -1697,6 +1702,7 @@ impl<G: GameApp + 'static> Engine<G> {
             autosave: crate::autosave::AutosaveClock::new(autosave_interval),
             pending_recovery: None,
             recent_scenes: crate::settings::load_recent_scenes(),
+            level_scenes,
             entity_clipboard: crate::clipboard::EntityClipboard::default(),
             camera_focus_request: None,
             state: LifecycleState::Uninitialized,
@@ -2381,6 +2387,7 @@ impl<G: GameApp> Engine<G> {
             renderer.wait_gpu(render_ctx);
             renderer.reset_scene_gpu(render_ctx);
         }
+        self.release_outgoing_scene_gpu(document);
         for entity in self.world.entities().collect::<Vec<_>>() {
             self.world.despawn(entity);
         }
@@ -2413,6 +2420,94 @@ impl<G: GameApp> Engine<G> {
             report.warnings.len()
         );
         self.after_scene_load(path);
+    }
+
+    /// Where an `ImportedMesh.source` lives on disk, contained by the project.
+    fn imported_source_path(&self, source: &str) -> Result<std::path::PathBuf, String> {
+        let source_path = std::path::Path::new(source);
+        match self.config.project_root.as_ref() {
+            Some(root) => crate::authoring::project::ProjectPaths::open(root)
+                .and_then(|project| project.resolve(source_path)),
+            None => Ok(source_path.to_path_buf()),
+        }
+    }
+
+    /// Hand the outgoing scene's GPU uploads back before `incoming` arrives.
+    ///
+    /// Nothing used to be released: every level opened in a session stayed in
+    /// the geometry pool, the bindless table and BLAS memory. Gardens then
+    /// Road filled the 256 MB vertex pool, so interiors opened next lost every
+    /// mesh ("Mesh skipped" — populated outliner, empty viewport), and Town's
+    /// ~880 images after any other level exhausted the texture table (panic).
+    ///
+    /// Imported sources the incoming scene also uses stay resident and are
+    /// reused; the rest, the old entities' own uploads (primitives, blockouts)
+    /// and the foliage palette are released. Foliage re-uploads lazily for the
+    /// kinds the next terrain actually paints. Runs with the GPU idle.
+    fn release_outgoing_scene_gpu(&mut self, incoming: &serde_json::Value) {
+        let keep: std::collections::HashSet<std::path::PathBuf> = incoming
+            .get("entities")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entity| {
+                entity
+                    .pointer("/components/somnium.ImportedMesh/fields/source")?
+                    .as_str()
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|source| self.imported_source_path(source).ok()?.canonicalize().ok())
+            .collect();
+        let released = self.imported_uploads.retain_sources(&keep);
+        let retained = self.imported_uploads.vertex_offsets();
+
+        // A skipped upload reports offset 0 with no indices; offset 0 is a
+        // real mesh, so only allocations that drew something are released.
+        let mut meshes: std::collections::BTreeSet<u32> = released
+            .iter()
+            .filter(|node| node.index_count > 0)
+            .map(|node| node.vertex_offset)
+            .collect();
+        let mut materials: std::collections::BTreeSet<u32> =
+            released.iter().map(|node| node.material_id).collect();
+        for entity in self.world.entities() {
+            if let Some(mesh) = self.world.get::<MeshComponent>(entity)
+                && mesh.index_count > 0
+                && !retained.contains(&mesh.vertex_offset)
+            {
+                meshes.insert(mesh.vertex_offset);
+            }
+        }
+        let foliage = self
+            .project_foliage_sources
+            .drain()
+            .flat_map(|(_, parts)| parts)
+            .chain(self.foliage_meshes.iter_mut().filter_map(Option::take).flatten())
+            .chain(self.foliage_lod_meshes.iter_mut().filter_map(Option::take).flatten())
+            .collect::<Vec<_>>();
+        self.foliage_failed = [false; 256];
+        for part in foliage {
+            if part.index_count > 0 && !retained.contains(&part.vertex_offset) {
+                meshes.insert(part.vertex_offset);
+            }
+            materials.insert(part.material_id);
+        }
+
+        let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) else {
+            return;
+        };
+        let (meshes, textures) = renderer.release_uploads(ctx, meshes, materials);
+        let (vertex_bytes, index_bytes) = renderer.geometry.live_bytes();
+        info!(
+            meshes,
+            textures,
+            kept_sources = keep.len(),
+            live_textures = renderer.texture_pool.live_count(),
+            vertex_mib = vertex_bytes / 1_048_576,
+            index_mib = index_bytes / 1_048_576,
+            "Released outgoing scene uploads"
+        );
     }
 
     /// Re-upload the GPU state a schema scene does not carry.
@@ -2492,19 +2587,12 @@ impl<G: GameApp> Engine<G> {
             }
         }
         for (source, entities) in imported {
-            let source_path = std::path::Path::new(&source);
-            let resolved = if let Some(root) = self.config.project_root.as_ref() {
-                match crate::authoring::project::ProjectPaths::open(root)
-                    .and_then(|project| project.resolve(source_path))
-                {
-                    Ok(path) => path,
-                    Err(error) => {
-                        warn!(%error,%source,"Imported mesh path rejected");
-                        continue;
-                    }
+            let resolved = match self.imported_source_path(&source) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(%error,%source,"Imported mesh path rejected");
+                    continue;
                 }
-            } else {
-                source_path.to_path_buf()
             };
             let stamp = import_cache::SourceStamp::read(&resolved);
             let cached = stamp
@@ -4818,12 +4906,24 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 if ui.preferences_open() {
                     ui.update_settings_panels(settings_panels, &settings_overrides);
                 }
-                ui.set_recent_scenes(
-                    self.recent_scenes
-                        .iter()
-                        .map(|path| (path.to_string_lossy().into_owned(), path.exists()))
-                        .collect(),
-                );
+                // Levels first, then a separator (empty path), then recents
+                // that are not levels — fewer of them beside a level list, so
+                // the menu still fits a 900-pixel window.
+                let entry = |path: &std::path::PathBuf| (path.to_string_lossy().into_owned(), path.exists());
+                let recent_cap = if self.level_scenes.is_empty() { usize::MAX } else { 5 };
+                let recents: Vec<_> = self
+                    .recent_scenes
+                    .iter()
+                    .filter(|path| !self.level_scenes.contains(path))
+                    .take(recent_cap)
+                    .map(entry)
+                    .collect();
+                let mut menu: Vec<(String, bool)> = self.level_scenes.iter().map(entry).collect();
+                if !menu.is_empty() && !recents.is_empty() {
+                    menu.push((String::new(), false));
+                }
+                menu.extend(recents);
+                ui.set_recent_scenes(menu);
                 ui.set_marquee(
                     self.marquee
                         .filter(crate::selection::Marquee::is_dragged)
@@ -7799,6 +7899,7 @@ impl<G: GameApp> Engine<G> {
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
             r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
+            r.volumetric_pass.fog.sky_occlusion = pp.fog_sky_occlusion;
             {
                 use somnium_renderer::pass::lighting_extra::{
                     FLAG_CACHE, FLAG_PATH, FLAG_PROBES, FLAG_SDF, FLAG_SPECULAR,

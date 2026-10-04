@@ -324,7 +324,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // in a separate target. All opaque pixels keep the proven depth path.
     let water_coverage = textureLoad(water_surface_tex, coord, 0).a;
     let water_velocity = textureLoad(velocity_tex, coord, 0).xy;
-    let prev_uv = select(depth_prev_uv, in.uv + water_velocity, water_coverage > 0.5);
+    var prev_uv = select(depth_prev_uv, in.uv + water_velocity, water_coverage > 0.5);
+    // Reactive pixels are the first-person hands and tools. They ride with the
+    // camera, so world reprojection is wrong for them but the same screen pixel
+    // is (nearly) right. They used to skip history entirely, which showed every
+    // per-frame lighting sample raw: gold specks of practical-light GI on the
+    // hands, worst while running.
+    if reactive > 0.5 {
+        prev_uv = in.uv;
+    }
 
     // Off screen last frame: there is no history to reuse.
     if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0))
@@ -333,7 +341,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     let history_sample = sample_history_catmull_rom(prev_uv, resolution);
-    if reactive > 0.5 || history_sample.a > 0.001 {
+    // History must be the same kind as this pixel: world pixels reject any
+    // reactive history (a hand that just moved away), and reactive pixels keep
+    // only history that was reactive at the same place (the hand last frame).
+    let wrong_kind = select((history_sample.a > 0.001), (history_sample.a < 0.5), (reactive > 0.5));
+    if wrong_kind {
         return vec4<f32>(current, reactive);
     }
 
@@ -384,7 +396,10 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         maximum,
     );
 
-    let blended = mix(tonemap_for_blend(current), history, taa.blend_factor);
+    // Hands sway and animate in screen space, so they keep less history than
+    // the world: enough to average lighting noise, little enough not to smear.
+    let blend = select(taa.blend_factor, min(taa.blend_factor, 0.8), reactive > 0.5);
+    let blended = mix(tonemap_for_blend(current), history, blend);
     let resolved = untonemap_for_blend(blended);
 
     // ── Instrumentation ─────────────────────────────────────────────────────

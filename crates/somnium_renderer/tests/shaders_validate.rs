@@ -156,6 +156,31 @@ fn the_volumetric_module_validates() {
     check("volumetric", &composed("volumetric.wgsl"));
 }
 
+/// A negative height depth is a window onto a room: the ray is carried into a
+/// box behind the glass (interior mapping) instead of marched through a height
+/// field, which smeared a shop's shelves into sliding stripes; and the side
+/// walls' shade reaches both the albedo and the emissive.
+#[test]
+fn a_negative_height_depth_maps_a_room_behind_the_glass() {
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    assert!(shading.contains("if material.height_depth < 0.0 && abs(tbn_det) > 1.0e-12 {"));
+    assert!(shading.contains("interior_uv(uv, view_dir_early, geo_normal, dpdu, dpdv, -material.height_depth)"));
+    assert!(shading.contains("} else if material.height_map >= 0 && material.height_depth > 0.0"), "relief only for positive");
+    assert!(shading.contains("surface.albedo *= interior_shade;"));
+    assert!(shading.contains("emissive *= interior_shade;"));
+}
+
+/// Fog under a roof must not glow with the whole sky: the skylight term is
+/// scaled by the sun's shadow visibility as far as `fog_sky_occlusion` asks,
+/// and the shadow lookup runs for it even with light shafts off.
+#[test]
+fn fog_skylight_follows_the_sun_shadow_when_asked() {
+    let vol = include_str!("../src/shaders/volumetric.wgsl");
+    assert!(vol.contains("if vol.shafts_enabled != 0u || vol.fog_sky_occlusion > 0.0 {"), "lookup gate");
+    assert!(vol.contains("sky_vis = mix(1.0, shadow_vis, saturate(vol.fog_sky_occlusion));"));
+    assert!(vol.contains("+ vec3<f32>(fog) * multiscatter * sky_vis;"), "fog skylight term");
+}
+
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
 /// does, which is the point: a ray hit and a visibility-buffer hit resolve
 /// through one description of the scene, not two that could drift apart.
@@ -551,6 +576,7 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
         "surface.normal = terrain.normal;",
         "widen_roughness_toksvig(surface.roughness, relief.w)",
         "apply_decals(&surface, hit_point, decal_froxel);",
+        "apply_wetness(&surface, material.porosity);",
     ] {
         let at = source
             .find(writer)
@@ -561,12 +587,20 @@ fn specular_aa_runs_after_every_normal_and_roughness_writer() {
         );
     }
 
-    // And before `f0`, which is derived from roughness-adjacent state and is
-    // the first consumer downstream.
+    // Mesh wetness adjusts f0 as well as roughness, so f0 must exist before
+    // wetness. The AA filter only changes roughness; it follows both and must
+    // finish before any lighting/shadow evaluation consumes the surface.
     let f0 = source
         .find("surface.f0       = mix(vec3<f32>(0.04)")
         .expect("f0 derivation is still there");
-    assert!(aa < f0, "specular AA must run before f0 is derived");
+    let wetness = source
+        .find("apply_wetness(&surface, material.porosity);")
+        .expect("mesh wetness is still there");
+    let shading = source
+        .find("let view_pos   = view.view * vec4<f32>(hit_point, 1.0);")
+        .expect("the downstream lighting path is still there");
+    assert!(f0 < wetness, "wetness needs the material's initial f0");
+    assert!(aa < shading, "specular AA must finish before lighting");
 }
 
 #[test]
@@ -693,9 +727,52 @@ fn moonlight_uses_the_bounded_area_brdf() {
 
     assert!(
         compact.contains(
-            "moonlight=clamp_specular_lobe(evaluate_brdf_area(surface,moon_dir,light.sun_angular_radius),surface.roughness,)*moon_color"
+            "moonlight=evaluate_brdf_area(surface,moon_dir,light.sun_angular_radius)*moon_color"
         ),
-        "moonlight bypasses the area BRDF or direct-lobe firefly bound"
+        "moonlight bypasses the area BRDF"
+    );
+}
+
+/// A decal's facing axis is its local +Y taken to world space: the rows of
+/// the world-to-decal matrix, not that matrix applied to a direction (which
+/// only works for decals turned about the vertical, so wall decals vanished).
+#[test]
+fn decal_axes_come_from_the_rows_of_the_inverse() {
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    let start = shading.find("fn apply_decals").expect("apply_decals");
+    let body = &shading[start..start + shading[start..].find("
+}
+").expect("end")];
+    assert!(body.contains("vec3<f32>(inv[0].y, inv[1].y, inv[2].y)"), "facing axis from row 1");
+    assert!(!body.contains("inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)"), "direction through the inverse");
+}
+
+/// Hammon's rough-diffuse lobe divides by n_dot_h. It must be floored at the
+/// half-vector bound, or a shading normal facing away from the camera but
+/// toward the light returns thousands of times the light (white trunk strips).
+#[test]
+fn hammon_diffuse_floors_n_dot_h_at_the_half_vector_bound() {
+    let brdf = include_str!("../src/shaders/brdf.wgsl");
+    let start = brdf.find("fn diffuse_hammon").expect("hammon");
+    let body = &brdf[start..start + brdf[start..].find("
+}").expect("end of fn")];
+    assert!(body.contains("max(n_dot_h, max(0.5 * (n_dot_l + n_dot_v)"), "n_dot_h floor");
+    assert!(!body.contains("/ max(n_dot_h, 1e-4)"), "the unbounded divide is back");
+}
+
+/// The firefly bound lives inside the area lobe, on the specular term alone,
+/// so every light type gets it and none of them has its diffuse capped.
+#[test]
+fn the_specular_bound_covers_every_light_and_spares_diffuse() {
+    let brdf = include_str!("../src/shaders/brdf.wgsl");
+    let start = brdf.find("fn evaluate_brdf_area_lobe").expect("area lobe");
+    let body = &brdf[start..start + brdf[start..].find("
+}").expect("end of fn")];
+    assert!(body.contains("Fr = clamp_specular_lobe(Fr"), "the lobe bounds its specular term");
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    assert!(
+        !shading.contains("clamp_specular_lobe("),
+        "a call site wraps the whole BRDF again, capping diffuse"
     );
 }
 

@@ -37,6 +37,8 @@ struct FsrGpu {
     /// One-frame dynamic coverage, independent of FSR's accumulated color.
     coverage: [wgpu::Texture; 2],
     reactive_mask: wgpu::Texture,
+    /// Scene motion with first-person (reactive) pixels pinned to the screen.
+    motion: wgpu::Texture,
     reactive_instances: wgpu::Buffer,
     empty_particle_coverage: wgpu::Texture,
     exposure_buf: wgpu::Buffer,
@@ -191,6 +193,7 @@ impl FsrPass {
             gpu.depth_f32 = alloc_r32(device, "FSR Depth F32", render);
             gpu.coverage = alloc_coverage(device, render);
             gpu.reactive_mask = alloc_r32(device, "FSR Dynamic Reactive Mask", render);
+            gpu.motion = alloc_rg16(device, "FSR Camera-Locked Motion", render);
         }
         gpu.render_size = render;
         gpu.upscale_size = upscale;
@@ -245,6 +248,7 @@ impl FsrPass {
         let current_coverage = gpu.coverage[write].create_view(&Default::default());
         let reactive_mask = gpu.reactive_mask.create_view(&Default::default());
         let motion_view = motion_vectors.create_view(&Default::default());
+        let motion_out = gpu.motion.create_view(&Default::default());
         let empty_particles = gpu.empty_particle_coverage.create_view(&Default::default());
         let sanitize_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("FSR Sanitize"),
@@ -268,6 +272,7 @@ impl FsrPass {
                 bind_view(9, &reactive_mask),
                 bind_view(10, &motion_view),
                 bind_view(11, particle_coverage.unwrap_or(&empty_particles)),
+                bind_view(12, &motion_out),
             ],
         });
         {
@@ -294,7 +299,9 @@ impl FsrPass {
         let info = FsrDispatchInfo {
             color: gpu.sanitized.clone(),
             depth: gpu.depth_f32.clone(),
-            motion_vectors: motion_vectors.clone(),
+            // sr_sanitize copies the velocity buffer, zeroing hand/tool pixels:
+            // they move with the camera, so their history is at the same pixel.
+            motion_vectors: gpu.motion.clone(),
             exposure: None,
             reactive_mask: Some(gpu.reactive_mask.clone()),
             // The same coverage also invalidates temporal locks. A disappearing
@@ -437,6 +444,7 @@ fn alloc_gpu(
         depth_f32,
         coverage: alloc_coverage(device, render),
         reactive_mask: alloc_r32(device, "FSR Dynamic Reactive Mask", render),
+        motion: alloc_rg16(device, "FSR Camera-Locked Motion", render),
         reactive_instances: alloc_reactive_instances(device, 4),
         empty_particle_coverage: alloc_r32(device, "FSR Empty Sprite Coverage", [1, 1]),
         exposure_buf,
@@ -549,6 +557,7 @@ fn alloc_sanitize_pipeline(
             storage_tex(9, wgpu::TextureFormat::R32Float),
             sampled_tex(10, false),
             sampled_tex(11, false),
+            storage_tex(12, wgpu::TextureFormat::Rg16Float),
         ],
     });
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

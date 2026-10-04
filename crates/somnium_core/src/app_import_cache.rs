@@ -10,8 +10,6 @@ use std::{
     time::SystemTime,
 };
 
-const MAX_SOURCES: usize = 128;
-const MAX_NODES: usize = 32_768;
 const MAX_DEPENDENCIES: usize = 4096;
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -147,14 +145,16 @@ fn decode_uri(uri: &str) -> Option<String> {
 struct Entry {
     stamp: SourceStamp,
     nodes: Vec<UploadedNode>,
-    used: u64,
 }
 
+/// Uploads are owned by the open scene: an entry lives until a scene switch
+/// that no longer references its source hands it back
+/// ([`ImportedUploadCache::retain_sources`]). There is deliberately no size
+/// cap — forgetting an entry used to be the only "eviction", and that leaked
+/// its geometry and textures for the rest of the session.
 #[derive(Default)]
 pub(super) struct ImportedUploadCache {
     sources: BTreeMap<PathBuf, Entry>,
-    clock: u64,
-    nodes: usize,
 }
 
 impl ImportedUploadCache {
@@ -163,45 +163,46 @@ impl ImportedUploadCache {
     }
 
     pub(super) fn get(&mut self, stamp: &SourceStamp) -> Option<Vec<UploadedNode>> {
-        let entry = self.sources.get_mut(&stamp.source)?;
-        if entry.stamp != *stamp {
-            return None;
-        }
-        self.clock = self.clock.saturating_add(1);
-        entry.used = self.clock;
-        Some(entry.nodes.clone())
+        let entry = self.sources.get(&stamp.source)?;
+        (entry.stamp == *stamp).then(|| entry.nodes.clone())
     }
 
     pub(super) fn insert(&mut self, stamp: SourceStamp, nodes: &[UploadedNode]) {
-        if nodes.is_empty() || nodes.len() > MAX_NODES || !stamp.is_current() {
+        if nodes.is_empty() || !stamp.is_current() {
             return;
         }
-        if let Some(previous) = self.sources.remove(&stamp.source) {
-            self.nodes -= previous.nodes.len();
-        }
-        while self.sources.len() >= MAX_SOURCES || self.nodes + nodes.len() > MAX_NODES {
-            let Some(oldest) = self
-                .sources
-                .iter()
-                .min_by_key(|(_, entry)| entry.used)
-                .map(|(path, _)| path.clone())
-            else {
-                break;
-            };
-            if let Some(entry) = self.sources.remove(&oldest) {
-                self.nodes -= entry.nodes.len();
-            }
-        }
-        self.clock = self.clock.saturating_add(1);
-        self.nodes += nodes.len();
         self.sources.insert(
             stamp.source.clone(),
             Entry {
                 stamp,
                 nodes: nodes.to_vec(),
-                used: self.clock,
             },
         );
+    }
+
+    /// Drop every entry whose canonical source is not in `keep` or whose files
+    /// changed on disk, returning the dropped uploads for the caller to release.
+    pub(super) fn retain_sources(
+        &mut self,
+        keep: &std::collections::HashSet<PathBuf>,
+    ) -> Vec<UploadedNode> {
+        let mut released = Vec::new();
+        self.sources.retain(|source, entry| {
+            let kept = keep.contains(source) && entry.stamp.is_current();
+            if !kept {
+                released.append(&mut entry.nodes);
+            }
+            kept
+        });
+        released
+    }
+
+    /// Vertex offsets still owned by retained entries.
+    pub(super) fn vertex_offsets(&self) -> std::collections::HashSet<u32> {
+        self.sources
+            .values()
+            .flat_map(|entry| entry.nodes.iter().map(|node| node.vertex_offset))
+            .collect()
     }
 }
 
@@ -288,5 +289,34 @@ mod tests {
         );
         cache.clear();
         assert!(cache.get(&stamp).is_none());
+    }
+
+    #[test]
+    fn a_scene_switch_hands_back_only_sources_the_next_scene_does_not_use() {
+        let fixture = Fixture::new();
+        let stamp = fixture.stamp();
+        let node = |vertex_offset| UploadedNode {
+            entity_name: "rock".into(),
+            vertex_offset,
+            index_offset: 0,
+            index_count: 3,
+            material_id: 4,
+            material_index: 0,
+            transform: glam::Mat4::IDENTITY,
+        };
+        let mut cache = ImportedUploadCache::default();
+        cache.insert(stamp.clone(), &[node(10), node(20)]);
+
+        let keep: std::collections::HashSet<_> = [stamp.source.clone()].into();
+        assert!(cache.retain_sources(&keep).is_empty(), "shared source stays resident");
+        assert_eq!(cache.vertex_offsets(), [10, 20].into());
+
+        let released = cache.retain_sources(&Default::default());
+        assert_eq!(released.iter().map(|n| n.vertex_offset).collect::<Vec<_>>(), [10, 20]);
+        assert!(cache.get(&stamp).is_none() && cache.vertex_offsets().is_empty());
+
+        cache.insert(stamp.clone(), &[node(30)]);
+        std::fs::write(fixture.0.join("mesh.bin"), b"edited on disk").unwrap();
+        assert_eq!(cache.retain_sources(&keep).len(), 1, "a stale upload is released too");
     }
 }

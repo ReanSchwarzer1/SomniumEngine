@@ -35,7 +35,12 @@ pub const TILE_SIZE: u32 = 32;
 pub const NUM_DEPTH_SLICES: u32 = 24;
 
 /// Maximum total number of (froxel → light) index entries across all froxels.
-pub const MAX_LIGHT_INDICES: usize = 256 * 1024;
+///
+/// 8 MB. A room of 64 practicals around the camera needs ~690 k at 1600p even
+/// with each slice binned by its own cross-section (the near slices are thin
+/// and every light the camera stands in fills them). Past the cap the far
+/// froxels lose every light at once, so this is sized for the worst room.
+pub const MAX_LIGHT_INDICES: usize = 2 * 1024 * 1024;
 
 /// Maximum number of froxels the offset buffer can hold.
 ///
@@ -192,7 +197,87 @@ impl ClusterVolume for GpuLocalLight {
         self.position_ws
     }
     fn bounding_radius(&self) -> f32 {
-        self.range
+        // A tube lights everything within `range` of its segment, so its ends
+        // reach half its length further than the centre's sphere.
+        if self.light_type == 4 {
+            self.range + self._pad[0].max(0.05)
+        } else {
+            self.range
+        }
+    }
+}
+
+/// Positive view depth where `slice` starts; the inverse of [`depth_slice`].
+fn slice_depth(slice: u32, near: f32, far: f32) -> f32 {
+    near * (far / near).powf(slice as f32 / NUM_DEPTH_SLICES as f32)
+}
+
+/// Call `visit` with every froxel `volume` may touch.
+///
+/// Within one depth slice a sphere is only as wide as its cross-section
+/// there, so each slice is binned by its own box rather than the whole
+/// sphere's: a practical the camera stands in otherwise claims every tile of
+/// every slice it spans, and a lit room overran the index list.
+#[allow(clippy::too_many_arguments)]
+fn for_each_froxel<V: ClusterVolume>(
+    volume: &V,
+    view: glam::Mat4,
+    proj: glam::Mat4,
+    sw: f32,
+    sh: f32,
+    near: f32,
+    far: f32,
+    grid_w: u32,
+    grid_h: u32,
+    total_froxels: usize,
+    mut visit: impl FnMut(usize),
+) {
+    let Some(b) = volume_froxel_bounds(volume, view, proj, sw, sh, near, far, grid_w, grid_h) else {
+        return;
+    };
+    let sphere = volume.corners_ws().is_none();
+    let c = view * glam::Vec3::from_array(volume.centre_ws()).extend(1.0);
+    let (depth, r) = (-c.z, volume.bounding_radius());
+    let to_tile = |p: glam::Vec4| {
+        // All corners sit at depth >= near, so w > 0.
+        let clip = proj * p;
+        let px = ((clip.x / clip.w * 0.5 + 0.5) * sw).clamp(0.0, sw - 1.0);
+        let py = ((1.0 - (clip.y / clip.w * 0.5 + 0.5)) * sh).clamp(0.0, sh - 1.0);
+        ((px as u32 / TILE_SIZE).min(grid_w - 1), (py as u32 / TILE_SIZE).min(grid_h - 1))
+    };
+    for sz in b.slice_min..=b.slice_max {
+        let (mut x0, mut x1, mut y0, mut y1) = (b.tile_min_x, b.tile_max_x, b.tile_min_y, b.tile_max_y);
+        if sphere {
+            // Padded a little: `depth_slice` rounds through a logarithm.
+            let z0 = (slice_depth(sz, near, far) * 0.999).max(depth - r).max(near);
+            let z1 = if sz + 1 >= NUM_DEPTH_SLICES {
+                depth + r
+            } else {
+                (slice_depth(sz + 1, near, far) * 1.001).min(depth + r)
+            };
+            let dz = (z0 - depth).max(depth - z1).max(0.0);
+            let rs = (r * r - dz * dz).max(0.0).sqrt();
+            let (mut t0, mut t1) = ((u32::MAX, u32::MAX), (0, 0));
+            for corner in 0..8 {
+                let pick = |bit: usize, lo: f32, hi: f32| if corner & bit == 0 { lo } else { hi };
+                let (tx, ty) = to_tile(glam::Vec4::new(
+                    pick(1, c.x - rs, c.x + rs),
+                    pick(2, c.y - rs, c.y + rs),
+                    -pick(4, z0, z1),
+                    1.0,
+                ));
+                (t0, t1) = ((t0.0.min(tx), t0.1.min(ty)), (t1.0.max(tx), t1.1.max(ty)));
+            }
+            (x0, x1, y0, y1) = (x0.max(t0.0), x1.min(t1.0), y0.max(t0.1), y1.min(t1.1));
+        }
+        for ty in y0..=y1 {
+            let row = (sz * grid_h * grid_w + ty * grid_w) as usize;
+            for tx in x0..=x1 {
+                if row + (tx as usize) < total_froxels {
+                    visit(row + tx as usize);
+                }
+            }
+        }
     }
 }
 
@@ -241,12 +326,27 @@ fn volume_froxel_bounds<V: ClusterVolume>(
         (px, py)
     };
 
-    // Conservative screen AABB from the bounding sphere's axis extremes.
-    let (x0, _) = project_to_screen(pos_vs.x - range, pos_vs.y, depth);
-    let (x1, _) = project_to_screen(pos_vs.x + range, pos_vs.y, depth);
-    let (_, y0) = project_to_screen(pos_vs.x, pos_vs.y - range, depth);
-    let (_, y1) = project_to_screen(pos_vs.x, pos_vs.y + range, depth);
-    let (mut sx0, mut sx1, mut sy0, mut sy1) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+    // Conservative screen AABB: the sphere's view-space box, clipped to the
+    // near plane, projected through its eight corners. Every corner is in
+    // front of the camera, and x/z and y/z are extremal at a box's corners,
+    // so this bounds every visible point of the sphere.
+    //
+    // This used to project four points at the *centre's* depth. A sphere the
+    // camera stands in, or that passes beside it, spreads far wider on screen
+    // nearer the camera than at its centre, so the light was binned into a
+    // rectangle of tiles and every pixel outside lost it: a hard, tile-aligned
+    // dark block that slid with the view. Interiors hit it constantly — the
+    // camera is nearly always inside a few practicals' 5 m ranges.
+    let (mut sx0, mut sx1, mut sy0, mut sy1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for corner in 0..8 {
+        let pick = |bit: usize, lo: f32, hi: f32| if corner & bit == 0 { lo } else { hi };
+        let (px, py) = project_to_screen(
+            pick(1, pos_vs.x - range, pos_vs.x + range),
+            pick(2, pos_vs.y - range, pos_vs.y + range),
+            pick(4, z_min, z_max),
+        );
+        (sx0, sx1, sy0, sy1) = (sx0.min(px), sx1.max(px), sy0.min(py), sy1.max(py));
+    }
     let (mut z_min, mut z_max) = (z_min, z_max);
 
     // A box, when every corner is in front of the near plane: its projected
@@ -362,21 +462,9 @@ fn assign_froxels<V: ClusterVolume>(
     counts.resize(total_froxels, 0);
 
     for light in lights {
-        let Some(b) = volume_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
-        else {
-            continue;
-        };
-        for sz in b.slice_min..=b.slice_max {
-            for ty in b.tile_min_y..=b.tile_max_y {
-                let row = (sz * grid_h * grid_w + ty * grid_w) as usize;
-                for tx in b.tile_min_x..=b.tile_max_x {
-                    let froxel = row + tx as usize;
-                    if froxel < total_froxels {
-                        counts[froxel] += 1;
-                    }
-                }
-            }
-        }
+        for_each_froxel(light, view, proj, sw, sh, near, far, grid_w, grid_h, total_froxels, |f| {
+            counts[f] += 1
+        });
     }
 
     // ── 2. Prefix sum → per-froxel (offset, count) ───────────────────────────
@@ -394,6 +482,14 @@ fn assign_froxels<V: ClusterVolume>(
         running += count;
     }
     let total_indices = running as usize;
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if total_indices == MAX_LIGHT_INDICES
+        && counts.iter().map(|&c| c as usize).sum::<usize>() > total_indices
+        && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        // Truncation drops every volume from the far froxels at once.
+        tracing::warn!("cluster index list full ({MAX_LIGHT_INDICES}); far froxels lose their lights");
+    }
 
     // ── 3. Fill pass ─────────────────────────────────────────────────────────
     // Reuse `counts` as the per-froxel write cursor.
@@ -405,28 +501,14 @@ fn assign_froxels<V: ClusterVolume>(
     index_list.resize(total_indices, 0);
 
     for (light_idx, light) in lights.iter().enumerate() {
-        let Some(b) = volume_froxel_bounds(light, view, proj, sw, sh, near, far, grid_w, grid_h)
-        else {
-            continue;
-        };
-        for sz in b.slice_min..=b.slice_max {
-            for ty in b.tile_min_y..=b.tile_max_y {
-                let row = (sz * grid_h * grid_w + ty * grid_w) as usize;
-                for tx in b.tile_min_x..=b.tile_max_x {
-                    let froxel = row + tx as usize;
-                    if froxel >= total_froxels {
-                        continue;
-                    }
-                    let entry = offsets[froxel];
-                    let cursor = &mut counts[froxel];
-                    // Respect the clamp applied during the prefix sum.
-                    if *cursor < entry.offset + entry.count {
-                        index_list[*cursor as usize] = light_idx as u32;
-                        *cursor += 1;
-                    }
-                }
+        for_each_froxel(light, view, proj, sw, sh, near, far, grid_w, grid_h, total_froxels, |f| {
+            let cursor = &mut counts[f];
+            // Respect the clamp applied during the prefix sum.
+            if *cursor < offsets[f].offset + offsets[f].count {
+                index_list[*cursor as usize] = light_idx as u32;
+                *cursor += 1;
             }
-        }
+        });
     }
 }
 
@@ -605,20 +687,9 @@ mod tests {
     ) -> (Vec<u32>, Vec<ClusterOffset>) {
         let mut froxel_lists: Vec<Vec<u32>> = vec![Vec::new(); total_froxels];
         for (light_idx, l) in lights.iter().enumerate() {
-            let Some(b) = volume_froxel_bounds(l, view, proj, sw, sh, near, far, grid_w, grid_h)
-            else {
-                continue;
-            };
-            for sz in b.slice_min..=b.slice_max {
-                for ty in b.tile_min_y..=b.tile_max_y {
-                    for tx in b.tile_min_x..=b.tile_max_x {
-                        let f = (sz * grid_h * grid_w + ty * grid_w + tx) as usize;
-                        if f < total_froxels {
-                            froxel_lists[f].push(light_idx as u32);
-                        }
-                    }
-                }
-            }
+            for_each_froxel(l, view, proj, sw, sh, near, far, grid_w, grid_h, total_froxels, |f| {
+                froxel_lists[f].push(light_idx as u32)
+            });
         }
         let mut index_list = Vec::new();
         let mut offsets = Vec::new();
@@ -750,6 +821,92 @@ mod tests {
             total <= MAX_FROXELS,
             "4K grid is {total}, exceeds MAX_FROXELS {MAX_FROXELS}"
         );
+    }
+
+    #[test]
+    fn every_visible_point_of_a_light_lands_in_its_binned_tiles() {
+        // A room's practicals mostly surround the camera: beside it, just
+        // behind it, overhead. Each visible point of the sphere must fall in
+        // the binned tiles and slices, or the pixel there silently loses the
+        // light — the tile-aligned dark block from the Office review.
+        let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+        let view = glam::Mat4::look_at_rh(eye, glam::Vec3::new(0.3, 1.4, -5.0), glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 10.0, 0.1, 1000.0);
+        let (sw, sh, near, far) = (2160.0_f32, 1350.0_f32, 0.1, 1000.0);
+        let (gw, gh) = ((sw as u32).div_ceil(TILE_SIZE), (sh as u32).div_ceil(TILE_SIZE));
+        for (pos, range) in [
+            ([1.8, 2.7, -0.6], 4.6),  // overhead, beside the camera
+            ([-1.2, 2.6, 1.0], 5.8),  // behind the shoulder
+            ([3.0, 1.2, -1.0], 4.6),  // off-screen to the right, reaching across
+            ([0.4, 2.5, -6.0], 4.6),  // well in front
+        ] {
+            let l = light(pos, range);
+            let mut binned = std::collections::HashSet::new();
+            let total = (gw * gh * NUM_DEPTH_SLICES) as usize;
+            for_each_froxel(&l, view, proj, sw, sh, near, far, gw, gh, total, |f| {
+                binned.insert(f);
+            });
+            let centre = glam::Vec3::from_array(pos);
+            let mut checked = 0;
+            for i in 0..4096 {
+                // Deterministic lattice through the ball.
+                let f = |k: u32| ((i as u32 * k) % 997) as f32 / 996.0 * 2.0 - 1.0;
+                let offset = glam::Vec3::new(f(37), f(101), f(271));
+                if offset.length() > 1.0 {
+                    continue;
+                }
+                let p = centre + offset * range;
+                let depth = -(view * p.extend(1.0)).z;
+                let clip = proj * view * p.extend(1.0);
+                if depth <= near || clip.w <= 0.0 {
+                    continue;
+                }
+                let (ndc_x, ndc_y) = (clip.x / clip.w, clip.y / clip.w);
+                if ndc_x.abs() >= 1.0 || ndc_y.abs() >= 1.0 {
+                    continue;
+                }
+                let tx = (((ndc_x * 0.5 + 0.5) * sw) as u32 / TILE_SIZE).min(gw - 1);
+                let ty = (((1.0 - (ndc_y * 0.5 + 0.5)) * sh) as u32 / TILE_SIZE).min(gh - 1);
+                let slice = depth_slice(depth, near, far);
+                assert!(
+                    binned.contains(&((slice * gh * gw + ty * gw + tx) as usize)),
+                    "light at {pos:?} r={range}: point {p} in tile ({tx},{ty}) slice {slice} not binned"
+                );
+                checked += 1;
+            }
+            assert!(checked > 50, "too few visible samples for {pos:?}");
+        }
+    }
+
+    #[test]
+    fn a_lit_office_fits_the_index_list() {
+        // The Office: 64 practicals with 4-8 m ranges over the desks and the
+        // camera standing among them at 1600p. A list truncated in froxel
+        // order drops every light from the far slices at once: the hard dark
+        // block that slid with the view in the 2026-10-03 review.
+        let view = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 1.6, 0.0),
+            glam::Vec3::new(0.5, 1.2, -10.0),
+            glam::Vec3::Y,
+        );
+        let proj = glam::Mat4::perspective_rh(70.0_f32.to_radians(), 16.0 / 10.0, 0.1, 1000.0);
+        let (sw, sh, near, far) = (2560.0_f32, 1600.0_f32, 0.1, 1000.0);
+        let (gw, gh) = ((sw as u32).div_ceil(TILE_SIZE), (sh as u32).div_ceil(TILE_SIZE));
+        let total = (gw * gh * NUM_DEPTH_SLICES) as usize;
+        let lights: Vec<_> = (0..64)
+            .map(|i| {
+                let (col, row) = ((i % 8) as f32, (i / 8) as f32);
+                light([col * 3.0 - 10.5, 2.7, 6.0 - row * 4.0], 4.0 + (i % 5) as f32)
+            })
+            .collect();
+        let (mut counts, mut offsets, mut index_list) = (Vec::new(), Vec::new(), Vec::new());
+        assign_froxels(
+            &lights, view, proj, sw, sh, near, far, gw, gh, total, &mut counts, &mut offsets,
+            &mut index_list,
+        );
+        let (reference, _) = reference_assign(&lights, view, proj, sw, sh, near, far, gw, gh, total);
+        assert_eq!(index_list.len(), reference.len(), "the index list was truncated");
+        assert!(index_list.len() * 2 < MAX_LIGHT_INDICES, "{} entries leaves no headroom", index_list.len());
     }
 
     /// A flat box on the ground, 2.6 x 0.2 x 0.8 m (a puddle decal).

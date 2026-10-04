@@ -48,9 +48,9 @@ fn rt_miss(origin: vec3<f32>) -> RtHit {
 // while loading only the selected entries. Other ray-query roots stay unchanged.
 override rt_terrain_direct_storage: bool = false;
 
-// GI-only measurement candidate. Other ray-query roots leave this false and
-// retain eager hit albedo. GI can avoid splat/material work for terrain hits
-// rejected by its emissive, sun-facing or sun-visibility tests.
+// GI only (on by default since 2026-10-04; restir_gi.rs). Other ray-query roots
+// leave this false and retain eager hit albedo. GI looks terrain albedo up in
+// gi_direct_at, its one consumer, with the same arithmetic.
 override rt_gi_deferred_terrain_albedo: bool = false;
 
 fn rt_terrain_albedo(terrain_index: u32, world_pos: vec3<f32>) -> vec3<f32> {
@@ -173,9 +173,9 @@ fn rt_resolve(origin: vec3<f32>, dir: vec3<f32>, isect: RayIntersection) -> RtHi
     return out;
 }
 
-// Measurement candidate: keep traversal alive while rejecting transparent
-// triangles instead of restarting from the root after every leaf-card hole.
-// Off by default until native timing and image comparisons establish its cost.
+// Keep traversal alive while rejecting transparent triangles instead of
+// restarting from the root after every leaf-card hole. The ReSTIR GI pipeline
+// turns this on (see restir_gi.rs); other users keep the hop loop.
 override rt_candidate_alpha: bool = false;
 
 fn rt_candidate_is_covered(isect: RayIntersection) -> bool {

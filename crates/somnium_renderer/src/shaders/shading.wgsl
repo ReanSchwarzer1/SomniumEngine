@@ -17,8 +17,9 @@ enable wgpu_ray_query;
 //!endif
 
 /// Direct practical shadows use the same built scene as indirect transport.
-/// One visibility ray per contributing light. The caller samples the emitting
-/// surface; the existing temporal resolve accumulates finite-source penumbrae.
+/// Stable centre visibility uses one ray per contributing light. Reactive
+/// surfaces (including hands) bypass TAA, so per-frame random emitter samples
+/// cannot be denoised there. Finite-source penumbrae need a dedicated filter.
 fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3<f32>) -> f32 {
     //!if LOCAL_SHADOWS
     if (cluster_params.shading_mode & 16u) != 0u {
@@ -31,38 +32,13 @@ fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3
             // shadow its own authored source. This is a world-space fixture
             // tolerance, not a distance-dependent leak across room partitions.
             rayQueryInitialize(&rq, local_shadow_accel,
-                RayDesc(0x4u, 0xffu, 0.008, distance - 0.06, origin, delta / distance));
+                RayDesc(0x4u, 0x1u, 0.008, distance - 0.06, origin, delta / distance));
             rayQueryProceed(&rq);
             return select(0.0, 1.0, rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE);
         }
     }
     //!endif
     return 1.0;
-}
-
-/// One emitter-surface sample per pixel/frame, decorrelated between fixtures.
-/// Visibility modulates the analytic finite-area lobe, so partial occlusion is
-/// still an approximation; it no longer casts a large panel's point-hard edge.
-fn practical_emitter_sample(ll: GpuLocalLight, p: vec3<f32>, pixel: vec2<f32>, light_index: u32) -> vec3<f32> {
-    let frame = u32(view.wind_time.x * 60.0);
-    let u = vec2<f32>(
-        interleaved_gradient_noise(pixel, frame + light_index * 719u),
-        interleaved_gradient_noise(pixel.yx + vec2<f32>(37.0, 11.0), frame + light_index * 1237u));
-    var axis = normalize(p - ll.position_ws);
-    if ll.light_type == 2u || ll.light_type == 3u { axis = normalize(ll.direction_ws); }
-    let up = select(vec3<f32>(0.0,1.0,0.0),vec3<f32>(1.0,0.0,0.0),abs(axis.y)>0.95);
-    let t = normalize(cross(up,axis));
-    let b = cross(axis,t);
-    var xy = sqrt(u.x) * max(ll.radius,0.0) * vec2<f32>(cos(6.2831853*u.y),sin(6.2831853*u.y));
-    if ll.light_type == 2u {
-        xy = (2.0*u-1.0) * vec2<f32>(max(ll._pad1,0.05),max(ll._pad2,0.05));
-    } else if ll.light_type == 3u {
-        let sector = min(u.x*8.0,7.999999);
-        let angle = floor(sector)*0.785398163;
-        xy = sqrt(fract(sector)) * mix(vec2<f32>(cos(angle),sin(angle)),
-            vec2<f32>(cos(angle+0.785398163),sin(angle+0.785398163)),u.y) * max(ll.radius,0.05);
-    }
-    return ll.position_ws + t*xy.x + b*xy.y;
 }
 
 // Somnium Engine — Visibility Buffer Shading Pass
@@ -274,7 +250,14 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
 
         // The decal projects along its own -Y, so its UVs are the other two
         // axes and its facing is +Y in decal space taken back to the world.
-        let axis = normalize((decal.inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
+        // `inv_transform` maps world to decal space; its 3x3 is S^-1 R^T, so
+        // the transpose (its rows) carries a decal axis back out as R S^-1.
+        // Multiplying a direction by the inverse itself instead returned world
+        // up *in decal space*, which only equals the decal's +Y for decals
+        // turned about the vertical: every wall decal failed the facing test
+        // below and never drew, unless its wall happened to face -Z.
+        let inv = decal.inv_transform;
+        let axis = normalize(vec3<f32>(inv[0].y, inv[1].y, inv[2].y));
         let facing = dot(geometric_normal, axis);
         if facing <= decal.angle_fade_cos {
             continue;
@@ -316,7 +299,7 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
             // tangent basis from the surface would rotate it with whatever it
             // happened to land on.
             let n = axis;
-            let t = normalize((decal.inv_transform * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz);
+            let t = normalize(vec3<f32>(inv[0].x, inv[1].x, inv[2].x));
             let b = cross(n, t);
             let mapped = normalize(t * tangent_normal.x + n * tangent_normal.z + b * tangent_normal.y);
             (*surface).normal = normalize(mix(
@@ -471,6 +454,45 @@ fn parallax_uv(
     let before = (1.0 - textureSampleGrad(textures[map], default_sampler, prev, ddx, ddy).r) - (layer - layer_step);
     let w = clamp(after / (after - before + 1.0e-6), 0.0, 1.0);
     return mix(cur, prev, w);
+}
+
+/// Interior mapping, for a window whose colour map is the room behind it
+/// seen straight on (the Town's shop windows: an orthographic render of the
+/// back wall). The view ray carries on through the glass into a box
+/// `depth_m` deep whose mouth is the UV square. Where it meets the back wall
+/// the map is read there, so the room keeps its perspective from any angle,
+/// which a height-field march cannot do: at a room's depth it smears thin
+/// shelves into sliding stripes. Where the ray meets a side wall, the floor
+/// or the ceiling first, the wall takes the back wall's colour at that edge
+/// (blurred by the caller), darker toward the glass. Returns the UV to read
+/// and a brightness: 1 on the back wall, below 1 on the sides.
+fn interior_uv(
+    uv: vec2<f32>,
+    view_ws: vec3<f32>,
+    normal: vec3<f32>,
+    dpdu: vec3<f32>,
+    dpdv: vec3<f32>,
+    depth_m: f32,
+) -> vec3<f32> {
+    let vn = dot(view_ws, normal);
+    if vn <= 1.0e-3 {
+        return vec3<f32>(uv, 1.0);
+    }
+    // UV per metre along the ray, which runs from the eye on into the room.
+    let s = vec2<f32>(
+        dot(-view_ws, dpdu) / max(dot(dpdu, dpdu), 1.0e-12),
+        dot(-view_ws, dpdv) / max(dot(dpdv, dpdv), 1.0e-12),
+    );
+    let t_back = depth_m / vn;
+    let wall = select(vec2<f32>(0.0), vec2<f32>(1.0), s > vec2<f32>(0.0));
+    let t_side = select(vec2<f32>(1.0e9), (wall - uv) / s, abs(s) > vec2<f32>(1.0e-9));
+    let t = min(t_back, min(t_side.x, t_side.y));
+    let hit = uv + s * t;
+    if t >= t_back {
+        return vec3<f32>(hit, 1.0);
+    }
+    let along = clamp(t * vn / depth_m, 0.0, 1.0); // 0 at the glass, 1 at the back wall
+    return vec3<f32>(clamp(hit, vec2<f32>(0.002), vec2<f32>(0.998)), mix(0.35, 0.8, along));
 }
 
 /// Perspective-correct barycentric at an NDC sample (Phase 25N).
@@ -840,31 +862,84 @@ fn sh_probe_volume_weight(pos: vec3<f32>) -> f32 {
 /// be as far from the camera as this pixel's, so indirect light is smooth
 /// across a surface and never bleeds across a silhouette. `a` of the result is
 /// 1 when any texel could vouch for this pixel.
+///
+/// The footprint is 4x4 texels with a Gaussian falloff, and it denoises as
+/// well as upsamples: one reservoir per texel is still a stochastic estimate,
+/// and a texel that drew a rare bright sample (a bounce off a lamp housing) was
+/// reproduced as a gold firefly — always on the first-person hands, which keep
+/// little temporal history, and on everything while running.
+///
+/// Two bounds per tap, both relative so they need no exposure. A tap may not
+/// exceed `GI_SPECK_RATIO` times its brightest same-surface neighbour in the
+/// footprint: an isolated hot texel is exactly a speck, while real bounce is
+/// smooth and its neighbours vouch for it. A cap against the footprint mean
+/// alone could not do this — the speck lifts the mean it is measured against,
+/// so a texel 100x its neighbours came out 18x and stayed visible. The mean
+/// cap stays as the backstop for small clusters.
 fn gi_upsample(pixel: vec2<f32>, dist: f32) -> vec4<f32> {
     let gdims = vec2<i32>(textureDimensions(restir_gi));
     let ratio = vec2<f32>(textureDimensions(vis_buffer)) / vec2<f32>(gdims);
     let gp = pixel / ratio - 0.5;
     let g0 = vec2<i32>(floor(gp));
     let f = gp - floor(gp);
-    var sum = vec3<f32>(0.0);
+    var taps: array<vec4<f32>, 16>;
+    // Tap luminance, or -1 for a tap on another surface (or none).
+    var luma: array<f32, 16>;
+    var mean = vec3<f32>(0.0);
     var wsum = 0.0;
-    for (var k = 0; k < 4; k = k + 1) {
-        let d = vec2<i32>(k & 1, k >> 1);
+    for (var k = 0; k < 16; k = k + 1) {
+        let d = vec2<i32>(k & 3, k >> 2) - vec2<i32>(1);
         let t = textureLoad(restir_gi, clamp(g0 + d, vec2<i32>(0), gdims - 1), 0);
+        luma[k] = -1.0;
         if t.a <= 0.0 {
+            taps[k] = vec4<f32>(0.0);
             continue;
         }
-        let wb = select(1.0 - f.x, f.x, d.x == 1) * select(1.0 - f.y, f.y, d.y == 1);
+        let offset = vec2<f32>(d) - f;
+        let ws = exp(-0.5 * dot(offset, offset) / (GI_FILTER_SIGMA * GI_FILTER_SIGMA));
         let wd = exp(-abs(t.a - dist) / (dist * 0.025 + 0.05));
-        let w = (wb + 0.02) * wd;
-        sum += t.rgb * w;
+        let w = (ws + 0.002) * wd;
+        taps[k] = vec4<f32>(t.rgb, w);
+        if wd > 0.1 {
+            luma[k] = dot(t.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        }
+        mean += t.rgb * w;
         wsum += w;
     }
     if wsum < 1.0e-4 {
         return vec4<f32>(0.0);
     }
+    mean /= wsum;
+    let mean_ceiling = GI_FIREFLY_RATIO * dot(mean, vec3<f32>(0.2126, 0.7152, 0.0722)) + 1.0e-6;
+    var sum = vec3<f32>(0.0);
+    for (var k = 0; k < 16; k = k + 1) {
+        if taps[k].a <= 0.0 {
+            continue;
+        }
+        var neighbour_max = -1.0;
+        for (var n = 0; n < 9; n = n + 1) {
+            let x = (k & 3) + n % 3 - 1;
+            let y = (k >> 2) + n / 3 - 1;
+            if n != 4 && x >= 0 && x < 4 && y >= 0 && y < 4 {
+                neighbour_max = max(neighbour_max, luma[y * 4 + x]);
+            }
+        }
+        var ceiling = mean_ceiling;
+        if neighbour_max >= 0.0 {
+            ceiling = min(ceiling, GI_SPECK_RATIO * neighbour_max + 1.0e-6);
+        }
+        let l = dot(taps[k].rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        sum += taps[k].rgb * min(1.0, ceiling / max(l, 1.0e-6)) * taps[k].a;
+    }
     return vec4<f32>(sum / wsum, 1.0);
 }
+
+/// Gaussian radius of the GI upsample, in GI texels.
+const GI_FILTER_SIGMA: f32 = 1.0;
+/// A GI texel may be at most this many times brighter than its neighbourhood.
+const GI_FIREFLY_RATIO: f32 = 2.5;
+/// ...and than its brightest same-surface neighbour.
+const GI_SPECK_RATIO: f32 = 1.25;
 
 fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
@@ -1495,13 +1570,20 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
 // ─── Clustered lighting helpers ──────────────────────────────────────────────
 
-// UE4/5 physically-based inverse-square attenuation with smooth cutoff
-fn smooth_distance_attenuation(dist: f32, range: f32) -> f32 {
+// UE4/5 physically-based inverse-square attenuation with smooth cutoff.
+//
+// Held finite inside the emitter: a surface closer to a lamp than its bulb
+// radius cannot receive more than the bulb's own surface irradiance. The old
+// 1 cm floor gave a fixture's housing ~10,000x the light of the room around it,
+// so every practical whose Light sits on its own lamp blew out white and bloomed
+// into a large splotch in a dark, high-exposure interior.
+fn smooth_distance_attenuation(dist: f32, range: f32, radius: f32) -> f32 {
     let ratio = dist / range;
     let ratio2 = ratio * ratio;
     let ratio4 = ratio2 * ratio2;
     let factor = saturate(1.0 - ratio4);
-    return (factor * factor) / max(dist * dist, 0.0001);
+    let floor_r = max(radius, 0.08);
+    return (factor * factor) / max(dist * dist, floor_r * floor_r);
 }
 
 // Exponential depth slice (matches CPU side)
@@ -1808,7 +1890,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Parallax occlusion: every map below is sampled at the displaced UV.
     // Faded out past 30 m, where the relief is sub-pixel and the march is waste.
-    if material.height_map >= 0 && material.height_depth > 0.0 && abs(tbn_det) > 1.0e-12
+    // A negative depth is a window onto a room (interior mapping): no fade,
+    // since the room is the window's whole content at any distance.
+    var interior_shade = 1.0;
+    if material.height_depth < 0.0 && abs(tbn_det) > 1.0e-12 {
+        let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
+        let dpdv = (edge1 * duv0.x - edge0 * duv1.x) / tbn_det;
+        let room = interior_uv(uv, view_dir_early, geo_normal, dpdu, dpdv, -material.height_depth);
+        uv = room.xy;
+        interior_shade = room.z;
+        if room.z < 1.0 {
+            // A side wall is the back wall's edge colour, blurred: read at a
+            // coarse mip rather than smearing one column of texels along it.
+            uv_ddx = vec2<f32>(0.25, 0.0);
+            uv_ddy = vec2<f32>(0.0, 0.25);
+        }
+    } else if material.height_map >= 0 && material.height_depth > 0.0 && abs(tbn_det) > 1.0e-12
         && distance(hit_point, view.camera_pos) < 30.0 {
         let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
         let dpdv = (edge1 * duv0.x - edge0 * duv1.x) / tbn_det;
@@ -1837,6 +1934,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
         }
     }
+    surface.albedo *= interior_shade;
 
     surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
@@ -2192,6 +2290,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         apply_decals(&surface, hit_point, decal_froxel);
     }
 
+    surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
+    if material.terrain_index >= 0 {
+        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
+    } else {
+        // CONTROL-N. Meshes only: terrain already has XV-H's own wetness
+        // path, driven by the same weather state one level up, and applying
+        // both would darken the ground twice.
+        apply_wetness(&surface, material.porosity);
+    }
+
     // ── Geometric specular antialiasing (TSUSHIMA-E) ─────────────────────────
     //
     // Tokuyoshi & Kaplanyan, I3D 2019. The filter kernel comes from the
@@ -2210,9 +2318,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // decals overwrote it again after that. The comment there claimed it ran
     // "after every other write", which was the intent and not the code.
     //
-    // It now runs after terrain, relief, wetness and decals: the last point
-    // where anything writes the normal or the roughness, and before `f0` is
-    // derived from them. `dpdx` is also well defined here, which it would not
+    // It runs after terrain, relief, decals and mesh wetness: the last point
+    // where anything writes the normal or roughness. Wetness must precede this
+    // filter because it narrows roughness and can replace the shading normal.
+    // Deriving f0 first is safe: it depends on albedo/metallic, not roughness.
+    // `dpdx` is also well defined here, which it would not
     // be inside the terrain branch — that is a storage read the compiler
     // cannot prove uniform, and a derivative taken in non-uniform control flow
     // is undefined.
@@ -2226,16 +2336,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let kernel = min(2.0 * variance, SPEC_AA_KAPPA);
         let alpha = surface.roughness * surface.roughness;
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
-    }
-
-    surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
-    if material.terrain_index >= 0 {
-        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
-    } else {
-        // CONTROL-N. Meshes only: terrain already has XV-H's own wetness
-        // path, driven by the same weather state one level up, and applying
-        // both would darken the ground twice.
-        apply_wetness(&surface, material.porosity);
     }
 
     // ── Shadow factor ────────────────────────────────────────────────────────
@@ -2504,7 +2604,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if d > ll.range { continue; }
 
                 let Ll = lv / d;
-                var atten = smooth_distance_attenuation(d, ll.range);
+                var atten = smooth_distance_attenuation(d, ll.range, ll.radius);
                 if ll.light_type == 1u {
                     let ca = dot(-Ll, normalize(ll.direction_ws));
                     atten *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, ca);
@@ -2546,10 +2646,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // had already returned zero. Treat the moon as the same apparent
             // disc size as the sun and keep its sub-pixel specular peaks under
             // the direct-lobe energy bound as well.
-            moonlight = clamp_specular_lobe(
-                evaluate_brdf_area(surface, moon_dir, light.sun_angular_radius),
-                surface.roughness,
-            ) * moon_color;
+            moonlight = evaluate_brdf_area(surface, moon_dir, light.sun_angular_radius) * moon_color;
 
             // Do not add the thin-leaf transmission lobe here. Unlike the sun,
             // the moon has no directional shadow receiver yet, so transmission
@@ -2562,10 +2659,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // the sun's illuminance, so the ceiling is a fraction of the light
         // actually arriving rather than an absolute number that would mean
         // something different at noon and at dusk.
-        var direct_light = clamp_specular_lobe(
-            evaluate_brdf_area(surface, light_dir, light.sun_angular_radius),
-            surface.roughness,
-        ) * light_color * shadow_factor + moonlight;
+        var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
+            * light_color * shadow_factor + moonlight;
 
         // Transmitted sunlight follows the same atmospheric fade as every
         // other direct term, with no independent elevation threshold.
@@ -2652,7 +2747,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let dist_t = length(to_l);
                     if dist_t > ll.range { continue; }
                     let Lt = to_l / max(dist_t, 1e-4);
-                    let atten_t = smooth_distance_attenuation(dist_t, ll.range)
+                    if dot(surface.normal, Lt) <= 0.0 { continue; } // zero BRDF: no shadow ray
+                    let atten_t = smooth_distance_attenuation(dist_t, ll.range, ll.radius)
                         * practical_visibility(hit_point, shadow_normal, q);
                     let r = max(ll.radius, 0.01);
                     let angular = atan(r / max(dist_t, 1e-3));
@@ -2667,7 +2763,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if dist > ll.range { continue; }
 
                 let L = light_vec / dist;
-                var atten_val = smooth_distance_attenuation(dist, ll.range);
+                var atten_val = smooth_distance_attenuation(dist, ll.range, ll.radius);
                 if ll.light_type == 2u {
                     let half_x = max(ll._pad1, 0.05);
                     let half_y = max(ll._pad2, 0.05);
@@ -2680,7 +2776,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let angular = atan(eq_r / max(dist, 1e-3));
                     local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
                         * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
-                        * practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
+                        * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 3u {
@@ -2695,7 +2791,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let area = 2.82842712 * r * r;
                     local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
                         * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
-                        * practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
+                        * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 1u {
@@ -2708,12 +2804,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // and that is what stops its highlight being a single pixel on
                 // anything polished.
                 let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
-                if atten_val > 0.0 {
-                    atten_val *= practical_visibility(hit_point, shadow_normal, practical_emitter_sample(ll, hit_point, vec2<f32>(pixel_coords), light_idx));
-                }
-                local_light_contrib += clamp_specular_lobe(
-                    evaluate_brdf_area(surface, L, angular), surface.roughness,
-                ) * ll.color * atten_val;
+                // evaluate_brdf_area carries saturate(n.l): a light behind the
+                // surface, or outside its cone, adds exactly nothing, so it must
+                // not pay for a shadow ray. With dozens of practicals in reach
+                // (the lit interiors) those rays were most of the shading pass.
+                if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 { continue; }
+                atten_val *= practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                local_light_contrib += evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
             }
         }
 
@@ -2729,6 +2826,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     textures[material.emissive_map], default_sampler, uv).rgb;
             }
         }
+        emissive *= interior_shade;
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
 

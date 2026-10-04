@@ -26,6 +26,23 @@ struct Exposure {
 @group(0) @binding(9) var reactive_mask: texture_storage_2d<r32float, write>;
 @group(0) @binding(10) var velocity: texture_2d<f32>;
 @group(0) @binding(11) var particle_coverage: texture_2d<f32>;
+@group(0) @binding(12) var motion_out: texture_storage_2d<rg16float, write>;
+
+/// How much FSR should trust this frame on a hand/tool pixel that was also a
+/// hand/tool pixel last frame. 1.0 (the old value) discarded all history, so
+/// every per-frame lighting sample on the hands showed raw — the gold specks
+/// from practical-light GI. Their motion is pinned to the screen below, so the
+/// history at the same pixel is the hand itself; the remainder leaves room for
+/// sway and animation, which camera-locked motion does not describe.
+const HELD_REACTIVE: f32 = 0.35;
+
+/// Is the visible surface at exactly this pixel a reactive (camera-held) draw?
+fn held(coord: vec2<i32>) -> bool {
+    let packed = textureLoad(visibility, coord, 0).x;
+    if packed == 0u { return false; }
+    let instance = packed - 1u;
+    return instance < arrayLength(&reactive_instances) && reactive_instances[instance] != 0u;
+}
 
 fn inside(coord: vec2<i32>, dims: vec2<i32>) -> bool {
     return all(coord >= vec2<i32>(0)) && all(coord < dims);
@@ -81,8 +98,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = vec2<i32>(dim);
     let current = dynamic_coverage(coord, dims);
     var reactive = current;
+    let motion = textureLoad(velocity, coord, 0).xy;
+    let held_here = held(coord);
     if exposure.history_valid > 0.5 {
-        let motion = textureLoad(velocity, coord, 0).xy;
         let previous_pixel = vec2<i32>(floor(vec2<f32>(coord) + 0.5 + motion * vec2<f32>(dim)));
         // Camera reprojection covers a moving view; the screen-space union also
         // covers a removed foreground object whose replacement background has
@@ -90,7 +108,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // so a vanished silhouette cannot keep propagating its own rejection.
         reactive = max(reactive, previous_dynamic(previous_pixel, dims));
         reactive = max(reactive, previous_dynamic(coord, dims));
+        // Interior of a held hand/tool that was held here last frame too: its
+        // history is valid at the same pixel. Silhouette rims (the 3x3 dilation
+        // without a held centre) and uncovered background keep full rejection.
+        var interior = held_here;
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let c = coord + vec2<i32>(x, y);
+                interior = interior && inside(c, dims) && held(c);
+            }
+        }
+        if interior && textureLoad(previous_coverage, coord, 0).r > 0.5 {
+            reactive = HELD_REACTIVE;
+        }
     }
+    textureStore(motion_out, coord, vec4<f32>(select(motion, vec2<f32>(0.0), held_here), 0.0, 0.0));
     textureStore(current_coverage, coord, vec4<f32>(current, 0.0, 0.0, 0.0));
     textureStore(reactive_mask, coord, vec4<f32>(reactive, 0.0, 0.0, 0.0));
     let c = textureLoad(src, coord, 0);
