@@ -108,6 +108,27 @@ pub enum TerrainToolField {
     ReliefTakeover,
 }
 
+/// Vertex Paint tool controls. Core owns the brush and the paint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VertexPaintEvent {
+    /// Enter or leave Vertex Paint mode.
+    Toggle,
+    /// Erase, Dirt, Rust, Wet, Blood, Preview (0..=5) switched on or off.
+    SetFlag(u8, bool),
+    /// Radius, Strength, Falloff (0..=2). `live` while a drag is in progress.
+    SetBrush(u8, f32),
+    /// Set the chosen channels to full on the selection.
+    Fill,
+    /// Remove all paint from the selection.
+    Clear,
+    /// Copy the selection's paint.
+    Copy,
+    /// Paste copied paint onto the selection (same vertex count).
+    Paste,
+    /// Generate grime, damp, rust and wear from the mesh's own shape.
+    AutoWeather,
+}
+
 /// Brush/runtime controls which deliberately remain outside component schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FoliageBrushField {
@@ -439,6 +460,8 @@ pub enum EditorEvent {
         value: f32,
         live: bool,
     },
+    /// The Vertex Paint tool (mode, brush, channel and paint actions).
+    VertexPaint(VertexPaintEvent),
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),

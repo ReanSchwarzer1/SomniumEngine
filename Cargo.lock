@@ -3889,7 +3889,9 @@ version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "base64 0.22.1",
  "glam 0.29.3",
+ "miniz_oxide",
  "pollster 0.3.0",
  "rfd",
  "serde",

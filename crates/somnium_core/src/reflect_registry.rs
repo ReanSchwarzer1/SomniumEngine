@@ -650,6 +650,39 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(camera_settings_schema());
     registry.register(decal_schema());
     registry.register(light_flicker_schema());
+    registry.register(component_schema! {
+        crate::vertex_paint::VertexPaintComponent as "somnium.VertexPaint", display "Vertex Paint", version 1,
+        fields {
+            enabled { group: "Vertex Paint",
+                doc: "Show the paint. Off keeps it but renders the bare material." },
+            data { group: "Vertex Paint", advanced: true, read_only: true, display_name: "Masks",
+                doc: "Per-vertex R, G, B, A layer amounts. Edit with the Vertex Paint tool." },
+            layer_r { group: "Layers", display_name: "Layer R material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the R channel paints. Unset: built-in dirt and grime." },
+            layer_g { group: "Layers", display_name: "Layer G material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the G channel paints. Unset: built-in rust." },
+            layer_b { group: "Layers", display_name: "Layer B material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the B channel paints. Unset: built-in wetness." },
+            layer_a { group: "Layers", display_name: "Layer A material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the A channel paints. Unset: built-in blood." },
+            tiling { group: "Layers", min: 0.01, max: 16.0,
+                doc: "Per layer (R, G, B, A): texture repeats per metre. Layers are projected in world space, so 0.5 is a 2 m texture on every mesh." },
+            height_contrast { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 0 fades by the painted amount; toward 1 the height maps shape the edge, so the layer fills the surface's crevices before it covers it." },
+            slope_min { group: "Layers", min: -1.0, max: 1.0,
+                doc: "Per layer: lowest surface normal Y the layer shows on. 0.7 with max 1 keeps it to what faces up." },
+            slope_max { group: "Layers", min: -1.0, max: 1.0,
+                doc: "Per layer: highest surface normal Y the layer shows on. Min -0.3, max 0.3 keeps it to walls." },
+            breakup { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: how far world-space noise breaks part-painted areas into patches. 0 follows the painted gradient exactly." },
+            breakup_scale { group: "Layers", min: 0.05, max: 50.0,
+                doc: "Per layer: size of the breakup patches in metres." },
+        }
+    });
     registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
@@ -1385,7 +1418,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 43);
+        assert_eq!(registry.len(), 44);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1428,6 +1461,7 @@ mod tests {
                 "somnium.TimeOfDay",
                 "somnium.Transform",
                 "somnium.UiCanvas",
+                "somnium.VertexPaint",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
                 "somnium.Weather",

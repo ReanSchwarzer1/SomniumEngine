@@ -161,6 +161,7 @@ impl<G: GameApp> Engine<G> {
                 self.scene_dirty = true;
                 Ok(json!({"ok":true,"terrain_revision":revision,"undo":"one terrain stroke"}))
             }
+            "vertex_paint" => self.execute_vertex_paint(entity, p),
             "foliage_stroke" => {
                 let tc = self
                     .world
@@ -345,6 +346,251 @@ impl<G: GameApp> Engine<G> {
             _ => Err("unknown specialized action".into()),
         }
     }
+    /// MCP vertex paint on one entity. `op`:
+    /// - `get`: vertex count and per-channel mean/max;
+    /// - `stroke`: world-space `samples` [[x,y,z]..] with radius, strength,
+    ///   falloff, `channels` and `erase`;
+    /// - `fill`: `channels` set to `value`;
+    /// - `clear`;
+    /// - `generate`: `layers` [{channel, rule, amount, blend, ..rule params}];
+    /// - `auto_weather`: the editor button (`metal` overrides the material);
+    /// - `layers`: `layers` [{channel, material, tiling, height_contrast,
+    ///   slope_min, slope_max, breakup, breakup_scale}] sets what each
+    ///   channel paints. `material` is a content-relative `.sommat` path or
+    ///   asset id, or null for the built-in weathering; omitted keys keep
+    ///   their value;
+    /// - `preview`: `mode` 0 off, 1 all masks, 2..=5 one channel.
+    ///
+    /// Channels are `dirt`/`rust`/`wet`/`blood`, `r`/`g`/`b`/`a` or `1`..`4`.
+    fn execute_vertex_paint(&mut self, entity: Entity, p: &Value) -> Result<Value, String> {
+        use crate::vertex_paint as vp;
+        let mesh = self
+            .world
+            .get::<MeshComponent>(entity)
+            .copied()
+            .ok_or("entity has no mesh")?;
+        let count = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.geometry.static_vertex_count(mesh.vertex_offset))
+            .ok_or("mesh is not a static upload")? as usize;
+        let colors = vp::colors_of(&self.world, entity, count);
+        let channel = |name: &str| -> Result<usize, String> {
+            vp::channel_index(name)
+                .ok_or_else(|| format!("unknown channel {name}; use dirt, rust, wet, blood or r, g, b, a"))
+        };
+        let channels = |p: &Value| -> Result<[bool; 4], String> {
+            let mut on = [false; 4];
+            for name in p["channels"].as_array().ok_or("channels must be an array")? {
+                on[channel(name.as_str().ok_or("channel names are strings")?)?] = true;
+            }
+            Ok(on)
+        };
+        let num = |key: &str, default: f32, min: f32, max: f32| -> Result<f32, String> {
+            let v = p.get(key).map_or(Some(f64::from(default)), Value::as_f64).ok_or(format!("{key} must be a number"))? as f32;
+            if (min..=max).contains(&v) { Ok(v) } else { Err(format!("{key} outside {min}..={max}")) }
+        };
+        let model = self.entity_model(entity);
+        let read_mesh = |this: &Self| -> Result<vp::PaintMesh, String> {
+            let (Some(r), Some(ctx)) = (this.renderer.as_ref(), this.render_ctx.as_ref()) else {
+                return Err("renderer unavailable".into());
+            };
+            vp::PaintMesh::read(&this.world, r, ctx, entity).ok_or_else(|| "mesh readback failed".into())
+        };
+        let op = required(p, "op")?;
+        if op == "layers" {
+            let before = self.world.get::<vp::VertexPaintComponent>(entity).cloned();
+            let mut after = before.clone().unwrap_or_default();
+            let layers = p["layers"].as_array().ok_or("layers must be an array")?;
+            if layers.is_empty() || layers.len() > 4 {
+                return Err("layers needs 1..4 entries".into());
+            }
+            for layer in layers {
+                let c = channel(layer["channel"].as_str().ok_or("layer channel required")?)?;
+                match &layer["material"] {
+                    Value::Null if layer.get("material").is_none() => {}
+                    Value::Null => after.set_layer_asset(c, somnium_asset::database::AssetId::NONE),
+                    Value::String(text) if text.is_empty() => {
+                        after.set_layer_asset(c, somnium_asset::database::AssetId::NONE);
+                    }
+                    Value::String(text) => {
+                        let id = match u128::from_str_radix(text, 16) {
+                            Ok(raw) if text.len() == 32 => somnium_asset::database::AssetId::from_raw(raw),
+                            _ => somnium_asset::database::AssetId::from_relative_path(text),
+                        };
+                        let known = self
+                            .asset_gate
+                            .published()
+                            .and_then(|snapshot| snapshot.get(id))
+                            .is_some_and(|record| record.kind == somnium_asset::database::AssetKind::Material);
+                        if !known {
+                            return Err(format!("{text} is not a material asset in this project"));
+                        }
+                        after.set_layer_asset(c, id);
+                    }
+                    _ => return Err("layer material must be a path, an asset id or null".into()),
+                }
+                let mut set = |key: &str, slot: &mut f32, min: f32, max: f32| -> Result<(), String> {
+                    if let Some(v) = layer.get(key) {
+                        let v = v.as_f64().ok_or(format!("{key} must be a number"))? as f32;
+                        if !(min..=max).contains(&v) {
+                            return Err(format!("{key} outside {min}..={max}"));
+                        }
+                        *slot = v;
+                    }
+                    Ok(())
+                };
+                set("tiling", &mut after.tiling[c], 0.01, 16.0)?;
+                set("height_contrast", &mut after.height_contrast[c], 0.0, 1.0)?;
+                set("slope_min", &mut after.slope_min[c], -1.0, 1.0)?;
+                set("slope_max", &mut after.slope_max[c], -1.0, 1.0)?;
+                set("breakup", &mut after.breakup[c], 0.0, 1.0)?;
+                set("breakup_scale", &mut after.breakup_scale[c], 0.05, 50.0)?;
+            }
+            let changed = before.as_ref() != Some(&after);
+            if changed {
+                match self.world.get_mut::<vp::VertexPaintComponent>(entity) {
+                    Some(c) => *c = after.clone(),
+                    None => {
+                        let _ = self.world.insert_component(entity, after.clone());
+                    }
+                }
+                self.undo_stack.push_silent(Box::new(vp::VertexPaintCmd { entity, before, after }));
+                self.scene_dirty = true;
+            }
+            return Ok(json!({"ok":true,"changed":changed,"undo":"one vertex paint step"}));
+        }
+        if op == "preview" {
+            // Show the masks (0 off, 1 all, 2..=5 dirt/rust/wet/blood) by
+            // entering Vertex Paint mode, as the panel's Preview does.
+            let mode = p["mode"].as_u64().filter(|m| *m <= 5).ok_or("mode must be 0..=5")? as u32;
+            self.vertex_paint_preview = mode;
+            self.vertex_paint_active = mode != 0;
+            return Ok(json!({"ok":true,"preview":mode}));
+        }
+        let new = match op {
+            "get" => {
+                let mut mean = [0.0f64; 4];
+                let mut max = [0.0f32; 4];
+                for c in &colors {
+                    for (i, v) in vp::unpack(*c).iter().enumerate() {
+                        mean[i] += f64::from(*v);
+                        max[i] = max[i].max(*v);
+                    }
+                }
+                let n = count.max(1) as f64;
+                let stats: serde_json::Map<String, Value> = vp::CHANNELS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| ((*name).to_owned(), json!({"mean": mean[i] / n, "max": max[i]})))
+                    .collect();
+                let paint = self.world.get::<vp::VertexPaintComponent>(entity).cloned().unwrap_or_default();
+                let layers: Vec<Value> = paint
+                    .layer_assets()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, asset)| {
+                        json!({
+                            "channel": vp::CHANNELS[i],
+                            "material": (*asset != somnium_asset::database::AssetId::NONE).then(|| asset.to_string()),
+                            "tiling": paint.tiling[i],
+                            "height_contrast": paint.height_contrast[i],
+                            "slope_min": paint.slope_min[i],
+                            "slope_max": paint.slope_max[i],
+                            "breakup": paint.breakup[i],
+                            "breakup_scale": paint.breakup_scale[i],
+                        })
+                    })
+                    .collect();
+                return Ok(json!({"ok":true,"vertex_count":count,"painted":colors.iter().any(|c| *c != 0),"channels":stats,"layers":layers}));
+            }
+            "clear" => vec![0; count],
+            "fill" => {
+                let mut c = colors.clone();
+                vp::fill(&mut c, channels(p)?, num("value", 1.0, 0.0, 1.0)?);
+                c
+            }
+            "stroke" => {
+                let samples: Vec<[f32; 3]> = serde_json::from_value(p["samples"].clone())
+                    .map_err(|_| "samples need world-space [x,y,z]")?;
+                if samples.is_empty() || samples.len() > 256 || samples.iter().flatten().any(|v| !v.is_finite()) {
+                    return Err("stroke needs 1..256 finite samples".into());
+                }
+                let brush = vp::VertexPaintBrush {
+                    radius: num("radius", 0.5, 0.01, 50.0)?,
+                    strength: num("strength", 0.5, 0.0, 1.0)?,
+                    falloff: num("falloff", 0.75, 0.0, 1.0)?,
+                    channels: channels(p)?,
+                    erase: p["erase"].as_bool().unwrap_or(false),
+                };
+                let positions = read_mesh(self)?.world(model).0;
+                let mut c = colors.clone();
+                for s in samples {
+                    vp::dab(&mut c, &positions, glam::Vec3::from_array(s), &brush);
+                }
+                c
+            }
+            "generate" | "auto_weather" => {
+                let mesh = read_mesh(self)?;
+                let (positions, normals) = mesh.world(model);
+                if op == "auto_weather" {
+                    let metal = p["metal"].as_bool().unwrap_or_else(|| {
+                        self.world
+                            .get::<MaterialComponent>(entity)
+                            .and_then(|m| self.renderer.as_ref()?.materials_pool.get(m.runtime_id))
+                            .is_some_and(|m| m.metallic > 0.5)
+                    });
+                    vp::auto_weather(&colors, &positions, &normals, &mesh.indices, metal)
+                } else {
+                    let layers = p["layers"].as_array().ok_or("layers must be an array")?;
+                    if layers.is_empty() || layers.len() > 16 {
+                        return Err("generate needs 1..16 layers".into());
+                    }
+                    let mut c = colors.clone();
+                    for layer in layers {
+                        let f = |key: &str, default: f32| layer[key].as_f64().map_or(default, |v| v as f32);
+                        let rule = match layer["rule"].as_str().ok_or("layer rule required")? {
+                            "ground" => vp::Rule::Ground { height: f("height", 0.6), ground: layer["ground"].as_f64().map(|v| v as f32) },
+                            "up" => vp::Rule::Up { power: f("power", 1.5) },
+                            "down" => vp::Rule::Down { power: f("power", 1.5) },
+                            "slope" => vp::Rule::Slope { min: f("min", -0.3), max: f("max", 0.3) },
+                            "cavity" => vp::Rule::Cavity { gain: f("gain", 3.0) },
+                            "edges" => vp::Rule::Edges { gain: f("gain", 2.5) },
+                            "noise" => vp::Rule::Noise { scale: f("scale", 1.5), seed: f("seed", 0.0) },
+                            "streaks" => vp::Rule::Streaks { scale: f("scale", 1.5), seed: f("seed", 0.0) },
+                            "all" => vp::Rule::All,
+                            other => return Err(format!("unknown rule {other}")),
+                        };
+                        let blend = match layer["blend"].as_str().unwrap_or("max") {
+                            "max" => vp::Blend::Max,
+                            "add" => vp::Blend::Add,
+                            "set" => vp::Blend::Set,
+                            "multiply" => vp::Blend::Multiply,
+                            other => return Err(format!("unknown blend {other}")),
+                        };
+                        let values = vp::generate(rule, &positions, &normals, &mesh.indices);
+                        vp::apply(&mut c, channel(layer["channel"].as_str().ok_or("layer channel required")?)?, &values, f("amount", 1.0).clamp(0.0, 1.0), blend);
+                    }
+                    c
+                }
+            }
+            other => return Err(format!("unknown vertex_paint op {other}")),
+        };
+        let before = self.world.get::<vp::VertexPaintComponent>(entity).cloned();
+        vp::store(&mut self.world, entity, &new);
+        let after = self
+            .world
+            .get::<vp::VertexPaintComponent>(entity)
+            .cloned()
+            .ok_or("vertex paint was not stored")?;
+        let changed = before.as_ref() != Some(&after);
+        if changed {
+            self.undo_stack.push_silent(Box::new(vp::VertexPaintCmd { entity, before, after }));
+            self.scene_dirty = true;
+        }
+        Ok(json!({"ok":true,"vertex_count":count,"changed":changed,"undo":"one vertex paint step"}))
+    }
+
     pub(super) fn query_authoring_spatial(&self, p: &Value) -> Result<Value, String> {
         let origin = glam::Vec3::from_array(vec3(p, "origin", [0.0; 3])?);
         if p["kind"] == "clearance" {

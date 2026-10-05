@@ -562,6 +562,9 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
+
+    /// Per-entity vertex paint masks (see `crate::vertex_paint`).
+    pub vertex_paint: crate::vertex_paint::VertexPaintPool,
 }
 
 /// One TSUSHIMA-F term's switch: its own variable, or the group switch, or on.
@@ -1242,6 +1245,7 @@ impl SomniumRenderer {
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
+            vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
             water_textures_bind_group,
             water_bodies: Default::default(),
@@ -2186,6 +2190,97 @@ impl SomniumRenderer {
         }
         let dst = &self.cull_stats_buffers.as_ref().unwrap()[phase];
         encoder.copy_buffer_to_buffer(&self.indirect.buffer, 0, dst, 0, bytes);
+    }
+
+    /// Publish vertex paint for this frame: changed masks, the per-instance
+    /// handle table for the opaque draws (instance `i` is `draw_queue[i]`),
+    /// then the header that switches the shader's paint path on.
+    fn upload_vertex_paint(&mut self, ctx: &RenderContext) {
+        let pool = &mut self.vertex_paint;
+        if !pool.wants_header() {
+            if pool.header_live {
+                self.shading_pass.write_paint(&ctx.queue, 0, &pool.header(0));
+                pool.header_live = false;
+            }
+            return;
+        }
+        let draws = if pool.is_empty() { 0 } else { self.draw_queue.len() };
+        let grown = self
+            .shading_pass
+            .ensure_paint_capacity(&ctx.device, pool.required_words(draws));
+        if let Some((word, data)) = pool.take_dirty(grown) {
+            self.shading_pass.write_paint(&ctx.queue, word, data);
+        }
+        let mut table = 0;
+        if !pool.is_empty() {
+            table = pool.instance_table_start();
+            let mut handles = std::mem::take(&mut pool.frame_instances);
+            handles.clear();
+            handles.extend(self.draw_queue.iter().map(|cmd| cmd.paint));
+            self.shading_pass.write_paint(&ctx.queue, table, &handles);
+            pool.frame_instances = handles;
+        }
+        self.shading_pass
+            .write_paint(&ctx.queue, 0, &pool.header(table));
+        pool.header_live = true;
+    }
+
+    /// Read a static mesh back from the geometry pool: its vertices in pool
+    /// order (the order paint is stored in) and its triangle list.
+    ///
+    /// Blocking. For editor tools that need one mesh once, such as the vertex
+    /// paint brush when it starts on an entity.
+    #[must_use]
+    pub fn read_mesh(
+        &self,
+        ctx: &RenderContext,
+        vertex_offset: u32,
+        index_offset: u32,
+        index_count: u32,
+    ) -> Option<(Vec<somnium_asset::Vertex>, Vec<u32>)> {
+        let vertex_count = self.geometry.static_vertex_count(vertex_offset)?;
+        let stride = std::mem::size_of::<somnium_asset::Vertex>() as u64;
+        let v_bytes = u64::from(vertex_count) * stride;
+        let i_bytes = u64::from(index_count) * 4;
+        if v_bytes == 0 || i_bytes == 0 {
+            return None;
+        }
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mesh Readback"),
+            size: v_bytes + i_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Mesh Readback") });
+        encoder.copy_buffer_to_buffer(
+            &self.geometry.vertex_buffer,
+            u64::from(vertex_offset) * stride,
+            &staging,
+            0,
+            v_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.geometry.index_buffer,
+            u64::from(index_offset) * 4,
+            &staging,
+            v_bytes,
+            i_bytes,
+        );
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        let out = {
+            let data = slice.get_mapped_range().ok()?;
+            let vertices: Vec<somnium_asset::Vertex> =
+                bytemuck::pod_collect_to_vec(&data[..v_bytes as usize]);
+            let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&data[v_bytes as usize..]);
+            (vertices, indices)
+        };
+        staging.unmap();
+        Some(out)
     }
 
     /// Map both snapshots and log how many draws each phase left alive.
@@ -3974,6 +4069,7 @@ impl SomniumRenderer {
                     );
                 }
                 let cmd = DrawCommand {
+                    paint: 0,
                     casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
                         0,
@@ -4119,6 +4215,7 @@ impl SomniumRenderer {
         }
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
         self.instances.upload(&ctx.queue);
+        self.upload_vertex_paint(ctx);
         self.profiler.cpu_end();
 
         self.profiler.cpu_begin("Indirect args");
@@ -5376,21 +5473,35 @@ impl SomniumRenderer {
             // OIT off mid-session must not need a re-sort.
             self.oit_pass.begin(&mut encoder);
             self.transparent_pass.record_weighted(
+                &ctx.device,
                 &mut encoder,
                 self.oit_pass.accum_view(),
                 self.oit_pass.reveal_view(),
                 &self.vis_pass.depth_view,
                 &self.global_pool.bind_group,
+                &self.postprocess_pass.scene_copy_view,
                 &transparent_draws,
             );
             self.oit_pass
                 .composite(&mut encoder, &self.postprocess_pass.hdr_view);
         } else {
+            if !transparent_draws.is_empty() {
+                // Glass refracts the scene behind it, and a pass cannot
+                // sample its own target: the same copy the water takes,
+                // taken again so it includes the water.
+                encoder.copy_texture_to_texture(
+                    self.postprocess_pass.hdr_texture.as_image_copy(),
+                    self.postprocess_pass.scene_copy_texture.as_image_copy(),
+                    self.postprocess_pass.hdr_texture.size(),
+                );
+            }
             self.transparent_pass.record(
+                &ctx.device,
                 &mut encoder,
                 &self.postprocess_pass.hdr_view,
                 &self.vis_pass.depth_view,
                 &self.global_pool.bind_group,
+                &self.postprocess_pass.scene_copy_view,
                 &transparent_draws,
             );
         }
@@ -6589,6 +6700,7 @@ mod frame_instance_layout_tests {
 
     fn draw(vertex: u32, index: u32, material: u32, tx: f32) -> DrawCommand {
         DrawCommand {
+            paint: 0,
             sort_key: SortKey::new(0, material as u16, vertex),
             vertex_offset: vertex,
             index_offset: index,

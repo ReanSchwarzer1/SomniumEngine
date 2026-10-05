@@ -202,6 +202,11 @@ pub struct ShadingPass {
     virtual_shadow_params: wgpu::Buffer,
     /// DREAMS-B's shared stochastic sampling atlas.
     grain_packed: wgpu::Buffer,
+    /// Vertex paint words (see `crate::vertex_paint`), grown on demand.
+    paint_buffer: wgpu::Buffer,
+    paint_capacity_words: u64,
+    /// Kept so growing the paint buffer can rebuild the bind group.
+    visibility_view: wgpu::TextureView,
     _virtual_shadow_dummy: wgpu::Texture,
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
@@ -533,6 +538,17 @@ impl ShadingPass {
                     },
                     count: None,
                 },
+                // binding 30: vertex paint (header, masks, instance table)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 30,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ];
         if local_shadow_tlas.is_some() {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
@@ -632,6 +648,8 @@ impl ShadingPass {
             decals.params_buffer.clone(),
         ];
 
+        let paint_capacity_words = 1024;
+        let paint_buffer = Self::make_paint_buffer(device, paint_capacity_words);
         let bind_group = Self::make_bind_group(
             device,
             &bind_group_layout,
@@ -661,6 +679,7 @@ impl ShadingPass {
             &virtual_shadow_page_table,
             &virtual_shadow_params,
             grain_packed,
+            &paint_buffer,
             local_shadow_tlas,
         );
 
@@ -798,6 +817,9 @@ impl ShadingPass {
             virtual_shadow_page_table,
             virtual_shadow_params,
             grain_packed: grain_packed.clone(),
+            paint_buffer,
+            paint_capacity_words,
+            visibility_view: visibility_view.clone(),
             _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
             clipmap_sampler,
@@ -1192,6 +1214,7 @@ impl ShadingPass {
         virtual_shadow_page_table: &wgpu::Buffer,
         virtual_shadow_params: &wgpu::Buffer,
         grain_packed: &wgpu::Buffer,
+        paint: &wgpu::Buffer,
         local_shadow_tlas: Option<&wgpu::Tlas>,
     ) -> wgpu::BindGroup {
         let mut entries = vec![
@@ -1310,6 +1333,10 @@ impl ShadingPass {
                 wgpu::BindGroupEntry {
                     binding: 28,
                     resource: grain_packed.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: paint.as_entire_binding(),
                 },
             ];
         if let Some(tlas) = local_shadow_tlas {
@@ -1486,10 +1513,15 @@ impl ShadingPass {
         self.restir_gi_view = restir_gi_view.clone();
         self.lighting_aux_view = lighting_aux_view.clone();
         self.world_volume_view = world_volume_view.clone();
+        self.visibility_view = visibility_view.clone();
+        self.rebind(device);
+    }
+
+    fn rebind(&mut self, device: &wgpu::Device) {
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,
-            visibility_view,
+            &self.visibility_view,
             &self.sampler,
             &self.shadow_atlas_view,
             &self.shadow_sampler,
@@ -1515,8 +1547,37 @@ impl ShadingPass {
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
             &self.grain_packed,
+            &self.paint_buffer,
             self.local_shadow_tlas.as_ref(),
         );
+    }
+
+    fn make_paint_buffer(device: &wgpu::Device, words: u64) -> wgpu::Buffer {
+        // Created zeroed, so word 0 already reads "nothing painted".
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vertex Paint"),
+            size: words * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Grow the vertex paint buffer to at least `words`. True when it was
+    /// recreated, in which case everything must be uploaded again.
+    pub fn ensure_paint_capacity(&mut self, device: &wgpu::Device, words: u64) -> bool {
+        if words <= self.paint_capacity_words {
+            return false;
+        }
+        self.paint_capacity_words = words.next_power_of_two();
+        self.paint_buffer = Self::make_paint_buffer(device, self.paint_capacity_words);
+        self.rebind(device);
+        true
+    }
+
+    pub fn write_paint(&self, queue: &wgpu::Queue, word: u32, data: &[u32]) {
+        if !data.is_empty() {
+            queue.write_buffer(&self.paint_buffer, u64::from(word) * 4, bytemuck::cast_slice(data));
+        }
     }
 
     /// Bind the renderer-owned sparse shadow cache into opaque/terrain shading.
@@ -1530,37 +1591,8 @@ impl ShadingPass {
         self.virtual_shadow_sampler = gpu.comparison_sampler.clone();
         self.virtual_shadow_page_table = gpu.page_table.clone();
         self.virtual_shadow_params = gpu.params.clone();
-        self.bind_group = Self::make_bind_group(
-            device,
-            &self.bind_group_layout,
-            visibility_view,
-            &self.sampler,
-            &self.shadow_atlas_view,
-            &self.shadow_sampler,
-            &self.env_view,
-            &self.env_sampler,
-            &self.gtao_view,
-            &self.depth_view,
-            &self.restir_view,
-            &self.restir_gi_view,
-            &self.volumetric_view,
-            &self.volumetric_sampler,
-            &self.volumetric_range,
-            &self.lighting_aux_view,
-            &self.world_volume_view,
-            &self.lighting_extra,
-            &self.sh_probes,
-            &self.cloud_shadow_view,
-            &self.cloud_shadow_params,
-            &self.weather,
-            &self.decal_buffers,
-            &self.virtual_shadow_view,
-            &self.virtual_shadow_sampler,
-            &self.virtual_shadow_page_table,
-            &self.virtual_shadow_params,
-            &self.grain_packed,
-            self.local_shadow_tlas.as_ref(),
-        );
+        self.visibility_view = visibility_view.clone();
+        self.rebind(device);
     }
 
     /// Publish this frame's wetness. All zero leaves shading bit-identical to

@@ -110,6 +110,7 @@ pub mod sky;
 pub mod somui_host;
 pub mod sun;
 pub mod time;
+pub mod vertex_paint;
 /// Phase CONTROL-L: the day cycle.
 pub mod time_of_day;
 /// Phase CONTROL-N: weather and the wetness it leaves.

@@ -158,13 +158,17 @@ fn the_volumetric_module_validates() {
 
 /// A negative height depth is a window onto a room: the ray is carried into a
 /// box behind the glass (interior mapping) instead of marched through a height
-/// field, which smeared a shop's shelves into sliding stripes; and the side
-/// walls' shade reaches both the albedo and the emissive.
+/// field, which smeared a shop's shelves into sliding stripes. The point it
+/// meets is projected back through the pinhole the room was rendered from
+/// (2 x depth in front of the glass), so no face of the box is painted with an
+/// edge colour; the shade still reaches both the albedo and the emissive.
 #[test]
 fn a_negative_height_depth_maps_a_room_behind_the_glass() {
     let shading = include_str!("../src/shaders/shading.wgsl");
     assert!(shading.contains("if material.height_depth < 0.0 && abs(tbn_det) > 1.0e-12 {"));
     assert!(shading.contains("interior_uv(uv, view_dir_early, geo_normal, dpdu, dpdv, -material.height_depth)"));
+    assert!(shading.contains("let pinhole = 2.0 * depth_m;"), "same pinhole as tools/shop_interiors_20261003.py");
+    assert!(shading.contains("(hit - vec2<f32>(0.5)) * (pinhole / (pinhole + z))"));
     assert!(shading.contains("} else if material.height_map >= 0 && material.height_depth > 0.0"), "relief only for positive");
     assert!(shading.contains("surface.albedo *= interior_shade;"));
     assert!(shading.contains("emissive *= interior_shade;"));
@@ -324,6 +328,33 @@ fn material_mirrors_and_the_view_carry_the_wind_where_rust_puts_it() {
 #[test]
 fn the_transparent_module_validates() {
     check("transparent", &composed("transparent.wgsl"));
+}
+
+/// Glass is lit by the lamps of the room it is in, bends by its normal map
+/// and refracts the scene copy; the light grid it reads is the shared one.
+#[test]
+fn glass_reads_the_light_grid_its_normal_map_and_the_scene_behind_it() {
+    let glass = include_str!("../src/shaders/transparent.wgsl");
+    let pool = include_str!("../src/shaders/global_pool.wgsl");
+    let pass = include_str!("../src/pass/transparent.rs");
+    // The same four bindings, at the same slots, as every other pass.
+    for binding in [
+        "@group(0) @binding(7) var<storage, read> local_lights: array<GpuLocalLight>;",
+        "@group(0) @binding(8) var<storage, read> light_index_list: array<u32>;",
+        "@group(0) @binding(9) var<storage, read> cluster_offsets: array<ClusterOffset>;",
+        "@group(0) @binding(10) var<storage, read> cluster_params: ClusterParams;",
+    ] {
+        assert!(glass.contains(binding) && pool.contains(binding), "{binding}");
+    }
+    assert!(glass.contains("@group(1) @binding(3) var scene_color: texture_2d<f32>;"));
+    assert!(pass.contains("binding: 3,"));
+    assert!(glass.contains("textures[material.normal_map]"));
+    assert!(glass.contains("let bent = refract(-v, g.normal, 1.0 / 1.5);"));
+    // Flat glass keeps plain blending, so a pane behind a pane still shows.
+    assert!(glass.contains("if g.bend <= 0.0 {"));
+    // The weighted path cannot refract: it must not read the scene copy.
+    let oit = &glass[glass.find("fn fs_oit(").unwrap()..];
+    assert!(!oit.contains("scene_color"));
 }
 
 #[test]
@@ -1076,4 +1107,52 @@ fn water_surfaces_receive_the_volumetric_fog() {
         "the shaded water colour leaves without the fog"
     );
     check("water.wgsl", &composed("water.wgsl"));
+}
+
+/// Vertex paint is layered before decals and `f0`, read through the shading
+/// pass's own binding 30, and the header layout matches `vertex_paint.rs`
+/// (word 0 instance table, word 1 preview, words 2..5 the brush ring).
+#[test]
+fn vertex_paint_reaches_the_surface_before_decals_and_f0() {
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    let pass = include_str!("../src/pass/shading.rs");
+    assert!(shading.contains("@group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;"));
+    assert!(pass.contains("binding: 30,"));
+    assert_eq!(somnium_renderer::vertex_paint::HEADER_WORDS, 6);
+    assert!(shading.contains("let ring_radius = bitcast<f32>(vertex_paint[5]);"));
+    let paint = shading.find("let layered = apply_vertex_layers(&surface, paint_slot, paint_mask, hit_point,").unwrap();
+    let decals = shading.find("apply_decals(&surface, hit_point, decal_froxel);").unwrap();
+    let f0 = shading.find("surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);").unwrap();
+    assert!(paint < decals && decals < f0);
+    assert!(shading.contains("unpack4x8unorm(vertex_paint[base + i0]) * bary.x"));
+}
+
+/// A paint slot starts with the layer header `PaintLayers::words` writes, and
+/// the shader reads it at the same offsets: materials at 0, tilings at 4,
+/// packed parameters at 8, noise frequencies at 12, masks after 16. Channels
+/// without a material fall through to the built-in weathering.
+#[test]
+fn paint_layers_read_the_slot_header_the_pool_writes() {
+    let shading = include_str!("../src/shaders/shading.wgsl");
+    assert_eq!(somnium_renderer::vertex_paint::SLOT_HEADER_WORDS, 16);
+    assert!(shading.contains("const PAINT_SLOT_HEADER: u32 = 16u;"));
+    assert_eq!(somnium_renderer::vertex_paint::NO_LAYER, 0xffff_ffff);
+    assert!(shading.contains("const PAINT_NO_LAYER: u32 = 0xffffffffu;"));
+    for read in [
+        "let material_id = vertex_paint[slot + c];",
+        "bitcast<f32>(vertex_paint[slot + 4u + c])",
+        "unpack4x8unorm(vertex_paint[slot + 8u + c])",
+        "bitcast<f32>(vertex_paint[slot + 12u + c])",
+        "let base = slot + PAINT_SLOT_HEADER;",
+    ] {
+        assert!(shading.contains(read), "{read}");
+    }
+    // The weathering only sees the channels that carried no layer material.
+    assert!(shading.contains(
+        "apply_vertex_weathering(&surface, paint_mask * (vec4<f32>(1.0) - layered), hit_point);"
+    ));
+    // Layers are world-projected with explicit gradients: no implicit-LOD
+    // read may sit inside the per-channel branches.
+    let body = &shading[shading.find("fn paint_layer_plane(").unwrap()..shading.find("fn paint_layer_add(").unwrap()];
+    assert!(!body.contains("textureSample("), "paint layers must use textureSampleGrad");
 }

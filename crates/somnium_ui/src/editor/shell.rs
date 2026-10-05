@@ -440,6 +440,15 @@ pub(crate) fn build_editor_layout(
         font_id,
         theme::active().density.row_chrome,
     );
+    let (vertex_paint_button, vertex_paint_label) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::PaintLayer,
+        "Paint",
+        &command_tooltip("editor.vertex_paint.edit"),
+        font_id,
+        theme::active().density.row_chrome,
+    );
     scope_separator(ui, main_tb_stack_h);
     let play_button = icon_tool_button(
         ui,
@@ -2251,6 +2260,7 @@ pub(crate) fn build_editor_layout(
         select_button,
         landscape_button,
         foliage_toolbar_button,
+        vertex_paint_button,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
@@ -2272,6 +2282,7 @@ pub(crate) fn build_editor_layout(
             select_label,
             landscape_label,
             foliage_mode_label,
+            vertex_paint_label,
         ],
         status_dirty,
         status_selection,

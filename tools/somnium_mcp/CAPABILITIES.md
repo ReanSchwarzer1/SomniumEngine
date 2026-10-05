@@ -47,6 +47,7 @@ The following operations come from the live discovery response. A passing family
 | spatial | `camera`, `bookmark` |
 | state machine | `state_initial`, `state_add_transition`, `state_set_transition`, `state_remove_transition`, `state_undo`, `state_redo` |
 | terrain | `terrain_stroke`, `foliage_stroke` |
+| vertex paint | `vertex_paint` op `get`, `stroke`, `fill`, `clear`, `generate`, `auto_weather`, `layers`, `preview`; channels dirt/r, rust/g, wet/b, blood/a. `layers` gives a channel a PBR material (`.sommat` path or id; null = built-in weathering) with `tiling`, `height_contrast`, `slope_min`/`slope_max`, `breakup`, `breakup_scale` |
 | timeline | `add_group`, `add_track`, `add_media`, `move_media`, `resize_media`, `add_marker`, `move_marker`, `add_key`, `move_key`, `remove_track`, `select_channel`, `replace`, `scrub`, `undo`, `redo` |
 | workspace | `float`, `dock`, `place` |
 

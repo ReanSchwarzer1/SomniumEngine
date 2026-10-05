@@ -335,6 +335,7 @@ impl Previews {
                 if let Some(mirror) = mirror {
                     let full_count = draw.allocation.index_count - draw.indices.len() as u32;
                     r.submit(somnium_renderer::DrawCommand {
+                        paint: 0,
                         sort_key: somnium_renderer::SortKey::new(
                             0,
                             draw.material as u16,
@@ -356,6 +357,7 @@ impl Previews {
                 }
                 r.animated_geometry.update(draw.skin, &i.palette);
                 r.submit(somnium_renderer::command::DrawCommand {
+                    paint: 0,
                     sort_key: somnium_renderer::command::SortKey::new(
                         0,
                         draw.material as u16,

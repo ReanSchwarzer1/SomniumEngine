@@ -693,6 +693,7 @@ impl VoxelTerrain {
             let Some(alloc) = entry else { continue };
             let origin = somnium_voxel::chunk_origin(*coord);
             renderer.submit(somnium_renderer::command::DrawCommand {
+                paint: 0,
                 casts_shadow: true,
                 sort_key: somnium_renderer::command::SortKey::new(
                     0,
@@ -2571,6 +2572,9 @@ impl GameApp for HelloGame {
                 // archetypes carry no flags column at all, so this costs one
                 // lookup per archetype, not per entity.
                 let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
+                let painted = archetype
+                    .column_index(ComponentId::of::<somnium_core::vertex_paint::VertexPaintComponent>())
+                    .is_some();
                 for row in 0..archetype.len() {
                     if let Some(col) = flags_col
                         && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
@@ -2589,7 +2593,13 @@ impl GameApp for HelloGame {
                     ) else {
                         continue;
                     };
+                    let paint = if painted {
+                        somnium_core::vertex_paint::handle(renderer, entity)
+                    } else {
+                        0
+                    };
                     renderer.submit(somnium_renderer::command::DrawCommand {
+                        paint,
                         casts_shadow,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,
@@ -2622,6 +2632,7 @@ impl GameApp for HelloGame {
                 );
                 for (part_index, part) in boat.parts.iter().enumerate() {
                     renderer.submit(somnium_renderer::command::DrawCommand {
+                        paint: 0,
                         casts_shadow: true,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,

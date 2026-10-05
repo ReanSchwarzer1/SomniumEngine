@@ -67,6 +67,7 @@ pub use drag_drop::{DragPayload, DropAcceptance, DropEffect, DropRequest, DropTa
 pub use editor_event::{
     CreateKind, EditorEvent, FoliageBrushField, GestureId, OutlinerRow, ScriptAttachmentRow,
     ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
+    VertexPaintEvent,
 };
 pub use node::CursorKind;
 pub use runtime::{GameUi, GameUiFrame, UiCanvas};
@@ -612,6 +613,7 @@ struct EditorLayout {
     select_button: NodeHandle,
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
+    vertex_paint_button: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
@@ -685,7 +687,7 @@ struct EditorLayout {
     time_label: NodeHandle,
     time_slider: NodeHandle,
     /// Mode-scope command labels. Collapse to icon-only under 1400 px.
-    mode_labels: [NodeHandle; 4],
+    mode_labels: [NodeHandle; 5],
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -945,6 +947,7 @@ pub struct UiManager {
     select_button: NodeHandle,
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
+    vertex_paint_button: NodeHandle,
     // Terrain tool buttons (Phase 14F / XV-Zeta): (button, label, BrushMode index)
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -979,7 +982,7 @@ pub struct UiManager {
     /// Mode-scope command labels. Held so a future rule can address them; the
     /// 1400 px breakpoint deliberately does not.
     #[allow(dead_code)]
-    mode_labels: [NodeHandle; 4],
+    mode_labels: [NodeHandle; 5],
     /// Last width the collapse rules were evaluated at, so a resize that does
     /// not cross a breakpoint costs nothing.
     collapsed_at: Option<u32>,
@@ -1776,6 +1779,7 @@ impl UiManager {
             select_button: layout.select_button,
             landscape_button: layout.landscape_button,
             foliage_toolbar_button: layout.foliage_toolbar_button,
+            vertex_paint_button: layout.vertex_paint_button,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             palette_entities: Vec::new(),
@@ -3950,6 +3954,7 @@ impl UiManager {
                 self.select_button,
                 self.landscape_button,
                 self.foliage_toolbar_button,
+                self.vertex_paint_button,
                 self.camera_speed_slider,
                 self.outliner_search,
                 self.outliner_tree,
@@ -5073,6 +5078,9 @@ impl UiManager {
             A::ToggleFoliagePaint => self
                 .editor_events
                 .push_back(EditorEvent::ToggleFoliagePaint),
+            A::ToggleVertexPaint => self
+                .editor_events
+                .push_back(EditorEvent::VertexPaint(VertexPaintEvent::Toggle)),
             A::ToggleImmersiveViewport => self
                 .editor_events
                 .push_back(EditorEvent::ToggleImmersiveViewport),
@@ -7322,6 +7330,7 @@ impl UiManager {
                 (self.select_button, ToolMode::Select),
                 (self.landscape_button, ToolMode::Landscape),
                 (self.foliage_toolbar_button, ToolMode::Foliage),
+                (self.vertex_paint_button, ToolMode::VertexPaint),
             ] {
                 self.native_ui
                     .send(ButtonMessage::set_selected(handle, mode == active));
@@ -8480,6 +8489,10 @@ impl UiManager {
                 }
                 if msg.destination == self.foliage_toolbar_button {
                     self.run_command_id("editor.foliage.edit");
+                    continue;
+                }
+                if msg.destination == self.vertex_paint_button {
+                    self.run_command_id("editor.vertex_paint.edit");
                     continue;
                 }
                 if msg.destination == self.immersive_button {
@@ -10451,6 +10464,7 @@ mod zeta_layout_tests {
             layout.select_button,
             layout.landscape_button,
             layout.foliage_toolbar_button,
+            layout.vertex_paint_button,
             layout.play_button,
             layout.immersive_button,
             layout.pause_button,

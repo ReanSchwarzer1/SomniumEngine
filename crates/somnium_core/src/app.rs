@@ -1181,6 +1181,22 @@ pub struct Engine<G: GameApp> {
     /// One message per stroke. A brush dabs on every mouse-move, so a refusal
     /// reported per dab would bury the log the moment anyone dragged.
     foliage_refusal_reported: bool,
+    /// Vertex Paint mode: dragging on the selected mesh paints its masks.
+    pub vertex_paint_active: bool,
+    vertex_paint_brush: crate::vertex_paint::VertexPaintBrush,
+    /// Mask preview: 0 off, 1 all channels, 2..=5 one channel.
+    vertex_paint_preview: u32,
+    vertex_paint_sync: crate::vertex_paint::VertexPaintSync,
+    /// The painted entity's mesh, read back from the GPU when painting starts
+    /// on it, plus its world positions under the model they were taken at.
+    vertex_paint_mesh: Option<crate::vertex_paint::PaintMesh>,
+    vertex_paint_world: (glam::Mat4, Vec<glam::Vec3>),
+    /// The paint before the stroke in progress: one undo step per stroke.
+    vertex_paint_stroke: Option<(
+        somnium_ecs::Entity,
+        Option<crate::vertex_paint::VertexPaintComponent>,
+    )>,
+    vertex_paint_clipboard: Option<Vec<u32>>,
     /// Phase 17B: static heightfield body per terrain, with the terrain
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
@@ -1724,6 +1740,14 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_stroke_seed: 0,
             foliage_painting: false,
             foliage_refusal_reported: false,
+            vertex_paint_active: false,
+            vertex_paint_brush: crate::vertex_paint::VertexPaintBrush::default(),
+            vertex_paint_preview: 0,
+            vertex_paint_sync: crate::vertex_paint::VertexPaintSync::default(),
+            vertex_paint_mesh: None,
+            vertex_paint_world: (glam::Mat4::ZERO, Vec::new()),
+            vertex_paint_stroke: None,
+            vertex_paint_clipboard: None,
             terrain_colliders: std::collections::HashMap::new(),
             log_rx: Some(log_rx),
             shortcut_modifiers: somnium_ui::message::Modifiers::default(),
@@ -3019,7 +3043,11 @@ impl<G: GameApp> Engine<G> {
         // Terrain sculpting, foliage painting and Play each own the viewport
         // and have already cleared the gizmo; re-placing it here would undo
         // that every frame.
-        if self.play_session_active || self.terrain_edit_active || self.foliage_paint_active {
+        if self.play_session_active
+            || self.terrain_edit_active
+            || self.foliage_paint_active
+            || self.vertex_paint_active
+        {
             return;
         }
         let anchor = gizmo_anchor(&self.world, self.selection.primary);
@@ -4010,6 +4038,31 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // MORROWIND-N's to revisit.
         if self.dispatch_game_os_event(&event) {
             return;
+        }
+
+        // ── 3.3 Vertex paint brush — before the gizmo, like the other brushes ──
+        if !self.play_session_active && self.vertex_paint_active {
+            if let WindowEvent::MouseInput {
+                state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                if *state == winit::event::ElementState::Pressed {
+                    if self.vertex_paint_dab(true) {
+                        return;
+                    }
+                } else if self.vertex_paint_stroke.is_some() {
+                    self.end_vertex_paint_stroke();
+                    return;
+                }
+            }
+            if self.vertex_paint_stroke.is_some()
+                && let WindowEvent::CursorMoved { .. } = &event
+            {
+                self.vertex_paint_dab(false);
+                return;
+            }
         }
 
         // ── 3.4 Foliage brush (Phase 17F) — takes priority over sculpting ────
@@ -5216,6 +5269,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.script_behavior_update(preview_dt);
         }
 
+        self.sync_vertex_paint();
         self.zone_begin("Game render hook");
         {
             let mut ctx = EngineContext::new(
@@ -5340,6 +5394,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
+        self.update_vertex_paint_cursor();
         self.zone_end();
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Scene submit");
@@ -6696,8 +6751,21 @@ impl<G: GameApp> Engine<G> {
     }
     fn persona_tool_context(&self) -> somnium_ui::editor::tool_context::ToolContext {
         use somnium_ui::editor::tool_context::{ToolContext, ToolMode};
+        let brush = self.vertex_paint_brush;
         ToolContext {
-            mode: if self.foliage_paint_active {
+            paint_reason: self.vertex_paint_target().err().map(str::to_owned),
+            paint_brush: [brush.radius, brush.strength, brush.falloff],
+            paint_flags: [
+                brush.erase,
+                brush.channels[0],
+                brush.channels[1],
+                brush.channels[2],
+                brush.channels[3],
+                self.vertex_paint_preview != 0,
+            ],
+            mode: if self.vertex_paint_active {
+                ToolMode::VertexPaint
+            } else if self.foliage_paint_active {
                 ToolMode::Foliage
             } else if self.terrain_edit_active {
                 ToolMode::Landscape
@@ -6748,6 +6816,289 @@ impl<G: GameApp> Engine<G> {
                 .map_or(0, |t| t.layers.len()),
         }
     }
+    /// Publish changed paint to the renderer, with each layer's material
+    /// loaded and resolved to its renderer slot the way an entity's own
+    /// material is. Free on a frame where nothing about paint changed.
+    fn sync_vertex_paint(&mut self) {
+        if !self.vertex_paint_sync.stale(&self.world) {
+            return;
+        }
+        let mut materials = std::collections::HashMap::new();
+        for asset in crate::vertex_paint::layer_assets(&self.world) {
+            if self.load_material_document(asset) {
+                self.queue_material_textures(asset);
+                if let Some(id) = self.resolve_material_runtime(asset) {
+                    materials.insert(asset, id);
+                }
+            }
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            self.vertex_paint_sync.sync(&self.world, r, &materials);
+        }
+    }
+
+    /// The entity Vertex Paint works on, or why there is none.
+    fn vertex_paint_target(&self) -> Result<somnium_ecs::Entity, &'static str> {
+        let entity = self.selection.primary.ok_or("Select a mesh to paint.")?;
+        if self
+            .world
+            .get::<EditorFlags>(entity)
+            .is_some_and(|flags| flags.locked || flags.hidden)
+        {
+            return Err("Unlock and show the selected mesh before painting.");
+        }
+        if self.world.get::<MeshComponent>(entity).is_none() {
+            return Err("The selection has no mesh. Select a mesh entity to paint.");
+        }
+        Ok(entity)
+    }
+
+    fn entity_model(&self, entity: somnium_ecs::Entity) -> glam::Mat4 {
+        self.world.get::<WorldTransform>(entity).map_or_else(
+            || {
+                self.world
+                    .get::<Transform>(entity)
+                    .map_or(glam::Mat4::IDENTITY, Transform::to_matrix)
+            },
+            |world| world.0,
+        )
+    }
+
+    /// Make sure the read-back mesh and its world positions are `entity`'s.
+    fn vertex_paint_prepare(&mut self, entity: somnium_ecs::Entity) -> bool {
+        let offset = self.world.get::<MeshComponent>(entity).map(|m| m.vertex_offset);
+        if !self
+            .vertex_paint_mesh
+            .as_ref()
+            .is_some_and(|m| m.entity == entity && Some(m.vertex_offset) == offset)
+        {
+            let (Some(r), Some(ctx)) = (self.renderer.as_ref(), self.render_ctx.as_ref()) else {
+                return false;
+            };
+            self.vertex_paint_mesh = crate::vertex_paint::PaintMesh::read(&self.world, r, ctx, entity);
+            self.vertex_paint_world.0 = glam::Mat4::ZERO;
+        }
+        let model = self.entity_model(entity);
+        match &self.vertex_paint_mesh {
+            Some(mesh) => {
+                if self.vertex_paint_world.0 != model {
+                    self.vertex_paint_world = (model, mesh.world(model).0);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Where the cursor ray meets the painted mesh, if it does.
+    fn vertex_paint_hit(&mut self) -> Option<(somnium_ecs::Entity, glam::Vec3)> {
+        let entity = self.vertex_paint_target().ok()?;
+        if !self.vertex_paint_prepare(entity) {
+            return None;
+        }
+        let (origin, dir) = self.cursor_ray()?;
+        let hit = self
+            .vertex_paint_mesh
+            .as_ref()?
+            .raycast(self.vertex_paint_world.0, origin, dir)?;
+        Some((entity, hit))
+    }
+
+    /// One dab under the cursor; `start` begins a stroke. False when the
+    /// cursor is not over the selected mesh, so the click falls through.
+    fn vertex_paint_dab(&mut self, start: bool) -> bool {
+        let Some((entity, hit)) = self.vertex_paint_hit() else {
+            return false;
+        };
+        let positions = &self.vertex_paint_world.1;
+        let mut colors = crate::vertex_paint::colors_of(&self.world, entity, positions.len());
+        if start {
+            self.vertex_paint_stroke = Some((
+                entity,
+                self.world
+                    .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                    .cloned(),
+            ));
+        }
+        if crate::vertex_paint::dab(&mut colors, positions, hit, &self.vertex_paint_brush) > 0 {
+            crate::vertex_paint::store(&mut self.world, entity, &colors);
+            self.scene_dirty = true;
+        }
+        true
+    }
+
+    fn end_vertex_paint_stroke(&mut self) {
+        let Some((entity, before)) = self.vertex_paint_stroke.take() else {
+            return;
+        };
+        if let Some(after) = self
+            .world
+            .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+            .cloned()
+            && before.as_ref() != Some(&after)
+        {
+            self.undo_stack
+                .push_silent(Box::new(crate::vertex_paint::VertexPaintCmd {
+                    entity,
+                    before,
+                    after,
+                }));
+        }
+    }
+
+    /// The brush ring and the mask preview, published to the renderer.
+    fn update_vertex_paint_cursor(&mut self) {
+        let mut ring = [0.0; 4];
+        if self.vertex_paint_active && !self.play_session_active {
+            if let Some(r) = self.renderer.as_mut() {
+                r.clear_gizmo();
+            }
+            if let Some((_, hit)) = self.vertex_paint_hit() {
+                ring = [hit.x, hit.y, hit.z, self.vertex_paint_brush.radius];
+            }
+        }
+        let preview = if self.vertex_paint_active && !self.play_session_active {
+            self.vertex_paint_preview
+        } else {
+            0
+        };
+        if let Some(r) = self.renderer.as_mut() {
+            r.vertex_paint.brush = ring;
+            r.vertex_paint.preview = preview;
+        }
+    }
+
+    fn handle_vertex_paint_event(&mut self, event: somnium_ui::VertexPaintEvent) {
+        use somnium_ui::VertexPaintEvent as E;
+        match event {
+            E::Toggle => {
+                self.end_vertex_paint_stroke();
+                self.vertex_paint_active = !self.vertex_paint_active;
+                if self.vertex_paint_active {
+                    self.terrain_edit_active = false;
+                    self.foliage_paint_active = false;
+                    if let Err(reason) = self.vertex_paint_target() {
+                        self.toast(reason);
+                    }
+                }
+                info!(
+                    "Vertex paint: {}",
+                    if self.vertex_paint_active { "ON" } else { "off" }
+                );
+            }
+            E::SetFlag(index, on) => match index {
+                0 => self.vertex_paint_brush.erase = on,
+                1..=4 => self.vertex_paint_brush.channels[usize::from(index - 1)] = on,
+                5 => self.vertex_paint_preview = u32::from(on),
+                _ => {}
+            },
+            E::SetBrush(index, value) => match index {
+                0 => self.vertex_paint_brush.radius = value.max(0.01),
+                1 => self.vertex_paint_brush.strength = value.clamp(0.0, 1.0),
+                2 => self.vertex_paint_brush.falloff = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+            E::Copy => {
+                let Ok(entity) = self.vertex_paint_target() else {
+                    return;
+                };
+                let count = self.vertex_paint_count(entity);
+                self.vertex_paint_clipboard =
+                    Some(crate::vertex_paint::colors_of(&self.world, entity, count));
+                self.toast("Vertex paint copied");
+            }
+            E::Fill | E::Clear | E::Paste | E::AutoWeather => self.vertex_paint_selection(event),
+        }
+    }
+
+    /// Vertex count of `entity`'s mesh as uploaded, 0 when unknown.
+    fn vertex_paint_count(&self, entity: somnium_ecs::Entity) -> usize {
+        self.world
+            .get::<MeshComponent>(entity)
+            .and_then(|m| self.renderer.as_ref()?.geometry.static_vertex_count(m.vertex_offset))
+            .map_or(0, |n| n as usize)
+    }
+
+    /// Fill, clear, paste or auto-weather every selected mesh, one undo step each.
+    fn vertex_paint_selection(&mut self, event: somnium_ui::VertexPaintEvent) {
+        use somnium_ui::VertexPaintEvent as E;
+        let entities: Vec<_> = self
+            .selection
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|e| self.world.get::<MeshComponent>(*e).is_some())
+            .collect();
+        if entities.is_empty() {
+            self.toast("Select one or more meshes first");
+            return;
+        }
+        let mut changed = 0;
+        for entity in entities {
+            let count = self.vertex_paint_count(entity);
+            if count == 0 {
+                continue;
+            }
+            let colors = crate::vertex_paint::colors_of(&self.world, entity, count);
+            let new = match event {
+                E::Fill => {
+                    let mut c = colors;
+                    let value = if self.vertex_paint_brush.erase { 0.0 } else { 1.0 };
+                    crate::vertex_paint::fill(&mut c, self.vertex_paint_brush.channels, value);
+                    c
+                }
+                E::Clear => vec![0; count],
+                E::Paste => match &self.vertex_paint_clipboard {
+                    Some(c) if c.len() == count => c.clone(),
+                    _ => {
+                        self.toast("Paste needs copied paint from a mesh with the same vertex count");
+                        continue;
+                    }
+                },
+                _ => {
+                    let (Some(r), Some(ctx)) = (self.renderer.as_ref(), self.render_ctx.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(mesh) = crate::vertex_paint::PaintMesh::read(&self.world, r, ctx, entity)
+                    else {
+                        continue;
+                    };
+                    let metal = self
+                        .world
+                        .get::<MaterialComponent>(entity)
+                        .and_then(|m| r.materials_pool.get(m.runtime_id))
+                        .is_some_and(|m| m.metallic > 0.5);
+                    let (positions, normals) = mesh.world(self.entity_model(entity));
+                    crate::vertex_paint::auto_weather(&colors, &positions, &normals, &mesh.indices, metal)
+                }
+            };
+            let before = self
+                .world
+                .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                .cloned();
+            crate::vertex_paint::store(&mut self.world, entity, &new);
+            if let Some(after) = self
+                .world
+                .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                .cloned()
+                && before.as_ref() != Some(&after)
+            {
+                self.undo_stack
+                    .push_silent(Box::new(crate::vertex_paint::VertexPaintCmd {
+                        entity,
+                        before,
+                        after,
+                    }));
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.scene_dirty = true;
+            self.toast(&format!("Vertex paint applied to {changed} mesh(es)"));
+        }
+    }
+
     fn cancel_persona_stroke(&mut self) {
         let Some(stroke) = self.terrain_stroke.take() else {
             return;
@@ -8312,6 +8663,7 @@ impl<G: GameApp> Engine<G> {
             if let Some(r) = self.renderer.as_mut() {
                 for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
+                        paint: 0,
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
                         vertex_offset: part.vertex_offset,
                         index_offset: part.index_offset,
@@ -11681,6 +12033,8 @@ impl<G: GameApp> Engine<G> {
                 self.end_terrain_stroke();
                 self.terrain_edit_active = false;
                 self.foliage_paint_active = false;
+                self.end_vertex_paint_stroke();
+                self.vertex_paint_active = false;
                 if let Some(r) = &mut self.renderer {
                     r.gizmo_mode = match mode {
                         1 => somnium_renderer::pass::gizmo::GizmoMode::Rotate,
@@ -11695,6 +12049,7 @@ impl<G: GameApp> Engine<G> {
                     self.terrain_edit_active = !self.terrain_edit_active;
                     if self.terrain_edit_active {
                         self.foliage_paint_active = false;
+                        self.vertex_paint_active = false;
                     }
                     info!(
                         "Terrain edit mode: {}",
@@ -11792,6 +12147,7 @@ impl<G: GameApp> Engine<G> {
                 // Sculpting and foliage painting both claim the left button.
                 if self.foliage_paint_active {
                     self.terrain_edit_active = false;
+                    self.vertex_paint_active = false;
                 }
                 info!(
                     "Foliage paint: {}",
@@ -11802,6 +12158,7 @@ impl<G: GameApp> Engine<G> {
                     }
                 );
             }
+            EditorEvent::VertexPaint(event) => self.handle_vertex_paint_event(event),
             EditorEvent::ToggleFoliageErase => {
                 self.foliage_erase = !self.foliage_erase;
             }

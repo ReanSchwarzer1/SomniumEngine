@@ -277,6 +277,7 @@ pub enum CommandAction {
     SetGizmoMode(u8),
     ToggleTerrainEdit,
     ToggleFoliagePaint,
+    ToggleVertexPaint,
     ToggleImmersiveViewport,
     OpenOutputLog,
     /// Open or close the References panel on whatever it last had.
@@ -1312,6 +1313,16 @@ fn declarations() -> Vec<Command> {
             Some(Chord::press(CommandKey::Function(8))),
             "Enter or leave foliage painting mode.",
             A::ToggleFoliagePaint,
+            TOOLBAR,
+            always
+        ),
+        command!(
+            "editor.vertex_paint.edit",
+            "Vertex Paint Mode",
+            "Tools",
+            Some(Chord::press(CommandKey::Function(7))),
+            "Paint dirt, rust, wetness and blood onto the selected mesh.",
+            A::ToggleVertexPaint,
             TOOLBAR,
             always
         ),

@@ -418,6 +418,7 @@ impl<G: GameApp> Engine<G> {
                     "setting",
                     "terrain_stroke",
                     "foliage_stroke",
+                    "vertex_paint",
                     "designer",
                     "script",
                     "editor",
@@ -446,6 +447,7 @@ impl<G: GameApp> Engine<G> {
                     "state_machine":{"owner":"native graph overlay","operations":["state_initial","state_add_transition","state_set_transition","state_remove_transition","state_undo","state_redo"],"guard":"expected_state_view"},
                     "timeline":{"owner":"retained TimelineSurface","operations":["add_group","add_track","add_media","move_media","resize_media","add_marker","move_marker","add_key","move_key","remove_track","select_channel","replace","scrub","undo","redo"],"guard":"expected_view"},
                     "terrain":{"actions":["terrain_stroke","foliage_stroke"],"owner":"renderer terrain buffers + native restore history","guards":["expected_revision","terrain_revision","bounded brush samples"]},
+                    "vertex_paint":{"ops":["get","stroke","fill","clear","generate","auto_weather","layers","preview"],"channels":["dirt|r","rust|g","wet|b","blood|a"],"rules":["ground","up","down","slope","cavity","edges","noise","streaks","all"],"layers":"per channel: material (.sommat path, asset id or null = built-in weathering), tiling (repeats per metre, world-projected), height_contrast, slope_min, slope_max, breakup, breakup_scale","owner":"somnium.VertexPaint on the entity; one undo step per request","guards":["expected_revision","bounded samples and layers"]},
                     "designer":{"tools":["navigation_bake","navigation_clear","behavior_edit","animation_rig","animation_reset","animation_reload","animation_events","animation_save_events","save_play","load_play"],"owner":"native designer handlers; bake completion in NavigationProfile status/pending_cells"},
                     "scripts":{"operations":["attach","detach","reorder","enabled","number","bool","reload"],"source":"validated Luau document publication and exact-byte undo"},
                     "materials":"material_open -> reflected native material draft -> material_save; native dirty/GPU path",
@@ -660,7 +662,7 @@ impl<G: GameApp> Engine<G> {
                 self.settings.set(schema.stable_id,field.id,value)?;self.apply_settings();
                 Ok(json!({"ok":true,"previous_value":previous,"value":params["value"]}))
             }
-            "terrain_stroke"|"foliage_stroke"|"designer"|"script"|"terrain_settings"|"foliage_settings"|"content"=> {
+            "terrain_stroke"|"foliage_stroke"|"vertex_paint"|"designer"|"script"|"terrain_settings"|"foliage_settings"|"content"=> {
                 let id=required(params,"request_id")?;
                 if let Some((old,receipt))=host.semantic_receipts.get(id){return if old==params{Ok(receipt.clone())}else{Err("request_id reused with different inputs".into())};}
                 let result=self.execute_specialized(host,params)?;

@@ -133,6 +133,13 @@ struct VirtualShadowParams {
 @group(1) @binding(26) var<storage, read> virtual_shadow_pages: array<u32>;
 @group(1) @binding(27) var<uniform> virtual_shadow: VirtualShadowParams;
 @group(1) @binding(28) var<uniform> grain_words: array<vec4<u32>, 1024>;
+// Vertex paint (`vertex_paint.rs`): word 0 = start of the per-instance handle
+// table (0 = nothing painted), word 1 = preview mode, words 2..5 = the editor
+// brush (centre, radius) as f32 bits, then per painted mesh a slot: a
+// `PAINT_SLOT_HEADER` of layer settings and one RGBA8 mask per vertex. A
+// channel with a layer material blends that material in; without one it is
+// the built-in weathering (R dirt, G rust, B wetness, A blood).
+@group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;
 
 /// Sun visibility through the cloud layer at a world position.
 ///
@@ -205,6 +212,314 @@ fn apply_wetness(surface: ptr<function, Surface>, porosity: f32) {
             (*surface).normal, vec3<f32>(0.0, 1.0, 0.0), puddle * wet_specular));
         (*surface).roughness = mix((*surface).roughness, 0.02, puddle * wet_specular);
     }
+}
+
+/// An orthonormal rotation that takes paint breakup noise off the world axes.
+const PAINT_ROT = mat3x3<f32>(
+    vec3<f32>(0.8, 0.36, -0.48),
+    vec3<f32>(-0.6, 0.48, -0.64),
+    vec3<f32>(0.0, 0.8, 0.6),
+);
+
+/// Words of layer settings at the start of a paint slot (`vertex_paint.rs`
+/// `SLOT_HEADER_WORDS`): four material ids, four tilings, four packed
+/// parameter words, four breakup-noise frequencies.
+const PAINT_SLOT_HEADER: u32 = 16u;
+const PAINT_NO_LAYER: u32 = 0xffffffffu;
+
+/// This instance's paint slot, or 0 when it is unpainted.
+fn vertex_paint_slot(instance_id: u32) -> u32 {
+    let table = vertex_paint[0];
+    if table == 0u {
+        return 0u;
+    }
+    return vertex_paint[table + instance_id];
+}
+
+/// The interpolated vertex-paint mask of this pixel's triangle.
+fn vertex_paint_mask(slot: u32, i0: u32, i1: u32, i2: u32, bary: vec3<f32>) -> vec4<f32> {
+    let base = slot + PAINT_SLOT_HEADER;
+    return unpack4x8unorm(vertex_paint[base + i0]) * bary.x
+        + unpack4x8unorm(vertex_paint[base + i1]) * bary.y
+        + unpack4x8unorm(vertex_paint[base + i2]) * bary.z;
+}
+
+/// One read of a painted layer's material.
+struct PaintLayer {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    occlusion: f32,
+    height: f32,
+}
+
+/// A layer material read on one world plane. `t_axis` and `b_axis` are the
+/// world directions the plane's U and its image-up run along, which is the
+/// tangent frame the normal map was authored in.
+fn paint_layer_plane(
+    m: Material,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    t_axis: vec3<f32>,
+    b_axis: vec3<f32>,
+    n: vec3<f32>,
+) -> PaintLayer {
+    var out: PaintLayer;
+    out.albedo = m.base_color.rgb;
+    if m.albedo_map >= 0 {
+        out.albedo *= textureSampleGrad(textures[m.albedo_map], default_sampler, uv, ddx, ddy).rgb;
+    }
+    out.roughness = max(m.roughness, 0.05);
+    out.metallic = m.metallic;
+    out.occlusion = 1.0;
+    if m.metallic_roughness_map >= 0 {
+        let arm = textureSampleGrad(textures[m.metallic_roughness_map], default_sampler, uv, ddx, ddy);
+        out.roughness = max(arm.g, 0.05);
+        out.metallic = arm.b;
+        // A packed AO/roughness/metal map: one read serves both slots.
+        if m.occlusion_map == m.metallic_roughness_map {
+            out.occlusion = arm.r;
+        }
+    }
+    if m.occlusion_map >= 0 && m.occlusion_map != m.metallic_roughness_map {
+        out.occlusion = textureSampleGrad(textures[m.occlusion_map], default_sampler, uv, ddx, ddy).r;
+    }
+    out.normal = n;
+    if m.normal_map >= 0 {
+        let t = textureSampleGrad(textures[m.normal_map], default_sampler, uv, ddx, ddy).xyz * 2.0 - 1.0;
+        out.normal = n * max(t.z, 0.05) + (t_axis * t.x + b_axis * t.y) * m.normal_scale;
+    }
+    // Height around the map's own mean, like the surface's (see `fs_main`).
+    // Without a height map the albedo stands in: mortar, cracks and soil are
+    // darker than what stands proud of them often enough to shape an edge.
+    out.height = 0.5;
+    if m.height_map >= 0 {
+        out.height += textureSampleGrad(textures[m.height_map], default_sampler, uv, ddx, ddy).r
+            - textureSampleLevel(textures[m.height_map], default_sampler, uv, 7.0).r;
+    } else if m.albedo_map >= 0 {
+        let mean = m.base_color.rgb * textureSampleLevel(textures[m.albedo_map], default_sampler, uv, 7.0).rgb;
+        out.height += dot(out.albedo - mean, vec3<f32>(0.5));
+    }
+    return out;
+}
+
+fn paint_layer_add(sum: ptr<function, PaintLayer>, s: PaintLayer, w: f32) {
+    (*sum).albedo += s.albedo * w;
+    (*sum).normal += s.normal * w;
+    (*sum).roughness += s.roughness * w;
+    (*sum).metallic += s.metallic * w;
+    (*sum).occlusion += s.occlusion * w;
+    (*sum).height += s.height * w;
+}
+
+/// A layer material projected in world space at `tiling` repeats per metre,
+/// so one material keeps one texel density on every mesh whatever its UVs.
+/// A flat wall or floor reads one plane; only a surface turned between axes
+/// reads a second or third (weights below 0.12 are dropped, not sampled).
+fn paint_layer(m: Material, tiling: f32, p: vec3<f32>, pdx: vec3<f32>, pdy: vec3<f32>, n: vec3<f32>) -> PaintLayer {
+    let an = abs(n);
+    var w = an * an;
+    w = w * w;
+    w = w / (w.x + w.y + w.z);
+    w = max(w - vec3<f32>(0.12), vec3<f32>(0.0));
+    w = w / (w.x + w.y + w.z);
+    var sum: PaintLayer;
+    sum.albedo = vec3<f32>(0.0);
+    sum.normal = vec3<f32>(0.0);
+    sum.roughness = 0.0;
+    sum.metallic = 0.0;
+    sum.occlusion = 0.0;
+    sum.height = 0.0;
+    // Image-up is +Y on walls, so stains and courses stay upright.
+    if w.y > 0.0 {
+        paint_layer_add(&sum, paint_layer_plane(m, p.xz * tiling, pdx.xz * tiling, pdy.xz * tiling,
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, -1.0), n), w.y);
+    }
+    if w.x > 0.0 {
+        let flip = vec2<f32>(tiling, -tiling);
+        paint_layer_add(&sum, paint_layer_plane(m, p.zy * flip, pdx.zy * flip, pdy.zy * flip,
+            vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), n), w.x);
+    }
+    if w.z > 0.0 {
+        let flip = vec2<f32>(tiling, -tiling);
+        paint_layer_add(&sum, paint_layer_plane(m, p.xy * flip, pdx.xy * flip, pdy.xy * flip,
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n), w.z);
+    }
+    sum.normal = normalize(sum.normal);
+    return sum;
+}
+
+/// How much of a layer shows where `cover` of it is painted, the surface
+/// under it stands `h_base` high and the layer `h_layer` (both 0..1).
+///
+/// The classic height blend: each side's height is offset by its share of the
+/// paint and the taller one wins within a band. At `contrast` 0 the band is
+/// as wide as the heights and this is a plain fade; toward 1 the heights
+/// decide, so half-painted mud lies in the joints of a cobble and leaves the
+/// stones proud, and the edge of a patch follows the texture instead of the
+/// mesh's vertices.
+fn paint_height_blend(cover: f32, h_base: f32, h_layer: f32, contrast: f32) -> f32 {
+    let depth = 1.0 - 0.94 * contrast;
+    let a = h_base * contrast + (1.0 - cover);
+    let b = h_layer * contrast + cover;
+    let top = max(a, b) - depth;
+    let wa = max(a - top, 0.0);
+    let wb = max(b - top, 0.0);
+    // Pinned at the ends: unpainted is none of it, fully painted all of it.
+    return max(wb / max(wa + wb, 1.0e-5) * smoothstep(0.0, 0.06, cover), smoothstep(0.94, 1.0, cover));
+}
+
+/// How much of a layer shows where its painted amount is `m` and the breakup
+/// noise is `n` (~0.2..0.8). Full paint covers everything; half paint leaves
+/// blotches where the noise is low, the way grime and rust really gather,
+/// instead of a smooth gradient that betrays the vertex spacing.
+fn paint_coverage(m: f32, n: f32) -> f32 {
+    return saturate((m * 1.25 - n) * 4.0);
+}
+
+/// Blend the painted layer materials over the surface, in channel order.
+///
+/// Each channel that has a material in its slot header is a full PBR layer:
+/// albedo, normal, roughness, metal, occlusion and height replace the
+/// surface's by the blend weight. The weight is the painted amount, limited
+/// to the layer's slope range, broken up by world-space noise where it is
+/// part-painted (so a low-poly wall's two rows of vertices still give ragged
+/// patches), then sharpened against the height maps. `height` carries the
+/// surface height from one layer to the next. Returns, per channel, whether
+/// it was a material layer; the rest are left to `apply_vertex_weathering`.
+fn apply_vertex_layers(
+    surface: ptr<function, Surface>,
+    slot: u32,
+    mask: vec4<f32>,
+    p: vec3<f32>,
+    pdx: vec3<f32>,
+    pdy: vec3<f32>,
+    geo_normal: vec3<f32>,
+    base_height: f32,
+) -> vec4<f32> {
+    var is_layer = vec4<f32>(0.0);
+    var height = base_height;
+    for (var c = 0u; c < 4u; c++) {
+        let material_id = vertex_paint[slot + c];
+        if material_id == PAINT_NO_LAYER {
+            continue;
+        }
+        is_layer[c] = 1.0;
+        let params = unpack4x8unorm(vertex_paint[slot + 8u + c]);
+        let slope_lo = params.y * 2.0 - 1.0;
+        let slope_hi = params.z * 2.0 - 1.0;
+        var cover = mask[c]
+            * smoothstep(slope_lo - 0.1, slope_lo + 0.05, geo_normal.y)
+            * (1.0 - smoothstep(slope_hi - 0.05, slope_hi + 0.1, geo_normal.y));
+        // The least cover at which the height blend can show any of this
+        // layer over a surface standing `height` high. In
+        // `paint_height_blend` the layer's side clears the band only when
+        // cover > contrast * (0.94 + h_base - h_layer) / 2, and a layer's
+        // mean-centred height stays under 1.15. Below that its maps need
+        // not be read at all, and most of a patchy mask is below it.
+        let floor_cover = max(0.004, 0.5 * params.x * (height - 0.21));
+        let spread = 4.0 * cover * (1.0 - cover) * params.w;
+        // The breakup noise tops out near 0.85: +0.84 * spread.
+        if cover + 0.84 * spread < floor_cover {
+            continue;
+        }
+        // Each layer gets its own noise, so two part-painted layers do not
+        // land in the same blotches.
+        let noise = weather_fbm(PAINT_ROT * p * bitcast<f32>(vertex_paint[slot + 12u + c])
+            + vec3<f32>(f32(c) * 19.7));
+        cover = saturate(cover + (noise - 0.5) * 2.4 * spread);
+        if cover < floor_cover {
+            continue;
+        }
+        let layer = paint_layer(materials[material_id], bitcast<f32>(vertex_paint[slot + 4u + c]),
+            p, pdx, pdy, geo_normal);
+        let w = paint_height_blend(cover, height, layer.height, params.x);
+        (*surface).albedo = mix((*surface).albedo, layer.albedo, w);
+        (*surface).normal = normalize(mix((*surface).normal, layer.normal, w));
+        (*surface).roughness = mix((*surface).roughness, layer.roughness, w);
+        (*surface).metallic = mix((*surface).metallic, layer.metallic, w);
+        // The layer's occlusion replaces the material's own, not GTAO's
+        // share of `occlusion`.
+        let occlusion = mix(micro_occlusion, layer.occlusion, w);
+        (*surface).occlusion = (*surface).occlusion / max(micro_occlusion, 0.05) * occlusion;
+        micro_occlusion = occlusion;
+        height = mix(height, layer.height, w);
+    }
+    return is_layer;
+}
+
+/// Layer the built-in painted weathering over the material, before `f0` is
+/// derived. `mask` has the channels that carry a layer material zeroed.
+///
+/// Values are measured albedos: soot and grime 0.06-0.12, settled dust
+/// ~0.2, iron oxide from
+/// orange (0.42, 0.17, 0.06) to dark scale (0.13, 0.06, 0.035), fresh blood
+/// (0.20, 0.01, 0.01) drying to (0.075, 0.018, 0.012). Wetness darkens the
+/// way `apply_wetness` does (Lekner & Dorf: the exponent rises with absorbed
+/// water) and smooths the microsurface toward a water film.
+fn apply_vertex_weathering(surface: ptr<function, Surface>, mask: vec4<f32>, p: vec3<f32>) {
+    if max(max(mask.x, mask.y), max(mask.z, mask.w)) < 0.004 {
+        return;
+    }
+    let broad = weather_fbm(p * 3.1);
+    let fine = weather_noise(p * 21.0);
+    // Coverage edges need noise off the value-noise lattice: sharpened, an
+    // axis-aligned octave turns into visible squares. Rotated fbm does not.
+    let speck = weather_fbm(PAINT_ROT * p * 7.0);
+
+    // Grime gathers in specks and smears, not clouds: part of its breakup is
+    // the fine noise, so a light coat reads as dirt rather than a stain.
+    let dirt = paint_coverage(mask.x, mix(broad, speck, 0.4));
+    if dirt > 0.0 {
+        // Dust settles pale on what faces up; grime and soot stay dark on
+        // walls and undersides.
+        let up = saturate((*surface).normal.y);
+        let grime = mix(vec3<f32>(0.085, 0.072, 0.056), vec3<f32>(0.24, 0.21, 0.17), up * 0.85)
+            * (0.8 + 0.4 * fine);
+        (*surface).albedo = mix((*surface).albedo, grime, dirt * 0.85);
+        (*surface).roughness = mix((*surface).roughness, 0.92, dirt);
+        (*surface).metallic = mix((*surface).metallic, 0.0, dirt);
+    }
+
+    let rust = paint_coverage(mask.y, mix(broad, speck, 0.45));
+    if rust > 0.0 {
+        let oxide = mix(vec3<f32>(0.42, 0.17, 0.06), vec3<f32>(0.13, 0.06, 0.035), fine);
+        (*surface).albedo = mix((*surface).albedo, oxide, rust);
+        (*surface).roughness = mix((*surface).roughness, 0.86, rust);
+        (*surface).metallic = mix((*surface).metallic, 0.0, rust);
+    }
+
+    let blood = paint_coverage(mask.w, mix(speck, broad, 0.3));
+    if blood > 0.0 {
+        let dried = smoothstep(0.35, 0.75, broad);
+        let stain = mix(vec3<f32>(0.20, 0.012, 0.01), vec3<f32>(0.075, 0.018, 0.012), dried);
+        (*surface).albedo = mix((*surface).albedo, stain, blood);
+        (*surface).roughness = mix((*surface).roughness, mix(0.22, 0.62, dried), blood);
+        (*surface).metallic = mix((*surface).metallic, 0.0, blood);
+    }
+
+    // Water wicks: no blotching, just the painted gradient.
+    let wet = saturate(mask.z);
+    if wet > 0.0 {
+        (*surface).albedo = pow(max((*surface).albedo, vec3<f32>(0.0)), vec3<f32>(1.0 + 0.8 * wet));
+        (*surface).roughness = clamp(mix((*surface).roughness, 0.07, wet * 0.9), 0.015, 1.0);
+    }
+}
+
+/// Editor preview of the raw mask: 1 = all channels (dirt brown, rust orange,
+/// wet blue, blood red), 2..5 = one channel as grey.
+fn vertex_paint_preview(mask: vec4<f32>, mode: u32) -> vec3<f32> {
+    if mode >= 2u && mode <= 5u {
+        return vec3<f32>(mask[mode - 2u]);
+    }
+    let base = vec3<f32>(0.06);
+    return base
+        + mask.x * vec3<f32>(0.45, 0.32, 0.18)
+        + mask.y * vec3<f32>(0.9, 0.42, 0.08)
+        + mask.z * vec3<f32>(0.1, 0.35, 0.9)
+        + mask.w * vec3<f32>(0.85, 0.02, 0.05);
 }
 
 /// Phase CONTROL-O: project this froxel's decals onto the surface.
@@ -456,16 +771,17 @@ fn parallax_uv(
     return mix(cur, prev, w);
 }
 
-/// Interior mapping, for a window whose colour map is the room behind it
-/// seen straight on (the Town's shop windows: an orthographic render of the
-/// back wall). The view ray carries on through the glass into a box
-/// `depth_m` deep whose mouth is the UV square. Where it meets the back wall
-/// the map is read there, so the room keeps its perspective from any angle,
-/// which a height-field march cannot do: at a room's depth it smears thin
-/// shelves into sliding stripes. Where the ray meets a side wall, the floor
-/// or the ceiling first, the wall takes the back wall's colour at that edge
-/// (blurred by the caller), darker toward the glass. Returns the UV to read
-/// and a brightness: 1 on the back wall, below 1 on the sides.
+/// Interior mapping, for a window whose colour map is the room behind it as
+/// seen through a pinhole `2 * depth_m` in front of the glass, framing the
+/// window exactly (the Town's shop windows, rendered in Blender). The view ray
+/// carries on through the glass into a box `depth_m` deep whose mouth is the
+/// UV square; wherever it meets the box (back wall, side walls, floor or
+/// ceiling) that point is projected back through the pinhole into the image,
+/// so every face of the room is the rendered room, in perspective, from any
+/// angle. (An orthographic back-wall image painted the box's other faces with
+/// its blurred edge colour: a band that slid up and down over the shelves as
+/// the camera moved.) Returns the UV to read and a brightness (1: the image
+/// carries the room's own light).
 fn interior_uv(
     uv: vec2<f32>,
     view_ws: vec3<f32>,
@@ -487,12 +803,11 @@ fn interior_uv(
     let wall = select(vec2<f32>(0.0), vec2<f32>(1.0), s > vec2<f32>(0.0));
     let t_side = select(vec2<f32>(1.0e9), (wall - uv) / s, abs(s) > vec2<f32>(1.0e-9));
     let t = min(t_back, min(t_side.x, t_side.y));
-    let hit = uv + s * t;
-    if t >= t_back {
-        return vec3<f32>(hit, 1.0);
-    }
-    let along = clamp(t * vn / depth_m, 0.0, 1.0); // 0 at the glass, 1 at the back wall
-    return vec3<f32>(clamp(hit, vec2<f32>(0.002), vec2<f32>(0.998)), mix(0.35, 0.8, along));
+    let hit = clamp(uv + s * t, vec2<f32>(0.0), vec2<f32>(1.0));
+    let z = clamp(t * vn, 0.0, depth_m); // metres behind the glass
+    let pinhole = 2.0 * depth_m;
+    let img = vec2<f32>(0.5) + (hit - vec2<f32>(0.5)) * (pinhole / (pinhole + z));
+    return vec3<f32>(clamp(img, vec2<f32>(0.001), vec2<f32>(0.999)), 1.0);
 }
 
 /// Perspective-correct barycentric at an NDC sample (Phase 25N).
@@ -1723,6 +2038,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv1 = vec2<f32>(v1.u, v1.v);
     let uv2 = vec2<f32>(v2.u, v2.v);
     var uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+    var paint_slot = 0u;
+    var paint_mask = vec4<f32>(0.0);
+    if material.terrain_index < 0 {
+        paint_slot = vertex_paint_slot(instance_id);
+        if paint_slot != 0u {
+            paint_mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary);
+        }
+    }
 
     // Phase 25N: analytic UV gradients. Implicit dpdx across a vis-buffer
     // 2×2 quad straddles unrelated triangles, so foliage mips jump per pixel.
@@ -1733,6 +2056,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // on every terrain pixel for a feature terrain does not use.
     var uv_ddx = vec2<f32>(0.0);
     var uv_ddy = vec2<f32>(0.0);
+    var paint_pos_ddx = vec3<f32>(0.0);
+    var paint_pos_ddy = vec3<f32>(0.0);
     let analytic_grad = (cluster_params.shading_mode & 8u) != 0u;
     if analytic_grad {
         let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
@@ -1740,6 +2065,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
         uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
         uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+        // World-position gradients for the world-projected paint layers,
+        // only where a layer can show.
+        if paint_slot != 0u {
+            let here = p0 * bary.x + p1 * bary.y + p2 * bary.z;
+            paint_pos_ddx = (p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here;
+            paint_pos_ddy = (p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here;
+        }
     }
 
     let normal_interp = normalize(
@@ -1899,12 +2231,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let room = interior_uv(uv, view_dir_early, geo_normal, dpdu, dpdv, -material.height_depth);
         uv = room.xy;
         interior_shade = room.z;
-        if room.z < 1.0 {
-            // A side wall is the back wall's edge colour, blurred: read at a
-            // coarse mip rather than smearing one column of texels along it.
-            uv_ddx = vec2<f32>(0.25, 0.0);
-            uv_ddy = vec2<f32>(0.0, 0.25);
-        }
     } else if material.height_map >= 0 && material.height_depth > 0.0 && abs(tbn_det) > 1.0e-12
         && distance(hit_point, view.camera_pos) < 30.0 {
         let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
@@ -2276,6 +2602,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
+    // Vertex paint goes under the decals: a decal is placed over a surface,
+    // and the surface is what got dirty.
+    if material.terrain_index < 0 {
+        // The paint brush cursor: where the brush sphere cuts a surface.
+        let ring_radius = bitcast<f32>(vertex_paint[5]);
+        if ring_radius > 0.0 {
+            let centre = vec3<f32>(bitcast<f32>(vertex_paint[2]), bitcast<f32>(vertex_paint[3]), bitcast<f32>(vertex_paint[4]));
+            if abs(distance(hit_point, centre) - ring_radius) < max(ring_radius * 0.035, 0.006) {
+                return vec4<f32>(10.0, 7.0, 1.0, 1.0);
+            }
+        }
+        if vertex_paint[1] != 0u {
+            return vec4<f32>(vertex_paint_preview(paint_mask, vertex_paint[1]), 1.0);
+        }
+        if paint_slot != 0u {
+            if !analytic_grad {
+                paint_pos_ddx = dpdx(hit_point);
+                paint_pos_ddy = dpdy(hit_point);
+            }
+            // What the layers height-blend against: the material's own
+            // relief where it has a height map, else its brightness, in both
+            // cases as the difference from its local mean (a coarse mip).
+            // The blend compares heights across materials, and a map that
+            // sits near white all over (a flat floor) would otherwise out-top
+            // every layer until it was painted solid.
+            var base_height = 0.5;
+            if analytic_grad {
+                if material.height_map >= 0 {
+                    base_height += textureSampleGrad(
+                        textures[material.height_map], default_sampler, uv, uv_ddx, uv_ddy).r
+                        - textureSampleLevel(textures[material.height_map], default_sampler, uv, 7.0).r;
+                } else if material.albedo_map >= 0 {
+                    let mean = material.base_color.rgb
+                        * textureSampleLevel(textures[material.albedo_map], default_sampler, uv, 7.0).rgb;
+                    base_height += dot(surface.albedo - mean, vec3<f32>(0.5));
+                }
+            }
+            let layered = apply_vertex_layers(&surface, paint_slot, paint_mask, hit_point,
+                paint_pos_ddx, paint_pos_ddy, geo_normal, base_height);
+            apply_vertex_weathering(&surface, paint_mask * (vec4<f32>(1.0) - layered), hit_point);
+        }
+    }
     // CONTROL-O. Before `f0` is derived, because a decal changes base colour
     // and metallic and `f0` is a function of both — deriving it first and
     // then painting over the albedo would leave a decal with the surface's
@@ -2748,13 +3116,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     if dist_t > ll.range { continue; }
                     let Lt = to_l / max(dist_t, 1e-4);
                     if dot(surface.normal, Lt) <= 0.0 { continue; } // zero BRDF: no shadow ray
-                    let atten_t = smooth_distance_attenuation(dist_t, ll.range, ll.radius)
-                        * practical_visibility(hit_point, shadow_normal, q);
                     let r = max(ll.radius, 0.01);
                     let angular = atan(r / max(dist_t, 1e-3));
                     let facing = max(length(cross(Lt, axis)), 0.15);
-                    local_light_contrib += evaluate_brdf_area(surface, Lt, angular)
-                        * ll.color * atten_t * facing;
+                    let lit_t = evaluate_brdf_area(surface, Lt, angular) * ll.color * facing
+                        * smooth_distance_attenuation(dist_t, ll.range, ll.radius);
+                    local_light_contrib += lit_t * practical_visibility(hit_point, shadow_normal, q);
                     continue;
                 }
 
@@ -2774,9 +3141,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let area = 4.0 * half_x * half_y;
                     let eq_r = sqrt(area / 3.14159265);
                     let angular = atan(eq_r / max(dist, 1e-3));
-                    local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
-                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
-                        * practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                    let lit_q = evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+                    local_light_contrib += lit_q * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 3u {
@@ -2789,9 +3156,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     // Match the area of the inscribed eight-sided integration
                     // polygon so the authored flux stays constant with radius.
                     let area = 2.82842712 * r * r;
-                    local_light_contrib += evaluate_brdf_area_lobe(surface, L, angular)
-                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range)
-                        * practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                    let lit_d = evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+                    local_light_contrib += lit_d * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 1u {
@@ -2809,8 +3176,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // not pay for a shadow ray. With dozens of practicals in reach
                 // (the lit interiors) those rays were most of the shading pass.
                 if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 { continue; }
-                atten_val *= practical_visibility(hit_point, shadow_normal, ll.position_ws);
-                local_light_contrib += evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                local_light_contrib += lit_p * practical_visibility(hit_point, shadow_normal, ll.position_ws);
             }
         }
 

@@ -60,6 +60,9 @@ pub struct DrawCommand {
     /// where the artist wants the cut nearer than "too small to see" would put
     /// it. Non-casters remain visible to GI and reflection rays.
     pub casts_shadow: bool,
+    /// Vertex-paint handle from `SomniumRenderer::set_vertex_paint`, or 0 for
+    /// an unpainted draw. Only the shading pass reads it.
+    pub paint: u32,
 }
 
 // ─── Visibility-buffer packing limits (Phase 15C) ────────────────────────────

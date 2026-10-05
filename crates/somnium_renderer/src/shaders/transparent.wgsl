@@ -6,10 +6,11 @@
 // has already filled the HDR target, depth-tested against the opaque depth but
 // NOT writing depth, sorted back-to-front on the CPU.
 //
-// Shading is deliberately lighter than `shading.wgsl`: the sun with its shadow
-// plus an IBL reflection. Glass reads mostly as a reflection and a tint, and
-// skipping the clustered-light loop keeps this pass cheap for what is usually
-// a small amount of screen area.
+// Shading is lighter than `shading.wgsl` but no longer blind to the scene:
+// the sun, the clustered local lights (unshadowed), an IBL reflection, the
+// material's normal map, and for the sorted path the scene behind the
+// surface, refracted. Glass indoors is lit by lamps, not by a sun, and its
+// cracks and dirt read only when those lamps catch them.
 
 // wgpu 30 requires `binding_array<...>` to be behind an explicit enable
 // directive; wgpu 29 accepted it without one. Found by MORROWIND-C, because
@@ -61,8 +62,8 @@ struct Material {
     emissive_map: i32,
     // Phase 25A-2: slot in the terrain-material array, or -1.
     terrain_index: i32,
-    _pad1: f32,
-    _pad2: f32,
+    porosity: f32,
+    normal_scale: f32,
     // Parallax-occlusion height map and relief depth (metres); see `pool.rs`.
     height_map: i32,
     height_depth: f32,
@@ -106,9 +107,46 @@ struct DirectionalLight {
 @group(0) @binding(5) var<storage, read> materials: array<Material>;
 @group(0) @binding(6) var<storage, read> light:     DirectionalLight;
 
+// The clustered local lights, as `global_pool.wgsl` declares them.
+struct GpuLocalLight {
+    position_ws: vec3<f32>,
+    range: f32,
+    color: vec3<f32>,
+    light_type: u32,
+    direction_ws: vec3<f32>,
+    spot_cos_outer: f32,
+    spot_cos_inner: f32,
+    radius: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+struct ClusterOffset {
+    offset: u32,
+    count: u32,
+}
+
+struct ClusterParams {
+    grid_width: u32,
+    grid_height: u32,
+    num_slices: u32,
+    tile_size: u32,
+    near: f32,
+    far: f32,
+    shading_mode: u32,
+    num_local_lights: u32,
+}
+
+@group(0) @binding(7) var<storage, read> local_lights: array<GpuLocalLight>;
+@group(0) @binding(8) var<storage, read> light_index_list: array<u32>;
+@group(0) @binding(9) var<storage, read> cluster_offsets: array<ClusterOffset>;
+@group(0) @binding(10) var<storage, read> cluster_params: ClusterParams;
+
 @group(1) @binding(0) var tex_sampler: sampler;
 @group(1) @binding(1) var env_cube:    texture_cube<f32>;
 @group(1) @binding(2) var env_sampler: sampler;
+// The opaque scene as it stood before this pass, for refraction.
+@group(1) @binding(3) var scene_color: texture_2d<f32>;
 
 const ENV_MAX_MIP: f32 = 5.0;
 
@@ -145,14 +183,52 @@ fn vs_main(
     return out;
 }
 
-/// Shade one blended fragment. Straight (non-premultiplied) alpha.
+/// What one blended fragment adds and what it lets through.
+struct Glass {
+    /// Light leaving the surface toward the eye: lit dirt and cracks (already
+    /// weighted by their coverage) plus every reflection. Premultiplied.
+    surface: vec3<f32>,
+    /// Fraction of the scene behind that still shows, per channel.
+    through: vec3<f32>,
+    /// Shading normal, for the refraction lookup.
+    normal: vec3<f32>,
+    /// How far the normal map bends it from the mesh's own, 0..1: flat glass
+    /// does not visibly refract, a crack or a ripple does.
+    bend: f32,
+}
+
+/// GGX normal distribution, with the lobe floored so a point light on
+/// polished glass is a small highlight rather than a single aliased pixel.
+fn glass_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * d * d);
+}
+
+/// The same exponential depth slicing the light grid was built with
+/// (`shading.wgsl` `compute_depth_slice`).
+fn glass_depth_slice(view_depth: f32) -> u32 {
+    let near = cluster_params.near;
+    let far = cluster_params.far;
+    if view_depth <= near { return 0u; }
+    if view_depth >= far { return cluster_params.num_slices - 1u; }
+    let slice = u32(f32(cluster_params.num_slices) * log(view_depth / near) / log(far / near));
+    return min(slice, cluster_params.num_slices - 1u);
+}
+
+/// Shade one blended fragment.
 ///
 /// MORROWIND-AC split this out of `fs_main` so the sorted path and the
 /// weighted-blended path shade identically. Any difference between the two
 /// images is then a difference in *compositing*, which is the thing being
 /// compared — not a difference in lighting, which would make the A/B
 /// meaningless.
-fn shade(in: VOut, front: bool) -> vec4<f32> {
+///
+/// Alpha is coverage: how much of the pixel is something opaque on the glass
+/// (dirt, frost, the crushed face of a crack). That part is lit as a diffuse
+/// surface. The rest is glass, which reflects by Fresnel and transmits the
+/// remainder tinted by the base colour.
+fn shade(in: VOut, front: bool) -> Glass {
     let material = materials[in.material_id];
 
     var albedo = material.base_color.rgb;
@@ -173,38 +249,147 @@ fn shade(in: VOut, front: bool) -> vec4<f32> {
 
     // Blended materials are usually double-sided and thin (window glass), so
     // flip the normal on back faces or the far side lights inside-out.
-    var n = normalize(in.normal);
+    var geo_n = normalize(in.normal);
     if !front {
-        n = -n;
+        geo_n = -geo_n;
+    }
+    var n = geo_n;
+    var bend = 0.0;
+    if material.normal_map >= 0 {
+        // Tangent frame from screen derivatives (this is a forward pass, so
+        // they are well defined). A degenerate UV map keeps the mesh normal.
+        let dp1 = dpdx(in.world_pos);
+        let dp2 = dpdy(in.world_pos);
+        let duv1 = dpdx(in.uv);
+        let duv2 = dpdy(in.uv);
+        let det = duv1.x * duv2.y - duv2.x * duv1.y;
+        let t_raw = (dp1 * duv2.y - dp2 * duv1.y) * sign(det);
+        let t_ortho = t_raw - geo_n * dot(t_raw, geo_n);
+        if abs(det) > 1.0e-12 && dot(t_ortho, t_ortho) > 1.0e-16 {
+            let t = normalize(t_ortho);
+            let b = cross(geo_n, t) * sign(det);
+            let tn = textureSample(textures[material.normal_map], tex_sampler, in.uv).xyz * 2.0 - 1.0;
+            n = normalize(t * tn.x * material.normal_scale + b * tn.y * material.normal_scale + geo_n * tn.z);
+            bend = saturate(length(n - geo_n) * 2.0);
+        }
     }
     let v = normalize(view.camera_pos - in.world_pos);
+    let n_dot_v = max(dot(n, v), 1.0e-3);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    // Fresnel: glass turns mirror-like at grazing angles, and its silhouette
+    // becomes more opaque, which is what makes it read as a surface at all.
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
+    let alpha_ggx = max(roughness * roughness, 0.004);
+
+    var diffuse = vec3<f32>(0.0);
+    var specular = vec3<f32>(0.0);
 
     // Direct sun, no shadow lookup: the shadow atlas is bound to the shading
     // pass's group and glass rarely reads as shadowed anyway.
-    let l = normalize(light.direction);
-    let n_dot_l = max(dot(n, l), 0.0);
-    let h = normalize(v + l);
-    let spec = pow(max(dot(n, h), 0.0), 64.0);
-    let direct = (albedo * n_dot_l + vec3<f32>(spec) * 0.6) * light.color;
+    let sun = normalize(light.direction);
+    let sun_n_dot_l = max(dot(n, sun), 0.0);
+    if sun_n_dot_l > 0.0 {
+        let h = normalize(v + sun);
+        diffuse += light.color * sun_n_dot_l / 3.14159265;
+        specular += light.color * sun_n_dot_l
+            * min(glass_ggx(max(dot(n, h), 0.0), max(alpha_ggx, 0.02)) * 0.25, 40.0);
+    }
 
-    // Environment reflection — this is most of what sells glass.
+    // The lamps. Unshadowed: a pane is small and its occluders are rarely
+    // between it and the fixture that lights the room it is in.
+    if cluster_params.num_local_lights > 0u {
+        let view_depth = max(-(view.view * vec4<f32>(in.world_pos, 1.0)).z, 0.0);
+        let tile = vec2<u32>(in.clip.xy) / vec2(cluster_params.tile_size);
+        let froxel = min(tile.x, cluster_params.grid_width - 1u)
+            + min(tile.y, cluster_params.grid_height - 1u) * cluster_params.grid_width
+            + glass_depth_slice(view_depth) * cluster_params.grid_width * cluster_params.grid_height;
+        let cluster = cluster_offsets[froxel];
+        for (var i = 0u; i < cluster.count; i++) {
+            let ll = local_lights[light_index_list[cluster.offset + i]];
+            var to_light = ll.position_ws - in.world_pos;
+            // The emitter's size as seen from here widens the highlight.
+            var size = max(ll.radius, 0.02);
+            if ll.light_type == 4u {
+                // A tube: the nearest point of its axis.
+                let axis = normalize(ll.direction_ws);
+                let along = clamp(dot(in.world_pos - ll.position_ws, axis), -ll._pad1, ll._pad1);
+                to_light = ll.position_ws + axis * along - in.world_pos;
+            } else if ll.light_type == 2u {
+                size = sqrt(max(ll._pad1 * ll._pad2, 0.0025));
+            }
+            let dist = length(to_light);
+            if dist > ll.range || dist < 1.0e-4 {
+                continue;
+            }
+            let l = to_light / dist;
+            let ratio = dist / ll.range;
+            let window = saturate(1.0 - ratio * ratio * ratio * ratio);
+            var atten = window * window / max(dist * dist, 0.0064);
+            if ll.light_type == 1u {
+                atten *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, dot(-l, normalize(ll.direction_ws)));
+            } else if ll.light_type == 2u || ll.light_type == 3u {
+                // Panels and discs emit from one face.
+                atten *= saturate(dot(-l, normalize(ll.direction_ws)) * 4.0);
+            }
+            let n_dot_l = dot(n, l);
+            if n_dot_l <= 0.0 || atten <= 0.0 {
+                continue;
+            }
+            let h = normalize(v + l);
+            let lobe = clamp(alpha_ggx + size / (2.0 * dist), 0.0, 1.0);
+            diffuse += ll.color * atten * n_dot_l / 3.14159265;
+            // Energy kept when the lobe is widened for the emitter's size.
+            let widen = (alpha_ggx * alpha_ggx) / (lobe * lobe);
+            specular += ll.color * atten * n_dot_l
+                * min(glass_ggx(max(dot(n, h), 0.0), lobe) * widen * 0.25, 40.0);
+        }
+    }
+
+    // Environment: a mirror direction for the glass, the blurriest mip as the
+    // ambient that lights whatever sits on it.
     let r = reflect(-v, n);
-    let env = textureSampleLevel(env_cube, env_sampler, r, roughness * ENV_MAX_MIP).rgb;
+    let env = textureSampleLevel(env_cube, env_sampler, r, roughness * ENV_MAX_MIP).rgb * light.ibl_intensity;
+    diffuse += textureSampleLevel(env_cube, env_sampler, n, ENV_MAX_MIP).rgb * light.ibl_intensity;
 
-    // Fresnel: glass turns mirror-like at grazing angles, and its silhouette
-    // becomes more opaque, which is what makes it read as a surface at all.
-    let n_dot_v = max(dot(n, v), 0.0);
-    let fresnel = 0.04 + 0.96 * pow(1.0 - n_dot_v, 5.0);
-
-    let color = direct + (env * light.ibl_intensity) * (f0 + vec3<f32>(fresnel));
-    let out_alpha = clamp(alpha + fresnel * (1.0 - alpha), 0.0, 1.0);
-    return vec4<f32>(color, out_alpha);
+    var out: Glass;
+    out.surface = albedo * (1.0 - metallic) * diffuse * alpha + (env + specular) * fresnel;
+    // Clear glass transmits what it does not reflect, tinted; coverage blocks.
+    let tint = mix(vec3<f32>(1.0), material.base_color.rgb, 0.5);
+    out.through = (vec3<f32>(1.0) - fresnel) * (1.0 - alpha) * tint;
+    out.normal = n;
+    out.bend = bend;
+    return out;
 }
 
+/// The sorted path: the scene behind the surface is read from the copy taken
+/// before this pass, so glass whose normal map bends its normal refracts
+/// what is behind it. The pipeline's alpha blend then only has to keep the
+/// unrefracted share of the destination.
 @fragment
 fn fs_main(in: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return shade(in, front);
+    let g = shade(in, front);
+    let through = dot(g.through, vec3<f32>(0.3333));
+    if g.bend <= 0.0 {
+        // Flat glass: let the blend show the destination itself, which keeps
+        // panes behind this one (drawn earlier in the sort) visible.
+        let a = 1.0 - through;
+        return vec4<f32>(g.surface / max(a, 1.0e-3), a);
+    }
+    // Thin-slab refraction: the ray bends toward the normal on entry and
+    // meets the scene a little to the side of where it was heading.
+    let v = normalize(view.camera_pos - in.world_pos);
+    let bent = refract(-v, g.normal, 1.0 / 1.5);
+    let exit = view.view_proj * vec4<f32>(in.world_pos + (bent + v) * 0.12, 1.0);
+    let straight = view.view_proj * vec4<f32>(in.world_pos, 1.0);
+    let dims = vec2<f32>(textureDimensions(scene_color));
+    let shift = (exit.xy / exit.w - straight.xy / straight.w) * vec2<f32>(0.5, -0.5);
+    let uv = clamp(in.clip.xy / dims + shift, vec2<f32>(0.001), vec2<f32>(0.999));
+    let behind = textureSampleLevel(scene_color, tex_sampler, uv, 0.0).rgb;
+    // Refracted where the normal bends, plain blending where it does not.
+    let refracted = g.surface + behind * g.through;
+    let a = mix(1.0 - through, 1.0, g.bend);
+    let rgb = mix(g.surface, refracted, g.bend);
+    return vec4<f32>(rgb / max(a, 1.0e-3), a);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -241,12 +426,14 @@ fn oit_weight(z: f32, a: f32) -> f32 {
 
 @fragment
 fn fs_oit(in: VOut, @builtin(front_facing) front: bool) -> OitOut {
-    let c = shade(in, front);
+    let g = shade(in, front);
+    // No refraction here: order independence has no "scene behind" to read.
+    let a = 1.0 - dot(g.through, vec3<f32>(0.3333));
     // `in.clip.z` is the post-projection depth wgpu hands the fragment, already
     // in 0..1, so no view-space reconstruction is needed here.
-    let w = oit_weight(in.clip.z, c.a);
+    let w = oit_weight(in.clip.z, a);
     var out: OitOut;
-    out.accum = vec4<f32>(c.rgb * c.a, c.a) * w;
-    out.reveal = c.a;
+    out.accum = vec4<f32>(g.surface, a) * w;
+    out.reveal = a;
     return out;
 }

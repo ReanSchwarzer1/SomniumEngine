@@ -156,6 +156,7 @@ impl GeometryPool {
             usage: geometry_usage(
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::VERTEX,
                 ray_query_enabled,
             ),
@@ -168,6 +169,7 @@ impl GeometryPool {
             usage: geometry_usage(
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::INDEX,
                 ray_query_enabled,
             ),
@@ -591,6 +593,11 @@ impl GeometryPool {
     }
 
     /// Local-space bounds of the mesh at `vertex_offset`, if it is known.
+    /// Vertex count of the static mesh uploaded at `vertex_offset`.
+    pub fn static_vertex_count(&self, vertex_offset: u32) -> Option<u32> {
+        self.static_meshes.get(&vertex_offset).map(|s| s.vertex_count)
+    }
+
     pub fn mesh_aabb(&self, vertex_offset: u32) -> Option<([f32; 3], [f32; 3])> {
         self.aabbs.get(&vertex_offset).copied()
     }
