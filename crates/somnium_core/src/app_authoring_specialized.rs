@@ -355,7 +355,7 @@ impl<G: GameApp> Engine<G> {
     /// - `generate`: `layers` [{channel, rule, amount, blend, ..rule params}];
     /// - `auto_weather`: the editor button (`metal` overrides the material);
     /// - `layers`: `layers` [{channel, material, tiling, height_contrast,
-    ///   slope_min, slope_max, breakup, breakup_scale}] sets what each
+    ///   slope_min, slope_max, breakup, breakup_scale, stain, detile}] sets what each
     ///   channel paints. `material` is a content-relative `.sommat` path or
     ///   asset id, or null for the built-in weathering; omitted keys keep
     ///   their value;
@@ -446,6 +446,8 @@ impl<G: GameApp> Engine<G> {
                 set("slope_max", &mut after.slope_max[c], -1.0, 1.0)?;
                 set("breakup", &mut after.breakup[c], 0.0, 1.0)?;
                 set("breakup_scale", &mut after.breakup_scale[c], 0.05, 50.0)?;
+                set("stain", &mut after.stain[c], 0.0, 1.0)?;
+                set("detile", &mut after.detile[c], 0.0, 1.0)?;
             }
             let changed = before.as_ref() != Some(&after);
             if changed {
@@ -499,6 +501,8 @@ impl<G: GameApp> Engine<G> {
                             "slope_max": paint.slope_max[i],
                             "breakup": paint.breakup[i],
                             "breakup_scale": paint.breakup_scale[i],
+                            "stain": paint.stain[i],
+                            "detile": paint.detile[i],
                         })
                     })
                     .collect();

@@ -25,7 +25,7 @@ use std::collections::HashMap;
 pub const HEADER_WORDS: u32 = 6;
 /// Words of layer settings at the start of every slot. `shading.wgsl` reads
 /// the same number as `PAINT_SLOT_HEADER`.
-pub const SLOT_HEADER_WORDS: u32 = 16;
+pub const SLOT_HEADER_WORDS: u32 = 20;
 /// "This channel has no layer material": the built-in weathering applies.
 pub const NO_LAYER: u32 = u32::MAX;
 
@@ -47,6 +47,13 @@ pub struct PaintLayers {
     pub breakup: [f32; 4],
     /// Size of that noise in metres per blotch.
     pub breakup_scale: [f32; 4],
+    /// 0 replaces the surface with the layer; 1 only stains it (the surface
+    /// keeps its own colour pattern, normal and relief).
+    pub stain: [f32; 4],
+    /// Above 0.5 the layer's maps are read twice at noise-picked offsets and
+    /// blended, which hides tiling in organic textures. Off for anything with
+    /// courses or joints.
+    pub detile: [f32; 4],
 }
 
 impl Default for PaintLayers {
@@ -59,13 +66,16 @@ impl Default for PaintLayers {
             slope_max: [1.0; 4],
             breakup: [0.5; 4],
             breakup_scale: [1.5; 4],
+            stain: [0.0; 4],
+            detile: [0.0; 4],
         }
     }
 }
 
 impl PaintLayers {
     /// The slot header: material ids, tilings, packed parameters (contrast,
-    /// slope min, slope max, breakup as bytes), noise frequencies.
+    /// slope min, slope max, breakup as bytes), noise frequencies, and a
+    /// second packed word (stain, de-tile).
     #[must_use]
     pub fn words(&self) -> [u32; SLOT_HEADER_WORDS as usize] {
         let byte = |v: f32| u32::from((v.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -78,6 +88,7 @@ impl PaintLayers {
                 | (byte(self.slope_max[i] * 0.5 + 0.5) << 16)
                 | (byte(self.breakup[i]) << 24);
             out[12 + i] = (1.0 / self.breakup_scale[i].max(0.01)).to_bits();
+            out[16 + i] = byte(self.stain[i]) | (byte(self.detile[i]) << 8);
         }
         out
     }
@@ -242,6 +253,8 @@ mod tests {
             slope_max: [1.0; 4],
             breakup: [1.0, 0.5, 0.5, 0.0],
             breakup_scale: [2.0, 1.5, 1.5, 0.5],
+            stain: [0.0, 1.0, 0.0, 0.0],
+            detile: [1.0, 0.0, 0.0, 0.0],
         };
         let w = layers.words();
         assert_eq!((w[0], w[1], w[3]), (7, NO_LAYER, 3));
@@ -250,6 +263,7 @@ mod tests {
         assert_eq!(w[8], 255 | (128 << 8) | (255 << 16) | (255 << 24));
         assert_eq!(w[11] & 255, 0);
         assert_eq!(f32::from_bits(w[12]), 0.5, "noise frequency is 1 / blotch size");
+        assert_eq!((w[16], w[17]), (255 << 8, 255), "de-tile in byte 1, stain in byte 0");
     }
 
     #[test]

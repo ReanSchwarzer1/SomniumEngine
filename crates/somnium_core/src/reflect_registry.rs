@@ -681,6 +681,10 @@ pub fn component_registry() -> TypeRegistry {
                 doc: "Per layer: how far world-space noise breaks part-painted areas into patches. 0 follows the painted gradient exactly." },
             breakup_scale { group: "Layers", min: 0.05, max: 50.0,
                 doc: "Per layer: size of the breakup patches in metres." },
+            stain { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 0 replaces the surface with the layer material; 1 only stains it, keeping the surface's own pattern, normal and relief (grime on wood grain, soot on paint)." },
+            detile { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 1 hides the layer texture's repetition by blending two offset reads. For organic textures (mould, dirt, rust, moss); leave 0 for bricks, tiles and setts." },
         }
     });
     registry.register(editor_flags_schema());

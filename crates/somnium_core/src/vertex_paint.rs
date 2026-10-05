@@ -60,6 +60,12 @@ pub struct VertexPaintComponent {
     pub breakup: [f32; 4],
     /// Per layer: size of those patches in metres.
     pub breakup_scale: [f32; 4],
+    /// Per layer: 0 replaces the surface with the layer material; 1 only
+    /// stains it, keeping the surface's own colour pattern and relief.
+    pub stain: [f32; 4],
+    /// Per layer: above 0.5, hide the layer texture's tiling (organic
+    /// textures only; it ghosts courses and joints).
+    pub detile: [f32; 4],
 }
 
 impl Component for VertexPaintComponent {}
@@ -80,6 +86,8 @@ impl Default for VertexPaintComponent {
             slope_max: layers.slope_max,
             breakup: layers.breakup,
             breakup_scale: layers.breakup_scale,
+            stain: layers.stain,
+            detile: layers.detile,
         }
     }
 }
@@ -120,6 +128,8 @@ impl VertexPaintComponent {
                 slope_max: self.slope_max,
                 breakup: self.breakup,
                 breakup_scale: self.breakup_scale,
+                stain: self.stain,
+                detile: self.detile,
             },
             resolved,
         )

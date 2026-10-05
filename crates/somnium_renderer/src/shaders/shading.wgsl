@@ -223,8 +223,9 @@ const PAINT_ROT = mat3x3<f32>(
 
 /// Words of layer settings at the start of a paint slot (`vertex_paint.rs`
 /// `SLOT_HEADER_WORDS`): four material ids, four tilings, four packed
-/// parameter words, four breakup-noise frequencies.
-const PAINT_SLOT_HEADER: u32 = 16u;
+/// parameter words, four breakup-noise frequencies, four more packed words
+/// (stain, de-tile).
+const PAINT_SLOT_HEADER: u32 = 20u;
 const PAINT_NO_LAYER: u32 = 0xffffffffu;
 
 /// This instance's paint slot, or 0 when it is unpainted.
@@ -257,6 +258,11 @@ struct PaintLayer {
 /// A layer material read on one world plane. `t_axis` and `b_axis` are the
 /// world directions the plane's U and its image-up run along, which is the
 /// tangent frame the normal map was authored in.
+///
+/// `detiled` reads every map twice at noise-picked offsets and blends them
+/// (`detile_uv`), so an organic texture's blotches stop landing on a lattice
+/// across a long wall. It is per layer because it is wrong for anything with
+/// courses or joints: two offsets of a brick bond ghost through each other.
 fn paint_layer_plane(
     m: Material,
     uv: vec2<f32>,
@@ -265,17 +271,27 @@ fn paint_layer_plane(
     t_axis: vec3<f32>,
     b_axis: vec3<f32>,
     n: vec3<f32>,
+    detiled: bool,
 ) -> PaintLayer {
     var out: PaintLayer;
+    var dt = detile_uv(uv);
     out.albedo = m.base_color.rgb;
     if m.albedo_map >= 0 {
-        out.albedo *= textureSampleGrad(textures[m.albedo_map], default_sampler, uv, ddx, ddy).rgb;
+        if detiled {
+            let a = textureSampleGrad(textures[m.albedo_map], default_sampler, dt.a, ddx, ddy).rgb;
+            let b = textureSampleGrad(textures[m.albedo_map], default_sampler, dt.b, ddx, ddy).rgb;
+            // The darker read wins the seam, as for a de-tiled base material.
+            dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
+            out.albedo *= mix(a, b, dt.t);
+        } else {
+            out.albedo *= textureSampleGrad(textures[m.albedo_map], default_sampler, uv, ddx, ddy).rgb;
+        }
     }
     out.roughness = max(m.roughness, 0.05);
     out.metallic = m.metallic;
     out.occlusion = 1.0;
     if m.metallic_roughness_map >= 0 {
-        let arm = textureSampleGrad(textures[m.metallic_roughness_map], default_sampler, uv, ddx, ddy);
+        let arm = sample_material_map(m.metallic_roughness_map, uv, dt, detiled, ddx, ddy, true);
         out.roughness = max(arm.g, 0.05);
         out.metallic = arm.b;
         // A packed AO/roughness/metal map: one read serves both slots.
@@ -284,11 +300,11 @@ fn paint_layer_plane(
         }
     }
     if m.occlusion_map >= 0 && m.occlusion_map != m.metallic_roughness_map {
-        out.occlusion = textureSampleGrad(textures[m.occlusion_map], default_sampler, uv, ddx, ddy).r;
+        out.occlusion = sample_material_map(m.occlusion_map, uv, dt, detiled, ddx, ddy, true).r;
     }
     out.normal = n;
     if m.normal_map >= 0 {
-        let t = textureSampleGrad(textures[m.normal_map], default_sampler, uv, ddx, ddy).xyz * 2.0 - 1.0;
+        let t = sample_material_map(m.normal_map, uv, dt, detiled, ddx, ddy, true).xyz * 2.0 - 1.0;
         out.normal = n * max(t.z, 0.05) + (t_axis * t.x + b_axis * t.y) * m.normal_scale;
     }
     // Height around the map's own mean, like the surface's (see `fs_main`).
@@ -296,7 +312,7 @@ fn paint_layer_plane(
     // darker than what stands proud of them often enough to shape an edge.
     out.height = 0.5;
     if m.height_map >= 0 {
-        out.height += textureSampleGrad(textures[m.height_map], default_sampler, uv, ddx, ddy).r
+        out.height += sample_material_map(m.height_map, uv, dt, detiled, ddx, ddy, true).r
             - textureSampleLevel(textures[m.height_map], default_sampler, uv, 7.0).r;
     } else if m.albedo_map >= 0 {
         let mean = m.base_color.rgb * textureSampleLevel(textures[m.albedo_map], default_sampler, uv, 7.0).rgb;
@@ -318,7 +334,15 @@ fn paint_layer_add(sum: ptr<function, PaintLayer>, s: PaintLayer, w: f32) {
 /// so one material keeps one texel density on every mesh whatever its UVs.
 /// A flat wall or floor reads one plane; only a surface turned between axes
 /// reads a second or third (weights below 0.12 are dropped, not sampled).
-fn paint_layer(m: Material, tiling: f32, p: vec3<f32>, pdx: vec3<f32>, pdy: vec3<f32>, n: vec3<f32>) -> PaintLayer {
+fn paint_layer(
+    m: Material,
+    tiling: f32,
+    p: vec3<f32>,
+    pdx: vec3<f32>,
+    pdy: vec3<f32>,
+    n: vec3<f32>,
+    detiled: bool,
+) -> PaintLayer {
     let an = abs(n);
     var w = an * an;
     w = w * w;
@@ -335,17 +359,17 @@ fn paint_layer(m: Material, tiling: f32, p: vec3<f32>, pdx: vec3<f32>, pdy: vec3
     // Image-up is +Y on walls, so stains and courses stay upright.
     if w.y > 0.0 {
         paint_layer_add(&sum, paint_layer_plane(m, p.xz * tiling, pdx.xz * tiling, pdy.xz * tiling,
-            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, -1.0), n), w.y);
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, -1.0), n, detiled), w.y);
     }
     if w.x > 0.0 {
         let flip = vec2<f32>(tiling, -tiling);
         paint_layer_add(&sum, paint_layer_plane(m, p.zy * flip, pdx.zy * flip, pdy.zy * flip,
-            vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), n), w.x);
+            vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), n, detiled), w.x);
     }
     if w.z > 0.0 {
         let flip = vec2<f32>(tiling, -tiling);
         paint_layer_add(&sum, paint_layer_plane(m, p.xy * flip, pdx.xy * flip, pdy.xy * flip,
-            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n), w.z);
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n, detiled), w.z);
     }
     sum.normal = normalize(sum.normal);
     return sum;
@@ -383,7 +407,10 @@ fn paint_coverage(m: f32, n: f32) -> f32 {
 ///
 /// Each channel that has a material in its slot header is a full PBR layer:
 /// albedo, normal, roughness, metal, occlusion and height replace the
-/// surface's by the blend weight. The weight is the painted amount, limited
+/// surface's by the blend weight. A layer set to *stain* instead keeps the
+/// surface's own colour pattern, normal and relief and takes only the
+/// layer's tone and some of its roughness: grime on wood grain, soot on
+/// paint, a tide mark on a panel. The weight is the painted amount, limited
 /// to the layer's slope range, broken up by world-space noise where it is
 /// part-painted (so a low-poly wall's two rows of vertices still give ragged
 /// patches), then sharpened against the height maps. `height` carries the
@@ -433,19 +460,26 @@ fn apply_vertex_layers(
         if cover < floor_cover {
             continue;
         }
+        // x: stain (0 replaces the surface, 1 only tones it); y: de-tile.
+        let extra = unpack4x8unorm(vertex_paint[slot + 16u + c]);
         let layer = paint_layer(materials[material_id], bitcast<f32>(vertex_paint[slot + 4u + c]),
-            p, pdx, pdy, geo_normal);
+            p, pdx, pdy, geo_normal, extra.y > 0.5);
         let w = paint_height_blend(cover, height, layer.height, params.x);
-        (*surface).albedo = mix((*surface).albedo, layer.albedo, w);
-        (*surface).normal = normalize(mix((*surface).normal, layer.normal, w));
-        (*surface).roughness = mix((*surface).roughness, layer.roughness, w);
-        (*surface).metallic = mix((*surface).metallic, layer.metallic, w);
+        // A mid-grey layer leaves a stained surface as it was; its darks
+        // darken and its lights (lime, dust) lift a little.
+        let stained = (*surface).albedo * min(layer.albedo * 2.2, vec3<f32>(1.6));
+        (*surface).albedo = mix((*surface).albedo, mix(layer.albedo, stained, extra.x), w);
+        // What a stain leaves alone: the surface's own shape.
+        let shape = w * (1.0 - extra.x);
+        (*surface).normal = normalize(mix((*surface).normal, layer.normal, shape));
+        (*surface).roughness = mix((*surface).roughness, layer.roughness, w * (1.0 - 0.5 * extra.x));
+        (*surface).metallic = mix((*surface).metallic, layer.metallic, shape);
         // The layer's occlusion replaces the material's own, not GTAO's
         // share of `occlusion`.
-        let occlusion = mix(micro_occlusion, layer.occlusion, w);
+        let occlusion = mix(micro_occlusion, layer.occlusion, shape);
         (*surface).occlusion = (*surface).occlusion / max(micro_occlusion, 0.05) * occlusion;
         micro_occlusion = occlusion;
-        height = mix(height, layer.height, w);
+        height = mix(height, layer.height, shape);
     }
     return is_layer;
 }

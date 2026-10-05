@@ -1134,8 +1134,12 @@ fn vertex_paint_reaches_the_surface_before_decals_and_f0() {
 #[test]
 fn paint_layers_read_the_slot_header_the_pool_writes() {
     let shading = include_str!("../src/shaders/shading.wgsl");
-    assert_eq!(somnium_renderer::vertex_paint::SLOT_HEADER_WORDS, 16);
-    assert!(shading.contains("const PAINT_SLOT_HEADER: u32 = 16u;"));
+    assert_eq!(somnium_renderer::vertex_paint::SLOT_HEADER_WORDS, 20);
+    assert!(shading.contains("const PAINT_SLOT_HEADER: u32 = 20u;"));
+    // A stain keeps the surface's own normal and relief.
+    assert!(shading.contains("unpack4x8unorm(vertex_paint[slot + 16u + c])"));
+    assert!(shading.contains("let shape = w * (1.0 - extra.x);"));
+    assert!(shading.contains("(*surface).normal = normalize(mix((*surface).normal, layer.normal, shape));"));
     assert_eq!(somnium_renderer::vertex_paint::NO_LAYER, 0xffff_ffff);
     assert!(shading.contains("const PAINT_NO_LAYER: u32 = 0xffffffffu;"));
     for read in [
