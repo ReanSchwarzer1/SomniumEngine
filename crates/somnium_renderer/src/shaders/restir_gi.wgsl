@@ -234,16 +234,44 @@ fn gi_sample_local(ll: GpuLocalLight, p: vec3<f32>, n: vec3<f32>, u: vec2<f32>) 
     return GiLightSample(emitter_pos, ll.color * (attenuation * max(dot(n, l), 0.0)));
 }
 
-/// Four uniform candidates, resampled using unoccluded irradiance. Only the
-/// survivor needs a visibility ray. N/4 and the selection probability preserve
-/// the sum over all lights, including when some candidates have zero weight.
+/// Lights walked per bounce hit before the walk starts striding (see below).
+const GI_LIGHT_WALK: u32 = 128u;
+
+/// Every light that reaches the hit is a candidate, resampled using unoccluded
+/// irradiance. Only the survivor needs a visibility ray.
+///
+/// It used to draw four of the scene's lights at random and scale by count/4.
+/// A lamp reaches a few metres, so in an interior of 46 nearly every draw was a
+/// lamp that does not reach the hit at all, and the rare draw that did came
+/// back twelve times too bright: one bounce in a dozen carried all the light,
+/// and the ones that landed beside a lamp were white specks that reuse carried
+/// across the screen while the camera moved. Five lights outdoors never showed it.
+/// Walking the list costs a range test per light and leaves nothing to chance
+/// but which reaching lamp is kept. Past GI_LIGHT_WALK lights it strides from a
+/// random start, each light equally likely, and scales by the stride.
 fn gi_local_irradiance(p: vec3<f32>, n: vec3<f32>, seed: ptr<function, u32>) -> vec3<f32> {
     let count = cluster_params.num_local_lights;
     if count == 0u { return vec3<f32>(0.0); }
+    let walked = min(count, GI_LIGHT_WALK);
+    let stride = f32(count) / f32(walked);
+    let start = gi_rand(seed) * stride;
     var selected = GiLightSample(p, vec3<f32>(0.0));
     var weight_sum = 0.0;
-    for (var i = 0u; i < 4u; i++) {
-        let index = min(u32(gi_rand(seed) * f32(count)), count - 1u);
+    for (var i = 0u; i < walked; i++) {
+        let index = min(u32(start + f32(i) * stride), count - 1u);
+        // Most lights are turned away here on their position, range and type
+        // alone, so only those are read until one passes.
+        let kind = local_lights[index].light_type;
+        let to_light = local_lights[index].position_ws - p;
+        var reach = local_lights[index].range;
+        if kind == 4u {
+            // A tube is lit from the nearest point of its axis, up to half its
+            // length nearer than its centre.
+            reach += max(local_lights[index]._pad1, 0.05);
+        }
+        // A point or a spot behind the surface lights nothing. The others have
+        // extent and may still show an edge over it.
+        if dot(to_light, to_light) >= reach * reach || (kind < 2u && dot(to_light, n) <= 0.0) { continue; }
         let uv = vec2<f32>(gi_rand(seed), gi_rand(seed));
         let candidate = gi_sample_local(local_lights[index], p, n, uv);
         let weight = gi_luma(candidate.irradiance);
@@ -255,7 +283,7 @@ fn gi_local_irradiance(p: vec3<f32>, n: vec3<f32>, seed: ptr<function, u32>) -> 
     if weight_sum <= 0.0 || !gi_visible(p + n * 0.02, selected.position, 0.02) {
         return vec3<f32>(0.0);
     }
-    return selected.irradiance * (weight_sum * f32(count) / (4.0 * gi_luma(selected.irradiance)));
+    return selected.irradiance * (weight_sum * stride / gi_luma(selected.irradiance));
 }
 
 /// Direct radiance leaving a secondary hit: sun plus shadowed local fixtures.

@@ -49,6 +49,7 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
     let pool = include_str!("../src/shaders/global_pool.wgsl");
     let mut source = item(pool, "struct GpuLocalLight {");
     source += &item(production, "struct GiLightSample {");
+    source += production.lines().find(|line| line.starts_with("const GI_LIGHT_WALK")).unwrap();
     for name in ["gi_rand", "gi_luma", "gi_sample_local", "gi_local_irradiance", "gi_direct_at"] {
         source += &item(production, &format!("fn {name}("));
     }
@@ -56,7 +57,7 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
         struct Counts { num_local_lights: u32 }
         struct Sun { direction: vec3f, color: vec3f, ibl_intensity: f32 }
         var<private> cluster_params: Counts;
-        var<private> local_lights: array<GpuLocalLight,16>;
+        var<private> local_lights: array<GpuLocalLight,256>;
         var<private> light: Sun;
         var<private> visible: bool;
         const rt_gi_deferred_terrain_albedo = false;
@@ -64,7 +65,7 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
         fn gi_visible(p: vec3f, q: vec3f, t: f32) -> bool { return visible; }
         @group(0) @binding(0) var<storage,read_write> result: array<f32>;
         @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3u) {
-            let base = gid.x * 10u;
+            let base = gid.x * 11u;
             let uv = (vec2f(f32(gid.x % 256u), f32(gid.x / 256u)) + 0.5) / 256.0;
             var lamp = GpuLocalLight(vec3f(0,2,0),1000000.0,vec3f(800.0/12.5663706),2u,
                 vec3f(0,-1,0),0.8,0.95,0.8,0.8,0.5);
@@ -94,6 +95,16 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
             result[base+7u] = gi_direct_at(vec3f(0),vec3f(0,1,0),vec3f(0.5),-1,&seed).x;
             visible = false;
             result[base+8u] = gi_direct_at(vec3f(0),vec3f(0,1,0),vec3f(0.5),-1,&seed).x;
+            // More lights than one walk covers: every other one is visited.
+            visible = true;
+            cluster_params.num_local_lights = 256u;
+            for(var i=0u;i<256u;i++) {
+                local_lights[i] = lamp;
+                local_lights[i].color = vec3f(0);
+            }
+            local_lights[1].color = vec3f(20,0,0);
+            local_lights[12].color = vec3f(40,0,0);
+            result[base+10u] = gi_local_irradiance(vec3f(0),vec3f(0,1,0),&seed).x;
             lamp.range = 1.0;
             result[base+9u] = gi_sample_local(lamp,vec3f(0),vec3f(0,1,0),uv).irradiance.x;
         }
@@ -106,7 +117,7 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
         label: None, layout: None, module: &shader, entry_point: Some("main"),
         compilation_options: Default::default(), cache: None,
     });
-    let size = 65536 * 10 * 4;
+    let size = 65536 * 11 * 4;
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
     });
@@ -130,14 +141,20 @@ fn practical_bounce_has_correct_flux_selection_and_sun_off_behavior() {
     recv.recv().unwrap().unwrap();
     let mapped = readback.slice(..).get_mapped_range().unwrap();
     let values: &[f32] = bytemuck::cast_slice(&mapped);
-    let mut means = [0.0f64; 10];
-    for row in values.chunks_exact(10) {
+    let mut means = [0.0f64; 11];
+    let mut brightest_pick = 0.0f32;
+    for row in values.chunks_exact(11) {
         for (mean, value) in means.iter_mut().zip(row) { *mean += f64::from(*value) / 65536.0; }
+        brightest_pick = brightest_pick.max(row[6]);
     }
+    // Two of sixteen lights reach the hit. No single bounce may come back
+    // brighter than both together: drawing four of the sixteen at random and
+    // scaling by 16/4 returned up to 160 here, the interior levels' white specks.
+    assert!(brightest_pick < 15.01, "a bounce returned {brightest_pick} for 15 of light");
     let cd = 800.0 / (4.0 * std::f64::consts::PI);
-    let expected = [quadrature(false), quadrature(true), 0.0, 0.0, cd/4.0, 0.0, 15.0, cd/4.0*0.5/std::f64::consts::PI, 0.0, 0.0];
+    let expected = [quadrature(false), quadrature(true), 0.0, 0.0, cd/4.0, 0.0, 15.0, cd/4.0*0.5/std::f64::consts::PI, 0.0, 0.0, 15.0];
     for (i, (actual, expected)) in means.iter().zip(expected).enumerate() {
-        let tolerance = if i == 6 { 0.30 } else { 0.025 };
+        let tolerance = if i == 10 { 0.30 } else { 0.025 };
         assert!((actual-expected).abs() < tolerance, "case {i}: {actual} != {expected}");
     }
 }
