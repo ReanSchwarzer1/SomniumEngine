@@ -45,6 +45,70 @@ export type GradientStop = { t: number, color: Color, alpha: number }
 
 -- ── Components, generated from the type registry ──────────────
 
+--- `hello.AnimatedPreview` (schema version 1).
+export type HelloAnimatedPreview = {
+	source: Asset?,
+	clip: string,
+	playing: boolean,
+	speed: number,
+	time: number,
+	looping: boolean,
+	hidden_joints: string,
+	reload: boolean,
+}
+
+--- `hello.MirrorPart` (schema version 1).
+export type HelloMirrorPart = {
+	role: number,
+}
+
+--- `somnium.AnimationAuthoring` (schema version 1).
+export type SomniumAnimationAuthoring = {
+	playing: boolean,
+	pose_jobs: boolean,
+	speed: number,
+	duration: number,
+	stride: Vec3,
+	turn: number,
+	root_motion: boolean,
+	root_joint: number,
+	capsule_half_height: number,
+	capsule_radius: number,
+	ik_root: number,
+	ik_middle: number,
+	ik_end: number,
+	reach_target: Entity?,
+	pole: Vec3,
+	ik_weight: number,
+	foot_ik: boolean,
+	sole_height: number,
+	look_target: Entity?,
+	look_joint: number,
+	look_weight: number,
+	look_limit: number,
+	ragdoll_weight: number,
+	ragdoll_swing: number,
+	ragdoll_twist: number,
+	compression: boolean,
+	translation_error: number,
+	rotation_error: number,
+	scale_error: number,
+	compression_report: string, -- engine-owned; reading only
+	events_timeline: string,
+	left_contact: number,
+	right_contact: number,
+	preview_time: number, -- engine-owned; reading only
+	event_count: number, -- engine-owned; reading only
+	last_event: string, -- engine-owned; reading only
+	status: string, -- engine-owned; reading only
+}
+
+--- `somnium.AnimationPreviewJoint` (schema version 1).
+export type SomniumAnimationPreviewJoint = {
+	owner: Entity?,
+	joint: number,
+}
+
 --- `somnium.AudioEmitter` (schema version 1).
 export type SomniumAudioEmitter = {
 	enabled: boolean,
@@ -64,6 +128,22 @@ export type SomniumAudioEmitter = {
 	cone_outer_gain: number,
 	occlusion: number,
 	doppler_scale: number,
+}
+
+--- `somnium.Behavior` (schema version 1).
+export type SomniumBehavior = {
+	enabled: boolean,
+	label: string,
+	status: string, -- engine-owned; reading only
+	last_error: string, -- engine-owned; reading only
+	graph_json: string,
+}
+
+--- `somnium.Blockout` (schema version 1).
+export type SomniumBlockout = {
+	shape: number --[[ Box | Ramp | Stairs | Cylinder ]],
+	size: Vec3,
+	segments: number,
 }
 
 --- `somnium.BuoyantVessel` (schema version 1).
@@ -95,6 +175,7 @@ export type SomniumDecal = {
 	angle_fade_degrees: number,
 	normal_strength: number,
 	roughness: number,
+	multiply: boolean,
 }
 
 --- `somnium.EditorFlags` (schema version 1).
@@ -119,7 +200,31 @@ export type SomniumFoliage = {
 	foliage_shadow_distance: number,
 	lod_distance: number,
 	impostor_distance: number,
+	near_distance: number,
+	shadow_proxy: boolean,
 	max_instances: number,
+}
+
+--- `somnium.ImportedMesh` (schema version 1).
+export type SomniumImportedMesh = {
+	source: string,
+	node: number,
+}
+
+--- `somnium.Interactable` (schema version 1).
+export type SomniumInteractable = {
+	kind: number --[[ Door | Collect | Inspect | Operate | Equip Light ]],
+	prompt: string,
+	trigger: string,
+	enabled: boolean,
+	locked: boolean,
+	reach: number,
+	duration: number,
+	anchor: Vec3,
+	contact_normal: Vec3,
+	hand_grip: number,
+	open_angle: number,
+	preview_requested: boolean,
 }
 
 --- `somnium.Light` (schema version 1).
@@ -136,6 +241,15 @@ export type SomniumLight = {
 	moon_intensity: number,
 	area_width: number,
 	area_height: number,
+}
+
+--- `somnium.LightFlicker` (schema version 1).
+export type SomniumLightFlicker = {
+	enabled: boolean,
+	strength: number,
+	rate: number,
+	dropout: number,
+	seed: number,
 }
 
 --- `somnium.Material` (schema version 2).
@@ -161,6 +275,49 @@ export type SomniumName = {
 	value: string,
 }
 
+--- `somnium.NavigationAgent` (schema version 1).
+export type SomniumNavigationAgent = {
+	enabled: boolean,
+	destination: Vec3,
+	speed: number,
+	radius: number,
+	status: string, -- engine-owned; reading only
+	arrived: boolean, -- engine-owned; reading only
+	pending_link: Entity?, -- engine-owned; reading only
+	link_exit: Vec3, -- engine-owned; reading only
+	acknowledge_link: boolean,
+}
+
+--- `somnium.NavigationLink` (schema version 1).
+export type SomniumNavigationLink = {
+	enabled: boolean,
+	destination: Vec3,
+	bidirectional: boolean,
+	attachment_radius: number,
+	extra_cost: number,
+}
+
+--- `somnium.NavigationObstacle` (schema version 1).
+export type SomniumNavigationObstacle = {
+	enabled: boolean,
+	size: Vec3,
+}
+
+--- `somnium.NavigationProfile` (schema version 1).
+export type SomniumNavigationProfile = {
+	bounds_size: Vec3,
+	tile_size: number,
+	voxel_size: number,
+	agent_height: number,
+	agent_radius: number,
+	max_step: number,
+	max_slope_degrees: number,
+	show_mesh: boolean,
+	status: string, -- engine-owned; reading only
+	polygon_count: number, -- engine-owned; reading only
+	pending_cells: number, -- engine-owned; reading only
+}
+
 --- `somnium.Parent` (schema version 1).
 export type SomniumParent = {
 	entity: Entity?,
@@ -168,6 +325,22 @@ export type SomniumParent = {
 
 --- `somnium.ParticleEmitter` (schema version 1).
 export type SomniumParticleEmitter = {
+	enabled: boolean,
+	texture: Asset?,
+	aspect: number,
+	additive: boolean,
+	world_up: boolean,
+	local_space: boolean,
+	staged_reflection: boolean,
+	tip_tint: Vec3,
+	atlas_columns: number,
+	atlas_rows: number,
+	atlas_frames: number,
+	atlas_fps: number,
+	rotation_spread: number,
+	spin: number,
+	flutter: number,
+	flutter_hz: number,
 	max_particles: number,
 	spawn_rate: number,
 	lifetime: number,
@@ -179,6 +352,20 @@ export type SomniumParticleEmitter = {
 	gravity: number,
 	velocity_bias: Vec3,
 	spawn_extents: Vec3,
+}
+
+--- `somnium.Perception` (schema version 1).
+export type SomniumPerception = {
+	enabled: boolean,
+	target: Entity?,
+	eye_height: number,
+	sight_range: number,
+	half_angle_degrees: number,
+	hearing_range: number,
+	target_loudness: number,
+	memory_seconds: number,
+	status: string, -- engine-owned; reading only
+	confidence: number, -- engine-owned; reading only
 }
 
 --- `somnium.PostProcess` (schema version 1).
@@ -199,6 +386,9 @@ export type SomniumPostProcess = {
 	lift: number,
 	gamma: number,
 	grain: number,
+	dream_mode: number --[[ Off | Heat drift | Peripheral echo | Architectural shear ]],
+	dream_strength: number,
+	dream_speed: number,
 	response_curve: { CurveKey },
 	bloom_enabled: boolean,
 	bloom_intensity: number,
@@ -216,6 +406,7 @@ export type SomniumPostProcess = {
 	motion_blur_enabled: boolean,
 	motion_blur_shutter: number,
 	restir_gi_intensity: number,
+	restir_gi_distance: number,
 	volumetrics_enabled: boolean,
 	light_shafts: boolean,
 	fog_density: number,
@@ -250,6 +441,7 @@ export type SomniumPostProcess = {
 	ddgi_hysteresis: number,
 	analytic_grad: boolean,
 	shaft_intensity: number,
+	fog_sky_occlusion: number,
 	fsr_sharpness: number,
 }
 
@@ -259,6 +451,21 @@ export type SomniumRigidBody = {
 	velocity: Vec3,
 	grounded: boolean, -- engine-owned; reading only
 	script_driven: boolean,
+}
+
+--- `somnium.SaveSettings` (schema version 1).
+export type SomniumSaveSettings = {
+	slot: string,
+	title: string,
+	content_version: number,
+	thumbnail: string,
+}
+
+--- `somnium.ScatterSettings` (schema version 1).
+export type SomniumScatterSettings = {
+	width: number,
+	depth: number,
+	offset: Vec2,
 }
 
 --- `somnium.Sky` (schema version 1).
@@ -288,10 +495,42 @@ export type SomniumSky = {
 	temporal_jitter: boolean,
 }
 
---- `somnium.Spline` (schema version 1).
+--- `somnium.SkyEye` (schema version 1).
+export type SomniumSkyEye = {
+	enabled: boolean,
+	yaw_deg: number,
+	pitch_deg: number,
+	size_deg: number,
+	color: Vec3,
+	intensity: number,
+	openness: number,
+	pupil: number,
+	pulse_hz: number,
+	glow: number,
+}
+
+--- `somnium.Spline` (schema version 2).
 export type SomniumSpline = {
 	points: { Vec3 },
 	closed: boolean,
+	tangents: { Vec3 },
+}
+
+--- `somnium.StagedMirror` (schema version 1).
+export type SomniumStagedMirror = {
+	enabled: boolean,
+	width: number,
+	height: number,
+	depth: number,
+	active_distance: number,
+	requires_repair: boolean,
+	rendered_triangles: number, -- engine-owned; reading only
+}
+
+--- `somnium.SurfaceTags` (schema version 1).
+export type SomniumSurfaceTags = {
+	names: { string },
+	weights: { number },
 }
 
 --- `somnium.Terrain` (schema version 2).
@@ -400,6 +639,7 @@ export type SomniumWeather = {
 	temperature_c: number,
 	wind_speed: number,
 	wind_direction_deg: number,
+	foliage_sway: number,
 	wetness_target: number,
 	wetting_seconds: number,
 	drying_seconds: number,
@@ -408,6 +648,23 @@ export type SomniumWeather = {
 	ripple_strength: number,
 	transition_seconds: number,
 	particle_rate: number,
+}
+
+--- `somnium.WorkTarget` (schema version 1).
+export type SomniumWorkTarget = {
+	kind: number --[[ Burn | Repair ]],
+	prompt: string,
+	trigger: string,
+	enabled: boolean,
+	seconds: number,
+	retain_progress: boolean,
+	reach: number,
+	anchor: Vec3,
+	progress: number, -- engine-owned; reading only
+	contact: number, -- engine-owned; reading only
+	complete: boolean, -- engine-owned; reading only
+	preview_held: boolean,
+	reset_requested: boolean,
 }
 
 --- `somnium.WorldPartition` (schema version 1).
@@ -429,23 +686,42 @@ export type SomniumWorldPartition = {
 
 --- The components mirrored onto `ctx.self`, by their short name.
 export type SelfComponents = {
+	animatedPreview: HelloAnimatedPreview?,
+	mirrorPart: HelloMirrorPart?,
+	animationAuthoring: SomniumAnimationAuthoring?,
+	animationPreviewJoint: SomniumAnimationPreviewJoint?,
 	audioEmitter: SomniumAudioEmitter?,
+	behavior: SomniumBehavior?,
+	blockout: SomniumBlockout?,
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
 	decal: SomniumDecal?,
 	editorFlags: SomniumEditorFlags?,
 	foliage: SomniumFoliage?,
+	importedMesh: SomniumImportedMesh?,
+	interactable: SomniumInteractable?,
 	light: SomniumLight?,
+	lightFlicker: SomniumLightFlicker?,
 	material: SomniumMaterial?,
 	mesh: SomniumMesh?,
 	meshKind: SomniumMeshKind?,
 	name: SomniumName?,
+	navigationAgent: SomniumNavigationAgent?,
+	navigationLink: SomniumNavigationLink?,
+	navigationObstacle: SomniumNavigationObstacle?,
+	navigationProfile: SomniumNavigationProfile?,
 	parent: SomniumParent?,
 	particleEmitter: SomniumParticleEmitter?,
+	perception: SomniumPerception?,
 	postProcess: SomniumPostProcess?,
 	rigidBody: SomniumRigidBody?,
+	saveSettings: SomniumSaveSettings?,
+	scatterSettings: SomniumScatterSettings?,
 	sky: SomniumSky?,
+	skyEye: SomniumSkyEye?,
 	spline: SomniumSpline?,
+	stagedMirror: SomniumStagedMirror?,
+	surfaceTags: SomniumSurfaceTags?,
 	terrain: SomniumTerrain?,
 	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,
@@ -453,6 +729,7 @@ export type SelfComponents = {
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
 	weather: SomniumWeather?,
+	workTarget: SomniumWorkTarget?,
 	worldPartition: SomniumWorldPartition?,
 }
 

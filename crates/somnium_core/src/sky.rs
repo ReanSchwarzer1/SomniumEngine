@@ -99,6 +99,80 @@ pub struct SkyComponent {
 
 impl Component for SkyComponent {}
 
+/// A burning eye that is part of the sky (the Abyss).
+///
+/// Drawn analytically by the shading pass on sky pixels, beside the sun and
+/// moon discs: it is as far away as the sky, so fog never greys it out and the
+/// cloud layer passes in front of it, and it costs nothing where the sky is not
+/// visible. A hidden entity (the editor's eye, or a game's visibility gate)
+/// draws no eye.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyEyeComponent {
+    pub enabled: bool,
+    /// Compass direction of the eye's centre, degrees; 0 looks down -Z, 90 down +X.
+    pub yaw_deg: f32,
+    /// Height of the eye's centre above the horizon, degrees.
+    pub pitch_deg: f32,
+    /// Angular width, corner to corner of the lids, degrees.
+    pub size_deg: f32,
+    /// Hottest colour of the iris.
+    pub color: glam::Vec3,
+    /// Luminance of the iris's hottest ring, cd/m². `0` draws nothing.
+    pub intensity: f32,
+    /// Lid opening: half-height at the centre over half-width.
+    pub openness: f32,
+    /// Width of the slit pupil as a fraction of the iris radius.
+    pub pupil: f32,
+    /// Slow swell of the glow, cycles per second.
+    pub pulse_hz: f32,
+    /// Halo and the flame licking round the lids, 0..1.
+    pub glow: f32,
+}
+
+impl Component for SkyEyeComponent {}
+
+impl Default for SkyEyeComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            yaw_deg: 0.0,
+            pitch_deg: 16.0,
+            size_deg: 44.0,
+            color: glam::Vec3::new(1.0, 0.36, 0.06),
+            intensity: 60.0,
+            openness: 0.42,
+            pupil: 0.14,
+            pulse_hz: 0.12,
+            glow: 0.6,
+        }
+    }
+}
+
+impl SkyEyeComponent {
+    /// World direction toward the eye's centre.
+    #[must_use]
+    pub fn direction(&self) -> glam::Vec3 {
+        let (y, p) = (self.yaw_deg.to_radians(), self.pitch_deg.clamp(-89.0, 89.0).to_radians());
+        glam::Vec3::new(y.sin() * p.cos(), p.sin(), -y.cos() * p.cos()).normalize()
+    }
+
+    /// What the renderer draws: disabled or dark draws nothing.
+    #[must_use]
+    pub fn to_params(&self) -> somnium_renderer::SkyEyeParams {
+        let on = self.enabled && self.intensity > 0.0 && self.size_deg > 0.0;
+        somnium_renderer::SkyEyeParams {
+            direction: self.direction(),
+            tan_half_width: (self.size_deg.clamp(0.1, 170.0).to_radians() * 0.5).tan(),
+            color: self.color.max(glam::Vec3::ZERO),
+            intensity: if on { self.intensity } else { 0.0 },
+            openness: self.openness.clamp(0.05, 1.0),
+            pupil: self.pupil.clamp(0.0, 1.0),
+            pulse_hz: self.pulse_hz.max(0.0),
+            glow: self.glow.clamp(0.0, 1.0),
+        }
+    }
+}
+
 impl Default for SkyComponent {
     fn default() -> Self {
         Self {
@@ -349,6 +423,23 @@ mod tests {
     }
 
     const QUALITY_NAMES_LEN: usize = SkyComponent::QUALITY_NAMES.len();
+
+    /// The eye points where its yaw and pitch say, and switching it off (or
+    /// darkening it) is what the renderer sees as "no eye".
+    #[test]
+    fn the_sky_eye_faces_its_bearing_and_off_means_no_eye() {
+        let eye = SkyEyeComponent { yaw_deg: 0.0, pitch_deg: 0.0, ..SkyEyeComponent::default() };
+        assert!((eye.direction() - glam::Vec3::NEG_Z).length() < 1e-5);
+        let east = SkyEyeComponent { yaw_deg: 90.0, pitch_deg: 30.0, ..SkyEyeComponent::default() };
+        let d = east.direction();
+        assert!(d.x > 0.8 && (d.y - 0.5).abs() < 1e-5 && d.z.abs() < 1e-5, "{d:?}");
+        let p = SkyEyeComponent { size_deg: 90.0, ..SkyEyeComponent::default() }.to_params();
+        assert!((p.tan_half_width - 1.0).abs() < 1e-5);
+        assert!(p.intensity > 0.0);
+        assert_eq!(SkyEyeComponent { enabled: false, ..SkyEyeComponent::default() }.to_params().intensity, 0.0);
+        let registry = crate::reflect_registry::editor_registry();
+        assert!(registry.by_name("somnium.SkyEye").is_some(), "the eye is editable");
+    }
 
     /// The panel must show the three names, not a spinner reading `0`.
     #[test]

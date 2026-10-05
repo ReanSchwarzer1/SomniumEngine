@@ -4,6 +4,7 @@
 //! Somnium-native types (`LoadedScene`) that the renderer can upload
 //! without ever seeing `gltf::` crate types directly.
 
+pub mod animated;
 pub mod cook;
 pub mod database;
 /// MORROWIND-M item 3: what references what, across a whole project.
@@ -11,6 +12,7 @@ pub mod depend;
 pub mod material;
 pub mod preview;
 pub mod residency;
+pub mod scatter;
 pub mod scene_file;
 /// Logical terrain source-page addresses used by MORROWIND-AD virtual texturing.
 pub mod virtual_texture;
@@ -61,6 +63,26 @@ pub enum AlphaMode {
     Blend,
 }
 
+/// A number from a glTF material's extras (`somnium_weathering`,
+/// `somnium_detile`), clamped to `0..1`; 0 when absent or unreadable.
+fn material_extra(mat: &gltf::Material<'_>, key: &str) -> f32 {
+    mat.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|v| v.get(key).and_then(serde_json::Value::as_f64))
+        .map_or(0.0, |w| (w as f32).clamp(0.0, 1.0))
+}
+
+/// glTF material extras `somnium_interior_depth`: metres of room behind a
+/// window whose colour map is that room's back wall. 0 when absent.
+fn interior_depth(mat: &gltf::Material<'_>) -> f32 {
+    mat.extras()
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+        .and_then(|v| v.get("somnium_interior_depth").and_then(serde_json::Value::as_f64))
+        .map_or(0.0, |d| (d as f32).clamp(0.0, 8.0))
+}
+
 /// PBR metallic-roughness material. Texture indices reference `LoadedScene.textures`.
 pub struct LoadedMaterial {
     /// Source material name, used for editable `.sommat` sibling naming.
@@ -74,6 +96,8 @@ pub struct LoadedMaterial {
     /// undefined, so AO must never be read from it.
     pub occlusion_map: Option<usize>,
     pub normal_map: Option<usize>,
+    /// glTF normalTexture.scale; zero preserves the geometric normal.
+    pub normal_scale: f32,
     pub metallic_roughness_map: Option<usize>,
     /// glTF `alphaMode`. Dropping this was why blended glass rendered as
     /// opaque grey panels.
@@ -96,6 +120,23 @@ pub struct LoadedMaterial {
     /// **Not** the same claim as [`Self::foliage_card`], and the two were one
     /// field until the difference cost a phase of grass that looked shattered.
     pub foliage: bool,
+    /// How weathered the surface is, `0..1` (glTF material extras
+    /// `somnium_weathering`). The shading pass adds world-space staining,
+    /// rain streaks, rising damp at the object's foot and grime on ledges in
+    /// proportion; 0 leaves the scan exactly as captured.
+    pub weathering: f32,
+    /// Break up visible tiling (glTF material extras `somnium_detile`): each
+    /// map is read at two noise-picked offsets and blended. Only for
+    /// stochastic scans (plaster, render, asphalt); an offset brick or board
+    /// texture would misalign its courses.
+    pub detile: bool,
+    /// Foliage wind lean per metre² of height above the plant's base (glTF
+    /// material extras `somnium_wind_bend`; the renderer's `wind.rs`). A
+    /// trunk and its needles carry the same value so they bend together.
+    pub wind_bend: f32,
+    /// Foliage wind flutter amplitude in metres (extras
+    /// `somnium_wind_flutter`): needles, leaves and blades, never a trunk.
+    pub wind_flutter: f32,
     /// This material is painted on **flat cut-out cards whose `uv.x` runs
     /// across the blade**, which is what `shading.wgsl`'s curved-card normal
     /// needs to be true.
@@ -126,7 +167,19 @@ pub struct LoadedMaterial {
     pub emissive_map: Option<usize>,
     /// glTF `doubleSided` — blended geometry is usually thin and needs both faces.
     pub double_sided: bool,
+    /// Parallax-occlusion height (white = high), found beside the colour map
+    /// as `<stem>_disp_*`. glTF has no slot for it, so like `_arm` and
+    /// `_alpha` the filename is the convention that states it.
+    pub height_map: Option<usize>,
+    /// Relief depth in metres spanned by the height map: `<stem>_disp.json`
+    /// `{"depth_m": …}` beside it, else [`DEFAULT_HEIGHT_DEPTH_M`].
+    /// Negative: the material is a window onto a room that deep (interior
+    /// mapping, glTF extras `somnium_interior_depth`), and no height map.
+    pub height_depth: f32,
 }
+
+/// Relief assumed for a height map with no depth sidecar: brick-joint scale.
+pub const DEFAULT_HEIGHT_DEPTH_M: f32 = 0.02;
 
 /// A single mesh primitive (position + normal + UV geometry + triangle indices).
 pub struct LoadedMesh {
@@ -222,6 +275,10 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             transmission: mat.transmission().map_or(0.0, |t| t.transmission_factor()),
             // Set below, where the sidecar cutout mask identifies vegetation.
             foliage: false,
+            weathering: material_extra(&mat, "somnium_weathering"),
+            detile: material_extra(&mat, "somnium_detile") > 0.5,
+            wind_bend: material_extra(&mat, "somnium_wind_bend"),
+            wind_flutter: material_extra(&mat, "somnium_wind_flutter"),
             // Authored only: see the field's own note on why no import can
             // honestly infer it.
             foliage_card: false,
@@ -229,6 +286,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             emissive_intensity: mat.emissive_strength().unwrap_or(1.0),
             emissive_map: mat.emissive_texture().map(|t| t.texture().source().index()),
             double_sided: mat.double_sided(),
+            height_map: None,
+            height_depth: -interior_depth(&mat),
             albedo_map: pbr
                 .base_color_texture()
                 .map(|t| t.texture().source().index()),
@@ -236,6 +295,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
                 .occlusion_texture()
                 .map(|t| t.texture().source().index()),
             normal_map: mat.normal_texture().map(|t| t.texture().source().index()),
+            normal_scale: mat.normal_texture().map_or(1.0, |t| t.scale()),
             metallic_roughness_map: pbr
                 .metallic_roughness_texture()
                 .map(|t| t.texture().source().index()),
@@ -255,6 +315,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             m.occlusion_map = m.metallic_roughness_map;
         }
     }
+
+    attach_sidecar_height(&document, base_dir, &mut scene);
 
     // A sidecar mask means the albedo is a cutout atlas, so the material has
     // to be alpha-tested even though the glTF called it opaque.
@@ -286,16 +348,23 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             albedo_map: None,
             occlusion_map: None,
             normal_map: None,
+            normal_scale: 1.0,
             metallic_roughness_map: None,
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
             transmission: 0.0,
             foliage: false,
+            weathering: 0.0,
+            detile: false,
+            wind_bend: 0.0,
+            wind_flutter: 0.0,
             foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
             emissive_map: None,
             double_sided: false,
+            height_map: None,
+            height_depth: 0.0,
         });
     }
 
@@ -615,6 +684,62 @@ fn attach_sidecar_alpha(
     masked
 }
 
+/// Give each material whose colour map is `<stem>_diff_*` the height map
+/// `<stem>_disp_*` beside it, decoded as linear grey into the red channel.
+fn attach_sidecar_height(document: &gltf::Document, base_dir: &Path, scene: &mut LoadedScene) {
+    let mut loaded: HashMap<usize, (usize, f32)> = HashMap::new();
+    for m in &mut scene.materials {
+        let Some(albedo) = m.albedo_map else { continue };
+        if m.height_depth < 0.0 {
+            continue; // a window onto a room: its depth is the room's, not a relief
+        }
+        if let Some(&(index, depth)) = loaded.get(&albedo) {
+            m.height_map = Some(index);
+            m.height_depth = depth;
+            continue;
+        }
+        let Some(image) = document.images().nth(albedo) else { continue };
+        let gltf::image::Source::Uri { uri, .. } = image.source() else { continue };
+        let Some((path, depth)) = sidecar_height_path(base_dir, uri) else { continue };
+        let grey = match image::open(&path) {
+            Ok(img) => img.into_luma8(),
+            Err(e) => {
+                warn!("Height sidecar {path:?} failed to decode: {e}");
+                continue;
+            }
+        };
+        let (width, height) = grey.dimensions();
+        let data = grey.pixels().flat_map(|p| [p.0[0], p.0[0], p.0[0], 255]).collect();
+        scene.textures.push(LoadedTexture { data, width, height });
+        let index = scene.textures.len() - 1;
+        loaded.insert(albedo, (index, depth));
+        m.height_map = Some(index);
+        m.height_depth = depth;
+    }
+}
+
+/// `<dir>/<stem>_disp_*` beside `<stem>_diff_*`, and its depth in metres.
+fn sidecar_height_path(base_dir: &Path, uri: &str) -> Option<(std::path::PathBuf, f32)> {
+    let uri = uri.replace("%20", " ");
+    let (dir, file) = match uri.rsplit_once('/') {
+        Some((d, f)) => (base_dir.join(d), f.to_string()),
+        None => (base_dir.to_path_buf(), uri.clone()),
+    };
+    let (stem, _) = file.split_once("_diff")?;
+    let prefix = format!("{stem}_disp_");
+    let path = std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix) && (n.ends_with(".png") || n.ends_with(".jpg")))
+    })?;
+    let depth = std::fs::read_to_string(dir.join(format!("{stem}_disp.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("depth_m").and_then(serde_json::Value::as_f64))
+        .map_or(DEFAULT_HEIGHT_DEPTH_M, |d| d as f32);
+    Some((path, depth))
+}
+
 /// Resolve `<dir>/<stem-with-_diff_-swapped-for-_alpha_>.png`, if it exists.
 ///
 /// Split on `_diff` rather than the whole `_diff_2k` so the same rule survives
@@ -837,7 +962,7 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
     for seg in 0..segments {
         let a = top_ring_start + seg;
         let b = top_ring_start + (seg + 1) % segments;
-        indices.extend_from_slice(&[top_centre, a, b]);
+        indices.extend_from_slice(&[top_centre, b, a]);
     }
 
     // Bottom cap
@@ -861,7 +986,7 @@ pub fn generate_cylinder(radius: f32, height: f32, segments: u32) -> (Vec<Vertex
     for seg in 0..segments {
         let a = bot_ring_start + seg;
         let b = bot_ring_start + (seg + 1) % segments;
-        indices.extend_from_slice(&[bot_centre, b, a]);
+        indices.extend_from_slice(&[bot_centre, a, b]);
     }
 
     (vertices, indices)
@@ -1012,5 +1137,95 @@ mod foliage_tuft_tests {
         let a = generate_foliage_tuft(6, 9).0;
         let b = generate_foliage_tuft(6, 9).0;
         assert!(a.iter().zip(&b).all(|(x, y)| x.position == y.position));
+    }
+}
+
+#[cfg(test)]
+mod normal_scale_tests {
+    #[test]
+    fn gltf_normal_strength_preserves_zero_fractional_and_default_values() {
+        let root =
+            std::env::temp_dir().join(format!("somnium-normal-scale-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([128, 128, 255, 255]))
+            .save(root.join("normal.png"))
+            .unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "images":[{"uri":"normal.png"}], "textures":[{"source":0}],
+            "materials":[
+                {"normalTexture":{"index":0,"scale":0.0}},
+                {"normalTexture":{"index":0,"scale":0.25}},
+                {"normalTexture":{"index":0}}, {}]
+        });
+        let path = root.join("strength.gltf");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        let strengths: Vec<_> = loaded.materials.iter().map(|m| m.normal_scale).collect();
+        assert_eq!(&strengths[..4], &[0.0, 0.25, 1.0, 1.0]);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(root.join("normal.png")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn material_extras_carry_weathering_and_detile() {
+        let root = std::env::temp_dir().join(format!("somnium-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[
+                {"extras":{"somnium_weathering":0.6,"somnium_detile":1}},
+                {"extras":{"somnium_weathering":3.0}}, {}]
+        });
+        let path = root.join("extras.gltf");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        let got: Vec<_> = loaded.materials.iter().map(|m| (m.weathering, m.detile)).collect();
+        assert_eq!(&got[..3], &[(0.6, true), (1.0, false), (0.0, false)]);
+        assert_eq!(loaded.materials[0].wind_bend, 0.0, "no extras, no sway");
+        std::fs::remove_file(&path).unwrap();
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[{"extras":{"somnium_wind_bend":0.00035,"somnium_wind_flutter":0.02}}]
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        assert_eq!((loaded.materials[0].wind_bend, loaded.materials[0].wind_flutter), (0.00035, 0.02));
+        assert_eq!(loaded.materials[0].height_depth, 0.0, "no extras, no room");
+        std::fs::remove_file(&path).unwrap();
+        // A window onto a room carries the room's depth as a negative height depth.
+        let document = serde_json::json!({
+            "asset":{"version":"2.0"},
+            "materials":[{"extras":{"somnium_interior_depth":1.2}}]
+        });
+        std::fs::write(&path, document.to_string()).unwrap();
+        let loaded = super::load_gltf(&path).unwrap();
+        assert_eq!(loaded.materials[0].height_depth, -1.2);
+        assert!(loaded.materials[0].height_map.is_none());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod height_sidecar_tests {
+    use super::*;
+
+    #[test]
+    fn a_disp_map_beside_the_colour_map_is_found_with_its_depth_note() {
+        let root = std::env::temp_dir().join(format!("somnium-height-sidecar-{}", std::process::id()));
+        let dir = root.join("textures");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("brick_disp_1k.png"), b"png").unwrap();
+        let (path, depth) = sidecar_height_path(&root, "textures/brick_diff_2k.jpg").expect("found");
+        assert!(path.ends_with("brick_disp_1k.png"));
+        assert_eq!(depth, DEFAULT_HEIGHT_DEPTH_M, "no note: the default depth");
+        std::fs::write(dir.join("brick_disp.json"), br#"{"depth_m": 0.035}"#).unwrap();
+        let (_, depth) = sidecar_height_path(&root, "textures/brick_diff_2k.jpg").expect("found");
+        assert!((depth - 0.035).abs() < 1e-6, "the note sets the depth");
+        assert!(sidecar_height_path(&root, "textures/stone_diff_2k.jpg").is_none(), "no map, no parallax");
+        assert!(sidecar_height_path(&root, "textures/brick.png").is_none(), "only _diff colour maps qualify");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

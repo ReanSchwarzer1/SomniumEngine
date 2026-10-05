@@ -76,6 +76,12 @@ pub struct WaterPass {
     virtual_shadow_sampler: wgpu::Sampler,
     virtual_shadow_page_table: wgpu::Buffer,
     virtual_shadow_params: wgpu::Buffer,
+    /// The froxel fog the shading pass applies to opaque surfaces. Water is
+    /// drawn after it, so it applies the same fetch itself. The volume's view
+    /// never changes (see `VolumetricPass::view`).
+    volumetric_view: wgpu::TextureView,
+    volumetric_sampler: wgpu::Sampler,
+    volumetric_range: wgpu::Buffer,
     frame_buffer: wgpu::Buffer,
     previous_view_proj: glam::Mat4,
     previous_time: f32,
@@ -273,6 +279,9 @@ impl WaterPass {
         target_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        volumetric_view: &wgpu::TextureView,
+        volumetric_sampler: &wgpu::Sampler,
+        volumetric_range: &wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
@@ -420,6 +429,32 @@ impl WaterPass {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -733,6 +768,9 @@ impl WaterPass {
             virtual_shadow_sampler,
             virtual_shadow_page_table,
             virtual_shadow_params,
+            volumetric_view: volumetric_view.clone(),
+            volumetric_sampler: volumetric_sampler.clone(),
+            volumetric_range: volumetric_range.clone(),
             frame_buffer,
             previous_view_proj: glam::Mat4::IDENTITY,
             previous_time: 0.0,
@@ -1130,6 +1168,18 @@ impl WaterPass {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: self.virtual_shadow_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: wgpu::BindingResource::TextureView(&self.volumetric_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: wgpu::BindingResource::Sampler(&self.volumetric_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: self.volumetric_range.as_entire_binding(),
                 },
             ],
         })

@@ -17,9 +17,12 @@ impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
             gravity: Vec3::new(0.0, -9.81, 0.0),
-            max_bodies: 1024,
-            max_body_pairs: 1024,
-            max_contact_constraints: 1024,
+            // A dressed town is ~1,200 static solids before any dynamic body.
+            // At 1,024 every body past the cap was silently refused, so doors
+            // and walls late in the scene had no collision at all.
+            max_bodies: 16384,
+            max_body_pairs: 16384,
+            max_contact_constraints: 8192,
         }
     }
 }

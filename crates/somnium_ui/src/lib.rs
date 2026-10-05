@@ -1,4 +1,5 @@
 pub mod a11y;
+pub mod authoring_panel;
 pub mod brand;
 pub mod brand_ico;
 pub mod color;
@@ -26,6 +27,7 @@ pub mod path;
 pub mod pool;
 pub mod primitive;
 pub mod runtime;
+pub mod semantic_authoring;
 pub mod shaped;
 pub mod somui;
 pub mod somui_editor;
@@ -65,6 +67,7 @@ pub use drag_drop::{DragPayload, DropAcceptance, DropEffect, DropRequest, DropTa
 pub use editor_event::{
     CreateKind, EditorEvent, FoliageBrushField, GestureId, OutlinerRow, ScriptAttachmentRow,
     ScriptFieldKind, ScriptFieldRow, ScriptInspectorState, SelectionMode, TerrainToolField,
+    VertexPaintEvent,
 };
 pub use node::CursorKind;
 pub use runtime::{GameUi, GameUiFrame, UiCanvas};
@@ -610,6 +613,7 @@ struct EditorLayout {
     select_button: NodeHandle,
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
+    vertex_paint_button: NodeHandle,
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     inspector_handles: ToolHandles,
     viewport_handle: NodeHandle,
@@ -683,7 +687,7 @@ struct EditorLayout {
     time_label: NodeHandle,
     time_slider: NodeHandle,
     /// Mode-scope command labels. Collapse to icon-only under 1400 px.
-    mode_labels: [NodeHandle; 4],
+    mode_labels: [NodeHandle; 5],
     inner_h: NodeHandle,
     content_split_h: NodeHandle,
     right_split_h: NodeHandle,
@@ -718,13 +722,9 @@ struct EditorLayout {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    foliage_kind_popup: NodeHandle,
-    viewport_res_popup: NodeHandle,
     /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
     /// the others — a dropdown nothing knows about stays open behind the next
     /// one.
-    snap_grid_popup: NodeHandle,
-    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -872,6 +872,8 @@ enum LogView {
 }
 
 pub struct UiManager {
+    authoring_panel: Option<crate::authoring_panel::AuthoringPanel>,
+    authoring_tool_mode: crate::editor::tool_context::ToolMode,
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
     /// rules and the workspace presets all measure against.
@@ -918,6 +920,7 @@ pub struct UiManager {
     /// Palette entry currently shown on the picker button, so a click can
     /// advance to the next one.
     foliage_kind_shown: u8,
+    foliage_palette_kinds: Vec<u8>,
     // File menu (Phase 19B): Import
     file_button: NodeHandle,
     file_popup: NodeHandle,
@@ -944,6 +947,7 @@ pub struct UiManager {
     select_button: NodeHandle,
     landscape_button: NodeHandle,
     foliage_toolbar_button: NodeHandle,
+    vertex_paint_button: NodeHandle,
     // Terrain tool buttons (Phase 14F / XV-Zeta): (button, label, BrushMode index)
     terrain_tool_items: Vec<(NodeHandle, NodeHandle, u8)>,
     // Outliner row mapping: (button_handle, entity_index)
@@ -978,7 +982,7 @@ pub struct UiManager {
     /// Mode-scope command labels. Held so a future rule can address them; the
     /// 1400 px breakpoint deliberately does not.
     #[allow(dead_code)]
-    mode_labels: [NodeHandle; 4],
+    mode_labels: [NodeHandle; 5],
     /// Last width the collapse rules were evaluated at, so a resize that does
     /// not cross a breakpoint costs nothing.
     collapsed_at: Option<u32>,
@@ -1060,13 +1064,9 @@ pub struct UiManager {
     outliner_search: NodeHandle,
     inspector_search: NodeHandle,
     foliage_kind_combo: NodeHandle,
-    foliage_kind_popup: NodeHandle,
-    viewport_res_popup: NodeHandle,
     /// CONTROL-G's snap dropdowns. Held so `combo_entries` can close them with
     /// the others — a dropdown nothing knows about stays open behind the next
     /// one.
-    snap_grid_popup: NodeHandle,
-    snap_angle_popup: NodeHandle,
     save_button: NodeHandle,
     palette_button: NodeHandle,
     palette_popup: NodeHandle,
@@ -1738,6 +1738,8 @@ impl UiManager {
             outliner_stack: layout.outliner_stack,
             inspector_stack: layout.inspector_stack,
             persona: layout.persona,
+            authoring_panel: None,
+            authoring_tool_mode: crate::editor::tool_context::ToolMode::Select,
             details_empty: layout.details_empty,
             outliner_empty: layout.outliner_empty,
             log_empty: layout.log_empty,
@@ -1756,6 +1758,7 @@ impl UiManager {
             create_popup_open: false,
             create_popup_items: layout.create_popup_items,
             foliage_kind_shown: 0,
+            foliage_palette_kinds: (0..FOLIAGE_KIND_NAMES.len() as u8).collect(),
             file_button: layout.file_button,
             file_popup: layout.file_popup,
             file_menu_stack: layout.file_menu_stack,
@@ -1776,6 +1779,7 @@ impl UiManager {
             select_button: layout.select_button,
             landscape_button: layout.landscape_button,
             foliage_toolbar_button: layout.foliage_toolbar_button,
+            vertex_paint_button: layout.vertex_paint_button,
             terrain_tool_items: layout.terrain_tool_items,
             outliner_rows: Vec::new(),
             palette_entities: Vec::new(),
@@ -1853,10 +1857,6 @@ impl UiManager {
             outliner_search: layout.outliner_search,
             inspector_search: layout.inspector_search,
             foliage_kind_combo: layout.foliage_kind_combo,
-            foliage_kind_popup: layout.foliage_kind_popup,
-            viewport_res_popup: layout.viewport_res_popup,
-            snap_grid_popup: layout.snap_grid_popup,
-            snap_angle_popup: layout.snap_angle_popup,
             save_button: layout.save_button,
             palette_button: layout.palette_button,
             palette_popup: layout.palette_popup,
@@ -2132,6 +2132,32 @@ impl UiManager {
                 self.run_command_id("editor.foliage.edit");
             }
             "persona-gallery" => crate::editor::gallery::show(&mut self.native_ui),
+            "morrowind-animation" => {
+                if self.drawer_open {
+                    self.run_command_id("editor.view.content_drawer");
+                }
+                self.run_command_id("editor.animation.rig");
+                self.editor_events.push_back(EditorEvent::FocusSelection);
+            }
+            "morrowind-navigation" => {
+                if self.drawer_open {
+                    self.run_command_id("editor.view.content_drawer");
+                }
+                self.run_command_id("editor.create.cube");
+                self.run_command_id("editor.create.navigation_profile");
+                self.editor_events.push_back(EditorEvent::DesignerTool(
+                    crate::editor_event::DesignerTool::NavigationBake,
+                ));
+                self.editor_events.push_back(EditorEvent::FocusSelection);
+            }
+            "morrowind-prefab" => self.toggle_help(Some(10)),
+            "morrowind-scatter" => {
+                self.run_graph_tool_action(crate::editor_event::GraphToolAction::Scatter)
+            }
+            "morrowind-behavior" => {
+                self.run_graph_tool_action(crate::editor_event::GraphToolAction::Behavior)
+            }
+            "preferences" => self.toggle_preferences(),
             "menu-file" => self.open_menu(0),
             "menu-create" => self.open_menu(1),
             "menu-edit" => self.open_menu(2),
@@ -2228,6 +2254,7 @@ impl UiManager {
         &mut self,
         document: crate::graph::AnimationStateMachineDocument,
     ) {
+        self.set_graph_only_layout(false);
         self.native_ui.send(
             crate::graph::GraphEditorMessage::set_state_machine_document(
                 self.animation_graph_editor,
@@ -2240,6 +2267,7 @@ impl UiManager {
     /// Open a track document on MORROWIND-L's shared timeline in the shipped
     /// Animation workspace.
     pub fn edit_animation_timeline(&mut self, document: crate::timeline::TimelineDocument) {
+        self.set_graph_only_layout(false);
         self.animation_timeline_document = document.clone();
         self.native_ui
             .send(crate::timeline::TimelineEditorMessage::set_document(
@@ -3755,18 +3783,15 @@ impl UiManager {
     }
 
     fn combo_entries(&self) -> Vec<(NodeHandle, NodeHandle)> {
-        let mut entries = vec![
-            (self.persona.workspace, self.persona.workspace_popup),
-            (self.persona.sort, self.persona.sort_popup),
-            (self.persona.size, self.persona.size_popup),
-            (self.persona.places, self.persona.places_popup),
-            (self.foliage_kind_combo, self.foliage_kind_popup),
-            (self.viewport_res_combo, self.viewport_res_popup),
-            (self.snap_grid_combo, self.snap_grid_popup),
-            (self.snap_angle_combo, self.snap_angle_popup),
-        ];
-        entries.extend_from_slice(&self.persona.tool_panel.popups);
-        entries
+        self.native_ui
+            .nodes
+            .pair_iter()
+            .filter_map(|(handle, node)| {
+                node.control
+                    .owned_popup()
+                    .map(|popup| (handle.transmute(), popup))
+            })
+            .collect()
     }
 
     fn close_combo_dropdowns(&mut self) {
@@ -3929,6 +3954,7 @@ impl UiManager {
                 self.select_button,
                 self.landscape_button,
                 self.foliage_toolbar_button,
+                self.vertex_paint_button,
                 self.camera_speed_slider,
                 self.outliner_search,
                 self.outliner_tree,
@@ -4408,6 +4434,13 @@ impl UiManager {
         self.recent_menu_items.push((separator, String::new()));
         let recents = self.recent_scenes.clone();
         for (path, exists) in recents {
+            // An empty path separates the project's levels from recent files.
+            if path.is_empty() {
+                let separator =
+                    crate::editor::parts::scope_separator(&mut self.native_ui, self.file_menu_stack);
+                self.recent_menu_items.push((separator, String::new()));
+                continue;
+            }
             let label = std::path::Path::new(&path)
                 .file_name()
                 .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
@@ -4581,6 +4614,8 @@ impl UiManager {
     /// the status bar can say so. `"lit"` means the ordinary image.
     pub fn set_active_debug_view(&mut self, id: &'static str) {
         self.active_debug_view = id;
+        self.native_ui
+            .set_texel_density_legend(id == "texel_density");
     }
 
     /// The active debug visualisation.
@@ -4862,10 +4897,10 @@ impl UiManager {
                 .last_outliner_state
                 .as_ref()
                 .is_some_and(|(_, selected)| selected.is_some()),
-            // UiManager does not own the undo cursor; core remains authoritative.
-            // Keep existing reachability until CONTROL-H exposes that snapshot.
-            can_undo: true,
-            can_redo: true,
+            // Core publishes this cursor through set_history; discovery and
+            // native dispatch therefore report the same real enablement.
+            can_undo: self.history_position > 0,
+            can_redo: self.history_position < self.history_rows.len(),
             has_content_target: self.content_menu_target.is_some(),
             has_clipboard: self.clipboard_filled,
         }
@@ -4877,7 +4912,71 @@ impl UiManager {
         self.clipboard_filled = filled;
     }
 
-    fn run_command_id(&mut self, id: &str) -> bool {
+    /// Registry-derived command inventory, including current native enablement.
+    pub fn authoring_commands(&self) -> Vec<crate::authoring_panel::CommandCapability> {
+        crate::authoring_panel::command_capabilities(&self.command_context())
+    }
+
+    /// Update the project's generic left-panel authoring view. Private game
+    /// labels and supported actions arrive through this state, not engine code.
+    pub fn set_authoring_state(&mut self, state: crate::authoring_panel::AuthoringState) {
+        use crate::editor::tool_context::ToolMode;
+        let was_enabled = self
+            .authoring_panel
+            .as_ref()
+            .is_some_and(|panel| panel.enabled());
+        let enabled = state.enabled;
+        if self.authoring_panel.is_none() {
+            let parent = self
+                .native_ui
+                .parent_of(self.persona.tool_panel.host)
+                .unwrap_or(self.persona.tools);
+            self.authoring_panel = Some(crate::authoring_panel::AuthoringPanel::build(
+                &mut self.native_ui,
+                parent,
+                self.font_id,
+            ));
+        }
+        if let Some(panel) = &mut self.authoring_panel {
+            panel.set_state(&mut self.native_ui, state);
+        }
+        if enabled != was_enabled {
+            let shown = self.authoring_tool_mode;
+            let visible = enabled || shown != ToolMode::Select;
+            self.native_ui.set_visibility(self.persona.tools, visible);
+            self.native_ui.set_visibility(
+                self.persona.tool_panel.host,
+                shown != ToolMode::Select || !enabled,
+            );
+            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
+            {
+                320.0
+            } else if visible {
+                280.0
+            } else {
+                48.0
+            };
+            self.chrome_layout.viewport = (self.window_size.0 as f32
+                - self.chrome_layout.tools
+                - self.chrome_layout.details
+                - 12.0)
+                .max(200.0);
+            for (handle, size) in [
+                (self.inner_h, self.chrome_layout.tools),
+                (self.content_split_h, self.chrome_layout.viewport),
+            ] {
+                self.native_ui.send(UiMessage::new(
+                    handle,
+                    MessageDirection::ToWidget,
+                    SplitterMessage::SetFirstSize(size),
+                ));
+            }
+        }
+    }
+
+    /// Invoke the same semantic route used by native menus and shortcuts.
+    /// Returns whether it was accepted; queued core work may still fail later.
+    pub fn run_command_id(&mut self, id: &str) -> bool {
         if let Some(command) = crate::commands::registry().get(id).copied() {
             if !command.enabled(&self.command_context()).is_enabled() {
                 return false;
@@ -4910,6 +5009,15 @@ impl UiManager {
         match action {
             A::NewScene => self.prompt_unsaved_new(),
             A::SaveScene => self.editor_events.push_back(EditorEvent::SaveScene),
+            A::Prefab(action) => self.editor_events.push_back(EditorEvent::Prefab(action)),
+            A::CreateComponent(name) => self
+                .editor_events
+                .push_back(EditorEvent::CreateComponent(name.into())),
+            A::DesignerTool(action) => self
+                .editor_events
+                .push_back(EditorEvent::DesignerTool(action)),
+            A::ExportBlockout => self.editor_events.push_back(EditorEvent::ExportBlockout),
+            A::GraphTool(action) => self.run_graph_tool_action(action),
             A::ImportModel => self.editor_events.push_back(EditorEvent::ImportModel),
             A::Undo => self.editor_events.push_back(EditorEvent::Undo),
             A::Redo => self.editor_events.push_back(EditorEvent::Redo),
@@ -4970,6 +5078,9 @@ impl UiManager {
             A::ToggleFoliagePaint => self
                 .editor_events
                 .push_back(EditorEvent::ToggleFoliagePaint),
+            A::ToggleVertexPaint => self
+                .editor_events
+                .push_back(EditorEvent::VertexPaint(VertexPaintEvent::Toggle)),
             A::ToggleImmersiveViewport => self
                 .editor_events
                 .push_back(EditorEvent::ToggleImmersiveViewport),
@@ -6090,24 +6201,16 @@ impl UiManager {
         }
         let selected = paths.iter().position(|path| path == &self.content_path);
         self.persona.place_paths = paths;
-        let list = self
-            .native_ui
-            .nodes
-            .borrow(self.persona.places_popup.transmute())
-            .widget
-            .children[0];
-        for handle in [self.persona.places, list] {
-            self.native_ui.send(UiMessage::new(
-                handle,
-                MessageDirection::ToWidget,
-                ComboBoxMessage::SetItems(labels.clone()),
-            ));
-            self.native_ui.send(UiMessage::new(
-                handle,
-                MessageDirection::ToWidget,
-                ComboBoxMessage::SetSelected(selected.unwrap_or(0)),
-            ));
-        }
+        self.native_ui.send(UiMessage::new(
+            self.persona.places,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetItems(labels),
+        ));
+        self.native_ui.send(UiMessage::new(
+            self.persona.places,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetSelected(selected.unwrap_or(0)),
+        ));
         self.native_ui.send(ButtonMessage::set_selected(
             self.persona.favorite,
             self.persona.prefs.favorites.contains(&self.content_path),
@@ -6435,6 +6538,12 @@ impl UiManager {
         self.editor_events.pop_front()
     }
 
+    /// Queue a game-owned scene load through the same loader as File/Open.
+    /// Callers validate their project path and stop Play before requesting it.
+    pub fn request_scene_load(&mut self, path: String) {
+        self.editor_events.push_back(EditorEvent::LoadScene(path));
+    }
+
     // ── Live UI updates ───────────────────────────────────────────────────────
 
     /// CONTROL-L: publish the scene's clock to the viewport context bar.
@@ -6579,13 +6688,18 @@ impl UiManager {
 
     /// Hierarchical outliner (Phase 26-E), one [`OutlinerRow`] per visible row.
     pub fn update_outliner_tree(&mut self, entities: &[OutlinerRow], selected: Option<u32>) {
-        let new_state = (entities.to_vec(), selected);
-        if let Some(ref old_state) = self.last_outliner_state {
-            if *old_state == new_state {
-                return;
-            }
+        // Compare the borrowed rows before allocating a fresh snapshot. The
+        // usual unchanged frame needs no cloned names or tag vectors.
+        if self
+            .last_outliner_state
+            .as_ref()
+            .is_some_and(|(rows, old_selected)| {
+                *old_selected == selected && rows.as_slice() == entities
+            })
+        {
+            return;
         }
-        self.last_outliner_state = Some(new_state);
+        self.last_outliner_state = Some((entities.to_vec(), selected));
 
         let filter = crate::outliner_filter::OutlinerFilter::parse(&format!(
             "{} {}",
@@ -7101,8 +7215,17 @@ impl UiManager {
         for feedback in asset_feedback {
             self.push_toast(&feedback);
         }
-        for binding in self.generated_rows.values_mut() {
-            if let Some((value, default, _)) = values.get(&(binding.component, binding.field)) {
+        let show_change =
+            self.native_ui.active_gesture().is_none() && !self.native_ui.has_text_focus();
+        for (row, binding) in &mut self.generated_rows {
+            if let Some((value, default, mixed)) = values.get(&(binding.component, binding.field)) {
+                if show_change && !*mixed && binding.value != *value {
+                    self.native_ui.send(UiMessage::new(
+                        *row,
+                        MessageDirection::ToWidget,
+                        PropertyRowMessage::Flash,
+                    ));
+                }
                 binding.value = value.clone();
                 binding.default = default.clone();
             }
@@ -7174,6 +7297,7 @@ impl UiManager {
                 _ => ToolMode::Select,
             }
         };
+        self.authoring_tool_mode = shown;
         for (component, host) in &self.persona.component_hosts {
             let in_tools = match shown {
                 ToolMode::Materials => component.as_str() == "somnium.asset.Material",
@@ -7206,11 +7330,20 @@ impl UiManager {
                 (self.select_button, ToolMode::Select),
                 (self.landscape_button, ToolMode::Landscape),
                 (self.foliage_toolbar_button, ToolMode::Foliage),
+                (self.vertex_paint_button, ToolMode::VertexPaint),
             ] {
                 self.native_ui
                     .send(ButtonMessage::set_selected(handle, mode == active));
             }
-            let visible = shown != ToolMode::Select;
+            let authoring_visible = self
+                .authoring_panel
+                .as_ref()
+                .is_some_and(|panel| panel.enabled());
+            let visible = shown != ToolMode::Select || authoring_visible;
+            self.native_ui.set_visibility(
+                self.persona.tool_panel.host,
+                shown != ToolMode::Select || !authoring_visible,
+            );
             self.native_ui.set_visibility(self.persona.tools, visible);
             self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
             {
@@ -7343,11 +7476,23 @@ impl UiManager {
 
     /// Show the stable authoring subset of a first-class water body.
 
-    /// Show or hide the Foliage section and refresh it (Phase 17C).
-    ///
-    /// `values` is `[density, radius, max_slope_deg, kind, scale_min, scale_max,
-    /// min_layer_weight]` followed by the component's four distances, plus the
-    /// enable flags.
+    /// Replace the palette display model while retaining stable saved kind IDs.
+    pub fn set_foliage_palette(&mut self, entries: &[(u8, String)]) {
+        self.foliage_palette_kinds = entries.iter().map(|(kind, _)| *kind).collect();
+        let names: Vec<String> = entries.iter().map(|(_, name)| name.clone()).collect();
+        for handle in [
+            self.inspector_handles.foliage_kind_button,
+            self.foliage_kind_combo,
+        ] {
+            self.native_ui.send(crate::message::UiMessage::new(
+                handle,
+                crate::message::MessageDirection::ToWidget,
+                ComboBoxMessage::SetItems(names.clone()),
+            ));
+        }
+    }
+
+    /// Show/hide the foliage section and refresh brush values, distances and flags.
     pub fn update_foliage_inspector(&mut self, values: Option<([f32; 11], [bool; 4])>) {
         let h = &self.inspector_handles;
         let section = h.foliage_section;
@@ -7377,10 +7522,17 @@ impl UiManager {
                     self.native_ui
                         .send(CheckBoxMessage::set_checked(*handle, *on));
                 }
-                let kind = (v[3].round().max(0.0) as usize).min(FOLIAGE_KIND_NAMES.len() - 1);
-                self.foliage_kind_shown = kind as u8;
+                let kind = v[3].round().clamp(0.0, 255.0) as u8;
+                let row = self
+                    .foliage_palette_kinds
+                    .iter()
+                    .position(|&id| id == kind)
+                    .unwrap_or(0);
+                self.foliage_kind_shown = kind;
                 self.native_ui
-                    .send(ComboBoxMessage::set_selected(h.foliage_kind_button, kind));
+                    .send(ComboBoxMessage::set_selected(h.foliage_kind_button, row));
+                self.native_ui
+                    .send(ComboBoxMessage::set_selected(self.foliage_kind_combo, row));
             }
             None => self.native_ui.set_visibility(section, false),
         }
@@ -7764,6 +7916,33 @@ impl UiManager {
                 self.set_scene_dirty(true);
                 continue;
             }
+            if let Some(crate::graph::GraphEditorMessage::Document {
+                catalogue,
+                json,
+                apply,
+                preview,
+                source,
+            }) = msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.editor_events.push_back(EditorEvent::AuthoringGraph {
+                        catalogue: catalogue.clone(),
+                        json: json.clone(),
+                        apply: *apply,
+                        preview: *preview,
+                        source: source.clone(),
+                    });
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::Tool(action)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.run_graph_tool_action(*action);
+                }
+                continue;
+            }
             if matches!(
                 msg.data::<crate::graph::GraphEditorMessage>(),
                 Some(
@@ -7920,6 +8099,15 @@ impl UiManager {
             if let Some(event) = self.persona.tool_panel.event(&msg) {
                 self.editor_events.push_back(event);
                 continue;
+            }
+            if let Some(panel) = &mut self.authoring_panel {
+                let (handled, event) = panel.event(&mut self.native_ui, &msg);
+                if let Some(event) = event {
+                    self.editor_events.push_back(event);
+                }
+                if handled {
+                    continue;
+                }
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
                 if self.persona.click(&mut self.native_ui, msg.destination)
@@ -8301,6 +8489,10 @@ impl UiManager {
                 }
                 if msg.destination == self.foliage_toolbar_button {
                     self.run_command_id("editor.foliage.edit");
+                    continue;
+                }
+                if msg.destination == self.vertex_paint_button {
+                    self.run_command_id("editor.vertex_paint.edit");
                     continue;
                 }
                 if msg.destination == self.immersive_button {
@@ -8826,8 +9018,10 @@ impl UiManager {
                 if msg.destination == self.inspector_handles.foliage_kind_button
                     || msg.destination == self.foliage_kind_combo
                 {
-                    self.editor_events
-                        .push_back(EditorEvent::SelectFoliageKind(*i as u8));
+                    if let Some(&kind) = self.foliage_palette_kinds.get(*i) {
+                        self.editor_events
+                            .push_back(EditorEvent::SelectFoliageKind(kind));
+                    }
                     continue;
                 }
                 if msg.destination == self.viewport_res_combo {
@@ -9977,6 +10171,16 @@ mod styx_budget_tests {
     }
 
     #[test]
+    fn an_idle_shell_has_zero_live_motion_tracks() {
+        let mut ui = shell_frame(1920.0, 1080.0);
+        for _ in 0..60 {
+            ui.draw_ctx.motion.tick(16.0);
+            ui.draw();
+            assert!(ui.draw_ctx.motion.is_idle(), "idle shell started motion");
+        }
+    }
+
+    #[test]
     fn an_idle_shell_rebuilds_a_byte_identical_draw_list() {
         // phase_27 §10.3 / §5.6: nothing may churn the draw list between two
         // frames with no input. This is the guard that keeps the coming
@@ -10260,6 +10464,7 @@ mod zeta_layout_tests {
             layout.select_button,
             layout.landscape_button,
             layout.foliage_toolbar_button,
+            layout.vertex_paint_button,
             layout.play_button,
             layout.immersive_button,
             layout.pause_button,
@@ -10733,6 +10938,139 @@ mod panel_drag_tests {
             &ui,
             layout.viewport_handle,
             layout.outliner_header
+        ));
+    }
+}
+
+impl UiManager {
+    fn set_graph_only_layout(&mut self, only_graph: bool) {
+        self.native_ui
+            .set_visibility(self.animation_timeline.editor, !only_graph);
+        self.native_ui.send(UiMessage::new(
+            self.animation_workspace,
+            MessageDirection::ToWidget,
+            crate::widgets::splitter::SplitterMessage::SetSinglePane(only_graph),
+        ));
+    }
+
+    fn run_graph_tool_action(&mut self, action: crate::editor_event::GraphToolAction) {
+        use crate::editor_event::GraphToolAction as A;
+        match action {
+            A::Scatter | A::Behavior => {
+                self.set_graph_only_layout(true);
+                let surface = if action == A::Scatter {
+                    crate::graph::scatter::default_surface()
+                } else {
+                    crate::graph::behavior::default_surface()
+                };
+                self.native_ui.send(UiMessage::new(
+                    self.animation_graph_editor,
+                    MessageDirection::ToWidget,
+                    crate::graph::GraphEditorMessage::ActivateSurface(surface),
+                ));
+                self.set_workspace(Workspace::Animation);
+                self.push_toast(if action == A::Scatter {
+                    "Scatter graph: edit nodes, then Apply Authoring Graph"
+                } else {
+                    "Behavior graph: edit tasks, then Save Authoring Graph"
+                });
+            }
+            A::Open => self
+                .editor_events
+                .push_back(EditorEvent::OpenAuthoringGraph),
+            A::Save | A::Preview | A::Apply => self.native_ui.send(UiMessage::new(
+                self.animation_graph_editor,
+                MessageDirection::ToWidget,
+                crate::graph::GraphEditorMessage::RequestDocument {
+                    apply: action != A::Save,
+                    preview: action == A::Preview,
+                },
+            )),
+        }
+    }
+
+    /// Address the retained document owner directly, preserving its native undo stack.
+    pub fn authoring_editor(
+        &mut self,
+        target: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let handle = match target {
+            "graph" => self.animation_graph_editor,
+            "timeline" => self.animation_timeline.editor,
+            "localisation" => self.locale_grid,
+            _ => return Err("editor must be graph, timeline or localisation".into()),
+        };
+        let mut emit = Vec::new();
+        let result = {
+            let node = self
+                .native_ui
+                .nodes
+                .try_borrow_mut(handle.transmute())
+                .map_err(|_| "editor document is unavailable")?;
+            node.control.authoring(&node.widget, params, &mut emit)
+        }?;
+        for message in emit {
+            if let Some(crate::widgets::data_grid::DataGridMessage::Edited { table, .. }) =
+                message.data::<crate::widgets::data_grid::DataGridMessage>()
+            {
+                self.locale_table = Some((**table).clone());
+            }
+            self.native_ui.send(message);
+        }
+        if target == "timeline" {
+            if let Some(document) = result.get("document") {
+                self.animation_timeline_document = crate::timeline::serial::from_json(
+                    &document.to_string(),
+                    &crate::timeline::catalogues::animation(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        self.native_ui.invalidate_ancestors(handle);
+        Ok(result)
+    }
+
+    /// Open a versioned behavior/scatter graph on the same retained graph control.
+    pub fn edit_authoring_graph(&mut self, catalogue: &str, json: &str) -> Result<(), String> {
+        let catalogue = match catalogue {
+            "somnium.scatter" => crate::graph::scatter::catalogue(),
+            "somnium.behavior" => crate::graph::behavior::catalogue(),
+            "somnium.material" => crate::graph::catalogues::material(),
+            "somnium.animation" => crate::graph::catalogues::animation(),
+            _ => return Err("unsupported authoring graph catalogue".into()),
+        };
+        let graph = crate::graph::serial::from_json(json, &catalogue).map_err(|e| e.to_string())?;
+        self.set_graph_only_layout(true);
+        let mut surface = crate::graph::GraphSurface::new(catalogue);
+        surface.graph = graph;
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::SetSurface(surface),
+        ));
+        self.set_workspace(Workspace::Animation);
+        Ok(())
+    }
+
+    /// Retain the source file in the document owner after a successful open/save.
+    pub fn set_authoring_graph_source(&mut self, source: &str) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::SetSource(source.to_owned()),
+        ));
+    }
+
+    /// Show compile/bake/save results on the graph surface without discarding edits.
+    pub fn set_authoring_graph_status(&mut self, text: &str, error: bool) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::HostStatus {
+                text: text.to_owned(),
+                error,
+            },
         ));
     }
 }

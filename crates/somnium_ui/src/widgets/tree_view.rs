@@ -159,22 +159,15 @@ impl Control for TreeView {
                 i as u32,
                 crate::motion::MotionProperty::HoverWash,
             );
-            let target = if interaction == Interaction::Hover {
-                1.0
-            } else {
-                0.0
-            };
-            ctx.motion.start(
+            let wash = crate::motion::policy::hover(
+                &mut ctx.motion,
                 key,
-                0.0,
-                target,
-                theme::active().motion.hover_ms as f32,
-                crate::motion::Easing::Standard,
+                interaction == Interaction::Hover,
+                widget.enabled,
             );
-            let wash = ctx.motion.value_or(key, target);
             // Selection is a different cue entirely and must never be faded
             // through, or a selected row would blink when the pointer crosses it.
-            if !selected && wash > 0.0 && wash < 1.0 {
+            if !selected && widget.enabled {
                 let rest = tree_row(VisualState::with(Interaction::Rest));
                 let hovered = tree_row(VisualState::with(Interaction::Hover));
                 paint.background =
@@ -282,14 +275,11 @@ impl Control for TreeView {
             let (uv, tex) = item.icon.draw_quad(ic);
             ctx.push_textured_rect(ic, uv, paint.foreground, tex);
             let label_x = b.x + indent + 18.0 + theme::ICON_TREE + 6.0;
-            let (label, _) = crate::widgets::property_row::ellipsise(
+            let (label, _) = ctx.font_atlas.ellipsise(
                 &item.label,
                 (badge_x - 18.0 - label_x).max(0.0),
-                |text| {
-                    ctx.font_atlas
-                        .measure_text(text, style.px, style.font_id())
-                        .x
-                },
+                style.px,
+                style.font_id(),
             );
             ctx.push_text(
                 &label,

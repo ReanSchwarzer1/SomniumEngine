@@ -499,6 +499,25 @@ impl TimelineEditor {
 }
 
 impl Control for TimelineEditor {
+    fn authoring(
+        &mut self,
+        widget: &Widget,
+        params: &serde_json::Value,
+        emit: &mut Vec<UiMessage>,
+    ) -> Result<serde_json::Value, String> {
+        if params["operation"].as_str().is_some_and(|s| s != "query")
+            && !matches!(self.gesture, Gesture::None)
+        {
+            return Err("Finish the designer's timeline gesture first".into());
+        }
+        let result = crate::semantic_authoring::timeline(&mut self.surface, params)?;
+        if params["operation"].as_str().is_some_and(|s| s != "query") {
+            self.emit_document(widget, emit);
+            self.emit_playhead(widget, emit);
+            self.push_selected_curve(emit);
+        }
+        Ok(result)
+    }
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         if let Some(&curve) = widget.children.first() {
             ctx.measure_child(curve, Vec2::new(available.x, CURVE_HEIGHT));

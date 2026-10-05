@@ -2,6 +2,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateKind {
     Cube,
+    /// Schema-authored box, ramp, stairs or cylinder.
+    Blockout,
     Sphere,
     Plane,
     Cylinder,
@@ -51,6 +53,7 @@ impl CreateKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Cube => "Cube",
+            Self::Blockout => "Blockout",
             Self::Sphere => "Sphere",
             Self::Plane => "Plane",
             Self::Cylinder => "Cylinder",
@@ -103,6 +106,27 @@ pub enum TerrainToolField {
     SkyVisibility,
     /// E: metres at which the baked relief normal has fully taken over.
     ReliefTakeover,
+}
+
+/// Vertex Paint tool controls. Core owns the brush and the paint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VertexPaintEvent {
+    /// Enter or leave Vertex Paint mode.
+    Toggle,
+    /// Erase, Dirt, Rust, Wet, Blood, Preview (0..=5) switched on or off.
+    SetFlag(u8, bool),
+    /// Radius, Strength, Falloff (0..=2). `live` while a drag is in progress.
+    SetBrush(u8, f32),
+    /// Set the chosen channels to full on the selection.
+    Fill,
+    /// Remove all paint from the selection.
+    Clear,
+    /// Copy the selection's paint.
+    Copy,
+    /// Paste copied paint onto the selection (same vertex count).
+    Paste,
+    /// Generate grime, damp, rust and wear from the mesh's own shape.
+    AutoWeather,
 }
 
 /// Brush/runtime controls which deliberately remain outside component schemas.
@@ -237,6 +261,30 @@ pub struct OutlinerRow {
 /// `app.rs` drains these after each frame and applies them to the ECS world.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
+    /// Shared, typed host authoring request from the native panel. The same
+    /// method/parameters are accepted from MCP; the host validates both.
+    AuthoringRequest {
+        method: String,
+        params: serde_json::Value,
+    },
+    /// Create a registered designer component with normal Details and undo.
+    CreateComponent(String),
+    /// Native authoring actions shared by menus and the command palette.
+    DesignerTool(DesignerTool),
+    /// Prefab commands share one route from menus and the command palette.
+    Prefab(PrefabAction),
+    /// Export the selected authored blockout as a standard mesh asset.
+    ExportBlockout,
+    /// Read an authored behavior/scatter graph from project content.
+    OpenAuthoringGraph,
+    /// Save or apply the graph currently owned by the shared graph control.
+    AuthoringGraph {
+        catalogue: String,
+        json: String,
+        apply: bool,
+        preview: bool,
+        source: Option<String>,
+    },
     /// One completed editor drop. The core maps this semantic operation to
     /// exactly one command/undo record.
     CompleteDrop(crate::drag_drop::DropRequest),
@@ -412,6 +460,8 @@ pub enum EditorEvent {
         value: f32,
         live: bool,
     },
+    /// The Vertex Paint tool (mode, brush, channel and paint actions).
+    VertexPaint(VertexPaintEvent),
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),
@@ -637,3 +687,67 @@ use somnium_ecs::reflect::{FieldId, ReflectValue, StableId};
 /// Identity shared by all live updates and the final commit of one gesture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GestureId(pub u64);
+
+/// Prefab authoring actions from the editor command registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefabAction {
+    /// Mount another template under the selected prefab root.
+    Nest,
+    /// Capture a selection and link its entities.
+    Create,
+    /// Resolve and instantiate a template asset.
+    Instantiate,
+    /// Enter instance editing.
+    Enter,
+    /// Leave instance editing.
+    Exit,
+    /// Publish instance edits and refresh other instances.
+    Propagate,
+    /// Remove overrides and reload template defaults.
+    Revert,
+    /// Retain entities while removing their template relationship.
+    BreakLink,
+}
+/// Shared graph authoring commands, independent of graph internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphToolAction {
+    /// Open a scatter graph starter document.
+    Scatter,
+    /// Open a behavior graph starter document.
+    Behavior,
+    /// Open a saved graph.
+    Open,
+    /// Save the active graph.
+    Save,
+    /// Evaluate and report the result without creating or attaching scene content.
+    Preview,
+    /// Compile the active graph and apply it to the selected scene source.
+    Apply,
+}
+
+/// Designer actions whose implementation belongs to the engine host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesignerTool {
+    /// Bake the selected navigation volume.
+    NavigationBake,
+    /// Clear derived navigation tiles.
+    NavigationClear,
+    /// Reopen the selected entity's behavior graph.
+    BehaviorEdit,
+    /// Create visible preview joints and draggable targets.
+    AnimationRig,
+    /// Rewind a preview and release its physical bodies.
+    AnimationReset,
+    /// Reload the event asset and preview clip.
+    AnimationReload,
+    /// Open or create the rig's event timeline.
+    AnimationEvents,
+    /// Save marker edits to the rig event asset.
+    AnimationSaveEvents,
+    /// Store player changes in the configured slot.
+    SavePlay,
+    /// Rebase a slot onto the Play checkpoint.
+    LoadPlay,
+    /// Choose a slot thumbnail PNG.
+    SaveThumbnail,
+}

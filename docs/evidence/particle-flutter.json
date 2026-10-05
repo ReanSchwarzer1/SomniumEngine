@@ -1,0 +1,112 @@
+{
+  "complete": true,
+  "cases": {
+    "native_details_and_smoke": {
+      "cancellation_requested": false,
+      "error": null,
+      "expected_revision": 8,
+      "job_id": "aac4fa8bd6bf83d4520408b17a875b61:feedback:2",
+      "kind": "capture",
+      "progress": 1.0,
+      "published_revision": 8,
+      "request_id": "15f0c5c2d9204762b788bed0349fde76",
+      "result": {
+        "capture": {
+          "camera": [
+            105.0,
+            1.5,
+            105.0
+          ],
+          "frame": 245,
+          "height": 720,
+          "path": "\\\\?\\C:\\Users\\adhir\\OneDrive\\Documents\\GitHub\\SomniumEngine\\target\\hello-editor\\captures\\capture-aac4fa8bd6bf83d4520408b17a875b61-244.png",
+          "requested_frame": 244,
+          "revision": 8,
+          "width": 1280
+        }
+      },
+      "status": "succeeded"
+    },
+    "preset_and_texture": {
+      "pass": true,
+      "fields": [
+        "additive",
+        "aspect",
+        "atlas_columns",
+        "atlas_fps",
+        "atlas_frames",
+        "atlas_rows",
+        "burst",
+        "color_over_life",
+        "enabled",
+        "flutter",
+        "flutter_hz",
+        "local_space",
+        "rotation_spread",
+        "spin",
+        "staged_reflection",
+        "texture",
+        "texture_status",
+        "tip_tint",
+        "world_up"
+      ]
+    },
+    "paused_step_burst": {
+      "cancellation_requested": false,
+      "error": null,
+      "expected_revision": 11,
+      "job_id": "aac4fa8bd6bf83d4520408b17a875b61:feedback:3",
+      "kind": "capture",
+      "progress": 1.0,
+      "published_revision": 11,
+      "request_id": "3e9f2f3e3a414c8292801c7594975a5a",
+      "result": {
+        "capture": {
+          "camera": [
+            105.0,
+            1.4018999338150024,
+            105.0
+          ],
+          "frame": 297,
+          "height": 720,
+          "path": "\\\\?\\C:\\Users\\adhir\\OneDrive\\Documents\\GitHub\\SomniumEngine\\target\\hello-editor\\captures\\capture-aac4fa8bd6bf83d4520408b17a875b61-296.png",
+          "requested_frame": 296,
+          "revision": 11,
+          "width": 1280
+        }
+      },
+      "status": "succeeded"
+    },
+    "smoke_after_sixty_steps": {
+      "cancellation_requested": false,
+      "error": null,
+      "expected_revision": 12,
+      "job_id": "aac4fa8bd6bf83d4520408b17a875b61:feedback:4",
+      "kind": "capture",
+      "progress": 1.0,
+      "published_revision": 12,
+      "request_id": "af11b03b01024bcf8ad882f89563f6da",
+      "result": {
+        "capture": {
+          "camera": [
+            105.0,
+            1.4018999338150024,
+            105.0
+          ],
+          "frame": 369,
+          "height": 720,
+          "path": "\\\\?\\C:\\Users\\adhir\\OneDrive\\Documents\\GitHub\\SomniumEngine\\target\\hello-editor\\captures\\capture-aac4fa8bd6bf83d4520408b17a875b61-368.png",
+          "requested_frame": 368,
+          "revision": 12,
+          "width": 1280
+        }
+      },
+      "status": "succeeded"
+    },
+    "play_pause_step_stop": {
+      "pass": true,
+      "burst_consumed": true,
+      "authored_values_restored": true
+    }
+  }
+}

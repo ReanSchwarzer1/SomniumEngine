@@ -152,7 +152,42 @@ impl Persona {
         key: String,
         label: &str,
     ) -> NodeHandle {
-        let button = action(ui, parent, label, 0.0);
+        let group = key.contains("/group/");
+        let button = ui.add_node(
+            ButtonBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::active().density.row_chrome)
+                    .with_margin(Thickness {
+                        left: 0.0,
+                        top: if group { 4.0 } else { 8.0 },
+                        right: 0.0,
+                        bottom: 2.0,
+                    })
+                    .with_tooltip(format!("Expand or collapse {label}")),
+            )
+            .with_variant(if group {
+                crate::style::ButtonVariant::Quiet
+            } else {
+                crate::style::ButtonVariant::Secondary
+            })
+            .build(),
+            parent,
+        );
+        ui.add_node(
+            TextBuilder::new(
+                WidgetBuilder::new()
+                    .with_margin(Thickness::axes(8.0, 0.0))
+                    .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+            )
+            .with_role(if group {
+                TextRole::Label
+            } else {
+                TextRole::Section
+            })
+            .with_text(label)
+            .build(),
+            button,
+        );
         let text = ui.nodes.borrow(button.transmute()).widget.children[0];
         let body = ui.add_node(
             StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))

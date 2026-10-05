@@ -12,20 +12,17 @@
 use crate::{
     message::NodeHandle,
     theme,
-    types::{HorizontalAlignment, Thickness, VerticalAlignment},
+    types::{Thickness, VerticalAlignment},
     ui::UserInterface,
     widget::WidgetBuilder,
     widgets::{
         border::BorderBuilder,
-        button::ButtonBuilder,
         canvas::CanvasBuilder,
         check_box::CheckBoxBuilder,
         grid::{Column, GridBuilder, Row},
-        popup::PopupBuilder,
         scroll_viewer::ScrollViewerBuilder,
         search_box::{BreadcrumbBuilder, SearchBoxBuilder},
         stack_panel::{Orientation, StackPanelBuilder},
-        text::TextBuilder,
     },
 };
 
@@ -34,7 +31,6 @@ use crate::{
 // the globs, so this cannot silently change which `TextBuilder` is in scope.
 #[allow(unused_imports)]
 use crate::editor::parts::*;
-use glam::Vec2;
 
 pub(crate) fn build_content_drawer(
     ui: &mut UserInterface,
@@ -96,7 +92,15 @@ pub(crate) fn build_content_drawer(
         ("›", crate::ContentToolbarAction::Forward),
         ("↑", crate::ContentToolbarAction::Up),
     ] {
-        actions.push((action(ui, arrows, label, 34.0), verb));
+        let arrow = action(ui, arrows, label, 34.0);
+        let text = ui.first_child(arrow);
+        if text.is_some() {
+            ui.nodes
+                .borrow_mut(text.transmute())
+                .widget
+                .horizontal_alignment = crate::types::HorizontalAlignment::Center;
+        }
+        actions.push((arrow, verb));
     }
     let crumb = ui.add_node(
         BreadcrumbBuilder::new(
@@ -223,54 +227,6 @@ pub(crate) fn build_create_popup(
     root: NodeHandle,
     font_id: u8,
 ) -> (NodeHandle, Vec<(NodeHandle, &'static str)>) {
-    let popup_backdrop =
-        PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT)).build();
-    let popup_h = ui.add_node(popup_backdrop, root);
-
-    let popup_border = BorderBuilder::new(
-        WidgetBuilder::new()
-            .with_desired_position(Vec2::new(148.0, 28.0))
-            .with_width(160.0)
-            .with_horizontal_alignment(HorizontalAlignment::Left)
-            .with_vertical_alignment(VerticalAlignment::Top)
-            .with_background(theme::active().semantic.surface.header.bytes())
-            .with_foreground(theme::active().semantic.border.subtle.bytes()),
-    )
-    .with_stroke_thickness(Thickness::uniform(1.0))
-    .build();
-    let popup_border_h = ui.add_node(popup_border, popup_h);
-
-    let popup_stack =
-        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-            .with_orientation(Orientation::Vertical)
-            .build();
-    let popup_stack_h = ui.add_node(popup_stack, popup_border_h);
-
-    let commands = crate::commands::registry().menu(crate::commands::Menu::Create);
-    let mut items = Vec::with_capacity(commands.len());
-    for command in commands {
-        let btn = ButtonBuilder::new(
-            WidgetBuilder::new()
-                .with_height(22.0)
-                .with_background(theme::TRANSPARENT),
-        )
-        .build();
-        let btn_h = ui.add_node(btn, popup_stack_h);
-
-        let lbl = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
-            left: 8.0,
-            top: 4.0,
-            right: 0.0,
-            bottom: 0.0,
-        }))
-        .with_text(command.menu_label())
-        .with_font_size(12.0)
-        .with_font_id(font_id)
-        .with_color(theme::active().semantic.text.primary.bytes())
-        .build();
-        ui.add_node(lbl, btn_h);
-        items.push((btn_h, command.id));
-    }
-
-    (popup_h, items)
+    let (popup, _, items) = command_popup_items(ui, root, font_id, crate::commands::Menu::Create);
+    (popup, items)
 }

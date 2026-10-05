@@ -502,8 +502,15 @@ impl RenderContext {
         };
 
         let mut limits = wgpu::Limits::default();
-        limits.max_binding_array_elements_per_shader_stage = 1024;
-        limits.max_storage_buffers_per_shader_stage = 16;
+        limits.max_binding_array_elements_per_shader_stage = crate::bindless::MAX_BINDLESS_TEXTURES;
+        // The shading pass binds 16 storage buffers before vertex paint adds a
+        // seventeenth. Desktop DX12/Vulkan report far more than 32.
+        // ponytail: no shader variant for an adapter capped at 16; add one if
+        // such a device ever matters.
+        limits.max_storage_buffers_per_shader_stage = adapter
+            .limits()
+            .max_storage_buffers_per_shader_stage
+            .clamp(16, 32);
         // Phase 24AC / FSR: SPD writes six mip UAVs from one dispatch, and FSR's
         // luma pyramid binds those plus two more. wgpu's default ceiling is four
         // storage textures per stage. Asked for from the adapter rather than

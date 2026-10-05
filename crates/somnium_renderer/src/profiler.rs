@@ -109,6 +109,22 @@ pub struct ScopeResult {
     pub ms: f32,
 }
 
+/// CPU decisions made while submitting native terrain-painted foliage.
+/// These count authored placements/material parts, before GPU visibility tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FoliageCounters {
+    pub candidates: u32,
+    pub distance_culled: u32,
+    pub unavailable_mesh: u32,
+    pub scale_culled: u32,
+    pub submitted_instances: u32,
+    /// Instances using a complete simplified project mesh at distance.
+    pub lod_instances: u32,
+    pub submitted_parts: u32,
+    /// Parts offered as casters before cascade/size shadow culling.
+    pub shadow_parts: u32,
+}
+
 /// Per-frame counters that belong next to the timings.
 ///
 /// From Flax's `RenderStatsData`: a pass time on its own says how long
@@ -118,8 +134,20 @@ pub struct FrameCounters {
     pub draw_calls: u32,
     pub dispatches: u32,
     pub triangles: u32,
-    /// Instances that survived culling and reached the draw queue.
+    /// CPU draw-queue submissions, not GPU visibility survivors.
     pub instances: u32,
+    /// Native painted foliage submission decisions from the current frame.
+    pub foliage: FoliageCounters,
+    /// GPU indirect arguments submitted: meshlets plus whole-mesh fallbacks.
+    pub gpu_draw_arguments: u32,
+    /// The subset of arguments produced by meshlet expansion.
+    pub gpu_meshlet_arguments: u32,
+    /// Actual surviving arguments from the opt-in cull readback. None when
+    /// unmeasured; zero must never be substituted for unavailable GPU data.
+    pub gpu_visible_arguments: Option<u32>,
+    /// Water commands queued, and the subset with a loaded body descriptor.
+    pub water_draws: u32,
+    pub water_bound_draws: u32,
     /// Terrain chunks submitted this frame (camera-visible; in `draw_queue`).
     pub terrain_chunks: u32,
     /// Terrain chunks rejected by the CPU camera frustum (Phase CR-B).
@@ -412,6 +440,9 @@ pub struct GpuProfiler {
     /// reconciles a small GPU `Frame` with a large `Frame wall`. Kept separate
     /// from [`Self::frame_cpu_ms`], which contains it.
     pub surface_acquire_ms: f32,
+    /// Queue submit through present, one frame late (after the frame's
+    /// profiler scope closes); the rest of `Frame CPU` outside the zones.
+    pub submit_present_ms: f32,
     /// The frame most recently collected, for the "is this stale" question the
     /// overlay would otherwise have to guess at.
     collected: u64,
@@ -525,6 +556,7 @@ impl GpuProfiler {
             cpu_raw_results: Vec::new(),
             frame_cpu_ms: 0.0,
             surface_acquire_ms: 0.0,
+            submit_present_ms: 0.0,
             collected: 0,
             frame_index: 0,
             counters: FrameCounters::default(),

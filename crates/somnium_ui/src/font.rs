@@ -73,6 +73,13 @@ pub struct GlyphInfo {
     pub advance: f32,
 }
 
+#[derive(Default)]
+struct ShapeCache {
+    elisions: HashMap<(String, u32, u8, u32), (String, bool)>,
+    lines: HashMap<(String, u32, u8, bool), std::sync::Arc<crate::text::shape::ShapedLine>>,
+    order: std::collections::VecDeque<(String, u32, u8, bool)>,
+}
+
 pub struct FontAtlas {
     /// RGBA8 pixel data — RGB=255 everywhere, A=glyph coverage.
     pub pixels: Vec<u8>,
@@ -81,6 +88,7 @@ pub struct FontAtlas {
     /// Set when pixels are modified; UiPass should upload the texture and clear this flag.
     pub dirty: bool,
 
+    shapes: std::sync::Mutex<ShapeCache>,
     fonts: Vec<fontdue::Font>,
     /// The bytes each face was loaded from.
     ///
@@ -149,6 +157,7 @@ impl FontAtlas {
             width: ATLAS_WIDTH,
             height: ATLAS_HEIGHT,
             dirty: false,
+            shapes: std::sync::Mutex::new(ShapeCache::default()),
             fonts: Vec::new(),
             font_bytes: Vec::new(),
             chain: crate::text::fallback::FallbackChain::new(),
@@ -183,6 +192,7 @@ impl FontAtlas {
         );
         self.fonts.push(font);
         self.font_bytes.push(std::sync::Arc::from(bytes));
+        *self.shapes.get_mut().unwrap_or_else(|e| e.into_inner()) = ShapeCache::default();
         Ok(id)
     }
 
@@ -193,15 +203,56 @@ impl FontAtlas {
         if !self.shaper.is_available() || tracking != 0.0 || line.is_empty() {
             return None;
         }
-        crate::text::shape::shape_line(
+        self.shape_line(
             line,
             px,
-            self,
-            self.chain(),
             crate::text::Direction::of_paragraph(line),
             font_id,
         )
         .map(|shaped| shaped.width)
+    }
+
+    /// Share positioned glyphs between layout and drawing. Repeated labels must
+    /// not parse OpenType tables on every measure/draw pass. Font registration
+    /// invalidates the cache; size, direction and preferred face are in the key.
+    /// At most 1,024 short lines are retained; long document text is not cached.
+    pub(crate) fn shape_line(
+        &self,
+        text: &str,
+        px: f32,
+        base: crate::text::Direction,
+        primary: u8,
+    ) -> Option<std::sync::Arc<crate::text::shape::ShapedLine>> {
+        let key = (text.to_owned(), px.to_bits(), primary, base.is_rtl());
+        let cacheable = text.len() <= 512;
+        if cacheable {
+            let cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(line) = cache.lines.get(&key) {
+                return Some(line.clone());
+            }
+        }
+        let line = std::sync::Arc::new(crate::text::shape::shape_line(
+            text,
+            px,
+            self,
+            self.chain(),
+            base,
+            primary,
+        )?);
+        if cacheable {
+            let mut cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = cache.lines.get(&key) {
+                return Some(existing.clone());
+            }
+            if cache.lines.len() >= 1024 {
+                if let Some(old) = cache.order.pop_front() {
+                    cache.lines.remove(&old);
+                }
+            }
+            cache.order.push_back(key.clone());
+            cache.lines.insert(key, line.clone());
+        }
+        Some(line)
     }
 
     /// Which face serves which codepoint.
@@ -232,6 +283,31 @@ impl FontAtlas {
     /// Returns (total_advance_width, line_height) in pixels.
     pub fn measure_text(&self, text: &str, px: f32, font_id: u8) -> Vec2 {
         self.measure_text_tracked(text, px, font_id, 0.0)
+    }
+
+    /// Cache the fitted label, not every progressively shorter candidate.
+    /// Long outliner names otherwise churn the shape cache on every frame.
+    /// Font registration clears this cache along with the positioned glyphs.
+    pub fn ellipsise(&self, text: &str, width: f32, px: f32, font_id: u8) -> (String, bool) {
+        let key = (text.to_owned(), px.to_bits(), font_id, width.to_bits());
+        let cacheable = text.len() <= 512;
+        if cacheable {
+            let cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(label) = cache.elisions.get(&key) {
+                return label.clone();
+            }
+        }
+        let label = crate::widgets::property_row::ellipsise(text, width, |s| {
+            self.measure_text(s, px, font_id).x
+        });
+        if cacheable {
+            let mut cache = self.shapes.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.elisions.len() >= 512 {
+                cache.elisions.clear();
+            }
+            cache.elisions.insert(key, label.clone());
+        }
+        label
     }
 
     /// [`measure_text`](Self::measure_text) with letter-spacing. Must agree
@@ -496,6 +572,63 @@ impl Default for FontAtlas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fitted_labels_reuse_results_and_follow_width_font_and_size_changes() {
+        let mut atlas = FontAtlas::new();
+        atlas.add_font(CUTS[0]).unwrap();
+        atlas.add_font(CUTS[2]).unwrap();
+        let text = "Town / weathered shopfront cornice — café façade";
+        for (width, px, font) in [(85.,13.,0), (180.,13.,0), (85.,15.,0), (85.,13.,1)] {
+            let expected = crate::widgets::property_row::ellipsise(text,width,|s| atlas.measure_text(s,px,font).x);
+            assert_eq!(atlas.ellipsise(text,width,px,font),expected);
+            // A warm fit must not repopulate even an evicted shaping cache.
+            atlas.shapes.get_mut().unwrap().lines.clear();
+            for _ in 0..20 { assert_eq!(atlas.ellipsise(text,width,px,font),expected); }
+            assert!(atlas.shapes.get_mut().unwrap().lines.is_empty());
+        }
+        assert_eq!(atlas.shapes.get_mut().unwrap().elisions.len(),4);
+        atlas.add_font(CUTS[1]).unwrap();
+        assert!(atlas.shapes.get_mut().unwrap().elisions.is_empty());
+    }
+
+    #[test]
+    fn cached_layout_keeps_shaped_glyphs_and_font_size_variants() {
+        let mut atlas = FontAtlas::new();
+        atlas.add_font(CUTS[0]).unwrap();
+        for text in ["Office ffi AV", "Doctor: café — 12", "שלום Hello"] {
+            for size in [12.0, 18.0] {
+                let direction = crate::text::Direction::of_paragraph(text);
+                let expected =
+                    crate::text::shape::shape_line(text, size, &atlas, atlas.chain(), direction, 0)
+                        .unwrap();
+                for _ in 0..3 {
+                    assert_eq!(
+                        *atlas.shape_line(text, size, direction, 0).unwrap(),
+                        expected
+                    );
+                    assert!((atlas.measure_text(text, size, 0).x - expected.width).abs() < 0.001);
+                }
+            }
+        }
+        atlas.add_font(CUTS[2]).unwrap();
+        let text = "Different face AV";
+        let expected = crate::text::shape::shape_line(
+            text,
+            14.0,
+            &atlas,
+            atlas.chain(),
+            crate::text::Direction::Ltr,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            *atlas
+                .shape_line(text, 14.0, crate::text::Direction::Ltr, 1)
+                .unwrap(),
+            expected
+        );
+    }
 
     /// The five bundled cuts, in the order `typography::FontRole` expects.
     const CUTS: [&[u8]; 5] = [

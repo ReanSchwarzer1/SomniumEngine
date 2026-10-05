@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod body;
 pub mod config;
 pub mod contact;

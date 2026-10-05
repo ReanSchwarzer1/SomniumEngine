@@ -314,7 +314,11 @@ impl WaterSpectrumPass {
         time: f32,
         simulation: [f32; 4],
     ) -> [f32; 4] {
-        if !self.enabled {
+        // A body that does not blend the spectrum in (spectrum_blend 0: every
+        // pond, creek and canal so far) multiplies the transform by zero in the
+        // shader, so skip it exactly as `SOMNIUM_WATER_SPECTRUM=0` does. It was
+        // ~6 ms a frame at 2560x1600 for water nobody could see move.
+        if !self.enabled || simulation[0] <= 0.0 {
             let mut gerstner_only = simulation;
             gerstner_only[0] = 0.0;
             return gerstner_only;

@@ -47,6 +47,9 @@ use somnium_script::value::ScriptValue;
 use crate::reflect_registry::component_registry;
 use crate::script_bridge::{ApplyOutcome, EngineWorldView, apply_commands};
 
+#[path = "ai_script.rs"]
+mod ai_script;
+
 /// Turns a script's `applyForce` into whatever the game's physics
 /// representation needs.
 ///
@@ -944,6 +947,28 @@ impl ScriptHost {
             });
         }
 
+        self.commit_commands(world, &mut commands, services);
+
+        // Measured around the whole phase, including VM and command apply.
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed = started.elapsed().as_secs_f32() * 1000.0;
+        match self.meter {
+            Meter::Sync => self.stats.sync_ms += elapsed,
+            Meter::Fixed => self.stats.fixed_ms += elapsed,
+            Meter::Update => self.stats.update_ms += elapsed,
+        }
+        self.stats.calls += u32::try_from(report.invoked).unwrap_or(u32::MAX);
+        self.stats.errors += u32::try_from(report.failures.len()).unwrap_or(u32::MAX);
+        report
+    }
+
+    /// One capability-filtered commit path for lifecycle and behavior callbacks.
+    fn commit_commands(
+        &mut self,
+        world: &mut World,
+        commands: &mut CommandBuffer,
+        services: &mut HostServices<'_>,
+    ) {
         // Phase 16-F: the capability manifest, enforced once, here.
         //
         // At the command boundary rather than in the bindings: every
@@ -969,21 +994,6 @@ impl ScriptHost {
         let outcome = apply_commands(world, &self.registry, queued);
         self.stats.commands += u32::try_from(outcome.applied).unwrap_or(u32::MAX);
         self.absorb(outcome, world, services);
-
-        // Measured around the whole phase — the VM call *and* the apply —
-        // because "how much did scripting cost this frame" is the
-        // question, and the marshalling either side of the call is most of
-        // the answer (see the 16-B budget record).
-        #[allow(clippy::cast_possible_truncation)]
-        let elapsed = started.elapsed().as_secs_f32() * 1000.0;
-        match self.meter {
-            Meter::Sync => self.stats.sync_ms += elapsed,
-            Meter::Fixed => self.stats.fixed_ms += elapsed,
-            Meter::Update => self.stats.update_ms += elapsed,
-        }
-        self.stats.calls += u32::try_from(report.invoked).unwrap_or(u32::MAX);
-        self.stats.errors += u32::try_from(report.failures.len()).unwrap_or(u32::MAX);
-        report
     }
 
     /// This frame's cost so far.

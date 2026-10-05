@@ -198,7 +198,7 @@ pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld, fixed_
     let falling_threshold = (physics.gravity().y * fixed_dt * FALLING_FRACTION).min(0.0);
 
     let bodies: Vec<(Entity, RigidBodyComponent)> = world
-        .entities()
+        .entities_with::<RigidBodyComponent>()
         .filter_map(|entity| Some((entity, *world.get::<RigidBodyComponent>(entity)?)))
         .collect();
 
@@ -251,7 +251,7 @@ pub fn read_physics_into_world(world: &mut World, physics: &PhysicsWorld, fixed_
 /// velocity the step was given, not the one it started from.
 pub fn write_world_into_physics(world: &mut World, physics: &mut PhysicsWorld) {
     let driven: Vec<(Entity, BodyId, glam::Vec3)> = world
-        .entities()
+        .entities_with::<RigidBodyComponent>()
         .filter_map(|entity| {
             let component = world.get::<RigidBodyComponent>(entity)?;
             component

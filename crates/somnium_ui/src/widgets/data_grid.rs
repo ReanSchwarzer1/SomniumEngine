@@ -82,9 +82,40 @@ pub struct DataGrid {
     /// Why the last commit was refused, shown against the cell that refused it.
     error: Option<String>,
     hovered: Option<usize>,
+    undo: Vec<DataTable>,
+    redo: Vec<DataTable>,
 }
 
 impl DataGrid {
+    fn remember(&mut self, before: DataTable) {
+        if before.to_csv() == self.table.to_csv() {
+            return;
+        }
+        if self.undo.len() >= 64 {
+            self.undo.remove(0);
+        }
+        self.undo.push(before);
+        self.redo.clear();
+    }
+    fn restore(&mut self, redo: bool) {
+        let previous = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop()
+        };
+        if let Some(previous) = previous {
+            let old = std::mem::replace(&mut self.table, previous);
+            if redo {
+                self.undo.push(old);
+            } else {
+                self.redo.push(old);
+            }
+            self.selection = None;
+            self.editing = None;
+            self.refresh();
+        }
+    }
+
     #[must_use]
     pub fn new(table: DataTable, font_id: u8) -> Self {
         let view = View::default();
@@ -98,6 +129,8 @@ impl DataGrid {
             editing: None,
             error: None,
             hovered: None,
+            undo: vec![],
+            redo: vec![],
         }
     }
 
@@ -169,8 +202,10 @@ impl DataGrid {
         let Some((rows, columns)) = self.selected_range() else {
             return;
         };
+        let before = self.table.clone();
         match self.table.set_range(&rows, &columns, &text) {
             Ok(_) => {
+                self.remember(before);
                 self.error = None;
                 let (r, c) = (rows.len(), columns.len());
                 // The sort may have been *by* the column just written, so the
@@ -238,6 +273,140 @@ fn error_text(error: &CellError) -> String {
 }
 
 impl Control for DataGrid {
+    fn authoring(
+        &mut self,
+        widget: &Widget,
+        p: &serde_json::Value,
+        emit: &mut Vec<UiMessage>,
+    ) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let op = p["operation"].as_str().unwrap_or("query");
+        let before = self.table.clone();
+        let token = crate::semantic_authoring::view_token(&format!("{:?}", self.table));
+        if op != "query" {
+            if self.editing.is_some() {
+                return Err("Finish the current native cell edit first".into());
+            }
+            if p["expected_view"] != token {
+                return Err("table_conflict: refresh the current localisation table".into());
+            }
+            match op {
+                "cell" => {
+                    let row = RowId(p["row"].as_u64().ok_or("row must be an ID")?);
+                    let column = p["column"].as_str().ok_or("column required")?;
+                    let text = p["text"].as_str().ok_or("text required")?;
+                    if text.len() > 16384 {
+                        return Err("cell exceeds 16 KiB".into());
+                    }
+                    self.table
+                        .set_text(row, column, text)
+                        .map_err(|e| e.to_string())?;
+                }
+                "range" => {
+                    let rows: Vec<u64> = serde_json::from_value(p["rows"].clone())
+                        .map_err(|_| "rows must be IDs")?;
+                    let columns: Vec<String> = serde_json::from_value(p["columns"].clone())
+                        .map_err(|_| "columns required")?;
+                    let text = p["text"].as_str().ok_or("text required")?;
+                    let cells = rows.len().saturating_mul(columns.len());
+                    if cells > 4096
+                        || text.len() > 16384
+                        || cells.saturating_mul(text.len()) > 1024 * 1024
+                    {
+                        return Err(
+                            "range exceeds 4096 cells, 16 KiB per cell or 1 MiB total".into()
+                        );
+                    }
+                    self.table
+                        .set_range(
+                            &rows.into_iter().map(RowId).collect::<Vec<_>>(),
+                            &columns,
+                            text,
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                "replace" => {
+                    let columns: Vec<String> = serde_json::from_value(p["columns"].clone())
+                        .map_err(|_| "columns must be key and locale IDs")?;
+                    if columns.len() < 2
+                        || columns.len() > 64
+                        || columns.first().map(String::as_str) != Some("key")
+                        || columns.iter().any(|v| {
+                            v.is_empty()
+                                || v.len() > 32
+                                || !v
+                                    .chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        })
+                        || columns
+                            .iter()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            != columns.len()
+                    {
+                        return Err("columns need unique key plus safe locale IDs".into());
+                    }
+                    let csv = p["csv"].as_str().ok_or("CSV required")?;
+                    if csv.len() > 512 * 1024 {
+                        return Err("CSV exceeds 512 KiB".into());
+                    }
+                    let mut replacement = DataTable::new(
+                        columns
+                            .into_iter()
+                            .map(|id| {
+                                crate::data_table::Column::text(
+                                    id.clone(),
+                                    if id == "key" { "Key".into() } else { id },
+                                )
+                            })
+                            .collect(),
+                    );
+                    replacement.read_csv(csv).map_err(|e| e.to_string())?;
+                    self.table = replacement;
+                }
+                "filter" => {
+                    self.view.filter = p["text"].as_str().ok_or("filter text required")?.into();
+                    self.view.only_incomplete = p["only_incomplete"].as_bool().unwrap_or(false);
+                }
+                "sort" => {
+                    let column = p["column"].as_str().ok_or("column required")?;
+                    if self.table.column(column).is_none() {
+                        return Err("unknown column".into());
+                    }
+                    self.view.sort = Some((
+                        column.into(),
+                        if p["descending"].as_bool().unwrap_or(false) {
+                            SortOrder::Descending
+                        } else {
+                            SortOrder::Ascending
+                        },
+                    ));
+                }
+                "undo" => self.restore(false),
+                "redo" => self.restore(true),
+                _ => return Err("unknown localisation operation".into()),
+            }
+            if !matches!(op, "undo" | "redo") {
+                self.remember(before);
+            }
+            self.refresh();
+            emit.push(UiMessage::new(
+                widget.handle,
+                MessageDirection::FromWidget,
+                DataGridMessage::Edited {
+                    rows: self.table.row_count(),
+                    columns: self.table.columns().len(),
+                    table: Box::new(self.table.clone()),
+                },
+            ));
+        }
+        let offset = p["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = p["limit"].as_u64().unwrap_or(100).min(1000) as usize;
+        Ok(
+            json!({"ok":true,"view_token":crate::semantic_authoring::view_token(&format!("{:?}",self.table)),"columns":self.table.columns().iter().map(|c|json!({"id":c.id,"title":c.title})).collect::<Vec<_>>(),"rows":self.rows.iter().skip(offset).take(limit).map(|row|json!({"id":row.0,"cells":self.table.columns().iter().map(|c|(c.id.clone(),json!(self.table.get(*row,&c.id).display()))).collect::<serde_json::Map<_,_>>()})).collect::<Vec<_>>(),"total":self.table.row_count(),"undo":self.undo.len(),"redo":self.redo.len(),"csv":self.table.to_csv()}),
+        )
+    }
+
     fn role(&self) -> crate::a11y::Role {
         crate::a11y::Role::Table
     }
@@ -391,6 +560,8 @@ impl Control for DataGrid {
             match message {
                 DataGridMessage::SetTable(table) => {
                     self.table = (**table).clone();
+                    self.undo.clear();
+                    self.redo.clear();
                     self.selection = None;
                     self.editing = None;
                     self.error = None;
@@ -494,6 +665,26 @@ impl Control for DataGrid {
             }
         }
 
+        if let Some(WidgetMessage::KeyDown(key, mods)) = msg.data::<WidgetMessage>() {
+            if mods.command()
+                && matches!(key, KeyCode::KeyZ | KeyCode::KeyY)
+                && self.editing.is_none()
+            {
+                self.restore(*key == KeyCode::KeyY || mods.shift);
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    DataGridMessage::Edited {
+                        rows: self.table.row_count(),
+                        columns: self.table.columns().len(),
+                        table: Box::new(self.table.clone()),
+                    },
+                ));
+                msg.handled = true;
+                widget.invalidate_layout();
+                return;
+            }
+        }
         if let Some(WidgetMessage::KeyDown(key, _)) = msg.data::<WidgetMessage>() {
             let key = *key;
             match key {
@@ -609,6 +800,38 @@ mod tests {
 
     /// A catalogue-shaped table: a key column and two locales, one of which is
     /// half-translated.
+    #[test]
+    fn semantic_cell_uses_native_history_and_rejects_stale_views() {
+        let (widget, mut grid) = grid_of(catalogue(2));
+        let mut emit = vec![];
+        let q = grid
+            .authoring(&widget, &serde_json::json!({}), &mut emit)
+            .unwrap();
+        let row = q["rows"][0]["id"].clone();
+        let edited=grid.authoring(&widget,&serde_json::json!({"operation":"cell","expected_view":q["view_token"],"row":row,"column":"en","text":"Start"}),&mut emit).unwrap();
+        assert!(
+            grid.authoring(
+                &widget,
+                &serde_json::json!({"operation":"undo","expected_view":q["view_token"]}),
+                &mut emit
+            )
+            .is_err()
+        );
+        let restored = grid
+            .authoring(
+                &widget,
+                &serde_json::json!({"operation":"undo","expected_view":edited["view_token"]}),
+                &mut emit,
+            )
+            .unwrap();
+        assert_eq!(restored["csv"], q["csv"]);
+        assert_eq!(restored["rows"], q["rows"]);
+        assert!(matches!(
+            emit.last().unwrap().data::<DataGridMessage>(),
+            Some(DataGridMessage::Edited { .. })
+        ));
+    }
+
     fn catalogue(n: usize) -> DataTable {
         let mut table = DataTable::new(vec![
             Column::text("key", "Key"),

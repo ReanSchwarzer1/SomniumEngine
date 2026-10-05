@@ -16,11 +16,11 @@
 > building the part Bethesda bought, and has almost none of the part Bethesda
 > built. **This phase is that part.**
 >
-> **Current status, 2026-08-29:** **ACTIVE, PARTIAL.** Work is in tree for seven
-> of the nine tracks. Completed records currently cover A, A2, B, C, D, E, E2,
-> E2b, F, G, H, I, K, L, Q, R, S, T, U, V, Z, AB, AC, AD, AE, AG, and AH.
-> HLAALU and SIXTH HOUSE have not started. Other tracks retain the open items
-> listed in [`../context.md`](../context.md#morrowind).
+> **Current status, 2026-09-09: ACTIVE, PARTIAL.** All nine tracks have code
+> in tree. This session implements **O, P, P2, W, W2, X, Y and AF**, including
+> native designer controls. [Session acceptance](<phase MORROWIND/MORROWIND-2026-09-09.md>)
+> records tests, captures, inherited gate failures and implementation limits.
+> The whole phase remains open; see [current context](../context.md).
 >
 > **Original planning snapshot:** this plan was written on 2026-08-23 against
 > `7c0b66f` on `dev`, before any MORROWIND sub-phase started. Counts and absence
@@ -32,7 +32,7 @@
 > from Phase 30 onward and absorbed its unstarted animation, asset-pipeline,
 > particle, input, localisation, and video work. The obsolete numbering no
 > longer appears in `context.md`; see §1.3 for the original reconciliation and
-> [`../context.md`](../context.md#roadmap-order) for the current roadmap.
+> [`../context.md`](../context.md#phase-ledger-and-remaining-work) for the current roadmap.
 >
 > **Predecessor:** Phase 26 and 26-Zeta built the editor's information
 > architecture and token layer. Phase 27 rebuilt much of its paint layer.
@@ -1808,6 +1808,8 @@ place the same rock twice and edit it once.*
 
 #### MORROWIND-O — Prefabs (Seam 6)
 
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-O.md>). Acceptance is recorded in the dated session report.
+
 1. `.somprefab` asset: a template scene fragment with stable ids.
 2. Instances with **patch-based overrides**, expressed in CONTROL's
    `(StableId, FieldId, ReflectValue)` vocabulary, inheriting `ChangeScope`.
@@ -1822,6 +1824,8 @@ Reference: O3DE's `Prefab/` (`Instance/`, `Link/`, `Overrides/`, `PrefabDom*`),
 with Flax's simpler model read as the alternative and the choice recorded.
 
 #### MORROWIND-P — Splines and blockout
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-P.md>). Acceptance is recorded in the dated session report.
 
 1. **Splines** as a first-class component: control points, tangents, closed
    loops, arc-length parameterisation, and a viewport gizmo (needs MORROWIND-D
@@ -1839,6 +1843,8 @@ with Flax's simpler model read as the alternative and the choice recorded.
    reflection, and MORROWIND-P should make them one mechanism rather than two.
 
 #### MORROWIND-P2 — Rule-driven scattering
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-P2.md>). Acceptance is recorded in the dated session report.
 
 Replaces the paint-brush-only model (Phase 17A/17F) with the O3DE composition:
 gradient sources (noise, image, slope, altitude, distance, shape), surface tags
@@ -1991,6 +1997,8 @@ machine editor specifically.
 
 #### MORROWIND-W — Root motion, IK and events
 
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-W.md>). Acceptance is recorded in the dated session report.
+
 1. **Root motion** extraction and application, with the collide-and-slide
    interaction against the character controller decided here rather than
    discovered later.
@@ -2004,6 +2012,8 @@ machine editor specifically.
    out of a ragdoll is exposure rather than implementation.
 
 #### MORROWIND-W2 — Compression and the pose task graph
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-W2.md>). Acceptance is recorded in the dated session report.
 
 Clip compression (curve fitting against an error budget), and pose evaluation as
 a job graph rather than a recursive walk — Esoterica's `TaskSystem/`, and a
@@ -2019,6 +2029,8 @@ clip format leaves room for it.
 ### Track 6 — SIXTH HOUSE (navigation and AI)
 
 #### MORROWIND-X — Navmesh and pathfinding
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-X.md>). Acceptance is recorded in the dated session report.
 
 1. **Bake** from level geometry: voxelise, region-grow, contour, triangulate —
    the Recast pipeline. As a cook step (MORROWIND-Q), per cell (MORROWIND-S), on
@@ -2045,6 +2057,8 @@ stack, **GPL, pattern only**), O3DE `Gems/RecastNavigation`, Esoterica's navmesh
 tooling.
 
 #### MORROWIND-Y — Behaviour trees and perception
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-Y.md>). Acceptance is recorded in the dated session report.
 
 A behaviour-tree runtime (composites, decorators, tasks, a blackboard), authored
 in **MORROWIND-K's surface** — Flax's `BehaviorTreeSurface.cs` is the eighth tool
@@ -2138,6 +2152,8 @@ Reference: `Unity3D/InputSystem-develop/…/Runtime/Actions/InputAction.cs`,
 `InputActionMap.cs`, `InputBinding.cs`.
 
 #### MORROWIND-AF — Save games and game state
+
+Implemented 2026-09-09; [implementation and editor usage](<phase MORROWIND/MORROWIND-AF.md>). Acceptance is recorded in the dated session report.
 
 A save is **not** a scene serialisation, and the distinction is the sub-phase: a
 scene records what an author built; a save records what a player changed, and

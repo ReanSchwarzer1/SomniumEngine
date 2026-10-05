@@ -204,15 +204,35 @@ struct CloudParams {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeParams {
+    inv_view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 3],
+    layer_bottom: f32,
     inv_low_size: [f32; 2],
     low_size: [f32; 2],
     depth_sigma: f32,
+    layer_top: f32,
     _pad0: f32,
     _pad1: f32,
+    eye_direction: [f32; 3],
+    eye_tan_half_width: f32,
+    eye_color: [f32; 3],
+    eye_intensity: f32,
+    eye_shape: [f32; 4],
+    eye_time: f32,
+    eye_through: f32,
     _pad2: f32,
+    _pad3: f32,
 }
 
+/// How much of the sky eye survives an opaque cloud deck: it is meant to burn
+/// through the storm, not sit politely behind it.
+const EYE_THROUGH_CLOUD: f32 = 0.92;
+
 pub struct CloudPass {
+    /// The sky eye, drawn again over the cloud so it burns through (set by the
+    /// renderer each frame), and the clock its flames run on.
+    pub sky_eye: crate::SkyEyeParams,
+    pub time: f32,
     // ── Authoring ────────────────────────────────────────────────────────────
     /// Off until the `.somtime` row exists. See the module header.
     ///
@@ -679,6 +699,8 @@ impl CloudPass {
             settings: CloudSettings::default(),
             jitter: std::env::var("SOMNIUM_CLOUD_JITTER").as_deref() != Ok("0"),
             upsample_depth_sigma: 0.002,
+            sky_eye: crate::SkyEyeParams::default(),
+            time: 0.0,
             base_view,
             detail_view,
             weather_view,
@@ -1119,6 +1141,10 @@ impl CloudPass {
             &self.composite_params,
             0,
             bytemuck::bytes_of(&CompositeParams {
+                inv_view_proj: inv_view_proj.to_cols_array_2d(),
+                camera_pos: camera_pos.to_array(),
+                layer_bottom: s.altitude.max(1.0),
+                layer_top: s.altitude.max(1.0) + s.thickness.max(1.0),
                 inv_low_size: [
                     1.0 / self.march_size.0 as f32,
                     1.0 / self.march_size.1 as f32,
@@ -1127,7 +1153,15 @@ impl CloudPass {
                 depth_sigma: self.upsample_depth_sigma.max(0.0),
                 _pad0: 0.0,
                 _pad1: 0.0,
+                eye_direction: self.sky_eye.direction.normalize_or_zero().to_array(),
+                eye_tan_half_width: self.sky_eye.tan_half_width,
+                eye_color: self.sky_eye.color.to_array(),
+                eye_intensity: self.sky_eye.intensity,
+                eye_shape: [self.sky_eye.openness, self.sky_eye.pupil, self.sky_eye.pulse_hz, self.sky_eye.glow],
+                eye_time: self.time,
+                eye_through: EYE_THROUGH_CLOUD,
                 _pad2: 0.0,
+                _pad3: 0.0,
             }),
         );
 

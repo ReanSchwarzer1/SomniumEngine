@@ -9,6 +9,7 @@ pub enum ToolMode {
     Foliage,
     Lighting,
     Materials,
+    VertexPaint,
 }
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ToolContext {
@@ -22,6 +23,12 @@ pub struct ToolContext {
     pub operation: usize,
     pub layer: usize,
     pub layer_count: usize,
+    /// Why Vertex Paint cannot run on the selection, if it cannot.
+    pub paint_reason: Option<String>,
+    /// Vertex Paint radius, strength, falloff.
+    pub paint_brush: [f32; 3],
+    /// Vertex Paint erase, dirt, rust, wet, blood, preview.
+    pub paint_flags: [bool; 6],
 }
 #[derive(Default)]
 pub struct ToolPanel {
@@ -31,6 +38,10 @@ pub struct ToolPanel {
     hint: NodeHandle,
     pub landscape: NodeHandle,
     pub foliage: NodeHandle,
+    pub vertex_paint: NodeHandle,
+    paint_checks: Vec<NodeHandle>,
+    paint_fields: Vec<NodeHandle>,
+    paint_actions: Vec<(NodeHandle, VertexPaintEvent)>,
     pub properties: NodeHandle,
     lighting_actions: NodeHandle,
     material_actions: NodeHandle,
@@ -99,6 +110,57 @@ impl ToolPanel {
         ui.nodes.borrow_mut(layer.transmute()).widget.tooltip =
             "Paint layer from the selected terrain's loaded layer palette".into();
         let foliage = stack(ui, host);
+        let vertex_paint = stack(ui, host);
+        let mut paint_checks = Vec::new();
+        // A channel paints its layer material (set on the entity's Vertex
+        // Paint component) or, without one, the weathering named here.
+        for name in ["Erase", "R: layer / dirt", "G: layer / rust", "B: layer / wet", "A: layer / blood", "Preview masks"] {
+            paint_checks.push(ui.add_node(
+                crate::widgets::check_box::CheckBoxBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(theme::active().density.row_chrome)
+                        .with_margin(Thickness::axes(8.0, 0.0)),
+                )
+                .with_label(name)
+                .with_font_id(font)
+                .build(),
+                vertex_paint,
+            ));
+        }
+        let mut paint_fields = Vec::new();
+        for (name, step, unit) in [("Radius", 0.05, "m"), ("Strength", 0.01, ""), ("Falloff", 0.01, "")] {
+            let row = ui.add_node(
+                crate::widgets::property_row::PropertyRowBuilder::new(WidgetBuilder::new())
+                    .with_label(name)
+                    .build(),
+                vertex_paint,
+            );
+            paint_fields.push(ui.add_node(
+                NumericFieldBuilder::new(WidgetBuilder::new())
+                    .with_drag_step(step)
+                    .with_unit(unit)
+                    .build(),
+                row,
+            ));
+        }
+        let paint_row = ui.add_node(
+            crate::widgets::wrap_panel::WrapPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_gap(4.0, 4.0)
+            .build(),
+            vertex_paint,
+        );
+        let mut paint_actions = Vec::new();
+        for (label, event) in [
+            ("Fill", VertexPaintEvent::Fill),
+            ("Clear", VertexPaintEvent::Clear),
+            ("Copy", VertexPaintEvent::Copy),
+            ("Paste", VertexPaintEvent::Paste),
+            ("Auto weather", VertexPaintEvent::AutoWeather),
+        ] {
+            paint_actions.push((action(ui, paint_row, label, 120.0), event));
+        }
         let mut commands = Vec::new();
         let lighting_actions = ui.add_node(
             crate::widgets::wrap_panel::WrapPanelBuilder::new(
@@ -141,6 +203,10 @@ impl ToolPanel {
             hint,
             landscape,
             foliage,
+            vertex_paint,
+            paint_checks,
+            paint_fields,
+            paint_actions,
             properties,
             lighting_actions,
             material_actions,
@@ -168,6 +234,7 @@ impl ToolPanel {
         let reason = match shown {
             ToolMode::Landscape => state.landscape_reason.as_deref(),
             ToolMode::Foliage => state.foliage_reason.as_deref(),
+            ToolMode::VertexPaint => state.paint_reason.as_deref(),
             ToolMode::Select | ToolMode::Lighting | ToolMode::Materials => None,
         };
         ui.send(TextMessage::set_text(
@@ -178,6 +245,7 @@ impl ToolPanel {
                 ToolMode::Foliage => "Foliage",
                 ToolMode::Lighting => "Lighting",
                 ToolMode::Materials => "Material",
+                ToolMode::VertexPaint => "Vertex Paint",
             },
         ));
         ui.send(TextMessage::set_text(
@@ -197,6 +265,7 @@ impl ToolPanel {
             ToolMode::Landscape => "Choose an operation, then drag on terrain. Esc cancels a stroke; Ctrl+Z undoes it.",
             ToolMode::Foliage if !state.foliage_visible => "Foliage is hidden. Enable Visible below before painting.",
             ToolMode::Foliage => "Choose a kind, then paint on terrain. Placement respects slope and layer limits; Ctrl+Z undoes a dab.",
+            ToolMode::VertexPaint => "Tick the channels, then drag on the selected mesh. Each channel paints the material set as its layer on the Vertex Paint component (Inspector), or dirt, rust, wet and blood when it has none. Erase removes paint; Ctrl+Z undoes a stroke. Auto weather builds grime, damp, rust and wear from the mesh's shape.",
         })));
         ui.set_visibility(self.lighting_actions, shown == ToolMode::Lighting);
         ui.set_visibility(self.material_actions, shown == ToolMode::Materials);
@@ -206,6 +275,15 @@ impl ToolPanel {
         );
         ui.set_visibility(self.landscape, shown == ToolMode::Landscape);
         ui.set_visibility(self.foliage, shown == ToolMode::Foliage);
+        ui.set_visibility(self.vertex_paint, shown == ToolMode::VertexPaint);
+        ui.nodes.borrow_mut(self.vertex_paint.transmute()).widget.enabled =
+            state.paint_reason.is_none();
+        for (handle, value) in self.paint_fields.iter().zip(state.paint_brush) {
+            ui.send(NumericFieldMessage::set_value(*handle, value));
+        }
+        for (handle, on) in self.paint_checks.iter().zip(state.paint_flags) {
+            ui.send(crate::widgets::check_box::CheckBoxMessage::set_checked(*handle, on));
+        }
         ui.set_visibility(self.finish, state.mode != ToolMode::Select);
         ui.nodes
             .borrow_mut(self.landscape.transmute())
@@ -252,6 +330,25 @@ impl ToolPanel {
             && msg.destination == self.finish
         {
             return Some(EditorEvent::SetGizmoMode(0));
+        }
+        if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+            && let Some((_, event)) = self.paint_actions.iter().find(|(h, _)| *h == msg.destination)
+        {
+            return Some(EditorEvent::VertexPaint(*event));
+        }
+        if let Some(crate::widgets::check_box::CheckBoxMessage::Check(on)) =
+            msg.data::<crate::widgets::check_box::CheckBoxMessage>()
+            && let Some(index) = self.paint_checks.iter().position(|h| *h == msg.destination)
+        {
+            return Some(EditorEvent::VertexPaint(VertexPaintEvent::SetFlag(index as u8, *on)));
+        }
+        if let Some(index) = self.paint_fields.iter().position(|h| *h == msg.destination) {
+            return match msg.data::<NumericFieldMessage>()? {
+                NumericFieldMessage::ValueChanging(value) | NumericFieldMessage::ValueChanged(value) => {
+                    Some(EditorEvent::VertexPaint(VertexPaintEvent::SetBrush(index as u8, *value)))
+                }
+                _ => None,
+            };
         }
         if let Some(ComboBoxMessage::SelectionChanged(index)) = msg.data::<ComboBoxMessage>() {
             if msg.destination == self.operation {
@@ -334,6 +431,31 @@ mod tests {
         assert!(ui.visibility(panel.material_actions));
         assert!(!ui.visibility(panel.lighting_actions));
         assert!(ui.visibility(panel.properties));
+    }
+    #[test]
+    fn vertex_paint_panel_shows_in_its_mode_and_reports_its_controls() {
+        let mut ui = UserInterface::new(280.0, 600.0);
+        let root = ui.root();
+        let mut panel = ToolPanel::build(&mut ui, root, 0);
+        panel.refresh(&mut ui, ToolContext::default(), ToolMode::VertexPaint);
+        ui.update();
+        assert!(ui.visibility(panel.vertex_paint));
+        assert!(!ui.visibility(panel.foliage));
+        fn from<T: std::any::Any + Send>(dest: NodeHandle, data: T) -> UiMessage {
+            UiMessage::new(dest, MessageDirection::FromWidget, data)
+        }
+        assert!(matches!(
+            panel.event(&from(panel.paint_checks[2], crate::widgets::check_box::CheckBoxMessage::Check(true))),
+            Some(EditorEvent::VertexPaint(VertexPaintEvent::SetFlag(2, true)))
+        ));
+        assert!(matches!(
+            panel.event(&from(panel.paint_fields[0], NumericFieldMessage::ValueChanged(0.8))),
+            Some(EditorEvent::VertexPaint(VertexPaintEvent::SetBrush(0, v))) if v == 0.8
+        ));
+        assert!(matches!(
+            panel.event(&from(panel.paint_actions[4].0, ButtonMessage::Click)),
+            Some(EditorEvent::VertexPaint(VertexPaintEvent::AutoWeather))
+        ));
     }
     #[test]
     fn brush_commands_preserve_live_and_commit_and_ignore_model_refresh() {

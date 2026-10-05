@@ -10,6 +10,7 @@ pub struct TexturePool {
     pub views: Vec<wgpu::TextureView>,
     /// Indices of free slots in the pool.
     free_indices: Vec<u32>,
+    live: Vec<bool>,
 }
 
 impl TexturePool {
@@ -40,11 +41,16 @@ impl TexturePool {
         Self {
             dummy_view,
             views: Vec::new(), // This will hold owned views
-            free_indices: (0..MAX_BINDLESS_TEXTURES).rev().collect(),
+            free_indices: (0..FALLBACK_SLOT).rev().collect(),
+            live: vec![false; MAX_BINDLESS_TEXTURES as usize],
         }
     }
 
     /// Add a texture to the pool and return its index.
+    ///
+    /// A full pool returns [`FALLBACK_SLOT`], which always holds the dummy
+    /// image: one texture goes blank and the log says why. This used to panic,
+    /// and a panic during a level load is a crash with the editor's work lost.
     pub fn add_texture(&mut self, view: wgpu::TextureView) -> u32 {
         if let Some(index) = self.free_indices.pop() {
             // Ensure views vector is large enough
@@ -53,9 +59,36 @@ impl TexturePool {
                     .resize_with(index as usize + 1, || self.dummy_view.clone());
             }
             self.views[index as usize] = view;
+            self.live[index as usize] = true;
             index
         } else {
-            panic!("Texture pool exhausted!");
+            tracing::error!(
+                "bindless texture pool exhausted ({MAX_BINDLESS_TEXTURES} slots); texture left blank"
+            );
+            FALLBACK_SLOT
         }
     }
+
+    /// Release the owned view as well as its descriptor slot. Double release is
+    /// harmless; callers must also replace any separately retained bind-group view.
+    pub fn release(&mut self, index: u32) -> bool {
+        let Some(live) = self.live.get_mut(index as usize) else {
+            return false;
+        };
+        if !*live {
+            return false;
+        }
+        *live = false;
+        self.views[index as usize] = self.dummy_view.clone();
+        self.free_indices.push(index);
+        true
+    }
+
+    pub fn live_count(&self) -> usize {
+        FALLBACK_SLOT as usize - self.free_indices.len()
+    }
 }
+
+/// Never handed out while space remains; returned when the pool is full so a
+/// texture renders blank instead of the process aborting.
+pub const FALLBACK_SLOT: u32 = MAX_BINDLESS_TEXTURES - 1;

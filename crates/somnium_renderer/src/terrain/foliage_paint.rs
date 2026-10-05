@@ -50,6 +50,124 @@ pub struct PaintedFoliage {
     pub scale: f32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredInstance {
+    kind: u8,
+    position: [f32; 3],
+    yaw: f32,
+    #[serde(default)]
+    tilt: f32,
+    scale: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstanceDocument {
+    version: u32,
+    instances: Vec<StoredInstance>,
+}
+
+fn decode_instances(bytes: &[u8]) -> Result<Vec<PaintedFoliage>, String> {
+    let document: InstanceDocument = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if document.version != 1 || document.instances.len() > 1_000_000 {
+        return Err("unsupported or oversized foliage instance document".into());
+    }
+    document
+        .instances
+        .into_iter()
+        .map(|i| {
+            if !i.position.iter().all(|v| v.is_finite())
+                || !i.yaw.is_finite()
+                || !i.tilt.is_finite()
+                || !i.scale.is_finite()
+                || i.scale <= 0.0
+            {
+                return Err("foliage instance needs finite coordinates and positive scale".into());
+            }
+            Ok(PaintedFoliage {
+                kind: i.kind,
+                position: Vec3::from_array(i.position),
+                yaw: i.yaw,
+                tilt: i.tilt,
+                scale: i.scale,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn save_instances(
+    terrain_path: &str,
+    instances: &[PaintedFoliage],
+) -> std::io::Result<()> {
+    let document = InstanceDocument {
+        version: 1,
+        instances: instances
+            .iter()
+            .map(|i| StoredInstance {
+                kind: i.kind,
+                position: i.position.to_array(),
+                yaw: i.yaw,
+                tilt: i.tilt,
+                scale: i.scale,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&document).map_err(std::io::Error::other)?;
+    // Refuse invalid runtime values rather than writing null floats that cannot reload.
+    decode_instances(&bytes).map_err(std::io::Error::other)?;
+    std::fs::write(format!("{terrain_path}.foliage.json"), bytes)
+}
+
+pub(super) fn load_instances(terrain_path: &str) -> Result<Vec<PaintedFoliage>, String> {
+    let path = format!("{terrain_path}.foliage.json");
+    match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read foliage sidecar: {e}")),
+        Ok(meta) if meta.len() > 64 * 1024 * 1024 => {
+            return Err("foliage sidecar exceeds 64 MiB".into());
+        }
+        Ok(_) => {}
+    }
+    decode_instances(&std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?)
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn stable_kind_and_terrain_local_pose_round_trip_without_ecs_entities() {
+        let source = InstanceDocument {
+            version: 1,
+            instances: vec![StoredInstance {
+                kind: 137,
+                position: [-2.25, 1.5, 23.0],
+                yaw: 1.2,
+                tilt: 0.1,
+                scale: 0.8,
+            }],
+        };
+        let decoded = decode_instances(&serde_json::to_vec(&source).unwrap()).unwrap();
+        assert_eq!(
+            decoded[0],
+            PaintedFoliage {
+                kind: 137,
+                position: Vec3::new(-2.25, 1.5, 23.0),
+                yaw: 1.2,
+                tilt: 0.1,
+                scale: 0.8
+            }
+        );
+        assert!(decode_instances(br#"{"version":2,"instances":[]}"#).is_err());
+        assert!(
+            decode_instances(
+                br#"{"version":1,"instances":[{"kind":128,"position":[0,0,0],"yaw":0,"scale":0}]}"#
+            )
+            .is_err()
+        );
+    }
+}
+
 /// Brush settings for a paint stroke.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FoliageBrush {
@@ -199,54 +317,52 @@ pub fn paint(
 
     let tilt_limit = brush.max_tilt_deg.clamp(0.0, 90.0).to_radians();
     let mut report = PaintReport::default();
-    let place = |x: f32,
-                 z: f32,
-                 salt: u32,
-                 out: &mut Vec<PaintedFoliage>,
-                 report: &mut PaintReport| {
-        let g = sample(x, z);
-        report.best_layer_weight = report.best_layer_weight.max(g.layer_weight);
-        if g.slope_cos < slope_limit || !g.height.is_finite() {
-            report.too_steep += 1;
-            return;
-        }
-        // A hard threshold, not a probability. A probability would scatter a
-        // thinning fringe of pebbles out across the grass, and the thing that
-        // makes a gravel patch read as gravel is that it *stops*.
-        if brush.min_layer_weight > 0.0 && g.layer_weight < brush.min_layer_weight {
-            report.wrong_layer += 1;
-            return;
-        }
-        let spacing = if brush.single {
-            // A tree still should not land inside another tree, but it must not
-            // be blocked by the grass around it either.
-            0.5 * scale_lo
-        } else {
-            spacing_for_density(brush.density)
+    let place =
+        |x: f32, z: f32, salt: u32, out: &mut Vec<PaintedFoliage>, report: &mut PaintReport| {
+            let g = sample(x, z);
+            report.best_layer_weight = report.best_layer_weight.max(g.layer_weight);
+            if g.slope_cos < slope_limit || !g.height.is_finite() {
+                report.too_steep += 1;
+                return;
+            }
+            // A hard threshold, not a probability. A probability would scatter a
+            // thinning fringe of pebbles out across the grass, and the thing that
+            // makes a gravel patch read as gravel is that it *stops*.
+            if brush.min_layer_weight > 0.0 && g.layer_weight < brush.min_layer_weight {
+                report.wrong_layer += 1;
+                return;
+            }
+            let spacing = if brush.single {
+                // A tree still should not land inside another tree, but it must not
+                // be blocked by the grass around it either.
+                0.5 * scale_lo
+            } else {
+                spacing_for_density(brush.density)
+            };
+            let sp_sq = spacing * spacing;
+            if out.iter().any(|p| {
+                p.kind == brush.kind
+                    && (p.position.x - x).powi(2) + (p.position.z - z).powi(2) < sp_sq
+            }) {
+                report.too_close += 1;
+                return;
+            }
+            let jy = unit_from(hash2(salt, 0x51_7C_C1_B7));
+            let js = unit_from(hash2(salt, 0x27_22_0A_95));
+            // `sqrt`, for the same reason the candidate radius above takes one: a
+            // uniform angle puts as many instances near flat as near the limit, and
+            // what a pile of debris actually looks like is mostly-settled with a
+            // few propped up. The third salt keeps tilt independent of yaw and
+            // scale, so raising the limit does not also reshuffle the field.
+            let jt = unit_from(hash2(salt, 0x9E_37_79_B1)).sqrt();
+            out.push(PaintedFoliage {
+                kind: brush.kind,
+                position: Vec3::new(x, g.height, z),
+                yaw: jy * std::f32::consts::TAU,
+                tilt: jt * tilt_limit,
+                scale: scale_lo + js * (scale_hi - scale_lo),
+            });
         };
-        let sp_sq = spacing * spacing;
-        if out.iter().any(|p| {
-            p.kind == brush.kind && (p.position.x - x).powi(2) + (p.position.z - z).powi(2) < sp_sq
-        }) {
-            report.too_close += 1;
-            return;
-        }
-        let jy = unit_from(hash2(salt, 0x51_7C_C1_B7));
-        let js = unit_from(hash2(salt, 0x27_22_0A_95));
-        // `sqrt`, for the same reason the candidate radius above takes one: a
-        // uniform angle puts as many instances near flat as near the limit, and
-        // what a pile of debris actually looks like is mostly-settled with a
-        // few propped up. The third salt keeps tilt independent of yaw and
-        // scale, so raising the limit does not also reshuffle the field.
-        let jt = unit_from(hash2(salt, 0x9E_37_79_B1)).sqrt();
-        out.push(PaintedFoliage {
-            kind: brush.kind,
-            position: Vec3::new(x, g.height, z),
-            yaw: jy * std::f32::consts::TAU,
-            tilt: jt * tilt_limit,
-            scale: scale_lo + js * (scale_hi - scale_lo),
-        });
-    };
 
     if brush.single {
         place(center[0], center[1], stroke_seed, out, &mut report);
@@ -475,7 +591,10 @@ mod tests {
             2,
             flat,
         );
-        assert_eq!(n.placed, 1, "a different kind was blocked by an existing instance");
+        assert_eq!(
+            n.placed, 1,
+            "a different kind was blocked by an existing instance"
+        );
         assert_eq!(v.len(), 2);
     }
 
@@ -665,7 +784,10 @@ mod tests {
         let r = paint(&mut v, &brush(), [0.0, 0.0], 1, cliff);
         assert!(r.refused());
         assert!(r.too_steep > 0);
-        assert!(!r.blocked_by_layer(), "a cliff was reported as wrong ground");
+        assert!(
+            !r.blocked_by_layer(),
+            "a cliff was reported as wrong ground"
+        );
     }
 
     /// Painting over ground that is already full is the brush working.
@@ -690,7 +812,10 @@ mod tests {
                 "dab {seed} on open ground reported a refusal: {r:?}"
             );
         }
-        assert!(saw_spacing, "the stroke never packed tightly enough to test");
+        assert!(
+            saw_spacing,
+            "the stroke never packed tightly enough to test"
+        );
     }
 
     /// The rejection has to be a *cliff*, not a gradient. A probability would

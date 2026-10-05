@@ -112,6 +112,8 @@ pub struct SomniumRenderer {
     pub global_pool: GlobalResourcePool,
     /// High level material system cache.
     pub shaders: crate::shaders::Shaders,
+    pub animated_geometry: crate::animated_geometry::AnimatedGeometry,
+    pub skin_pass: crate::pass::skin::SkinPass,
     /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
     pub grain_masks: crate::pass::grain::GrainMasks,
     /// The visibility buffer render pass.
@@ -146,6 +148,15 @@ pub struct SomniumRenderer {
     pub materials_pool: MaterialPool,
     /// Global texture storage.
     pub texture_pool: TexturePool,
+    /// Terrain descriptors are scene-owned; imported asset descriptors are not.
+    terrain_texture_slots: Vec<u32>,
+    imported_texture_slots: std::collections::HashMap<[u8; 32], i32>,
+    /// How many live imported materials sample each imported slot. Identical
+    /// images are shared across sources, so a slot is freed only at zero.
+    imported_texture_refs: std::collections::HashMap<i32, u32>,
+    /// The imported slots each imported material was counted against, so a
+    /// release decrements exactly what its upload incremented, once.
+    material_texture_refs: std::collections::HashMap<u32, Vec<i32>>,
     /// Per-frame instance storage.
     pub instances: InstancePool,
 
@@ -159,6 +170,13 @@ pub struct SomniumRenderer {
     pub camera_pos: glam::Vec3,
     /// The elapsed engine time in seconds.
     pub time: f32,
+    /// Foliage wind (`wind.rs`), set by the scene's weather.
+    pub foliage_wind: crate::wind::FoliageWind,
+    /// The wind's own clock, advanced by wall time once per frame so plants
+    /// sway in the editor as well as in Play; `.1` is last frame's value, for
+    /// motion vectors.
+    wind_clock: (f32, f32),
+    wind_clock_at: Option<std::time::Instant>,
 
     /// Directional light direction (toward the light, world space, normalized).
     pub light_direction: glam::Vec3,
@@ -362,6 +380,8 @@ pub struct SomniumRenderer {
     /// Phase 29. Public because the editor drives its toggle and reads its
     /// report; there is nothing to encapsulate behind an accessor pair.
     pub profiler: crate::profiler::GpuProfiler,
+    /// Pending CPU foliage counts, copied into the frame after profiler reset.
+    pub foliage_submission: crate::profiler::FoliageCounters,
     /// Phase DOOM-A. Inert unless `SOMNIUM_TIME` is set; when it is, it forces
     /// the profiler on, accumulates unsmoothed samples and writes a `.somtime`
     /// table with a standard deviation beside every mean.
@@ -441,6 +461,9 @@ pub struct SomniumRenderer {
     /// Phase CONTROL-M: volumetric clouds. Public because the editor drives
     /// every one of its parameters from `SkyComponent`.
     pub cloud_pass: crate::pass::clouds::CloudPass,
+    /// The eye drawn in the sky this frame (`intensity` 0: none). Set by the
+    /// app from `somnium.SkyEye` every frame.
+    pub sky_eye: crate::SkyEyeParams,
     /// Phase CONTROL-O: deferred decals, binned through the same froxel grid
     /// as the local lights.
     pub decal_grid: crate::pass::decal::DecalGrid,
@@ -477,6 +500,17 @@ pub struct SomniumRenderer {
     /// How many times each mesh appears in this frame's draw queue, used to
     /// decide whether cluster expansion is worth it (Phase 17G).
     instanced_counts: std::collections::HashMap<u32, u32>,
+    /// What `cluster_args` / `cull_aabbs` were expanded from (draw geometry,
+    /// sidedness, meshlet mode) and the meshlet count, so an unchanged draw
+    /// list reuses them. See `draw_list_signature`.
+    cluster_source: Option<u64>,
+    cluster_meshlet_arguments: u32,
+    /// Whole-mesh cull entries of skinned draws in the cached expansion,
+    /// `(entry index, vertex_offset, two-sided)`: refreshed each frame.
+    cluster_posed: Vec<(usize, u32, bool)>,
+    /// The player's graphics tier, laid over the scene's authored settings
+    /// by the engine each frame. See `quality`.
+    graphics_preset: crate::quality::GraphicsPreset,
     /// When true, a draw is expanded into one indirect argument per cluster so
     /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
     /// forces the whole-mesh path, for A/B measurement.
@@ -504,6 +538,7 @@ pub struct SomniumRenderer {
     /// already holds the chunk when it builds the draw, so the word is
     /// recorded there instead of searched for afterwards.
     terrain_lod_by_vertex: std::collections::HashMap<u32, u32>,
+    reactive_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
     /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
     /// so they skip vis / GPU 15B, but they occupy instance slots after the
     /// opaque vis draws so the shadow pass can find their transforms.
@@ -527,6 +562,9 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
+
+    /// Per-entity vertex paint masks (see `crate::vertex_paint`).
+    pub vertex_paint: crate::vertex_paint::VertexPaintPool,
 }
 
 /// One TSUSHIMA-F term's switch: its own variable, or the group switch, or on.
@@ -642,10 +680,11 @@ impl SomniumRenderer {
         let materials_pool = MaterialPool::new(&ctx.device);
         let instances = InstancePool::new(&ctx.device);
 
-        // Phase 11D/13: View buffer expanded to 224 bytes to include raw `view` matrix and `time`.
+        // Phase 11D/13: View buffer expanded to 224 bytes to include raw `view` matrix and `time`;
+        // 256 with the foliage wind and its clock (`wind.rs`), one full view slot.
         let view_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("View Buffer"),
-            size: 224,
+            size: VIEW_SLOT_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -823,7 +862,7 @@ impl SomniumRenderer {
         );
 
         // Phase 11.5J: GPU billboard particle pass.
-        let particle_pass = ParticlePass::new(&ctx.device, &shaders, ctx.config.format);
+        let particle_pass = ParticlePass::new(&ctx.device, &shaders, &global_pool.layout);
 
         // Phase 11.5I: Selection outline (stencil-based, renders to swapchain).
         let outline_pass = OutlinePass::new(
@@ -910,6 +949,9 @@ impl SomniumRenderer {
             &cloud_pass.shadow_params,
             &decal_grid,
             grain_masks.packed(),
+            if std::env::var("SOMNIUM_LOCAL_SHADOWS").as_deref() != Ok("0") {
+                raytrace_pass.tlas()
+            } else { None },
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -935,6 +977,9 @@ impl SomniumRenderer {
             HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
+            &volumetric_pass.view,
+            &volumetric_pass.sampler,
+            shading_pass.volumetric_range_buffer(),
         );
         let water_reflection_pass = crate::pass::water_reflection::WaterReflectionPass::new(
             &ctx.device,
@@ -960,11 +1005,16 @@ impl SomniumRenderer {
             &ctx.device,
             &shaders,
             &vis_pass.depth_view,
+            &vis_pass.view,
+            &global_pool.layout,
             ctx.config.width,
             ctx.config.height,
         );
 
+        let skin_pass = crate::pass::skin::SkinPass::new(&ctx.device, &shaders);
         Self {
+            skin_pass,
+            animated_geometry: Default::default(),
             global_pool,
             vis_pass,
             shading_pass,
@@ -984,12 +1034,19 @@ impl SomniumRenderer {
             geometry,
             materials_pool,
             texture_pool,
+            terrain_texture_slots: Vec::new(),
+            imported_texture_slots: Default::default(),
+            imported_texture_refs: Default::default(),
+            material_texture_refs: Default::default(),
             instances,
             view_matrix: glam::Mat4::IDENTITY,
             proj_matrix: glam::Mat4::IDENTITY,
             view_proj: glam::Mat4::IDENTITY,
             camera_pos: glam::Vec3::ZERO,
             time: 0.0,
+            foliage_wind: crate::wind::FoliageWind::default(),
+            wind_clock: (0.0, 0.0),
+            wind_clock_at: None,
             brdf_multiscatter: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MS"),
             brdf_rough_diffuse: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_DIFFUSE"),
             brdf_micro_shadow: brdf_term_enabled("SOMNIUM_TERRAIN_BRDF_MICROSHADOW"),
@@ -1113,6 +1170,7 @@ impl SomniumRenderer {
             ibl_pass,
             volumetric_pass,
             cloud_pass,
+            sky_eye: crate::SkyEyeParams::default(),
             decal_grid,
             decals: Vec::new(),
             hiz_pass,
@@ -1124,6 +1182,10 @@ impl SomniumRenderer {
             cull_aabbs: Vec::with_capacity(256),
             cluster_args: Vec::with_capacity(256),
             instanced_counts: std::collections::HashMap::new(),
+            cluster_source: None,
+            cluster_meshlet_arguments: 0,
+            cluster_posed: Vec::new(),
+            graphics_preset: crate::quality::GraphicsPreset::from_env(),
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             cpu_frustum_cull: !cpu_frustum_env_off(),
@@ -1131,6 +1193,7 @@ impl SomniumRenderer {
             cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
             rebuilt_chunks: Vec::with_capacity(32),
             terrain_lod_by_vertex: std::collections::HashMap::new(),
+            reactive_draws: std::collections::HashSet::new(),
             shadow_only_queue: Vec::with_capacity(256),
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
@@ -1157,6 +1220,7 @@ impl SomniumRenderer {
             debug_toggles: somnium_ui::debug::DebugToggles::from_env(),
             capture: crate::capture::FrameCapture::from_env(),
             profiler: crate::profiler::GpuProfiler::new(&ctx.device, &ctx.queue, ctx.features),
+            foliage_submission: crate::profiler::FoliageCounters::default(),
             timing: crate::timing::TimingRun::from_env(),
             census_pass,
             classify_pass,
@@ -1181,6 +1245,7 @@ impl SomniumRenderer {
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
+            vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
             water_textures_bind_group,
             water_bodies: Default::default(),
@@ -1193,19 +1258,33 @@ impl SomniumRenderer {
     /// Add a texture to the global bindless pool.
     pub fn add_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
         let index = self.texture_pool.add_texture(view.clone());
+        if index == crate::texture_pool::FALLBACK_SLOT {
+            return index;
+        }
         self.global_pool.texture_views[index as usize] = view;
         self.global_pool.update_textures(&ctx.device);
         index
     }
 
+    fn add_terrain_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
+        let index = self.add_texture(ctx, view);
+        self.terrain_texture_slots.push(index);
+        index
+    }
+
     /// Upload worker-decoded RGBA8 pixels into the bindless pool. Material
     /// asset jobs use this main-thread half after file IO and decode complete.
+    ///
+    /// `colour` selects sRGB decoding for albedo and emissive maps, as the
+    /// glTF import path already does; data maps (normal, ORM, height) stay
+    /// linear. Uploading a colour map as linear washes it out.
     pub fn upload_material_texture(
         &mut self,
         ctx: &RenderContext,
         rgba: &[u8],
         width: u32,
         height: u32,
+        colour: bool,
     ) -> i32 {
         let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Material Asset Texture"),
@@ -1217,7 +1296,11 @@ impl SomniumRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: if colour {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            } else {
+                wgpu::TextureFormat::Rgba8Unorm
+            },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -1264,11 +1347,11 @@ impl SomniumRenderer {
     /// Upload a `LoadedScene` to the GPU pools and return one `UploadedNode` per
     /// renderable node (mesh_index is Some). The caller can then spawn ECS entities
     /// using the returned data.
-    pub fn upload_scene(
+    pub fn upload_scene_materials(
         &mut self,
         ctx: &RenderContext,
         scene: &somnium_asset::LoadedScene,
-    ) -> Vec<UploadedNode> {
+    ) -> Vec<u32> {
         // 1. Textures --------------------------------------------------------
         //
         // **Only colour maps are sRGB** (Phase 17E remainder). Every imported
@@ -1283,7 +1366,31 @@ impl SomniumRenderer {
         // glTF images carry no colour-space flag — how a texture is referenced
         // is the only thing that says what it means.
         let mut is_colour = vec![false; scene.textures.len()];
-        for m in &scene.materials {
+        let mut used_textures = vec![false; scene.textures.len()];
+        let used_materials: std::collections::HashSet<_> = scene
+            .nodes
+            .iter()
+            .filter_map(|node| node.material_index)
+            .collect();
+        for (index, m) in scene.materials.iter().enumerate() {
+            if !used_materials.contains(&index) {
+                continue;
+            }
+            for slot in [
+                m.albedo_map,
+                m.emissive_map,
+                m.normal_map,
+                m.metallic_roughness_map,
+                m.occlusion_map,
+                m.height_map,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Some(used) = used_textures.get_mut(slot) {
+                    *used = true;
+                }
+            }
             for slot in [m.albedo_map, m.emissive_map] {
                 if let Some(i) = slot {
                     if let Some(flag) = is_colour.get_mut(i) {
@@ -1293,11 +1400,24 @@ impl SomniumRenderer {
             }
         }
 
+        // `write_texture` stages a CPU copy until the next submit. A scene load
+        // uploads every source before any frame submits, so unflushed staging
+        // grew with the whole level (6 GB for Town) and ran the device out of
+        // memory. Flushing every 256 MB bounds it.
+        let mut staged = 0_u64;
         let texture_indices: Vec<Option<i32>> = scene
             .textures
             .iter()
             .enumerate()
             .map(|(tex_index, tex)| {
+                if !used_textures[tex_index] {
+                    return None;
+                }
+                let colour = is_colour[tex_index];
+                let key = imported_texture_key(tex, colour);
+                if let Some(&slot) = self.imported_texture_slots.get(&key) {
+                    return Some(slot);
+                }
                 // Full mip chain. Without it, minified textures alias badly — the
                 // sampler asks for trilinear filtering but a single level leaves
                 // nothing to filter between, so detailed materials shimmer at
@@ -1364,8 +1484,20 @@ impl SomniumRenderer {
                     );
                 }
 
+                staged += levels
+                    .iter()
+                    .map(|(_, _, data)| data.len() as u64)
+                    .sum::<u64>();
+                if staged >= STAGING_FLUSH_BYTES {
+                    ctx.queue.submit(std::iter::empty());
+                    self.wait_gpu(ctx);
+                    staged = 0;
+                }
+
                 let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
-                Some(self.add_texture(ctx, view) as i32)
+                let slot = self.add_texture(ctx, view) as i32;
+                self.imported_texture_slots.insert(key, slot);
+                Some(slot)
             })
             .collect();
 
@@ -1378,7 +1510,8 @@ impl SomniumRenderer {
         let material_ids: Vec<u32> = scene
             .materials
             .iter()
-            .map(|mat| {
+            .enumerate()
+            .map(|(index, mat)| {
                 let id = self.materials_pool.add_material(
                     &ctx.queue,
                     GpuMaterial {
@@ -1390,11 +1523,16 @@ impl SomniumRenderer {
                         metallic_roughness_map: resolve_tex(mat.metallic_roughness_map),
                         occlusion_map: resolve_tex(mat.occlusion_map),
                         transmission: mat.transmission,
-                        emissive: mat.emissive,
+                        // KHR_materials_emissive_strength, as the authored
+                        // material pool already applies it. Dropping it here
+                        // left every imported lamp glass and bulb at 1/12 to
+                        // 1/250 of its authored luminance: lit, but unlit-looking.
+                        emissive: (glam::Vec3::from(mat.emissive) * mat.emissive_intensity)
+                            .to_array(),
                         emissive_map: resolve_tex(mat.emissive_map),
                         terrain_index: -1,
                         porosity: 0.5,
-                        _pad: 0.0,
+                        normal_scale: mat.normal_scale,
                         // Phase 17D: only MASK cuts out. OPAQUE ignores alpha entirely
                         // and BLEND goes to the forward pass, so a cutoff on either
                         // would punch holes in geometry that should be solid.
@@ -1415,6 +1553,12 @@ impl SomniumRenderer {
                         } else {
                             0
                         },
+                        // Linear, not colour: listed with the data maps above.
+                        height_map: resolve_tex(mat.height_map),
+                        height_depth: mat.height_depth,
+                        weathering: mat.weathering,
+                        detile: if mat.detile { 1.0 } else { 0.0 },
+                        wind: [mat.wind_bend, mat.wind_flutter, 0.0, 0.0],
                     },
                 );
                 // Phase 17D: remember double-sidedness so the visibility pass can
@@ -1423,10 +1567,100 @@ impl SomniumRenderer {
                 // Phase 21: remember which materials are blended so `submit` can
                 // route their draws to the forward transparent pass.
                 self.set_material_blend(id, mat.alpha_mode == somnium_asset::AlphaMode::Blend);
+                // Count only materials a node draws with: those are the ones
+                // `release_uploads` is handed back, and an unused material that
+                // shares a slot must not hold it open forever.
+                if used_materials.contains(&index) {
+                    let mut slots: Vec<i32> = [
+                        mat.albedo_map,
+                        mat.emissive_map,
+                        mat.normal_map,
+                        mat.metallic_roughness_map,
+                        mat.occlusion_map,
+                        mat.height_map,
+                    ]
+                    .into_iter()
+                    .map(resolve_tex)
+                    .filter(|slot| *slot >= 0)
+                    .collect();
+                    slots.sort_unstable();
+                    slots.dedup();
+                    for slot in &slots {
+                        *self.imported_texture_refs.entry(*slot).or_default() += 1;
+                    }
+                    self.material_texture_refs.insert(id, slots);
+                }
                 id
             })
             .collect();
 
+        material_ids
+    }
+
+    /// Hand back what a scene's imported uploads hold: geometry spans and their
+    /// BLAS for `vertex_offsets`, and for `material_ids` every imported texture
+    /// no other live material still samples.
+    ///
+    /// Call with the GPU idle (`wait_gpu`). Unknown offsets and ids are ignored,
+    /// and releasing twice is harmless, so callers may over-report. A material
+    /// that is released keeps its slot id but loses its maps, so a stray draw
+    /// shows untextured instead of whatever image reuses the freed slot.
+    pub fn release_uploads(
+        &mut self,
+        ctx: &RenderContext,
+        vertex_offsets: impl IntoIterator<Item = u32>,
+        material_ids: impl IntoIterator<Item = u32>,
+    ) -> (usize, usize) {
+        let mut meshes = 0;
+        for offset in vertex_offsets {
+            if self.geometry.release_static_mesh(offset) {
+                self.raytrace_pass.unregister_mesh(offset);
+                meshes += 1;
+            }
+        }
+        let mut textures = 0;
+        for id in material_ids {
+            let Some(slots) = self.material_texture_refs.remove(&id) else {
+                continue;
+            };
+            for slot in slots {
+                let Some(count) = self.imported_texture_refs.get_mut(&slot) else {
+                    continue;
+                };
+                *count -= 1;
+                if *count > 0 {
+                    continue;
+                }
+                self.imported_texture_refs.remove(&slot);
+                self.imported_texture_slots.retain(|_, live| *live != slot);
+                if self.texture_pool.release(slot as u32) {
+                    self.global_pool.texture_views[slot as usize] =
+                        self.texture_pool.dummy_view.clone();
+                    textures += 1;
+                }
+            }
+            if let Some(mut material) = self.materials_pool.get(id) {
+                material.albedo_map = -1;
+                material.normal_map = -1;
+                material.metallic_roughness_map = -1;
+                material.occlusion_map = -1;
+                material.emissive_map = -1;
+                material.height_map = -1;
+                self.materials_pool.set_material(&ctx.queue, id, material);
+            }
+        }
+        if textures > 0 {
+            self.global_pool.update_textures(&ctx.device);
+        }
+        (meshes, textures)
+    }
+
+    pub fn upload_scene(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+    ) -> Vec<UploadedNode> {
+        let material_ids = self.upload_scene_materials(ctx, scene);
         // 3. Meshes ----------------------------------------------------------
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
             .meshes
@@ -1472,6 +1706,15 @@ impl SomniumRenderer {
     }
 
     /// Current internal 3D target size (may be smaller than the swapchain).
+    /// Request live authoring evidence after the next complete render.
+    pub fn request_authoring_capture(
+        &mut self,
+        path: &std::path::Path,
+        include_editor: bool,
+    ) -> Result<(), String> {
+        self.capture.request_png(path, include_editor)
+    }
+
     pub fn scene_extent(&self) -> (u32, u32) {
         (self.render_width, self.render_height)
     }
@@ -1512,7 +1755,7 @@ impl SomniumRenderer {
     fn view_buffer_bytes(&self, view_proj: glam::Mat4) -> Vec<u8> {
         let inv_view_proj = view_proj.inverse();
         let debug_flag = if self.cascade_debug { 1.0f32 } else { 0.0f32 };
-        let mut view_data = Vec::with_capacity(224);
+        let mut view_data = Vec::with_capacity(VIEW_SLOT_BYTES as usize);
         view_data.extend_from_slice(bytemuck::bytes_of(&view_proj.to_cols_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&inv_view_proj.to_cols_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.view_matrix.to_cols_array()));
@@ -1520,7 +1763,37 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
         view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        let mut wind = self.foliage_wind;
+        let budget = self.graphics_budget();
+        if !budget.foliage_wind {
+            wind.strength = 0.0;
+        }
+        wind.fade_distance *= budget.draw_distance;
+        view_data.extend_from_slice(bytemuck::bytes_of(&wind.uniform()));
+        view_data.extend_from_slice(bytemuck::bytes_of(&[self.wind_clock.0, self.wind_clock.1, 0.0, 0.0]));
         view_data
+    }
+
+    /// The scene's wind for plants: velocity over the ground (m/s, x and z)
+    /// and how strongly they answer it (`Weather.foliage_sway`). Zero strength
+    /// stills every plant; the graphics preset can only lower it.
+    pub fn set_foliage_wind(&mut self, vector: [f32; 2], strength: f32) {
+        self.foliage_wind.vector = vector;
+        self.foliage_wind.strength = strength.max(0.0);
+    }
+
+    /// Advance the wind clock by wall time, once per frame.
+    fn tick_wind_clock(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = self
+            .wind_clock_at
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        self.wind_clock_at = Some(now);
+        // Wrapped well before f32 loses the sub-millisecond steps the phase needs.
+        self.wind_clock = ((self.wind_clock.0 + dt) % 3600.0, self.wind_clock.0);
+        if self.wind_clock.0 < self.wind_clock.1 {
+            self.wind_clock.1 = self.wind_clock.0 - dt;
+        }
     }
 
     fn write_view_buffer(&self, queue: &wgpu::Queue, view_proj: glam::Mat4) {
@@ -1919,11 +2192,102 @@ impl SomniumRenderer {
         encoder.copy_buffer_to_buffer(&self.indirect.buffer, 0, dst, 0, bytes);
     }
 
+    /// Publish vertex paint for this frame: changed masks, the per-instance
+    /// handle table for the opaque draws (instance `i` is `draw_queue[i]`),
+    /// then the header that switches the shader's paint path on.
+    fn upload_vertex_paint(&mut self, ctx: &RenderContext) {
+        let pool = &mut self.vertex_paint;
+        if !pool.wants_header() {
+            if pool.header_live {
+                self.shading_pass.write_paint(&ctx.queue, 0, &pool.header(0));
+                pool.header_live = false;
+            }
+            return;
+        }
+        let draws = if pool.is_empty() { 0 } else { self.draw_queue.len() };
+        let grown = self
+            .shading_pass
+            .ensure_paint_capacity(&ctx.device, pool.required_words(draws));
+        if let Some((word, data)) = pool.take_dirty(grown) {
+            self.shading_pass.write_paint(&ctx.queue, word, data);
+        }
+        let mut table = 0;
+        if !pool.is_empty() {
+            table = pool.instance_table_start();
+            let mut handles = std::mem::take(&mut pool.frame_instances);
+            handles.clear();
+            handles.extend(self.draw_queue.iter().map(|cmd| cmd.paint));
+            self.shading_pass.write_paint(&ctx.queue, table, &handles);
+            pool.frame_instances = handles;
+        }
+        self.shading_pass
+            .write_paint(&ctx.queue, 0, &pool.header(table));
+        pool.header_live = true;
+    }
+
+    /// Read a static mesh back from the geometry pool: its vertices in pool
+    /// order (the order paint is stored in) and its triangle list.
+    ///
+    /// Blocking. For editor tools that need one mesh once, such as the vertex
+    /// paint brush when it starts on an entity.
+    #[must_use]
+    pub fn read_mesh(
+        &self,
+        ctx: &RenderContext,
+        vertex_offset: u32,
+        index_offset: u32,
+        index_count: u32,
+    ) -> Option<(Vec<somnium_asset::Vertex>, Vec<u32>)> {
+        let vertex_count = self.geometry.static_vertex_count(vertex_offset)?;
+        let stride = std::mem::size_of::<somnium_asset::Vertex>() as u64;
+        let v_bytes = u64::from(vertex_count) * stride;
+        let i_bytes = u64::from(index_count) * 4;
+        if v_bytes == 0 || i_bytes == 0 {
+            return None;
+        }
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mesh Readback"),
+            size: v_bytes + i_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Mesh Readback") });
+        encoder.copy_buffer_to_buffer(
+            &self.geometry.vertex_buffer,
+            u64::from(vertex_offset) * stride,
+            &staging,
+            0,
+            v_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.geometry.index_buffer,
+            u64::from(index_offset) * 4,
+            &staging,
+            v_bytes,
+            i_bytes,
+        );
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        let out = {
+            let data = slice.get_mapped_range().ok()?;
+            let vertices: Vec<somnium_asset::Vertex> =
+                bytemuck::pod_collect_to_vec(&data[..v_bytes as usize]);
+            let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&data[v_bytes as usize..]);
+            (vertices, indices)
+        };
+        staging.unmap();
+        Some(out)
+    }
+
     /// Map both snapshots and log how many draws each phase left alive.
     ///
     /// `instance_count` doubles as the cull verdict, so counting the non-zero
     /// entries is exactly the number of draws that phase submitted.
-    fn report_cull_stats(&self, ctx: &RenderContext, draw_count: usize) {
+    fn report_cull_stats(&mut self, ctx: &RenderContext, draw_count: usize) {
         let Some(buffers) = &self.cull_stats_buffers else {
             return;
         };
@@ -1953,6 +2317,9 @@ impl SomniumRenderer {
             }
             buf.unmap();
         }
+
+        self.profiler.counters.gpu_visible_arguments =
+            Some(u32::try_from(alive[0] + alive[1]).unwrap_or(u32::MAX));
 
         tracing::info!(
             "CULLSTATS total={draw_count} phase1_drawn={} phase2_drawn={} culled={} tris_drawn={}",
@@ -2145,8 +2512,13 @@ impl SomniumRenderer {
                 .resize(&ctx.device, ctx.config.format, width, height);
             self.ldr_width = 0;
             self.ldr_height = 0;
-            self.velocity_pass
-                .resize(&ctx.device, &self.vis_pass.depth_view, width, height);
+            self.velocity_pass.resize(
+                &ctx.device,
+                &self.vis_pass.depth_view,
+                &self.vis_pass.view,
+                width,
+                height,
+            );
             self.water_pass.resize(&ctx.device, width, height);
             self.water_reflection_pass
                 .resize(&ctx.device, width, height);
@@ -2157,6 +2529,7 @@ impl SomniumRenderer {
                 &self.vis_pass.depth_view,
                 self.velocity_pass.view(),
                 self.water_pass.surface_view(),
+                &self.vis_pass.view,
             );
             self.motion_blur_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
@@ -2209,6 +2582,24 @@ impl SomniumRenderer {
             self.transparent_queue.push(cmd);
         } else {
             self.draw_queue.push(cmd);
+        }
+    }
+
+    /// Submit moving opaque/cutout geometry without reusing stale TAA history.
+    /// GPU-skinned draws are detected automatically; use this for rigid held tools.
+    /// The declaration lasts one frame and does not affect static instances elsewhere.
+    pub fn submit_dynamic(&mut self, cmd: DrawCommand) {
+        self.reactive_draws
+            .insert(crate::pass::taa::ReactiveDrawKey::of(&cmd));
+        self.submit(cmd);
+    }
+
+    /// Draw geometry only into shadow maps. Useful for a first-person body
+    /// whose head is hidden from the primary camera but still casts a shadow.
+    /// The command uses the same instance layout and clears with the frame.
+    pub fn submit_shadow_only(&mut self, command: DrawCommand) {
+        if command.casts_shadow {
+            self.shadow_only_queue.push(command);
         }
     }
 
@@ -2338,7 +2729,17 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        self.create_terrain_inner(ctx, desc, false)
+        self.create_terrain_with_asset_dir(ctx, desc, std::path::Path::new("assets/terrain"))
+    }
+
+    /// Allocate scene terrain with texture sources rooted in its active project.
+    pub fn create_terrain_with_asset_dir(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+        asset_dir: &std::path::Path,
+    ) -> u32 {
+        self.create_terrain_inner(ctx, desc, false, asset_dir)
     }
 
     /// Same as [`Self::create_terrain`], but extra-bank layers 16–31 and splat
@@ -2349,7 +2750,7 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
     ) -> u32 {
-        self.create_terrain_inner(ctx, desc, true)
+        self.create_terrain_inner(ctx, desc, true, std::path::Path::new("assets/terrain"))
     }
 
     fn create_terrain_inner(
@@ -2357,12 +2758,14 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         desc: crate::terrain::TerrainDescriptor,
         hero_bank_only: bool,
+        asset_dir: &std::path::Path,
     ) -> u32 {
-        let mut terrain = crate::terrain::TerrainData::new(
+        let mut terrain = crate::terrain::TerrainData::new_with_asset_dir(
             &ctx.device,
             &ctx.queue,
             desc,
             ctx.supports_bc_compression(),
+            asset_dir,
         );
         terrain.reserve_pool_spans(&mut self.geometry);
         if hero_bank_only {
@@ -2386,19 +2789,20 @@ impl SomniumRenderer {
             if hero_bank_only && i >= 4 {
                 -1
             } else {
-                self.add_texture(ctx, terrain.splatmap.views[i].clone()) as i32
+                self.add_terrain_texture(ctx, terrain.splatmap.views[i].clone()) as i32
             }
         });
-        ids.macro_map = self.add_texture(ctx, terrain.macro_view.clone()) as i32;
+        ids.macro_map = self.add_terrain_texture(ctx, terrain.macro_view.clone()) as i32;
         // Phase TSUSHIMA-B/C. Registered once, like the macro map: the bake is
         // rewritten in place after a sculpt, so these three indices are valid
         // for the terrain's life and no bind group is ever invalidated.
         ids.horizon_maps = [
-            self.add_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
-            self.add_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.angles_a_view.clone()) as i32,
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.angles_b_view.clone()) as i32,
         ];
-        ids.sky_visibility = self.add_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
-        ids.relief_normal = self.add_texture(ctx, terrain.relief_gpu.view.clone()) as i32;
+        ids.sky_visibility =
+            self.add_terrain_texture(ctx, terrain.horizon_gpu.sky_view.clone()) as i32;
+        ids.relief_normal = self.add_terrain_texture(ctx, terrain.relief_gpu.view.clone()) as i32;
         let hero = crate::terrain::textures::TERRAIN_HERO_LAYERS;
         // Virtual mode deliberately leaves every legacy layer id at -1. The
         // 4x4 arrays only keep the struct/fallback shape valid; publishing
@@ -2407,7 +2811,7 @@ impl SomniumRenderer {
         if terrain.layer_textures.virtual_texture.is_none() {
             for layer in 0..hero {
                 let i = layer as usize;
-                ids.albedo[i] = self.add_texture(
+                ids.albedo[i] = self.add_terrain_texture(
                     ctx,
                     layer_view(
                         &terrain.layer_textures.albedo,
@@ -2415,7 +2819,7 @@ impl SomniumRenderer {
                         "Terrain Layer Albedo+Height",
                     ),
                 ) as i32;
-                ids.surface[i] = self.add_texture(
+                ids.surface[i] = self.add_terrain_texture(
                     ctx,
                     layer_view(
                         &terrain.layer_textures.surface,
@@ -2427,7 +2831,7 @@ impl SomniumRenderer {
             if !hero_bank_only {
                 for layer in 0..(crate::terrain::textures::TERRAIN_LAYER_COUNT - hero) {
                     let i = (hero + layer) as usize;
-                    ids.albedo[i] = self.add_texture(
+                    ids.albedo[i] = self.add_terrain_texture(
                         ctx,
                         layer_view(
                             &terrain.layer_textures.albedo_extra,
@@ -2435,7 +2839,7 @@ impl SomniumRenderer {
                             "Terrain Layer Albedo+Height Extra",
                         ),
                     ) as i32;
-                    ids.surface[i] = self.add_texture(
+                    ids.surface[i] = self.add_terrain_texture(
                         ctx,
                         layer_view(
                             &terrain.layer_textures.surface_extra,
@@ -2448,9 +2852,9 @@ impl SomniumRenderer {
         }
         if let Some(gpu) = &terrain.layer_textures.virtual_texture {
             ids.virtual_texture = [
-                self.add_texture(ctx, gpu.albedo_view.clone()) as i32,
-                self.add_texture(ctx, gpu.surface_view.clone()) as i32,
-                self.add_texture(ctx, gpu.page_table_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.albedo_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.surface_view.clone()) as i32,
+                self.add_terrain_texture(ctx, gpu.page_table_view.clone()) as i32,
                 gpu.shader_atlas_size(),
             ];
         }
@@ -2479,7 +2883,12 @@ impl SomniumRenderer {
                 emissive_map: -1,
                 terrain_index: terrain.terrain_index as i32,
                 porosity: 0.5,
-                _pad: 0.0,
+                normal_scale: 1.0,
+                height_map: -1,
+                height_depth: 0.0,
+                weathering: 0.0,
+                detile: 0.0,
+                wind: [0.0; 4],
             },
         );
         // Opaque and single-sided, which is what an unregistered material
@@ -2516,7 +2925,23 @@ impl SomniumRenderer {
     }
 
     /// Drop GPU terrains, clipmaps, and water so a map load does not leak slots.
-    pub fn reset_scene_gpu(&mut self) {
+    pub fn reset_scene_gpu(&mut self, ctx: &RenderContext) {
+        // Clearing TerrainData alone leaves its texture arrays alive through
+        // both bindless view owners and the bind group. Release all three before
+        // importing the next scene, while keeping reusable asset slots stable.
+        for slot in self.terrain_texture_slots.drain(..) {
+            if self.texture_pool.release(slot) {
+                self.global_pool.texture_views[slot as usize] =
+                    self.texture_pool.dummy_view.clone();
+            }
+        }
+        self.global_pool.update_textures(&ctx.device);
+        for terrain in &mut self.terrains {
+            for chunk in &terrain.chunks {
+                self.raytrace_pass.unregister_mesh(chunk.vertex_offset);
+            }
+            terrain.release_pool_spans(&mut self.geometry);
+        }
         self.terrains.clear();
         self.clipmaps.clear();
         self.terrain_queue.clear();
@@ -2671,11 +3096,22 @@ impl SomniumRenderer {
         game_ui: Option<&mut dyn somnium_ui::GameUi>,
         scene_target: Option<SceneTarget<'_>>,
     ) {
+        self.tick_wind_clock();
         // Phase 29: collects whatever timings have landed and picks this
         // frame's query slot. Before any recording, and before the counters
         // below start accumulating.
         self.profiler.begin_frame();
+        self.profiler.counters.foliage = self.foliage_submission;
+        self.profiler.cpu_begin("Renderer prepare");
         self.grain_masks.advance_packed(&ctx.queue);
+
+        // Material imports can grow the pool between frames. All raster
+        // consumers share this bind group, so refresh it before any pass or
+        // temporary texture-hiding group is recorded. Growth is monotonic.
+        if self.global_pool.material_buffer.size() != self.materials_pool.buffer.size() {
+            self.global_pool.material_buffer = self.materials_pool.buffer.clone();
+            self.global_pool.update_textures(&ctx.device);
+        }
 
         // ── Phase DOOM-F: dynamic resolution ─────────────────────────────────
         //
@@ -2751,6 +3187,7 @@ impl SomniumRenderer {
         // same frame, which this one does — but the row belongs beside
         // `Frame wall` and `Frame CPU` rather than among the engine's own
         // zones, because it is a wait and not work.
+        self.profiler.cpu_end();
         let acquire_started = std::time::Instant::now();
         let output = match ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex) => tex,
@@ -2782,6 +3219,10 @@ impl SomniumRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Main Render Encoder"),
             });
+
+        self.animated_geometry.prepare(&mut self.geometry);
+        self.animated_geometry
+            .record(ctx, &mut encoder, &self.geometry, &mut self.skin_pass);
 
         // Nothing is going to draw the scene into this window, and the UI pass
         // loads rather than clears. Without this the editor's own swapchain
@@ -2822,6 +3263,14 @@ impl SomniumRenderer {
             let c = &mut self.profiler.counters;
             c.draw_calls = u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX);
             c.instances = c.draw_calls;
+            c.water_draws = u32::try_from(self.water_queue.len()).unwrap_or(u32::MAX);
+            c.water_bound_draws = u32::try_from(
+                self.water_queue
+                    .iter()
+                    .filter(|(id, ..)| self.water_bodies.get(*id).is_some())
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
             c.triangles = self
                 .draw_queue
                 .iter()
@@ -2963,18 +3412,6 @@ impl SomniumRenderer {
                 .record(&ctx.device, &ctx.queue, &mut encoder, scene_view, &lines);
         }
 
-        // ── 8.8 Particle Pass → swapchain (Phase 11.5J) ──────────────────────
-        if !self.pending_particles.is_empty() {
-            self.particle_pass.record(
-                &ctx.queue,
-                &mut encoder,
-                scene_view,
-                self.view_proj_unjittered,
-                self.view_matrix,
-                &self.pending_particles,
-            );
-        }
-
         self.profiler.end(&mut encoder); // Editor overlays
 
         // ── 9. UI Overlay ────────────────────────────────────────────────────
@@ -2984,6 +3421,7 @@ impl SomniumRenderer {
         // as a HUD that costs two milliseconds, not as an editor that got
         // slower.
         if let Some(game_ui) = game_ui {
+            self.profiler.cpu_begin("Game HUD");
             self.profiler.begin(&mut encoder, "Game UI");
             let mut frame = somnium_ui::GameUiFrame::new(
                 window,
@@ -2995,6 +3433,7 @@ impl SomniumRenderer {
             );
             game_ui.draw_ui(&mut frame);
             let drawn = frame.drawn();
+            self.profiler.cpu_end();
             self.profiler.end(&mut encoder); // Game UI
             if drawn == 0 && !self.game_ui_empty_warned {
                 self.game_ui_empty_warned = true;
@@ -3004,7 +3443,9 @@ impl SomniumRenderer {
             }
         }
         if !ui.is_immersive() {
+            self.profiler.cpu_begin("Editor UI layout and draw");
             ui.end_frame(window, &ctx.device, &ctx.queue, &mut encoder, &surface_view);
+            self.profiler.cpu_end();
         }
         self.profiler.end(&mut encoder); // UI
 
@@ -3034,6 +3475,7 @@ impl SomniumRenderer {
         };
         self.profiler.end(&mut encoder); // Frame
         self.profiler.end_frame(&mut encoder);
+        let submit_started = std::time::Instant::now();
         ctx.queue.submit(std::iter::once(encoder.finish()));
         // Must follow the submit: the map would otherwise race the copy that
         // fills the buffer it is reading.
@@ -3180,6 +3622,7 @@ impl SomniumRenderer {
         // so the present is ordered against submitted work explicitly rather
         // than implicitly by the texture's lifetime.
         ctx.queue.present(output);
+        self.profiler.submit_present_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
 
         self.clear_frame_queues();
     }
@@ -3362,6 +3805,7 @@ impl SomniumRenderer {
             1000.0, // far
             shading_mode,
         );
+        self.restir_gi_pass.update_local_lights(&self.local_lights);
         self.local_lights.clear();
 
         // Phase CONTROL-O: the same grid geometry, the same matrices, the same
@@ -3382,6 +3826,7 @@ impl SomniumRenderer {
         );
         self.decals = decals;
         self.decals.clear();
+        self.profiler.cpu_begin("View + light upload");
         // ── 0. Upload view buffer ────────────────────────────────────────────
         //
         // Through the encoder, not `write_buffer`: see `stage_view_buffer`.
@@ -3436,11 +3881,17 @@ impl SomniumRenderer {
         // they depend on the atmosphere's composition, not on sun or camera.
         self.atmosphere_pass.ensure_built(&ctx.device, &ctx.queue);
 
+        let overcast = if self.cloud_pass.enabled {
+            self.cloud_pass.settings.coverage
+        } else {
+            0.0
+        };
         self.ibl_pass.generate_if_needed(
             &ctx.device,
             &ctx.queue,
             self.light_direction,
             self.light_color,
+            overcast,
         );
 
         // ── 1. Compute cascades and upload light buffer ───────────────────────
@@ -3498,6 +3949,11 @@ impl SomniumRenderer {
             )
             .to_array(),
             moon_intensity: self.moon_intensity,
+            eye_direction: self.sky_eye.direction.normalize_or_zero().to_array(),
+            eye_tan_half_width: self.sky_eye.tan_half_width,
+            eye_color: self.sky_eye.color.to_array(),
+            eye_intensity: self.sky_eye.intensity,
+            eye_shape: [self.sky_eye.openness, self.sky_eye.pupil, self.sky_eye.pulse_hz, self.sky_eye.glow],
         };
         ctx.queue.write_buffer(
             &self.global_pool.light_buffer,
@@ -3505,6 +3961,8 @@ impl SomniumRenderer {
             bytemuck::bytes_of(&gpu_light),
         );
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Terrain draws");
         // ── 1.5 Terrain becomes ordinary draws (Phase 25A-2) ─────────────────
         //
         // Before the sort, because from here on terrain is indistinguishable
@@ -3519,7 +3977,7 @@ impl SomniumRenderer {
         // cascade, so off-screen ground can still shadow into view (15B's
         // contract). CR-E cascade-culls that list; never the camera frustum.
         self.profiler.cpu_begin("Terrain");
-        self.shadow_only_queue.clear();
+        // Keep explicit shadow-only submissions; all queues clear at frame end.
         self.terrain_lod_by_vertex.clear();
         let cam_planes = crate::culling::frustum_planes(self.view_proj_unjittered);
         let cascade_planes: [_; crate::shadow::NUM_CASCADES] =
@@ -3611,6 +4069,7 @@ impl SomniumRenderer {
                     );
                 }
                 let cmd = DrawCommand {
+                    paint: 0,
                     casts_shadow: true,
                     sort_key: crate::command::SortKey::new(
                         0,
@@ -3678,6 +4137,8 @@ impl SomniumRenderer {
                 .write(&ctx.queue, terrain_index, &mat);
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Draw sort");
         // ── 2. Sort draw queue ───────────────────────────────────────────────
         // This has to happen before the instance buffer is built. Instance `i`
         // is what draw `i` pulls its model matrix and geometry offsets from, so
@@ -3685,7 +4146,32 @@ impl SomniumRenderer {
         // mesh's offsets — which renders as triangles stretched between
         // unrelated parts of the geometry pool.
         self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
+        if self.taa_pass.enabled() || self.fsr_pass.enabled {
+            let posed: std::collections::HashSet<_> =
+                self.animated_geometry.posed_offsets().collect();
+            let flags: Vec<_> = self
+                .draw_queue
+                .iter()
+                .map(|cmd| {
+                    u32::from(
+                        posed.contains(&cmd.vertex_offset)
+                            || self
+                                .reactive_draws
+                                .contains(&crate::pass::taa::ReactiveDrawKey::of(cmd)),
+                    )
+                })
+                .collect();
+            if self.taa_pass.enabled() {
+                self.taa_pass
+                    .set_reactive_instances(&ctx.device, &ctx.queue, &flags);
+            }
+            if self.fsr_pass.enabled {
+                self.fsr_pass
+                    .set_reactive_instances(&ctx.device, &ctx.queue, &flags);
+            }
+        }
 
+        self.profiler.cpu_end();
         // ── 3. Build and upload instance buffer ──────────────────────────────
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
@@ -3729,8 +4215,10 @@ impl SomniumRenderer {
         }
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
         self.instances.upload(&ctx.queue);
+        self.upload_vertex_paint(ctx);
         self.profiler.cpu_end();
 
+        self.profiler.cpu_begin("Indirect args");
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
         // Argument `i` lines up with instance `i`, which the sort above keeps true.
         if self.gpu_driven {
@@ -3752,65 +4240,93 @@ impl SomniumRenderer {
             // each mesh appears and fall back to one whole-mesh argument once
             // it is clearly being instanced.
             self.profiler.cpu_begin("Cluster cull");
-            self.instanced_counts.clear();
-            for cmd in &self.draw_queue {
-                *self
-                    .instanced_counts
-                    .entry(cmd.vertex_offset)
-                    .or_insert(0u32) += 1;
-            }
-
-            self.cluster_args.clear();
-            self.cull_aabbs.clear();
-            for pass_two_sided in [false, true] {
-                if pass_two_sided {
-                    self.single_sided_args = self.cluster_args.len();
-                }
-                for (i, cmd) in self.draw_queue.iter().enumerate() {
-                    if self.is_double_sided(cmd.material_id) != pass_two_sided {
-                        continue;
-                    }
-                    let heavily_instanced = self
+            // TOWN-PERF: expanding ~4.7k draws into cluster arguments and
+            // bounds cost ~1 ms a frame and gives the same arrays whenever the
+            // draw list is unchanged, which for a still camera is every frame.
+            // The arguments are still uploaded (the cull shader zeroes culled
+            // counts in place); the bounds only when they change.
+            let source = self.draw_list_signature();
+            let reuse = self.cluster_source == Some(source);
+            let posed: std::collections::HashSet<u32> =
+                self.animated_geometry.posed_offsets().collect();
+            if !reuse {
+                self.cluster_posed.clear();
+                self.instanced_counts.clear();
+                for cmd in &self.draw_queue {
+                    *self
                         .instanced_counts
-                        .get(&cmd.vertex_offset)
-                        .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
-                    // Skip cluster expansion once a mesh is clearly instanced,
-                    // but keep one argument per draw. Folding copies into
-                    // `instance_count > 1` made the cull shader (which writes
-                    // 0 or 1) keep only the first tree and drop the rest.
-                    let meshlets = if self.meshlet_draws && !heavily_instanced {
-                        self.geometry.mesh_meshlets(cmd.vertex_offset)
-                    } else {
-                        None
-                    };
-                    let start = self.cull_aabbs.len();
-                    crate::indirect::push_cluster_args(
-                        i as u32,
-                        cmd.index_count,
-                        1,
-                        meshlets,
-                        self.geometry.mesh_aabb(cmd.vertex_offset),
-                        &mut self.cluster_args,
-                        &mut self.cull_aabbs,
-                    );
-                    // Normal-cone rejection assumes the vis pass culls back
-                    // faces. Two-sided foliage keeps those faces, so a trunk
-                    // cluster that faces away is still the bark you should see
-                    // from the other side of a second tree.
+                        .entry(cmd.vertex_offset)
+                        .or_insert(0u32) += 1;
+                }
+
+                self.cluster_args.clear();
+                self.cull_aabbs.clear();
+                for pass_two_sided in [false, true] {
                     if pass_two_sided {
-                        for aabb in &mut self.cull_aabbs[start..] {
-                            aabb.cone[3] = 2.0;
+                        self.single_sided_args = self.cluster_args.len();
+                    }
+                    for (i, cmd) in self.draw_queue.iter().enumerate() {
+                        if self.is_double_sided(cmd.material_id) != pass_two_sided {
+                            continue;
+                        }
+                        let heavily_instanced = self
+                            .instanced_counts
+                            .get(&cmd.vertex_offset)
+                            .is_some_and(|n| *n > MAX_INSTANCES_FOR_CLUSTERING);
+                        // Skip cluster expansion once a mesh is clearly instanced,
+                        // but keep one argument per draw. Folding copies into
+                        // `instance_count > 1` made the cull shader (which writes
+                        // 0 or 1) keep only the first tree and drop the rest.
+                        let meshlets = if self.meshlet_draws && !heavily_instanced {
+                            self.geometry.mesh_meshlets(cmd.vertex_offset)
+                        } else {
+                            None
+                        };
+                        if let Some(meshlets) = meshlets {
+                            self.profiler.counters.gpu_meshlet_arguments =
+                                self.profiler.counters.gpu_meshlet_arguments.saturating_add(
+                                    u32::try_from(meshlets.len()).unwrap_or(u32::MAX),
+                                );
+                        }
+                        let start = self.cull_aabbs.len();
+                        if meshlets.is_none() && posed.contains(&cmd.vertex_offset) {
+                            self.cluster_posed
+                                .push((start, cmd.vertex_offset, pass_two_sided));
+                        }
+                        crate::indirect::push_cluster_args(
+                            i as u32,
+                            cmd.index_count,
+                            1,
+                            meshlets,
+                            self.geometry.mesh_aabb(cmd.vertex_offset),
+                            &mut self.cluster_args,
+                            &mut self.cull_aabbs,
+                        );
+                        // Normal-cone rejection assumes the vis pass culls back
+                        // faces. Two-sided foliage keeps those faces, so a trunk
+                        // cluster that faces away is still the bark you should see
+                        // from the other side of a second tree.
+                        if pass_two_sided {
+                            for aabb in &mut self.cull_aabbs[start..] {
+                                aabb.cone[3] = 2.0;
+                            }
                         }
                     }
                 }
+                self.cluster_source = Some(source);
+                self.cluster_meshlet_arguments = self.profiler.counters.gpu_meshlet_arguments;
+            } else {
+                self.profiler.counters.gpu_meshlet_arguments = self.cluster_meshlet_arguments;
             }
+            self.profiler.counters.gpu_draw_arguments =
+                u32::try_from(self.cluster_args.len()).unwrap_or(u32::MAX);
             self.indirect
                 .upload(&ctx.device, &ctx.queue, &self.cluster_args);
             let counted_draws = self.counted_draws_active();
             self.cull_pass.update(
                 &ctx.device,
                 &ctx.queue,
-                &self.cull_aabbs,
+                (!reuse).then_some(self.cull_aabbs.as_slice()),
                 // Un-jittered: a visibility decision must not depend on a
                 // sub-pixel sampling offset. With the jittered matrix the
                 // frustum planes — and the Hi-Z occlusion test behind them —
@@ -3829,9 +4345,29 @@ impl SomniumRenderer {
                 self.single_sided_args,
                 counted_draws,
             );
+            if reuse && !self.cluster_posed.is_empty() {
+                let patches: Vec<_> = self
+                    .cluster_posed
+                    .iter()
+                    .filter_map(|&(index, offset, two_sided)| {
+                        let (min, max) = self.geometry.mesh_aabb(offset)?;
+                        let mut aabb = crate::culling::GpuCullAabb::from_aabb(min, max);
+                        if two_sided {
+                            aabb.cone[3] = 2.0;
+                        }
+                        Some((index, aabb))
+                    })
+                    .collect();
+                for &(index, aabb) in &patches {
+                    self.cull_aabbs[index] = aabb;
+                }
+                self.cull_pass.patch_aabbs(&ctx.queue, &patches);
+            }
             self.profiler.cpu_end();
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Shadow + cull record");
         // ── 5. Shadow Pass (4 cascades into the atlas) ───────────────────────
         //
         // Phase 24AE: cull casters too small to be worth a shadow before any of
@@ -3979,22 +4515,38 @@ impl SomniumRenderer {
         // GTAO read it. Keeping the prepass as well would draw every chunk a
         // second time, from whatever LOD state the previous frame left behind.
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Acceleration structures");
         // ── 6.5 Acceleration structures (Phase 24J) ──────────────────────────
         // The top level is rebuilt each frame from the same draw queue the
         // raster path uses, so the traced scene and the drawn one cannot drift
         // apart. Bottom-level structures are rebuilt only where the geometry
         // changed — a sculpt stroke, or a mesh's first frame (Phase 25B).
         if self.raytrace_pass.supported() {
-            let instances: Vec<(u32, u32, glam::Mat4)> = self
+            // Small instances (ground-cover patches, litter, hand props) are left
+            // out of the traced scene: they barely shade indirect light or show
+            // in a reflection, and a level carpeted in ground cover has five
+            // figures of them. Before this the TLAS took the draw queue in
+            // material order and truncated it at its cap, so *which* trees and
+            // walls rays could see depended on how materials happened to sort.
+            let geometry = &self.geometry;
+            let instances: Vec<(u32, u32, glam::Mat4, bool)> = self
                 .draw_queue
                 .iter()
                 .enumerate()
-                .map(|(i, cmd)| {
-                    (
-                        u32::try_from(i).unwrap_or(0),
-                        cmd.vertex_offset,
-                        cmd.transform,
-                    )
+                .filter_map(|(i, cmd)| {
+                    let radius = geometry.mesh_aabb(cmd.vertex_offset).map_or(f32::MAX, |(min, max)| {
+                        let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
+                        cmd.transform.transform_vector3(half).length()
+                    });
+                    (radius >= TLAS_MIN_RADIUS).then(|| {
+                        (
+                            u32::try_from(i).unwrap_or(0),
+                            cmd.vertex_offset,
+                            cmd.transform,
+                            traces_shadow(cmd.casts_shadow, radius),
+                        )
+                    })
                 })
                 .collect();
             self.profiler.begin(&mut encoder, "TLAS build");
@@ -4034,6 +4586,7 @@ impl SomniumRenderer {
                     &ctx.device,
                     &ctx.queue,
                     &mut encoder,
+                    &mut self.profiler,
                     &self.global_pool.bind_group,
                     tlas,
                     &self.vis_pass.depth_view,
@@ -4156,6 +4709,8 @@ impl SomniumRenderer {
         self.restir_gi_pass.clear_if_inactive(&mut encoder);
         self.profiler.end(&mut encoder);
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Screen passes record");
         // ── 6.9 GTAO (Phase 24I) ─────────────────────────────────────────────
         // After the visibility pass has filled depth, before shading reads it.
         self.gtao_pass
@@ -4167,6 +4722,7 @@ impl SomniumRenderer {
         self.velocity_pass.record(
             &ctx.queue,
             &mut encoder,
+            &self.global_pool.bind_group,
             self.view_proj_unjittered,
             self.render_width,
             self.render_height,
@@ -4195,6 +4751,7 @@ impl SomniumRenderer {
             self.atmosphere_pass.sampler(),
             &self.global_pool.light_buffer,
             &self.shadow_resources.atlas_depth_view,
+            &self.global_pool.cluster_grid,
         );
         self.profiler.end(&mut encoder);
         self.profiler.begin(&mut encoder, "Volumetrics");
@@ -4228,6 +4785,8 @@ impl SomniumRenderer {
             &self.vis_pass.depth_view,
             &self.volumetric_pass.view,
         );
+        self.cloud_pass.sky_eye = self.sky_eye;
+        self.cloud_pass.time = self.time;
         self.cloud_pass.record(
             &mut encoder,
             &ctx.queue,
@@ -4426,6 +4985,7 @@ impl SomniumRenderer {
                 clipmap: false,
                 debug: self.shading_debug != 0.0,
                 terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+                terrain_active_layers: 0,
                 live_terrain: false,
                 // Phase DOOM-B. Read once at startup and held constant for the
                 // process: an ablation that could change mid-run would recreate
@@ -4458,6 +5018,7 @@ impl SomniumRenderer {
                     continue;
                 }
                 spec.live_terrain = true;
+                spec.terrain_active_layers |= t.splatmap.painted_layers();
                 spec.hex |= t.hex_tiling;
                 spec.pom |= t.parallax_scale > 0.0;
                 if !t.hero_bank_only {
@@ -4468,6 +5029,20 @@ impl SomniumRenderer {
             // first terrain does not have to wait on a pipeline rebuild.
             if self.terrain_queue.is_empty() {
                 spec.live_terrain = true;
+                spec.terrain_active_layers = u32::MAX;
+            }
+            // Same binary A/B, default off: the sparse mask regressed Gardens
+            // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
+            // full palette until a specialization is measured faster.
+            static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*PAINTED_LAYERS.get_or_init(|| {
+                std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")
+            }) {
+                spec.terrain_active_layers = u32::MAX;
+            }
+            // Measurement rail only: how much of terrain shading is the splat scan.
+            if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
+                spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
             }
             self.shading_pass.ensure_pipeline(&ctx.device, spec);
 
@@ -4561,6 +5136,8 @@ impl SomniumRenderer {
             }
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Shading record");
         // ── 7. Shading Pass → HDR texture ────────────────────────────────────
         self.profiler.begin(&mut encoder, "Shading");
         // Phase DOOM-A: reserved *before* the pass, because the reservation
@@ -4768,6 +5345,8 @@ impl SomniumRenderer {
             .composite(&mut encoder, &self.postprocess_pass.hdr_view);
         self.profiler.end(&mut encoder);
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Water + blend record");
         // ── 7.5 Water Pass → HDR texture ─────────────────────────────────────
         self.water_pass.clear_surface(&mut encoder);
         if !self.water_queue.is_empty() {
@@ -4894,21 +5473,35 @@ impl SomniumRenderer {
             // OIT off mid-session must not need a re-sort.
             self.oit_pass.begin(&mut encoder);
             self.transparent_pass.record_weighted(
+                &ctx.device,
                 &mut encoder,
                 self.oit_pass.accum_view(),
                 self.oit_pass.reveal_view(),
                 &self.vis_pass.depth_view,
                 &self.global_pool.bind_group,
+                &self.postprocess_pass.scene_copy_view,
                 &transparent_draws,
             );
             self.oit_pass
                 .composite(&mut encoder, &self.postprocess_pass.hdr_view);
         } else {
+            if !transparent_draws.is_empty() {
+                // Glass refracts the scene behind it, and a pass cannot
+                // sample its own target: the same copy the water takes,
+                // taken again so it includes the water.
+                encoder.copy_texture_to_texture(
+                    self.postprocess_pass.hdr_texture.as_image_copy(),
+                    self.postprocess_pass.scene_copy_texture.as_image_copy(),
+                    self.postprocess_pass.hdr_texture.size(),
+                );
+            }
             self.transparent_pass.record(
+                &ctx.device,
                 &mut encoder,
                 &self.postprocess_pass.hdr_view,
                 &self.vis_pass.depth_view,
                 &self.global_pool.bind_group,
+                &self.postprocess_pass.scene_copy_view,
                 &transparent_draws,
             );
         }
@@ -4941,6 +5534,8 @@ impl SomniumRenderer {
             }
         }
 
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Post record");
         // ── 7.8 TAA resolve (Phase 24F) ──────────────────────────────────────
         // Between the last thing that writes HDR and the metering, so exposure
         // is measured on the resolved image rather than on a jittered one.
@@ -4950,6 +5545,7 @@ impl SomniumRenderer {
             &self.vis_pass.depth_view,
             self.velocity_pass.view(),
             self.water_pass.surface_view(),
+            &self.vis_pass.view,
         );
         // TAA deliberately reprojects between unjittered matrices so a static
         // scene has zero velocity. See `TaaPass::record`.
@@ -4999,6 +5595,24 @@ impl SomniumRenderer {
         // reported as TAA. Closing it here is a *reattribution*, not a change
         // in cost — expect the TAA row to fall and three new rows to appear
         // holding the difference.
+        self.profiler.end(&mut encoder);
+
+        // Sprite particles render after TAA and mark FSR reactivity, inside HDR
+        // exposure/bloom. Each view has independent upload buffers.
+        self.profiler.begin(&mut encoder, "Particles");
+        self.particle_pass.record(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &self.postprocess_pass.hdr_view,
+            &self.vis_pass.depth_view,
+            &self.global_pool.bind_group,
+            self.view_proj_unjittered,
+            self.view_matrix,
+            slot as usize,
+            [self.render_width, self.render_height],
+            &self.pending_particles,
+        );
         self.profiler.end(&mut encoder);
 
         // Phase IV-G: choose the finite body under the camera from the same
@@ -5137,6 +5751,8 @@ impl SomniumRenderer {
             &self.postprocess_pass.hdr_texture,
             &self.vis_pass.depth_texture,
             self.velocity_pass.texture(),
+            &self.vis_pass.view,
+            self.particle_pass.reactive_view(slot as usize),
             self.exposure,
             self.proj_matrix,
             self.frame_delta_time,
@@ -5153,7 +5769,8 @@ impl SomniumRenderer {
         // A TAA debug view must reach the screen unmodified: exposure would
         // crush a 0/1 flag image to black, and a tone curve would grade the
         // very values being inspected.
-        let debugging = self.taa_pass.debugging();
+        let debugging =
+            self.taa_pass.debugging() || (self.shading_debug > 34.5 && self.shading_debug < 35.5);
         self.postprocess_pass.set_params(
             &ctx.queue,
             if debugging { 1.0 } else { self.exposure },
@@ -5265,8 +5882,45 @@ impl SomniumRenderer {
         // ever looks at — the whole reason to separate them is that the scene
         // budget and the editor budget are answerable to different questions.
         self.profiler.end(&mut encoder);
+        self.profiler.cpu_end(); // Post record
 
         capture_now
+    }
+
+    /// The active graphics tier.
+    pub fn graphics_preset(&self) -> crate::quality::GraphicsPreset {
+        self.graphics_preset
+    }
+
+    /// Switch graphics tier; takes effect from the next frame's settings push.
+    pub fn set_graphics_preset(&mut self, preset: crate::quality::GraphicsPreset) {
+        if preset != self.graphics_preset {
+            tracing::info!(preset = preset.name(), "graphics preset");
+        }
+        self.graphics_preset = preset;
+    }
+
+    /// What the active tier allows.
+    pub fn graphics_budget(&self) -> crate::quality::GraphicsBudget {
+        self.graphics_preset.budget()
+    }
+
+    /// FNV-1a over what the cluster expansion reads from the draw queue: each
+    /// draw's mesh, index count and sidedness, plus the meshlet switch.
+    fn draw_list_signature(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        let mut word = |w: u32| h = (h ^ u64::from(w)).wrapping_mul(0x0100_0000_01b3);
+        word(u32::from(self.meshlet_draws));
+        let revision = self.geometry.bounds_revision();
+        word(revision as u32);
+        word((revision >> 32) as u32);
+        word(u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX));
+        for cmd in &self.draw_queue {
+            word(cmd.vertex_offset);
+            word(cmd.index_count);
+            word(u32::from(self.is_double_sided(cmd.material_id)));
+        }
+        h
     }
 
     /// Empty every per-frame submission queue.
@@ -5275,6 +5929,7 @@ impl SomniumRenderer {
     /// before drawing.
     fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
+        self.reactive_draws.clear();
         self.shadow_only_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();
@@ -5506,6 +6161,7 @@ impl SomniumRenderer {
                 &cascade_planes,
                 self.camera_pos,
                 &self.geometry,
+                &self.materials_pool,
                 &mut self.shadow_caster_scratch,
                 &mut self.cascade_shadow_revisions,
             );
@@ -5521,6 +6177,7 @@ impl SomniumRenderer {
                 &cascade_planes,
                 self.camera_pos,
                 &self.geometry,
+                &self.materials_pool,
                 &mut self.shadow_caster_scratch,
                 &mut self.cascade_shadow_revisions,
             );
@@ -5651,6 +6308,7 @@ fn consider_shadow_caster(
     cascade_planes: &[[[f32; 4]; 6]],
     camera_pos: glam::Vec3,
     geometry: &crate::geometry::GeometryPool,
+    materials: &MaterialPool,
     out: &mut Vec<crate::pass::shadow::ShadowCaster>,
     cascade_revisions: &mut [u64; crate::shadow::NUM_CASCADES],
 ) {
@@ -5660,6 +6318,14 @@ fn consider_shadow_caster(
     let caster = crate::pass::shadow::ShadowCaster {
         instance_index,
         index_count: cmd.index_count,
+        // MaterialPool's CPU copy is uploaded verbatim by add/set_material.
+        // Re-evaluate every frame, including material/texture slot edits.
+        // This is the exact shadow fragment predicate for finite cutoffs;
+        // unknown data conservatively retains the reference fragment stage.
+        opaque_depth_only: materials.get(cmd.material_id).is_some_and(|material| {
+            material.alpha_cutoff.is_finite()
+                && !(material.alpha_cutoff > 0.0 && material.albedo_map >= 0)
+        }),
     };
     let Some((min, max)) = geometry.mesh_aabb(cmd.vertex_offset) else {
         out.push(caster);
@@ -5712,6 +6378,40 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
         mix(value.to_bits());
     }
     *hash = hash.wrapping_add(fingerprint);
+}
+
+/// World-space bounding radius below which a draw stays out of the TLAS (metres).
+const TLAS_MIN_RADIUS: f32 = 1.0;
+
+/// Instances at least this large occlude shadow rays whatever their authored
+/// `casts_shadow`.
+const RT_SHADOW_MIN_RADIUS: f32 = 1.5;
+
+/// Whether a traced instance stops shadow rays.
+///
+/// Foliage authors `casts_shadow` from its shadow distance, a shadow-*map*
+/// budget (and far tree LODs author it off entirely). Taken as-is by shadow
+/// rays it made every tree past that distance transparent to the sun: its
+/// trunk stood in full sun under its own canopy and glowed white through the
+/// fog, and the ground beneath went unshadowed. A ray pays nothing for a tree
+/// it was going to traverse anyway, so only small things — grass, the case
+/// the authored cut exists for — keep it.
+fn traces_shadow(authored: bool, radius: f32) -> bool {
+    authored || radius >= RT_SHADOW_MIN_RADIUS
+}
+
+/// Staged texture bytes after which an import submits and waits.
+const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Content and interpretation both identify a reusable GPU image.
+fn imported_texture_key(texture: &somnium_asset::LoadedTexture, colour: bool) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(texture.width.to_le_bytes());
+    hash.update(texture.height.to_le_bytes());
+    hash.update([u8::from(colour)]);
+    hash.update(&texture.data);
+    hash.finalize().into()
 }
 
 /// Build a full mip chain by repeated 2×2 box filtering.
@@ -5841,8 +6541,39 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
 }
 
 #[cfg(test)]
+mod traced_shadow_tests {
+    use super::traces_shadow;
+
+    #[test]
+    fn a_far_tree_still_shadows_while_far_grass_does_not() {
+        assert!(traces_shadow(false, 6.0), "a tree past its foliage shadow distance");
+        assert!(!traces_shadow(false, 1.1), "a grass patch past its distance");
+        assert!(traces_shadow(true, 1.1), "an authored caster");
+    }
+}
+
+#[cfg(test)]
 mod mip_tests {
     use super::{ALPHA_TEST_CUTOFF, build_mip_chain};
+
+    #[test]
+    fn shared_images_are_reused_only_with_matching_shape_and_colour_space() {
+        let mut image = somnium_asset::LoadedTexture {
+            width: 2,
+            height: 1,
+            data: vec![128; 8],
+        };
+        let original = super::imported_texture_key(&image, true);
+        assert_eq!(original, super::imported_texture_key(&image, true));
+        assert_ne!(original, super::imported_texture_key(&image, false));
+        image.width = 1;
+        image.height = 2;
+        assert_ne!(original, super::imported_texture_key(&image, true));
+        image.width = 2;
+        image.height = 1;
+        image.data[0] = 127;
+        assert_ne!(original, super::imported_texture_key(&image, true));
+    }
 
     /// A 2x2 cutout block: one opaque green texel, three transparent black.
     /// Unweighted averaging would give a quarter-strength muddy green; weighting
@@ -5969,6 +6700,7 @@ mod frame_instance_layout_tests {
 
     fn draw(vertex: u32, index: u32, material: u32, tx: f32) -> DrawCommand {
         DrawCommand {
+            paint: 0,
             sort_key: SortKey::new(0, material as u16, vertex),
             vertex_offset: vertex,
             index_offset: index,

@@ -39,6 +39,7 @@ pub enum CookKind {
     Prefab = 5,
     Shader = 6,
     Material = 7,
+    Navigation = 8,
 }
 
 impl CookKind {
@@ -53,6 +54,7 @@ impl CookKind {
             Self::Prefab => "somprefab",
             Self::Shader => "somshader",
             Self::Material => "sommatc",
+            Self::Navigation => "somnav",
         }
     }
 
@@ -65,6 +67,7 @@ impl CookKind {
             Self::Prefab => *b"SOMPREF\0",
             Self::Shader => *b"SOMSHDR\0",
             Self::Material => *b"SOMMATC\0",
+            Self::Navigation => *b"SOMNAV\0\0",
         }
     }
 
@@ -77,6 +80,7 @@ impl CookKind {
             5 => Self::Prefab,
             6 => Self::Shader,
             7 => Self::Material,
+            8 => Self::Navigation,
             _ => return None,
         })
     }
@@ -84,7 +88,7 @@ impl CookKind {
     fn is_text(self) -> bool {
         matches!(
             self,
-            Self::Scene | Self::Prefab | Self::Shader | Self::Material
+            Self::Scene | Self::Prefab | Self::Shader | Self::Material | Self::Navigation
         )
     }
 }
@@ -580,7 +584,10 @@ fn canonical_source(kind: CookKind, bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "text asset is not UTF-8")?;
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    if matches!(kind, CookKind::Prefab | CookKind::Material) {
+    if matches!(
+        kind,
+        CookKind::Prefab | CookKind::Material | CookKind::Navigation
+    ) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&normalized) {
             return serde_json::to_vec(&json).map_err(|error| error.to_string());
         }

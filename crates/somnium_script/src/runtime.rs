@@ -1250,8 +1250,76 @@ impl ScriptRuntime {
         world: &dyn WorldView,
         commands: &mut CommandBuffer,
     ) -> PhaseReport {
+        self.run_phase_selected(callback, phase, world, commands, None)
+    }
+
+    /// Deliver a private tool/game event to one enabled attachment through the
+    /// normal lifecycle, snapshot, budget and failure-quarantine machinery.
+    /// Other queued events remain queued for their ordinary event phase.
+    pub fn invoke_instance_event(
+        &mut self,
+        instance: InstanceUuid,
+        name: &str,
+        phase: &PhaseInput,
+        world: &dyn WorldView,
+        commands: &mut CommandBuffer,
+    ) -> Result<(), ScriptError> {
+        let record =
+            self.instances
+                .get_mut(&instance)
+                .ok_or_else(|| ScriptError::HostRejected {
+                    message: format!("no live attachment {instance}"),
+                })?;
+        if !record.wants_enabled()
+            || !record.state.receives_updates()
+            || record.pending_destroy
+            || !world.is_alive(record.entity)
+        {
+            return Err(ScriptError::HostRejected {
+                message:
+                    "script task attachment is disabled, quarantined or awaiting initialization"
+                        .into(),
+            });
+        }
+        if !record.callbacks.has(Callback::Event) {
+            return Err(ScriptError::HostRejected {
+                message: "script task must implement onEvent, loadState and saveState".into(),
+            });
+        }
+        let pending = std::mem::take(&mut record.inbox);
+        record.inbox.push(ScriptEvent {
+            name: name.into(),
+            sequence: self.next_event_sequence,
+            source: None,
+            payload: ReflectObject::new(),
+        });
+        self.next_event_sequence += 1;
+        let report =
+            self.run_phase_selected(Callback::Event, phase, world, commands, Some(instance));
+        if let Some(record) = self.instances.get_mut(&instance) {
+            record.inbox = pending;
+        }
+        match report.failures.into_iter().next() {
+            Some(failure) => Err(failure.error),
+            None => Ok(()),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_phase_selected(
+        &mut self,
+        callback: Callback,
+        phase: &PhaseInput,
+        world: &dyn WorldView,
+        commands: &mut CommandBuffer,
+        selected: Option<InstanceUuid>,
+    ) -> PhaseReport {
         let mut report = PhaseReport::default();
-        let participants = self.participants(callback);
+        let participants: Vec<_> = self
+            .participants(callback)
+            .into_iter()
+            .filter(|id| selected.is_none_or(|selected| selected == *id))
+            .collect();
         if participants.is_empty() {
             return report;
         }

@@ -76,6 +76,10 @@ fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return view.xyz / view.w;
 }
 
+fn inside_depth(coord: vec2<i32>) -> bool {
+    return all(coord >= vec2<i32>(0)) && all(coord < vec2<i32>(textureDimensions(depth_tex)));
+}
+
 fn load_view_position(coord: vec2<i32>) -> vec3<f32> {
     let depth = textureLoad(depth_tex, coord, 0);
     let uv = (vec2<f32>(coord) + 0.5) * params.inv_resolution;
@@ -90,15 +94,18 @@ fn load_view_position(coord: vec2<i32>) -> vec3<f32> {
 /// black rims along every silhouette — the same class of error that plagues
 /// screen-space effects generally.
 fn reconstruct_normal(coord: vec2<i32>, centre: vec3<f32>) -> vec3<f32> {
-    let left  = load_view_position(coord + vec2<i32>(-1, 0));
-    let right = load_view_position(coord + vec2<i32>(1, 0));
-    let down  = load_view_position(coord + vec2<i32>(0, -1));
-    let up    = load_view_position(coord + vec2<i32>(0, 1));
+    let last = vec2<i32>(textureDimensions(depth_tex)) - 1;
+    let left  = load_view_position(clamp(coord + vec2<i32>(-1, 0), vec2<i32>(0), last));
+    let right = load_view_position(clamp(coord + vec2<i32>(1, 0), vec2<i32>(0), last));
+    let down  = load_view_position(clamp(coord + vec2<i32>(0, -1), vec2<i32>(0), last));
+    let up    = load_view_position(clamp(coord + vec2<i32>(0, 1), vec2<i32>(0), last));
 
-    let dx = select(right - centre, centre - left,
-        abs(left.z - centre.z) < abs(right.z - centre.z));
-    let dy = select(up - centre, centre - down,
-        abs(down.z - centre.z) < abs(up.z - centre.z));
+    // At a viewport edge use the available one-sided derivative. A clamped
+    // neighbour equals centre and would otherwise win the closest-depth test.
+    let dx = select(right - centre, centre - left, coord.x > 0 &&
+        (coord.x == last.x || abs(left.z - centre.z) < abs(right.z - centre.z)));
+    let dy = select(up - centre, centre - down, coord.y > 0 &&
+        (coord.y == last.y || abs(down.z - centre.z) < abs(up.z - centre.z)));
 
     // `cross(dy, dx)`, not `cross(dx, dy)`.
     //
@@ -120,7 +127,8 @@ fn reconstruct_normal(coord: vec2<i32>, centre: vec3<f32>) -> vec3<f32> {
     //
     // It read as a terrain or shadow problem for a long time because direct
     // lighting was unaffected: surfaces were lit, just never *ambient* lit.
-    return normalize(cross(dy, dx));
+    let n = cross(dy, dx);
+    return select(normalize(-centre), n / max(length(n), 1e-8), length(n) > 1e-8);
 }
 
 /// Visible arc for one slice, given its two horizon angles.
@@ -146,8 +154,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Nothing drawn here: sky is unoccluded by definition, and a
     // reconstructed position on the far plane is meaningless anyway.
-    if depth >= 1.0 {
-        textureStore(gtao_out, coord, vec4<f32>(0.5, 0.5, 1.0, 1.0));
+    if depth >= 1.0 || params.intensity <= 0.0 {
+        // Zero direction asks shading to use the actual geometric normal.
+        textureStore(gtao_out, coord, vec4<f32>(0.5, 0.5, 0.5, 1.0));
         return;
     }
 
@@ -167,6 +176,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let grain_noise = textureLoad(grain_masks, grain_coord, i32(params.frame & 63u), 0).r;
     let noise = select(legacy_noise, grain_noise, params.grain_enabled != 0u);
     var occlusion = 0.0;
+    var open_visibility = 0.0;
     var bent = vec3<f32>(0.0);
 
     for (var s = 0; s < GTAO_SLICES; s = s + 1) {
@@ -177,7 +187,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Project the slice plane's normal out of the surface normal to get
         // the reference direction the horizons are measured against.
-        let slice_dir = vec3<f32>(dir.x, dir.y, 0.0);
+        // Texture Y points down; view-space Y points up.
+        let slice_dir = vec3<f32>(dir.x, -dir.y, 0.0);
         let plane_normal = normalize(cross(slice_dir, view_dir));
         let projected = normal - plane_normal * dot(normal, plane_normal);
         let projected_len = length(projected);
@@ -196,32 +207,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var step = 1; step <= GTAO_STEPS; step = step + 1) {
             let offset = dir * (f32(step) + noise) * step_px;
 
-            let s1 = load_view_position(coord + vec2<i32>(offset));
-            let d1 = s1 - centre;
-            let len1 = length(d1);
-            // A sample lying in the surface's own tangent plane *is* the
-            // surface, not something in front of it. Seen at a grazing angle a
-            // heightfield's neighbours run almost parallel to the view ray, so
-            // without this test every one of them registers as a horizon and
-            // the ground occludes itself to near-black — which is exactly what
-            // terrain did the first time it consumed GTAO (0.029 visibility on
-            // open ground). Requiring a sample to sit measurably *above* the
-            // tangent plane is the standard remedy and costs one dot product.
-            if len1 > 1e-4 && len1 < params.radius
-                && dot(d1 / len1, normal) > GTAO_PLANE_BIAS {
-                // Falloff keeps distant geometry from carving occlusion into
-                // surfaces it is nowhere near.
-                let falloff = saturate(1.0 - len1 / params.radius);
-                cos_h1 = max(cos_h1, dot(d1 / len1, view_dir) * falloff);
-            }
-
-            let s2 = load_view_position(coord - vec2<i32>(offset));
-            let d2 = s2 - centre;
-            let len2 = length(d2);
-            if len2 > 1e-4 && len2 < params.radius
-                && dot(d2 / len2, normal) > GTAO_PLANE_BIAS {
-                let falloff = saturate(1.0 - len2 / params.radius);
-                cos_h2 = max(cos_h2, dot(d2 / len2, view_dir) * falloff);
+            // OOB textureLoad returns zero, which reconstructs as a near-plane
+            // occluder. This is common for hands/faces when radius exceeds the
+            // viewport. Missing screen/sky samples contain no occlusion data;
+            // skip them rather than inventing depth or repeating an edge texel.
+            for (var side = 0; side < 2; side = side + 1) {
+                let c = coord + select(vec2<i32>(offset), -vec2<i32>(offset), side == 0);
+                if !inside_depth(c) { continue; }
+                if textureLoad(depth_tex, c, 0) >= 1.0 { continue; }
+                let delta = load_view_position(c) - centre;
+                let distance = length(delta);
+                if distance > 1e-4 && distance < params.radius
+                    && dot(delta / distance, normal) > GTAO_PLANE_BIAS {
+                    let falloff = saturate(1.0 - distance / params.radius);
+                    let horizon = dot(delta / distance, view_dir) * falloff;
+                    if side == 0 { cos_h1 = max(cos_h1, horizon); }
+                    else { cos_h2 = max(cos_h2, horizon); }
+                }
             }
         }
 
@@ -238,24 +240,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // gives, which is obvious to nobody but harmless to everybody.
         occlusion += projected_len * max(integrate_arc(h1, h2, n_angle), 0.0);
 
-        // Bent normal: the average unoccluded direction. Cheaper to derive from
-        // the horizon midpoint than to accumulate separately, and it is what
-        // lets the indirect specular cone point away from the occluder instead
-        // of straight out along the surface normal.
-        let bent_angle = (h1 + h2) * 0.5;
-        bent += view_dir * cos(bent_angle) + slice_dir * sin(bent_angle);
+        // Integrate only the change from an open hemisphere. Averaging horizon
+        // midpoints also bends completely open planes as the two sample slices
+        // rotate, producing bands in the environment lighting. The slice basis
+        // must be orthogonal to the view vector, including away from screen centre.
+        let slice_tangent = normalize(slice_dir - view_dir * dot(slice_dir, view_dir));
+        let open_h1 = n_angle - 1.5707963;
+        let open_h2 = n_angle + 1.5707963;
+        open_visibility += projected_len * max(integrate_arc(open_h1, open_h2, n_angle), 0.0);
+        bent += projected_len * (
+            view_dir * (sin(h2) - sin(h1) - sin(open_h2) + sin(open_h1))
+            + slice_tangent * (cos(h1) - cos(h2) - cos(open_h1) + cos(open_h2)));
     }
 
-    var ao = saturate(occlusion / f32(GTAO_SLICES));
+    // Normalize against the same slices with no occluders. A fixed slice-count
+    // divisor darkens tilted open planes as the sampling pattern rotates.
+    var ao = saturate(occlusion / max(open_visibility, 1e-4));
     ao = pow(ao, params.power);
     ao = mix(1.0, ao, params.intensity);
 
-    // Bent normal packed to [0,1]; falls back to the surface normal when the
-    // slices disagree, which happens on flat, fully open surfaces where the
-    // bent normal is the surface normal anyway.
-    var bent_n = normal;
+    // No occluder means no normal override: shading has the exact mesh normal,
+    // while depth reconstruction and RGBA8 packing introduce small errors.
+    var bent_n = vec3<f32>(0.0);
     if length(bent) > 1e-4 {
-        bent_n = normalize(bent);
+        bent_n = normalize(normal + bent * (0.5 / f32(GTAO_SLICES)) * params.intensity);
     }
     textureStore(gtao_out, coord, vec4<f32>(bent_n * 0.5 + 0.5, ao));
 }
@@ -291,8 +299,10 @@ fn denoise(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let ao = select(1.0, total / weight_sum, weight_sum > 0.0);
-    var bent_n = vec3<f32>(0.0, 0.0, 1.0);
-    if length(bent) > 1e-4 {
+    var bent_n = vec3<f32>(0.0);
+    // Neutral 0.5 rounds to 128/255 in RGBA8. Do not normalize that tiny
+    // quantization residual into a diagonal lighting direction.
+    if length(bent) > 0.1 * weight_sum {
         bent_n = normalize(bent);
     }
     textureStore(gtao_denoised, coord, vec4<f32>(bent_n * 0.5 + 0.5, ao));

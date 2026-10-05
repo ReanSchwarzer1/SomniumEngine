@@ -33,6 +33,8 @@ const FLAG_SHADOW:   u32 = 4u;
 const FLAG_GLOW:     u32 = 8u;
 const FLAG_INSET:    u32 = 16u;
 const FLAG_GRADIENT: u32 = 32u;
+const FLAG_EMBOSS: u32 = 64u;
+const FLAG_DITHER: u32 = 128u;
 
 struct Globals {
     proj: mat4x4<f32>,
@@ -201,6 +203,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(rgb, in.shadow_color.a * clamp(cov, 0.0, 1.0));
     }
 
+    // Ordered 8x8 dither in authored display space, before the one decode.
+    // The same offset on both stops preserves smooth interpolation without
+    // an extra encode/decode roundtrip. Flat fills and glyphs are untouched.
+    var noise = 0.0;
+    if (flags & FLAG_DITHER) != 0u {
+        let p = vec2<u32>(in.clip_pos.xy) % vec2<u32>(8u);
+        var rank = 0u;
+        for (var bit = 0u; bit < 3u; bit += 1u) {
+            let x = (p.x >> bit) & 1u;
+            let y = (p.y >> bit) & 1u;
+            rank |= (((x ^ y) << 1u) | y) << (4u - bit * 2u);
+        }
+        noise = ((f32(rank) + 0.5) / 64.0 - 0.5) * (2.0 * in.shadow.x / 255.0);
+    }
+
     // ── Fill ─────────────────────────────────────────────────────────────────
     // Decode happens here, once. Gradients interpolate on the decoded values,
     // so a 50 % stop is the linear-space mean and never the sRGB mean.
@@ -210,13 +227,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let denom = max(in.half_extent, vec2<f32>(0.0001, 0.0001));
         let n     = in.local / denom;
         let t     = clamp(dot(n, in.grad_axis) * 0.5 + 0.5, 0.0, 1.0);
-        rgb   = mix(decode_srgb(in.fill_a.rgb), decode_srgb(in.fill_b.rgb), t);
+        rgb   = mix(decode_srgb(clamp(in.fill_a.rgb + vec3<f32>(noise), vec3<f32>(0.0), vec3<f32>(1.0))), decode_srgb(clamp(in.fill_b.rgb + vec3<f32>(noise), vec3<f32>(0.0), vec3<f32>(1.0))), t);
         alpha = mix(in.fill_a.a, in.fill_b.a, t);
     } else {
         rgb   = decode_srgb(in.fill_a.rgb);
         alpha = in.fill_a.a;
     }
 
+    // A fine highlight just inside the lower edge. The SDF naturally follows
+    // the rounded corners; vertical weighting leaves the upper half untouched.
+    if (flags & FLAG_EMBOSS) != 0u {
+        let edge = 1.0 - smoothstep(0.0, 1.0, abs(d + 1.0));
+        let lower = smoothstep(0.0, max(in.half_extent.y, 1.0), in.local.y);
+        rgb = mix(rgb, decode_srgb(in.shadow_color.rgb), edge * lower * in.shadow_color.a);
+    }
     // ── Texture ──────────────────────────────────────────────────────────────
     if (flags & FLAG_TEXTURED) != 0u {
         let tex = sample_atlas((flags >> TEX_SHIFT) & TEX_MASK, in.uv);

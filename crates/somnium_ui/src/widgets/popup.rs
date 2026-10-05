@@ -39,6 +39,7 @@ pub struct Popup {
     pub is_open: bool,
     pub anchor: NodeHandle,
     pub placement: PopupPlacement,
+    pub content_width: f32,
 }
 
 impl Control for Popup {
@@ -54,6 +55,14 @@ impl Control for Popup {
         self.is_open.then_some(self.anchor)
     }
 
+    fn popup_presentation(&self) -> Option<(bool, NodeHandle, bool)> {
+        (self.placement != PopupPlacement::BottomCenter).then_some((
+            self.is_open,
+            self.anchor,
+            self.placement == PopupPlacement::Center,
+        ))
+    }
+
     fn measure_override(&self, widget: &Widget, ctx: &mut LayoutCtx, available: Vec2) -> Vec2 {
         if !self.is_open {
             return Vec2::ZERO;
@@ -61,7 +70,16 @@ impl Control for Popup {
         // Menus and cards must not inherit the window size. Cap the constraint
         // so StackPanel/Border children size to their labels, not the screen.
         let content_avail = match self.placement {
-            PopupPlacement::AnchorBelow => Vec2::new(available.x.min(280.0), 10_000.0),
+            PopupPlacement::AnchorBelow => {
+                let inset = crate::theme::active().geometry.inset_panel;
+                let height = if self.anchor.is_some() {
+                    let anchor = ctx.screen_bounds(self.anchor);
+                    anchor.y.max(available.y - anchor.y - anchor.h) - inset
+                } else {
+                    available.y - inset * 2.0
+                };
+                Vec2::new(available.x.min(self.content_width), height.max(1.0))
+            }
             PopupPlacement::Center => Vec2::new(available.x.min(920.0), available.y.min(640.0)),
             PopupPlacement::BottomCenter => {
                 Vec2::new(available.x.min(720.0), available.y.min(360.0))
@@ -79,12 +97,12 @@ impl Control for Popup {
         }
         for &ch in &widget.children {
             let ds = ctx.desired_size(ch);
-            let mut w = ds.x.max(1.0);
-            let h = ds.y.max(1.0);
+            let mut w = ds.x.max(1.0).min(final_size.x);
+            let h = ds.y.max(1.0).min(final_size.y);
             let (x, y) = match self.placement {
                 PopupPlacement::AnchorBelow if self.anchor.is_some() => {
                     let b = ctx.screen_bounds(self.anchor);
-                    w = w.max(b.w);
+                    w = w.max(b.w).min(final_size.x);
                     let mut x = b.x;
                     let mut y = b.y + b.h;
                     if x + w > final_size.x {
@@ -172,6 +190,7 @@ pub struct PopupBuilder {
     widget: WidgetBuilder,
     anchor: NodeHandle,
     placement: PopupPlacement,
+    content_width: f32,
 }
 
 impl PopupBuilder {
@@ -180,7 +199,14 @@ impl PopupBuilder {
             widget,
             anchor: NodeHandle::NONE,
             placement: PopupPlacement::AnchorBelow,
+            content_width: 280.0,
         }
+    }
+
+    /// Preferred width of anchored content; always constrained to its window.
+    pub fn with_content_width(mut self, width: f32) -> Self {
+        self.content_width = width.max(1.0);
+        self
     }
 
     pub fn with_anchor(mut self, anchor: NodeHandle) -> Self {
@@ -200,6 +226,7 @@ impl PopupBuilder {
                 is_open: false,
                 anchor: self.anchor,
                 placement: self.placement,
+                content_width: self.content_width,
             }),
         )
     }
@@ -215,7 +242,201 @@ mod tests {
             is_open: false,
             anchor: NodeHandle::NONE,
             placement: PopupPlacement::AnchorBelow,
+            content_width: 280.0,
         };
         assert!(!p.is_open);
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+    use crate::{
+        motion::{MotionKey, MotionProperty},
+        theme,
+        ui::UserInterface,
+        widgets::{
+            border::BorderBuilder,
+            button::ButtonBuilder,
+            text_box::{TextBoxBuilder, TextBoxMessage},
+        },
+    };
+
+    fn fixture(reduced: bool) -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
+        fixture_at(reduced, PopupPlacement::AnchorBelow)
+    }
+    fn fixture_at(
+        reduced: bool,
+        placement: PopupPlacement,
+    ) -> (UserInterface, NodeHandle, NodeHandle, NodeHandle) {
+        let mut ui = UserInterface::new(480.0, 320.0);
+        ui.draw_ctx.motion.set_reduced_motion(reduced);
+        let anchor = ui.add_node(
+            ButtonBuilder::new(WidgetBuilder::new().with_width(90.0).with_height(28.0)).build(),
+            ui.root(),
+        );
+        let popup = ui.add_node(
+            PopupBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                .with_anchor(anchor)
+                .with_placement(placement)
+                .build(),
+            ui.root(),
+        );
+        let panel = ui.add_node(
+            BorderBuilder::new(
+                WidgetBuilder::new()
+                    .with_width(160.0)
+                    .with_height(70.0)
+                    .with_background(theme::active().semantic.surface.popup.bytes()),
+            )
+            .build(),
+            popup,
+        );
+        let field = ui.add_node(
+            TextBoxBuilder::new(WidgetBuilder::new().with_width(140.0).with_height(26.0)).build(),
+            panel,
+        );
+        ui.perform_layout();
+        ui.draw();
+        (ui, popup, panel, field)
+    }
+    fn send(ui: &mut UserInterface, popup: NodeHandle, event: PopupMessage) {
+        ui.send(UiMessage::new(popup, MessageDirection::ToWidget, event));
+        ui.update();
+        ui.perform_layout();
+        ui.draw();
+    }
+    #[test]
+    fn centered_dialog_keeps_input_live_and_reduced_motion_settles() {
+        for reduced in [false, true] {
+            let (mut ui, popup, panel, field) = fixture_at(reduced, PopupPlacement::Center);
+            send(&mut ui, popup, PopupMessage::Open);
+            let bounds = ui.screen_bounds(panel);
+            let field_bounds = ui.screen_bounds(field);
+            let point = Vec2::new(field_bounds.x + 4.0, field_bounds.y + 4.0);
+            assert_eq!(ui.hit_test(point), field);
+            ui.draw_ctx.motion.tick(180.0);
+            ui.draw();
+            assert_eq!(ui.screen_bounds(panel), bounds);
+            assert!(ui.draw_ctx.motion.is_idle());
+            send(&mut ui, popup, PopupMessage::Close);
+            assert_ne!(ui.hit_test(point), field);
+            ui.draw_ctx.motion.tick(100.0);
+            ui.draw();
+            assert!(ui.draw_ctx.motion.is_idle());
+        }
+    }
+
+    #[test]
+    fn popup_input_is_immediate_and_close_paint_never_catches_clicks() {
+        let (mut ui, popup, panel, field) = fixture(false);
+        send(&mut ui, popup, PopupMessage::Open);
+        let bounds = ui.nodes.borrow(panel.transmute()).widget.screen_bounds();
+        let field_bounds = ui.nodes.borrow(field.transmute()).widget.screen_bounds();
+        let point = Vec2::new(field_bounds.x + 4.0, field_bounds.y + 4.0);
+        assert_eq!(
+            ui.hit_test(point),
+            field,
+            "input is live at the first opening frame"
+        );
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::Focus,
+        ));
+        ui.send(UiMessage::new(
+            field,
+            MessageDirection::ToWidget,
+            WidgetMessage::Text("abc".into()),
+        ));
+        let messages = ui.update();
+        assert!(messages.iter().any(|m| matches!(m.data::<TextBoxMessage>(), Some(TextBoxMessage::TextChanged(s)) if s == "abc")));
+        ui.draw_ctx.motion.tick(70.0);
+        ui.draw();
+        let opacity = ui
+            .draw_ctx
+            .motion
+            .value_or(MotionKey::new(popup.index(), MotionProperty::Opacity), 0.0);
+        assert!(opacity > 0.0 && opacity < 1.0);
+        assert_eq!(
+            ui.nodes.borrow(panel.transmute()).widget.screen_bounds(),
+            bounds
+        );
+        send(&mut ui, popup, PopupMessage::Close);
+        assert!(!ui.is_globally_visible(field));
+        assert_ne!(
+            ui.hit_test(point),
+            field,
+            "closing paint must be input-transparent"
+        );
+        assert!(!ui.draw_ctx.instances.is_empty());
+        assert_eq!(
+            ui.draw_ctx
+                .motion
+                .value_or(MotionKey::new(popup.index(), MotionProperty::Opacity), 0.0),
+            opacity
+        );
+        ui.draw_ctx.motion.tick(50.0);
+        ui.draw();
+        let fading = ui
+            .draw_ctx
+            .motion
+            .value_or(MotionKey::new(popup.index(), MotionProperty::Opacity), 0.0);
+        assert!(fading > 0.0 && fading < opacity);
+        send(&mut ui, popup, PopupMessage::Open);
+        assert_eq!(
+            ui.draw_ctx
+                .motion
+                .value_or(MotionKey::new(popup.index(), MotionProperty::Opacity), 0.0),
+            fading
+        );
+        ui.draw_ctx.motion.tick(140.0);
+        ui.draw();
+        assert_eq!(ui.hit_test(point), field);
+        assert_eq!(
+            ui.nodes.borrow(panel.transmute()).widget.screen_bounds(),
+            bounds
+        );
+        send(&mut ui, popup, PopupMessage::Close);
+        ui.draw_ctx.motion.tick(100.0);
+        ui.draw();
+        assert_eq!(
+            ui.draw_ctx
+                .motion
+                .value_or(MotionKey::new(popup.index(), MotionProperty::Opacity), 1.0),
+            0.0
+        );
+        assert!(ui.draw_ctx.motion.is_idle());
+    }
+    #[test]
+    fn reduced_motion_matches_settled_popup_paint_and_layout_in_both_themes() {
+        for id in [theme::ThemeId::Nocturne, theme::ThemeId::Dawn] {
+            theme::set_active(id);
+            let (mut normal, popup, panel, _) = fixture(false);
+            send(&mut normal, popup, PopupMessage::Open);
+            normal.draw_ctx.motion.tick(140.0);
+            normal.draw();
+            let (mut reduced, other_popup, other_panel, _) = fixture(true);
+            send(&mut reduced, other_popup, PopupMessage::Open);
+            assert_eq!(
+                normal
+                    .nodes
+                    .borrow(panel.transmute())
+                    .widget
+                    .screen_bounds(),
+                reduced
+                    .nodes
+                    .borrow(other_panel.transmute())
+                    .widget
+                    .screen_bounds()
+            );
+            assert_eq!(normal.draw_ctx.instances, reduced.draw_ctx.instances);
+            assert_eq!(normal.draw_ctx.commands, reduced.draw_ctx.commands);
+            assert!(reduced.draw_ctx.motion.is_idle());
+            send(&mut reduced, other_popup, PopupMessage::Close);
+            assert!(!reduced.is_globally_visible(other_panel));
+            assert!(reduced.draw_ctx.motion.is_idle());
+        }
+        theme::set_active(theme::ThemeId::Nocturne);
     }
 }

@@ -4,6 +4,34 @@
 use std::ffi::c_void;
 
 #[repr(C)]
+pub struct JphRagdollPart {
+    pub parent: i32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub half_height: f32,
+    pub radius: f32,
+    pub anchor: [f32; 3],
+    pub swing_limit: f32,
+    pub twist_limit: f32,
+}
+#[repr(C)]
+pub struct JphCapsuleCast {
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub displacement: [f32; 3],
+    pub half_height: f32,
+    pub radius: f32,
+    pub ignore_body: u32,
+}
+#[repr(C)]
+#[derive(Default)]
+pub struct JphCastHit {
+    pub fraction: f32,
+    pub normal: [f32; 3],
+    pub body: u32,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct JphBodyCreationSettings {
     pub shape: *mut c_void,
@@ -21,6 +49,20 @@ pub struct JphBodyCreationSettings {
 }
 
 unsafe extern "C" {
+    pub fn jph_ragdoll_create(
+        system: *mut c_void,
+        parts: *const JphRagdollPart,
+        count: u32,
+        group: u32,
+    ) -> *mut c_void;
+    pub fn jph_ragdoll_destroy(ragdoll: *mut c_void);
+    pub fn jph_ragdoll_body(ragdoll: *mut c_void, joint: u32) -> u32;
+    pub fn jph_ragdoll_reset(ragdoll: *mut c_void);
+    pub fn jph_cast_capsule(
+        system: *mut c_void,
+        cast: *const JphCapsuleCast,
+        hit: *mut JphCastHit,
+    ) -> std::os::raw::c_int;
     pub fn jph_init();
     pub fn jph_shutdown();
 

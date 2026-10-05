@@ -399,7 +399,10 @@ fn progressive_ranks(edge: u32, seed: u32) -> Vec<u32> {
         if rank + 1 < count as u32 {
             selected = (0..count)
                 .filter(|&index| ranks[index] == u32::MAX)
-                .max_by_key(|&index| (nearest[index], std::cmp::Reverse(index)))
+                // A scan-order tie-break turns the later ranks into horizontal
+                // ramps once many candidates share the same nearest distance.
+                // Keep spatial spacing primary, but scramble equal-distance ranks.
+                .max_by_key(|&index| (nearest[index], mix_bits(seed ^ index as u32), index))
                 .expect("an unranked texel remains");
         }
     }
@@ -438,6 +441,34 @@ mod tests {
                 .into_iter()
                 .all(|count| (12..=20).contains(&count)),
             "{quadrants:?}"
+        );
+    }
+
+    #[test]
+    fn full_size_rank_mask_has_no_scanline_bias() {
+        let ranks = progressive_ranks(EDGE, SEED);
+        let row_means: Vec<f32> = ranks
+            .chunks_exact(EDGE as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|&rank| (rank as f32 + 0.5) / (EDGE * EDGE) as f32)
+                    .sum::<f32>()
+                    / EDGE as f32
+            })
+            .collect();
+        // Denoising removes pixel-scale variation. Test the low-frequency
+        // row ramps that survive a small filter and become visible AO bands.
+        let bands: Vec<f32> = row_means
+            .chunks_exact(8)
+            .map(|rows| rows.iter().sum::<f32>() / 8.0)
+            .collect();
+        let band_rms = (bands.iter().map(|mean| (mean - 0.5).powi(2)).sum::<f32>()
+            / bands.len() as f32)
+            .sqrt();
+        println!("64x64 rank mask eight-row mean RMS: {band_rms}");
+        assert!(
+            band_rms < 0.025,
+            "Sampling mask has horizontal rank bands: {band_rms}"
         );
     }
 

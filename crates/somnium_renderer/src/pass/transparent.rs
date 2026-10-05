@@ -30,8 +30,13 @@ pub struct TransparentPass {
     /// both are one pipeline each and a first-use compile inside a frame is a
     /// hitch the profiler would attribute to the transparent pass.
     oit_pipeline: wgpu::RenderPipeline,
-    /// Sampler + environment cubemap for reflections.
-    bind_group: wgpu::BindGroup,
+    /// Sampler, environment cubemap for reflections and the scene-colour copy
+    /// for refraction. The bind group is built per recording, because the
+    /// copy is recreated whenever the render targets resize.
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    env_view: wgpu::TextureView,
+    env_sampler: wgpu::Sampler,
 }
 
 impl TransparentPass {
@@ -68,6 +73,17 @@ impl TransparentPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // binding 3: the scene behind the glass, for refraction
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -80,25 +96,6 @@ impl TransparentPass {
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Transparent BG"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(env_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(env_sampler),
-                },
-            ],
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -201,8 +198,36 @@ impl TransparentPass {
         Self {
             pipeline,
             oit_pipeline,
-            bind_group,
+            layout,
+            sampler,
+            env_view: env_view.clone(),
+            env_sampler: env_sampler.clone(),
         }
+    }
+
+    fn bind_group(&self, device: &wgpu::Device, scene_copy_view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Transparent BG"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(scene_copy_view),
+                },
+            ],
+        })
     }
 
     /// Draw the blended queue into the weighted-blended targets (MORROWIND-AC).
@@ -211,18 +236,23 @@ impl TransparentPass {
     /// hand over the queue in submission order. It is accepted as a slice in
     /// the same shape as [`Self::record`] so the two paths differ in exactly
     /// one thing at the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_weighted(
         &self,
+        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         accum_view: &wgpu::TextureView,
         reveal_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         global_bind_group: &wgpu::BindGroup,
+        scene_copy_view: &wgpu::TextureView,
         draws: &[TransparentDraw],
     ) {
         if draws.is_empty() {
             return;
         }
+        // Bound for the layout's sake: the weighted path does not refract.
+        let bind_group = self.bind_group(device, scene_copy_view);
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Transparent OIT Pass"),
             multiview_mask: None,
@@ -258,24 +288,29 @@ impl TransparentPass {
         });
         rpass.set_pipeline(&self.oit_pipeline);
         rpass.set_bind_group(0, global_bind_group, &[]);
-        rpass.set_bind_group(1, &self.bind_group, &[]);
+        rpass.set_bind_group(1, &bind_group, &[]);
         for d in draws {
             rpass.draw(0..d.index_count, d.instance_index..d.instance_index + 1);
         }
     }
 
     /// Draw the blended queue. `draws` must already be sorted back-to-front.
+    /// `scene_copy_view` holds the target as it stood before this pass (the
+    /// caller copies it), which is what refracting glass reads.
     pub fn record(
         &self,
+        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         global_bind_group: &wgpu::BindGroup,
+        scene_copy_view: &wgpu::TextureView,
         draws: &[TransparentDraw],
     ) {
         if draws.is_empty() {
             return;
         }
+        let bind_group = self.bind_group(device, scene_copy_view);
 
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Transparent Pass"),
@@ -300,7 +335,7 @@ impl TransparentPass {
 
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, global_bind_group, &[]);
-        rpass.set_bind_group(1, &self.bind_group, &[]);
+        rpass.set_bind_group(1, &bind_group, &[]);
         for d in draws {
             rpass.draw(0..d.index_count, d.instance_index..d.instance_index + 1);
         }

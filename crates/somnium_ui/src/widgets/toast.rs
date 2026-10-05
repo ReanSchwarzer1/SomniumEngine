@@ -81,20 +81,46 @@ impl Control for ToastHost {
                 toast.sticky || now.duration_since(toast.raised) < Duration::from_secs(4)
             })
             .collect();
-        for (i, toast) in visible.iter().rev().enumerate() {
+        let mut bottom = b.y + b.h - 48.0;
+        for toast in visible.iter().rev() {
             let text = &toast.text;
             let age = now.duration_since(toast.raised).as_secs_f32();
-            let alpha = if toast.sticky {
+            let alpha = if toast.sticky || ctx.motion.reduced_motion() {
                 255
             } else if age > 3.0 {
                 ((4.0 - age) * 255.0).clamp(0.0, 255.0) as u8
             } else {
                 230
             };
-            let w = (text.len() as f32 * 7.0 + 24.0).clamp(120.0, 360.0);
-            let h = 28.0;
+            let width = (b.w - 32.0).clamp(80.0, 420.0);
+            let lines = crate::widgets::text::wrap_lines(text, width - 24.0, |line| {
+                ctx.font_atlas.measure_text(line, 12.0, self.font_id).x
+            });
+            let line_height = ctx
+                .font_atlas
+                .measure_text("Mg", 12.0, self.font_id)
+                .y
+                .max(14.0)
+                + 3.0;
+            let h = lines.len().max(1) as f32 * line_height + 16.0;
+            let w = (lines
+                .iter()
+                .map(|line| ctx.font_atlas.measure_text(line, 12.0, self.font_id).x)
+                .fold(0.0, f32::max)
+                + 24.0)
+                .clamp(120.0f32.min(width), width);
             let x = b.x + b.w - w - 16.0;
-            let y = b.y + b.h - 48.0 - i as f32 * 34.0;
+            let y = bottom - h;
+            if y < b.y {
+                break;
+            }
+            bottom = y - 8.0;
+            let enter = if ctx.motion.reduced_motion() {
+                1.0
+            } else {
+                (age / 0.18).clamp(0.0, 1.0)
+            };
+            let alpha = (alpha as f32 * enter) as u8;
             // Phase 27-D: a toast is the top rung of the elevation ladder, so
             // it reads as above the modal rather than pasted onto the status bar.
             let t = theme::active();
@@ -116,17 +142,22 @@ impl Control for ToastHost {
                 ),
                 None,
             );
-            ctx.push_text(
-                text,
-                Vec2::new(x + 10.0, y + 7.0),
-                self.font_id,
-                12.0,
-                if toast.sticky {
-                    t.semantic.status.error.bytes()
-                } else {
-                    theme::active().semantic.text.primary.bytes()
-                },
-            );
+            let color = if toast.sticky {
+                t.semantic.status.error.bytes()
+            } else {
+                t.semantic.text.primary.bytes()
+            };
+            ctx.push_clip_rect(rect);
+            for (index, line) in lines.iter().enumerate() {
+                ctx.push_text(
+                    line,
+                    Vec2::new(x + 12.0, y + 8.0 + index as f32 * line_height),
+                    self.font_id,
+                    12.0,
+                    theme::with_alpha(color, alpha),
+                );
+            }
+            ctx.pop_clip_rect();
         }
     }
 

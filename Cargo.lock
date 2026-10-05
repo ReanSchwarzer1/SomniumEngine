@@ -1623,6 +1623,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "somnium_anim",
  "somnium_asset",
  "somnium_audio",
  "somnium_core",
@@ -3822,10 +3823,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "somnium_ai"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "serde",
+ "serde_json",
+ "somnium_ecs",
+ "somnium_jobs",
+ "somnium_script",
+ "somnium_script_luau",
+]
+
+[[package]]
 name = "somnium_anim"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "somnium_jobs",
 ]
 
 [[package]]
@@ -3845,6 +3860,7 @@ dependencies = [
  "somnium_anim",
  "somnium_ecs",
  "somnium_jobs",
+ "thiserror 2.0.18",
  "tracing",
  "ureq",
 ]
@@ -3873,11 +3889,14 @@ version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "base64 0.22.1",
  "glam 0.29.3",
+ "miniz_oxide",
  "pollster 0.3.0",
  "rfd",
  "serde",
  "serde_json",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_audio",
@@ -3952,6 +3971,9 @@ dependencies = [
  "intel_tex_2",
  "naga",
  "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
  "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
@@ -4001,6 +4023,7 @@ dependencies = [
  "rustybuzz",
  "serde",
  "serde_json",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_ecs",
@@ -4680,6 +4703,7 @@ name = "vvardenfell"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
+ "somnium_ai",
  "somnium_anim",
  "somnium_asset",
  "somnium_core",

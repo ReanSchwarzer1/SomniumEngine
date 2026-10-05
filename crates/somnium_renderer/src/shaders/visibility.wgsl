@@ -1,4 +1,5 @@
 // Visibility Buffer - Rasterization Pass
+//!include "wind.wgsl"
 
 // wgpu 30 requires `binding_array<...>` to be behind an explicit enable
 // directive; wgpu 29 accepted it without one. Found by MORROWIND-C, because
@@ -33,6 +34,12 @@ struct View {
     view:          mat4x4<f32>,
     camera_pos:    vec3<f32>,
     _padding:      f32,
+    time:          f32,
+    _time_pad0:    f32,
+    _time_pad1:    f32,
+    _time_pad2:    f32,
+    wind:          vec4<f32>,
+    wind_time:     vec4<f32>,
 }
 
 struct Material {
@@ -65,6 +72,16 @@ struct Material {
     terrain_index: i32,
     _pad1: f32,
     _pad2: f32,
+    // Parallax-occlusion height map and relief depth (metres); see `pool.rs`.
+    height_map: i32,
+    height_depth: f32,
+    _hpad0: f32,
+    _hpad1: f32,
+    // Foliage wind response (`pool.rs` `wind`): bend, flutter; see `wind.wgsl`.
+    wind_bend: f32,
+    wind_flutter: f32,
+    _wind_pad0: f32,
+    _wind_pad1: f32,
 }
 
 @group(0) @binding(0) var<storage, read> vertices: array<Vertex>;
@@ -151,7 +168,15 @@ fn vs_main(
 
     out.uv = vec2<f32>(vertex.u, vertex.v);
     out.material_id = instance.material_id;
-    out.clip_pos = view.view_proj * instance.model * vec4<f32>(pos, 1.0);
+    var world = (instance.model * vec4<f32>(pos, 1.0)).xyz;
+    // Foliage wind. Terrain (packed != 0) never sways. The same displacement
+    // runs in shadow.wgsl, the shading pass's reconstruction and velocity.wgsl.
+    if packed == 0u {
+        let m = materials[instance.material_id];
+        world += wind_offset(world, instance.model[3].xyz, m.wind_bend, m.wind_flutter,
+                             view.wind_time.x, view.wind, view.camera_pos);
+    }
+    out.clip_pos = view.view_proj * vec4<f32>(world, 1.0);
     out.instance_id = inst_idx;
     out.prim_id = v_idx / 3u;
     

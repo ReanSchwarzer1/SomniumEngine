@@ -8,6 +8,19 @@ Terrain Details includes a generated **Actor World Partition** panel. **Stream A
 
 This does **not** hide or stream the Terrain entity's mesh chunks. Coastal is one authored terrain resource, so its chunks continue through the terrain frustum/LOD pipeline and the visible landscape can span the whole map. World partition controls actors stored under `assets/world_partition`; terrain chunk residency/virtual terrain is a separate renderer feature.
 
+## Saved project landscapes
+
+Loading a scene reconstructs its terrain from the saved grid descriptor and the adjacent `<scene>.terrain<ID>.bin` height/splat sidecar. Keep both files when copying a scene. Terrain material PNGs, BC7 banks and virtual-texture pages resolve from the active project's `assets/terrain`, so an external project or standalone game can supply its own materials. Existing terrain IDs are remapped together with linked water when renderer resources are recreated.
+
+```mermaid
+flowchart LR
+  Scene[Scene grid and transform] --> Terrain[Terrain allocation]
+  Sidecar[Height and 32-layer splat sidecar] --> Terrain
+  Assets[Project terrain materials] --> Terrain
+  Terrain --> Edit[Landscape sculpt / paint / foliage]
+  Edit --> Save[Scene and sidecar save]
+```
+
 ## Brushes
 
 Click a tool so it highlights. Keys **1–6** pick the same tools.
@@ -43,6 +56,8 @@ Two ways forward from there:
 ### Distances
 
 **Cull** / **LOD** / **Impostor** are **horizontal** metres: past LOD leaf/cutout parts drop; past Impostor only solid parts remain (there is no camera-facing billboard). Impostor `0` keeps every part.
+
+Imported plant hierarchies can also use an enabled **Foliage** component on their root. Hello Engine applies **Cull Distance** and **Foliage Shadow Distance** to every imported descendant, measuring horizontal distance from that root's world position to the active editor or play camera. `0` leaves the corresponding distance unlimited. The nearest enabled ancestor supplies the policy. This controls mesh submission only; lights, collision and gameplay continue normally. Imported plants currently use these two distance cuts, not the painted-foliage LOD/impostor or scale-falloff controls. Custom games can use `somnium_core::foliage_visibility::imported_draw` in their mesh adapter.
 
 ### Vegetation shading
 

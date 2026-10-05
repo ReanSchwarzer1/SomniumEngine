@@ -31,7 +31,8 @@ struct GenParams {
     face: u32,
     roughness: f32,
     _src_size: f32,
-    _pad: f32,
+    /// Cloud-deck coverage, 0..1; the sky is blended towards overcast by it.
+    overcast: f32,
     sun_direction: [f32; 4],
     sun_color: [f32; 4],
 }
@@ -55,7 +56,7 @@ pub struct IblPass {
     params_buffer: wgpu::Buffer,
 
     /// Last sun the cubemap was built for, so we only regenerate on change.
-    last_sun: Option<([f32; 3], [f32; 3])>,
+    last_sun: Option<([f32; 3], [f32; 3], u32)>,
 }
 
 /// Environment map format — HDR, since the sun disk is far brighter than 1.0.
@@ -310,8 +311,10 @@ impl IblPass {
         queue: &wgpu::Queue,
         sun_direction: glam::Vec3,
         sun_color: glam::Vec3,
+        overcast: f32,
     ) -> bool {
-        let key = (sun_direction.to_array(), sun_color.to_array());
+        let overcast = overcast.clamp(0.0, 1.0);
+        let key = (sun_direction.to_array(), sun_color.to_array(), overcast.to_bits());
         if self.last_sun == Some(key) {
             return false;
         }
@@ -325,7 +328,7 @@ impl IblPass {
 
         // Mip 0: capture the sky.
         for face in 0..6u32 {
-            self.write_params(queue, face, 0.0, dir, sun_color);
+            self.write_params(queue, face, 0.0, dir, sun_color, overcast);
             self.run_face(device, queue, 0, face, true);
         }
 
@@ -333,7 +336,7 @@ impl IblPass {
         for mip in 1..MIP_COUNT {
             let roughness = mip as f32 / (MIP_COUNT - 1) as f32;
             for face in 0..6u32 {
-                self.write_params(queue, face, roughness, dir, sun_color);
+                self.write_params(queue, face, roughness, dir, sun_color, overcast);
                 self.run_face(device, queue, mip, face, false);
             }
         }
@@ -347,12 +350,13 @@ impl IblPass {
         roughness: f32,
         sun_direction: glam::Vec3,
         sun_color: glam::Vec3,
+        overcast: f32,
     ) {
         let p = GenParams {
             face,
             roughness,
             _src_size: CUBE_SIZE as f32,
-            _pad: 0.0,
+            overcast,
             sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z, 0.0],
             // Phase 24A: `.w` carries the sky-dome luminance scale. The sky
             // gradient is authored as a unit-ish colour, but with the sun now

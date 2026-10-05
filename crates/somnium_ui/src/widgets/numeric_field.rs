@@ -358,37 +358,57 @@ impl Control for NumericField {
 
         let paint = crate::style::input(crate::style::VisualState::rest().focused(self.focused));
         ctx.push_paint(field, &paint);
-        // Phase 27-G: the unit sits at the right edge, muted, and is dropped
-        // while editing so it can never be mistaken for part of the text being
-        // typed.
-        if !self.unit.is_empty() && self.editing_text.is_none() {
-            let uw = ctx
-                .font_atlas
+        // Reserve a separate suffix lane. Compact redundant decimal zeros only
+        // when the resting value would crowd its unit; editing keeps full text.
+        let unit_size = if self.editing_text.is_none() && !self.unit.is_empty() {
+            ctx.font_atlas
                 .measure_text(self.unit, self.px - 1.0, self.font_id)
-                .x;
-            ctx.push_text(
-                self.unit,
-                Vec2::new(field.x + field.w - uw - 5.0, field.y + 3.5),
-                self.font_id,
-                self.px - 1.0,
-                tk.semantic.text.muted.bytes(),
-            );
+        } else {
+            Vec2::ZERO
+        };
+        let reserved = if unit_size.x > 0.0 {
+            unit_size.x + 5.0
+        } else {
+            0.0
+        };
+        let value_width = (field.w - 8.0 - reserved).max(0.0);
+        let mut text = self.display_text();
+        if self.editing_text.is_none()
+            && text.contains('.')
+            && ctx.font_atlas.measure_text(&text, self.px, self.font_id).x > value_width
+        {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
         }
-
-        let text = self.display_text();
-        let origin = Vec2::new(field.x + 4.0, field.y + 3.0);
+        let text_h = ctx.font_atlas.measure_text("Mg", self.px, self.font_id).y;
+        let origin = Vec2::new(field.x + 4.0, field.y + (field.h - text_h) * 0.5);
+        ctx.push_clip_rect(Rect::new(field.x + 4.0, field.y, value_width, field.h));
         if self.focused && self.select_all && !text.is_empty() {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
             ctx.push_rect_filled(
-                Rect::new(field.x + 4.0, field.y + 3.0, advance, self.px),
+                Rect::new(origin.x, origin.y, advance, text_h),
                 theme::active().semantic.accent.selected_bg.bytes(),
             );
         }
         ctx.push_text(&text, origin, self.font_id, self.px, self.color);
         if self.focused && !self.select_all {
             let advance = ctx.font_atlas.measure_text(&text, self.px, self.font_id).x;
-            let cx = field.x + 4.0 + advance;
-            ctx.push_rect_filled(Rect::new(cx, field.y + 3.0, 1.0, self.px), self.color);
+            ctx.push_rect_filled(
+                Rect::new(origin.x + advance, origin.y, 1.0, text_h),
+                self.color,
+            );
+        }
+        ctx.pop_clip_rect();
+        if unit_size.x > 0.0 {
+            ctx.push_text(
+                self.unit,
+                Vec2::new(
+                    field.x + field.w - unit_size.x - 4.0,
+                    field.y + (field.h - unit_size.y) * 0.5,
+                ),
+                self.font_id,
+                self.px - 1.0,
+                tk.semantic.text.muted.bytes(),
+            );
         }
     }
 

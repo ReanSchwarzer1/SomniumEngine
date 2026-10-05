@@ -57,6 +57,8 @@ struct VolumetricParams {
     jitter: f32,
     frame: u32,
     grain_enabled: u32,
+    fog_sky_occlusion: f32,
+    _pad: [f32; 3],
 }
 
 #[cfg(test)]
@@ -93,6 +95,9 @@ pub struct FogSettings {
     pub shafts: bool,
     /// Shadow-visibility contrast. 0 is neutral; 1 applies full occlusion.
     pub shaft_intensity: f32,
+    /// How far the sun's shadow map also hides skylight from the fog, 0..=1.
+    /// 0 lights the fog with the whole sky everywhere.
+    pub sky_occlusion: f32,
 }
 
 impl Default for FogSettings {
@@ -114,6 +119,7 @@ impl Default for FogSettings {
             base_height: 0.0,
             shafts: true,
             shaft_intensity: 1.5,
+            sky_occlusion: 0.0,
         }
     }
 }
@@ -136,7 +142,7 @@ pub struct VolumetricPass {
     prev_view_proj: glam::Mat4,
     history_valid: bool,
     frame: u32,
-    last_settings: Option<[u32; 6]>,
+    last_settings: Option<[u32; 7]>,
     pub enabled: bool,
     pub fog: FogSettings,
     pub max_distance: f32,
@@ -156,6 +162,16 @@ impl VolumetricPass {
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
 
+        let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let lut = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -244,6 +260,11 @@ impl VolumetricPass {
                     },
                     count: None,
                 },
+                // TOWN-FOG: clustered local lights (lights, indices, offsets, params).
+                storage(10),
+                storage(11),
+                storage(12),
+                storage(13),
             ],
         });
 
@@ -347,6 +368,7 @@ impl VolumetricPass {
         lut_sampler: &wgpu::Sampler,
         light_buffer: &wgpu::Buffer,
         shadow_atlas: &wgpu::TextureView,
+        cluster: &crate::cluster::ClusterGrid,
     ) {
         if self.bind_group.is_some() {
             return;
@@ -395,6 +417,22 @@ impl VolumetricPass {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&self.grain_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: cluster.light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: cluster.index_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: cluster.offset_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: cluster.params_buffer.as_entire_binding(),
+                },
             ],
         }));
     }
@@ -434,6 +472,7 @@ impl VolumetricPass {
             self.fog.base_height.to_bits(),
             u32::from(self.fog.shafts),
             self.fog.shaft_intensity.to_bits(),
+            self.fog.sky_occlusion.to_bits(),
         ];
         if self.last_settings.is_some_and(|last| last != settings) {
             self.history_valid = false;
@@ -469,6 +508,8 @@ impl VolumetricPass {
                 jitter: (self.frame as f32 * 0.618_034).fract(),
                 frame: self.frame,
                 grain_enabled: u32::from(self.grain_enabled),
+                fog_sky_occlusion: self.fog.sky_occlusion.clamp(0.0, 1.0),
+                _pad: [0.0; 3],
             }),
         );
 

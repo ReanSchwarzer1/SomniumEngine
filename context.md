@@ -1,6 +1,6 @@
 # Somnium Engine context
 
-Last verified: 2026-09-06 against the current working tree.
+Last verified: 2026-09-09 against the current working tree.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -16,14 +16,14 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | TALOS scoped down on 2026-09-08: retain graphics scalability and small rendering cleanups. The earlier broad optimization/60 FPS program is deferred by user request. |
-| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): material/lighting tools, browser fixes, Scripts access and saved brush settings, 2026-09-06 |
+| Active phase | PERSONA expansion: Nocturne 0.5 surface finish, H motion and QoL in tree; remaining H–L and G acceptance open. TALOS remains scoped to accepted scalability/rendering cleanups. |
+| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): compact shared pickers, scrolling, asset-overlay and popup lifecycle repairs; Nocturne 0.5 retained, 2026-09-09 |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
-| Current implementation priority | Retain the accepted scalability controls; fix only demonstrated, local rendering inefficiencies. See [TALOS evidence](<dev records/phase TALOS/README.md>). |
+| Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
 | Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-06 | 218,976 Rust/WGSL lines and 2,216 discovered tests |
+| Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
@@ -717,6 +717,8 @@ The scene layer adds durable authoring rules:
 - Scenes have thumbnails, autosave, crash recovery, and clickable undo history.
 - Assets stored in component fields use `AssetId`; renderer slots remain
   derived runtime state.
+- `World::entity_by_persistent_id` is constant time for live ids: a lazily
+  refreshed index, re-verified against the component on every hit.
 
 `somnium_core` still contains substantial editor orchestration. New work should
 prefer crate-level seams over adding more switch arms to the central app host.
@@ -3033,6 +3035,24 @@ only the render origin and never the authored data. ([MORROWIND-T](<dev records/
 
 ### Measurement
 
+**Every Somnus Fracture frame record before 2026-09-25 came from an
+opt-level 0 build.** The editor sat at 7–15 FPS in dressed levels while the GPU
+finished in 6–14 ms, which read as an MCP or level problem. A headless probe on
+the real Town scene measured per-frame world passes 13–17× faster optimised.
+Separately, each MCP request snapshotted the world through a linear
+`entity_by_persistent_id` per entity: 5.4 s on Town's 6,424 entities, now 124 ms
+optimised. ([TSF record](<games/TheSomnusFracture/dev records/MCP_PERFORMANCE_FIX_2026-09-25.md>), private)
+
+**A CPU-bound frame is found by the engine, not by a profiling session.**
+Town's optimised build still held 31 ms of CPU a frame (2026-09-26) from
+full-world scans, components rewritten every frame, and draw lists rebuilt
+from scratch; the editor now spends 21 ms and the shipped player waits on the
+GPU. Two guards keep it that way in every project and level:
+`somnium_core::cpu_watchdog` warns in the log, naming the frame stage, when
+more than 85% of a sub-55 fps frame is CPU work for three seconds, and
+`tests/full_scan_ratchet.rs` fails on any new `.entities()` scan. The fix
+pattern is component queries plus caches keyed on `World::change_signature`.
+
 **Screen-grabbing the window produced a frame-delta metric that varied from 0.776
 to 2.018 across three runs of one identical build.** A whole session went into
 chasing that variance instead of the change. `capture.rs` exists because of it,
@@ -3217,6 +3237,11 @@ python tools/census/generate.py --check
 
 Use `-j 1` for the full Windows test run to avoid transient linker file-lock
 failures.
+
+`.cargo/config.toml` sets `opt-level = 3` for non-member packages in `dev`, and
+names the private game crate. From a game workspace that is the whole engine,
+Jolt and Luau; from this workspace it is third-party crates only. Frame numbers
+taken from an unoptimised game editor are not engine costs.
 
 ### Documentation map
 

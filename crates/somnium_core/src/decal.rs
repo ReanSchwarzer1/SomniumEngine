@@ -60,13 +60,22 @@ pub struct DecalComponent {
     pub angle_fade_degrees: f32,
     /// Strength of the material's normal map through the decal, `0..1`.
     pub normal_strength: f32,
-    /// Roughness the decal writes where it is fully opaque.
+    /// Roughness the decal writes where it is fully opaque. Under 0.1 with no
+    /// normal map the decal is a liquid film (a puddle): it also lays the
+    /// surface's normal flat, the way water fills the relief it stands in.
     ///
     /// Separate from the material's own roughness because a decal is usually a
     /// *wet* or *scorched* patch on something, and the interesting authored
     /// value is what it does to the surface rather than what the source
     /// material happens to say.
     pub roughness: f32,
+    /// Darken what is underneath instead of painting over it.
+    ///
+    /// Wetness, damp and grime are the surface itself gone darker and
+    /// glossier; replacing its albedo with the decal's paints a flat blob that
+    /// hides the setts and joints a puddle should show through. With this set
+    /// the decal colour is a multiplier on the surface albedo.
+    pub multiply: bool,
 }
 
 impl Component for DecalComponent {}
@@ -80,8 +89,38 @@ impl Default for DecalComponent {
             angle_fade_degrees: 60.0,
             normal_strength: 1.0,
             roughness: 0.6,
+            multiply: false,
         }
     }
+}
+
+/// Keep the `cap` items nearest the camera, in their original order.
+///
+/// The renderer draws at most `MAX_DECALS` and used to keep whichever came
+/// first in ECS order, so a level with more decals than that lost an arbitrary
+/// set — often the ones in front of the player. Distance decides instead, and
+/// the survivors keep their relative order because the renderer's stable
+/// priority sort takes ties from input order; reordering by distance would make
+/// two overlapping equal-priority decals swap as the camera moved.
+pub fn keep_nearest<T>(items: Vec<T>, cap: usize, distance_sq: impl Fn(&T) -> f32) -> Vec<T> {
+    if items.len() <= cap {
+        return items;
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    if cap > 0 {
+        order.select_nth_unstable_by(cap - 1, |&a, &b| {
+            distance_sq(&items[a]).total_cmp(&distance_sq(&items[b]))
+        });
+    }
+    let mut keep = vec![false; items.len()];
+    for &index in &order[..cap] {
+        keep[index] = true;
+    }
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, kept)| kept.then_some(item))
+        .collect()
 }
 
 /// The default box a freshly dropped decal gets, in metres.
@@ -146,6 +185,16 @@ mod tests {
         assert!(t.rotation.is_finite());
         assert!(t.translation.is_finite());
         assert!(t.scale.is_finite());
+    }
+
+    #[test]
+    fn over_the_cap_the_nearest_survive_in_their_original_order() {
+        let distances = [9.0_f32, 1.0, 7.0, 2.0, 3.0];
+        let kept = keep_nearest(distances.to_vec(), 3, |d| d * d);
+        assert_eq!(kept, vec![1.0, 2.0, 3.0]);
+        let under = keep_nearest(distances.to_vec(), 8, |d| d * d);
+        assert_eq!(under, distances.to_vec(), "under the cap nothing is dropped or moved");
+        assert!(keep_nearest(distances.to_vec(), 0, |d| d * d).is_empty());
     }
 
     #[test]

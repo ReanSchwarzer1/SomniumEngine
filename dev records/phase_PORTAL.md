@@ -38,7 +38,7 @@
 > by **PORTAL-A**, not before. **Do not invent PNGs or `.somtime` files.**
 > **Roadmap correction:** CONTROL is complete. MORROWIND is active and partial.
 > PORTAL still owns engineering health, but the old instruction to land it
-> before CONTROL is obsolete. Use [`../context.md`](../context.md#roadmap-order)
+> before CONTROL is obsolete. Use [`../context.md`](../context.md#phase-ledger-and-remaining-work)
 > for the current sequence.
 
 **Frozen in the original 2026-08-18 plan.** Revalidate this list before

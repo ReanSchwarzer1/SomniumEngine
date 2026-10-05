@@ -18,6 +18,8 @@ use wgpu;
 /// Shadow render pass: pipeline, cascade-uniform bind group layout, and per-cascade bind groups.
 pub struct ShadowPass {
     pub pipeline: wgpu::RenderPipeline,
+    /// Default-off candidate: identical depth state without the cutout stage.
+    opaque_pipeline: Option<wgpu::RenderPipeline>,
     /// Bind group layout for @group(1): one u32 cascade index in a uniform buffer.
     pub cascade_bind_group_layout: wgpu::BindGroupLayout,
     /// One bind group per cascade (each holds a constant index buffer 0..3).
@@ -55,6 +57,9 @@ struct GpuShadowView {
 pub struct ShadowCaster {
     pub instance_index: u32,
     pub index_count: u32,
+    /// Current CPU material proves that `shadow.wgsl::fs_main` cannot discard.
+    /// Missing or non-finite material data stays on the reference pipeline.
+    pub opaque_depth_only: bool,
 }
 
 /// Is this caster large enough on screen to be worth a shadow?
@@ -181,7 +186,7 @@ impl ShadowPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let mut pipeline_descriptor = wgpu::RenderPipelineDescriptor {
             label: Some("Shadow Pipeline"),
             layout: Some(&pipeline_layout),
             multiview_mask: None,
@@ -191,7 +196,7 @@ impl ShadowPass {
                 buffers: &[],
                 compilation_options: Default::default(),
             },
-            // No fragment stage — depth writes happen automatically.
+            // The fragment stage only lets alpha-tested geometry discard.
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
@@ -222,7 +227,18 @@ impl ShadowPass {
             }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
-        });
+        };
+        let pipeline = device.create_render_pipeline(&pipeline_descriptor);
+        let opaque_pipeline =
+            if std::env::var("SOMNIUM_SHADOW_OPAQUE_DEPTH_ONLY").as_deref() == Ok("1") {
+                // Reuse the descriptor so vertex pulling, wind, rasterization,
+                // bias and depth comparison remain exactly the same.
+                pipeline_descriptor.label = Some("Opaque Depth-only Shadow Pipeline");
+                pipeline_descriptor.fragment = None;
+                Some(device.create_render_pipeline(&pipeline_descriptor))
+            } else {
+                None
+            };
 
         let virtual_view_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Virtual Shadow Page Views"),
@@ -282,6 +298,7 @@ impl ShadowPass {
 
         Self {
             pipeline,
+            opaque_pipeline,
             cascade_bind_group_layout,
             cascade_bind_groups,
             _cascade_index_buffers: cascade_index_buffers,
@@ -349,7 +366,17 @@ impl ShadowPass {
             rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[0]);
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
+            let mut opaque_bound = false;
             for c in casters {
+                let opaque = c.opaque_depth_only && self.opaque_pipeline.is_some();
+                if opaque != opaque_bound {
+                    rpass.set_pipeline(if opaque {
+                        self.opaque_pipeline.as_ref().expect("candidate is enabled")
+                    } else {
+                        &self.pipeline
+                    });
+                    opaque_bound = opaque;
+                }
                 rpass.draw(0..c.index_count, c.instance_index..(c.instance_index + 1));
             }
         }
@@ -418,7 +445,17 @@ impl ShadowPass {
                 &[i as u32 * SHADOW_VIEW_STRIDE as u32],
             );
             pass.set_bind_group(2, &self.cutout_bind_group, &[]);
+            let mut opaque_bound = false;
             for caster in casters {
+                let opaque = caster.opaque_depth_only && self.opaque_pipeline.is_some();
+                if opaque != opaque_bound {
+                    pass.set_pipeline(if opaque {
+                        self.opaque_pipeline.as_ref().expect("candidate is enabled")
+                    } else {
+                        &self.pipeline
+                    });
+                    opaque_bound = opaque;
+                }
                 pass.draw(
                     0..caster.index_count,
                     caster.instance_index..caster.instance_index + 1,

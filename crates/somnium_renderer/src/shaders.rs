@@ -55,7 +55,9 @@ pub mod define {
     use somnium_shader::Defines;
 
     /// Bit index and name pairs, registered at startup.
-    pub const ALL: &[(u32, &str)] = &[(SKINNED_BIT, "SKINNED"), (DREAMS_STF_BIT, "DREAMS_STF")];
+    pub const ALL: &[(u32, &str)] = &[(SKINNED_BIT, "SKINNED"), (DREAMS_STF_BIT, "DREAMS_STF"), (2, "LOCAL_SHADOWS")];
+    /// Optional hardware ray queries for practical-light occlusion.
+    pub const LOCAL_SHADOWS: Defines = Defines::bit(2);
 
     /// Skinned geometry. **Not yet used by any shader** — MORROWIND-U adds the
     /// `//!if SKINNED` blocks. It is registered now because the exit criterion
@@ -95,6 +97,7 @@ impl Shaders {
         register_modules!(
             system,
             "atmosphere.wgsl",
+            "sky_eye.wgsl",
             "skinning.wgsl",
             "atmosphere_lut.wgsl",
             "auto_exposure.wgsl",
@@ -150,6 +153,7 @@ impl Shaders {
             "water.wgsl",
             "water_reflection.wgsl",
             "water_spectrum.wgsl",
+            "wind.wgsl",
         );
         // SAFETY: this is a checked-in Somnium-authored artifact produced by
         // the pinned Slang compiler. `tools/slangcook/run.py --check` recooks
@@ -356,6 +360,8 @@ mod tests {
             "terrain_material.wgsl",
             "terrain_splat_core.wgsl",
             "clipmap_shade.wgsl",
+            "wind.wgsl",
+            "sky_eye.wgsl",
             "shading.wgsl",
         ];
         expected.sort_unstable();

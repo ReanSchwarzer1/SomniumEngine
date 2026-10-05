@@ -22,8 +22,21 @@
 /// same convention 24K established for its visibility target.
 const GI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// GI grid step in pixels: traced at half resolution and upsampled, depth-aware,
+/// by the shading pass (`gi_upsample`). Indirect diffuse is low frequency; this
+/// is a quarter of the rays for an image that cannot be told apart at 2K.
+/// `SOMNIUM_GI_SCALE=1` restores full resolution for an A/B.
+fn gi_scale() -> u32 {
+    std::env::var("SOMNIUM_GI_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|s| (1..=4).contains(s))
+        .unwrap_or(2)
+}
+
 /// Matches `GiReservoir` in `restir_gi.wgsl`: 12 floats, 48 bytes.
 const RESERVOIR_BYTES: u64 = 48;
+const SURFACE_BYTES: u64 = 32;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -37,7 +50,12 @@ struct GiParams {
     max_distance: f32,
     /// Pads to 112, which is what the WGSL mirror rounds to. See the shader's
     /// note on why the three scalars there are not one `vec3`.
-    _pad: [f32; 3],
+    /// GI grid step in pixels (`gi_scale`).
+    scale: f32,
+    /// Most confidence a reservoir may carry into this frame (`GI_M_CAP` when
+    /// the lights held still; less while they flicker or move).
+    history_m_cap: f32,
+    _pad: f32,
 }
 
 #[cfg(test)]
@@ -55,6 +73,73 @@ mod tests {
         assert_eq!(std::mem::size_of::<GiParams>(), 112);
         assert_eq!(std::mem::size_of::<GiParams>() % 16, 0);
     }
+
+    #[test]
+    fn flicker_and_carried_lights_shorten_history_instead_of_discarding_it() {
+        use super::classify_light_change;
+        let lamp = |pos: [f32; 3], lum: f32| crate::cluster::GpuLocalLight {
+            position_ws: pos,
+            range: 6.0,
+            color: [lum, lum * 0.8, lum * 0.5],
+            light_type: 0,
+            direction_ws: [0.0, -1.0, 0.0],
+            spot_cos_outer: 0.7,
+            spot_cos_inner: 0.9,
+            radius: 0.05,
+            _pad: [0.0; 2],
+        };
+        let base = [lamp([0.0, 3.0, 0.0], 100.0)];
+        // Buzz: 19% dimmer. Changed, gentle.
+        assert_eq!(classify_light_change(&[lamp([0.0, 3.0, 0.0], 81.0)], &base), (false, true, false));
+        // A carried lighter, one running frame on.
+        assert_eq!(classify_light_change(&[lamp([0.12, 3.0, 0.0], 100.0)], &base), (false, true, false));
+        // A stutter toward dark.
+        assert_eq!(classify_light_change(&[lamp([0.0, 3.0, 0.0], 4.0)], &base), (false, true, true));
+        // A cut, and a light switched out of the list.
+        assert!(classify_light_change(&[lamp([5.0, 3.0, 0.0], 100.0)], &base).0);
+        assert!(classify_light_change(&[], &base).0);
+        assert_eq!(classify_light_change(&base, &base), (false, false, false));
+    }
+}
+
+/// Confidence a reservoir may carry while the lights hold still (the shader's
+/// `GI_M_CAP`), while they drift (buzzing, carried), and while one stutters
+/// toward dark.
+const HISTORY_M_CAP: f32 = 24.0;
+const HISTORY_M_CAP_DRIFT: f32 = 12.0;
+const HISTORY_M_CAP_STUTTER: f32 = 3.0;
+
+/// `(structural, changed, strong)` between this frame's lights and the last
+/// recorded set. Structural: a light added, removed or retyped, or one that
+/// moved more than a metre (a cut, not motion). Changed: the old 2% / 5 cm
+/// test. Strong: output more than halved or doubled, or moved over 25 cm.
+fn classify_light_change(
+    now: &[crate::cluster::GpuLocalLight],
+    before: &[crate::cluster::GpuLocalLight],
+) -> (bool, bool, bool) {
+    if now.len() != before.len() {
+        return (true, true, true);
+    }
+    let (mut structural, mut changed, mut strong) = (false, false, false);
+    for (a, b) in now.iter().zip(before) {
+        let color_a = glam::Vec3::from_array(a.color);
+        let color_b = glam::Vec3::from_array(b.color);
+        let scale = color_a.abs().max(color_b.abs()).max_element().max(0.001);
+        let moved = glam::Vec3::from_array(a.position_ws).distance(glam::Vec3::from_array(b.position_ws));
+        let (lum_a, lum_b) = (color_a.max_element(), color_b.max_element());
+        structural |= a.light_type != b.light_type || moved > 1.0;
+        strong |= moved > 0.25 || lum_a > 2.0 * lum_b + 1e-3 || lum_b > 2.0 * lum_a + 1e-3;
+        changed |= a.light_type != b.light_type
+            || (color_a - color_b).abs().max_element() > 0.02 * scale
+            || moved > 0.05
+            || glam::Vec3::from_array(a.direction_ws).distance(glam::Vec3::from_array(b.direction_ws)) > 0.01
+            || (a.range - b.range).abs() > 0.01
+            || (a.radius - b.radius).abs() > 0.001
+            || a._pad != b._pad
+            || a.spot_cos_inner != b.spot_cos_inner
+            || a.spot_cos_outer != b.spot_cos_outer;
+    }
+    (structural, changed, strong)
 }
 
 pub struct RestirGiPass {
@@ -69,6 +154,9 @@ pub struct RestirGiPass {
     /// spatial pass would both race and double-count.
     gi_a: Option<wgpu::Buffer>,
     gi_b: Option<wgpu::Buffer>,
+    /// Current-frame primary geometry, shared with spatial neighbours.
+    surfaces: Option<wgpu::Buffer>,
+    cache_surfaces: bool,
     bind: Option<wgpu::BindGroup>,
     grain_view: wgpu::TextureView,
     grain_enabled: bool,
@@ -83,6 +171,9 @@ pub struct RestirGiPass {
     /// Lighting represented by the temporal reservoirs. A materially changed
     /// sun must discard history so daytime bounce cannot bleed into night.
     last_light: Option<([f32; 3], [f32; 3])>,
+    last_local_lights: Vec<crate::cluster::GpuLocalLight>,
+    /// See `GiParams::history_m_cap`.
+    history_m_cap: f32,
     supported: bool,
     pub enabled: bool,
     /// Scales the indirect contribution. Exposed so the A/B can vary the
@@ -118,6 +209,8 @@ impl RestirGiPass {
             sampler,
             gi_a: None,
             gi_b: None,
+            surfaces: None,
+            cache_surfaces: std::env::var("SOMNIUM_GI_SURFACE_CACHE").as_deref() == Ok("1"),
             bind: None,
             grain_view: grain_view.clone(),
             grain_enabled: supported
@@ -128,6 +221,8 @@ impl RestirGiPass {
             frame: 0,
             history_valid: false,
             last_light: None,
+            last_local_lights: Vec::new(),
+            history_m_cap: HISTORY_M_CAP,
             supported,
             // On wherever the hardware allows it. `SOMNIUM_RESTIR_GI=0` is the
             // A/B against the environment map's constant diffuse, and a device
@@ -223,6 +318,7 @@ impl RestirGiPass {
                 },
                 storage(5),
                 storage(6),
+                storage(9),
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -248,13 +344,47 @@ impl RestirGiPass {
             immediate_size: 0,
         });
 
+        // Alpha-test leaf/grass cards as traversal candidates instead of
+        // restarting the ray from the root at every cutout hole (up to four
+        // hops). Same-session native A/B/A 2026-10-04: Gardens GI initial +
+        // temporal 15.5 / 21.8 / 15.6 ms; Facility I 3.2 / 2.8 / 3.2 ms (off /
+        // on / off order there). `SOMNIUM_GI_CANDIDATE_ALPHA=0` restores hops.
+        let candidate_alpha = std::env::var("SOMNIUM_GI_CANDIDATE_ALPHA").as_deref() != Ok("0");
+        // Native Gardens A/B/A retained identical terrain arithmetic while
+        // avoiding local-array spills. Keep an explicit reference opt-out.
+        let terrain_storage =
+            std::env::var("SOMNIUM_GI_TERRAIN_STORAGE_READS").as_deref() != Ok("0");
+        // Terrain albedo for a GI hit is looked up where it is used, not at the
+        // hit: the same lookup and arithmetic, and the one consumer. Gardens
+        // A/B/A/B 2026-10-04: GI initial + temporal 31.5 / 31.4 -> 21.9 ms.
+        // `SOMNIUM_GI_DEFER_TERRAIN_ALBEDO=0` restores the eager lookup.
+        let deferred_terrain_albedo =
+            std::env::var("SOMNIUM_GI_DEFER_TERRAIN_ALBEDO").as_deref() != Ok("0");
+        let constants = [
+            ("rt_candidate_alpha", f64::from(u32::from(candidate_alpha))),
+            (
+                "rt_terrain_direct_storage",
+                f64::from(u32::from(terrain_storage)),
+            ),
+            (
+                "rt_gi_deferred_terrain_albedo",
+                f64::from(u32::from(deferred_terrain_albedo)),
+            ),
+            (
+                "gi_cache_surfaces",
+                f64::from(u32::from(pass.cache_surfaces)),
+            ),
+        ];
         let make = |entry: &str, label: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pl),
                 module: &shader,
                 entry_point: Some(entry),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
                 cache: None,
             })
         };
@@ -284,6 +414,34 @@ impl RestirGiPass {
         self.supported
     }
 
+    /// Reservoir radiance includes practical lights, so history has to follow
+    /// them. Only a *structural* change discards it: a light added, removed or
+    /// retyped, or one that jumped. Anything gentler shortens history instead.
+    ///
+    /// It used to discard on any 2% change. A flickering lamp's buzz moves its
+    /// output ~19% at 11 Hz and a carried lighter moves 5+ cm a frame, so in
+    /// Town (17 flickering lamps) and wherever the player carried a flame, GI
+    /// never reused a single frame: one bounce sample per texel, every frame,
+    /// which is the gold speckle on the hands and streets while running.
+    pub fn update_local_lights(&mut self, lights: &[crate::cluster::GpuLocalLight]) {
+        if !self.active() { return; }
+        let (structural, changed, strong) = classify_light_change(lights, &self.last_local_lights);
+        if structural {
+            self.history_valid = false;
+        }
+        self.history_m_cap = if !changed {
+            HISTORY_M_CAP
+        } else if strong {
+            HISTORY_M_CAP_STUTTER
+        } else {
+            HISTORY_M_CAP_DRIFT
+        };
+        if changed {
+            self.last_local_lights.clear();
+            self.last_local_lights.extend_from_slice(lights);
+        }
+    }
+
     pub fn active(&self) -> bool {
         self.supported && self.enabled
     }
@@ -299,8 +457,9 @@ impl RestirGiPass {
     }
 
     fn allocate_targets(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let w = width.max(1);
-        let h = height.max(1);
+        let s = gi_scale();
+        let w = width.max(1).div_ceil(s);
+        let h = height.max(1).div_ceil(s);
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ReSTIR GI radiance"),
@@ -337,6 +496,16 @@ impl RestirGiPass {
         };
         self.gi_a = Some(make("ReSTIR GI reservoirs A"));
         self.gi_b = Some(make("ReSTIR GI reservoirs B"));
+        self.surfaces = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ReSTIR GI current surfaces"),
+            size: if self.cache_surfaces {
+                u64::from(w) * u64::from(h) * SURFACE_BYTES
+            } else {
+                SURFACE_BYTES
+            },
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
         self.bind = None;
         // Reservoirs from a different resolution index differently, so history
         // has to be discarded rather than reinterpreted.
@@ -353,12 +522,13 @@ impl RestirGiPass {
         if self.bind.is_some() {
             return;
         }
-        let (Some(layout), Some(params), Some(out), Some(a), Some(b)) = (
+        let (Some(layout), Some(params), Some(out), Some(a), Some(b), Some(surfaces)) = (
             self.layout.as_ref(),
             self.params.as_ref(),
             self.out_view.as_ref(),
             self.gi_a.as_ref(),
             self.gi_b.as_ref(),
+            self.surfaces.as_ref(),
         ) else {
             return;
         };
@@ -401,6 +571,10 @@ impl RestirGiPass {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(&self.grain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: surfaces.as_entire_binding(),
                 },
             ],
         }));
@@ -446,6 +620,7 @@ impl RestirGiPass {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        profiler: &mut crate::profiler::GpuProfiler,
         global_bind: &wgpu::BindGroup,
         tlas: &wgpu::Tlas,
         depth_view: &wgpu::TextureView,
@@ -506,16 +681,23 @@ impl RestirGiPass {
                     + 2.0 * f32::from(u8::from(self.grain_enabled)),
                 intensity: self.intensity,
                 max_distance: self.max_distance,
-                _pad: [0.0; 3],
+                scale: gi_scale() as f32,
+                history_m_cap: self.history_m_cap,
+                _pad: 0.0,
             }),
         );
 
-        let groups = (width.div_ceil(8), height.div_ceil(8));
+        let s = gi_scale();
+        let groups = (
+            width.div_ceil(s).div_ceil(8),
+            height.div_ceil(s).div_ceil(8),
+        );
 
         // Two dispatches, not one pass with a barrier between: the spatial pass
         // reads neighbouring pixels' reservoirs, so every pixel of the first
         // dispatch has to have landed before any pixel of the second reads it.
         // Separate dispatches in the same encoder give exactly that ordering.
+        profiler.begin(encoder, "GI initial + temporal");
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ReSTIR GI initial+temporal"),
@@ -526,6 +708,8 @@ impl RestirGiPass {
             cpass.set_bind_group(1, bind, &[]);
             cpass.dispatch_workgroups(groups.0, groups.1, 1);
         }
+        profiler.end(encoder);
+        profiler.begin(encoder, "GI spatial + shade");
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ReSTIR GI spatial+shade"),
@@ -536,6 +720,7 @@ impl RestirGiPass {
             cpass.set_bind_group(1, bind, &[]);
             cpass.dispatch_workgroups(groups.0, groups.1, 1);
         }
+        profiler.end(encoder);
 
         self.dirty = true;
         self.frame = self.frame.wrapping_add(1);

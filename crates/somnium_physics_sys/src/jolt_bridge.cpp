@@ -13,6 +13,12 @@
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Ragdoll/Ragdoll.h>
+#include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 
 #include <thread>
 #include <iostream>
@@ -87,6 +93,81 @@ struct PhysicsContext {
 };
 
 extern "C" {
+
+void* jph_ragdoll_create(void* system_ptr, const JphRagdollPart* parts, uint32_t count, uint32_t group) {
+    PhysicsContext* ctx = (PhysicsContext*)system_ptr;
+    Ref<RagdollSettings> settings = new RagdollSettings();
+    settings->mSkeleton = new Skeleton();
+    settings->mParts.resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& input = parts[i];
+        std::string name = std::to_string(i);
+        settings->mSkeleton->AddJoint(name.c_str(), input.parent);
+        auto& part = settings->mParts[i];
+        part.SetShape(new CapsuleShape(input.half_height, input.radius));
+        part.mPosition = RVec3(input.position[0], input.position[1], input.position[2]);
+        part.mRotation = Quat(input.rotation[0], input.rotation[1], input.rotation[2], input.rotation[3]);
+        part.mMotionType = EMotionType::Dynamic;
+        part.mObjectLayer = Layers::MOVING;
+        if (input.parent >= 0) {
+            Ref<SwingTwistConstraintSettings> constraint = new SwingTwistConstraintSettings();
+            constraint->mPosition1 = constraint->mPosition2 = RVec3(input.anchor[0], input.anchor[1], input.anchor[2]);
+            constraint->mNormalHalfConeAngle = constraint->mPlaneHalfConeAngle = input.swing_limit;
+            constraint->mTwistMinAngle = -input.twist_limit;
+            constraint->mTwistMaxAngle = input.twist_limit;
+            part.mToParent = constraint;
+        }
+    }
+    settings->DisableParentChildCollisions();
+    settings->CalculateBodyIndexToConstraintIndex();
+    settings->CalculateConstraintIndexToBodyIdxPair();
+    settings->CalculateConstraintPriorities();
+    Ragdoll* ragdoll = settings->CreateRagdoll(group, 0, ctx->system);
+    if (!ragdoll) return nullptr;
+    ragdoll->AddRef();
+    ragdoll->AddToPhysicsSystem(EActivation::Activate);
+    return ragdoll;
+}
+
+void jph_ragdoll_destroy(void* ptr) {
+    auto* ragdoll = (Ragdoll*)ptr;
+    ragdoll->RemoveFromPhysicsSystem();
+    ragdoll->Release();
+}
+
+uint32_t jph_ragdoll_body(void* ptr, uint32_t joint) {
+    return ((Ragdoll*)ptr)->GetBodyID(joint).GetIndexAndSequenceNumber();
+}
+
+void jph_ragdoll_reset(void* ptr) { ((Ragdoll*)ptr)->ResetWarmStart(); }
+
+int jph_cast_capsule(void* system_ptr, const JphCapsuleCast* input, JphCastHit* output) {
+    PhysicsContext* ctx = (PhysicsContext*)system_ptr;
+    RefConst<Shape> shape = new CapsuleShape(input->half_height, input->radius);
+    Vec3 direction(input->displacement[0], input->displacement[1], input->displacement[2]);
+    RShapeCast cast(shape, Vec3::sReplicate(1.0f),
+        RMat44::sRotationTranslation(Quat(input->rotation[0], input->rotation[1], input->rotation[2], input->rotation[3]),
+            RVec3(input->position[0], input->position[1], input->position[2])), direction);
+    // Sliding tangentially along a floor must still find a wall farther ahead.
+    class BlockingCollector : public ClosestHitCollisionCollector<CastShapeCollector> {
+    public:
+        Vec3 direction;
+        explicit BlockingCollector(Vec3 inDirection) : direction(inDirection) { }
+        void AddHit(const ShapeCastResult& hit) override {
+            if (direction.Dot(-hit.mPenetrationAxis.NormalizedOr(Vec3::sAxisY())) < -1.0e-6f)
+                ClosestHitCollisionCollector<CastShapeCollector>::AddHit(hit);
+        }
+    } collector(direction);
+    ctx->system->GetNarrowPhaseQuery().CastShape(cast, ShapeCastSettings(), RVec3::sZero(), collector,
+        {}, {}, IgnoreSingleBodyFilter(BodyID(input->ignore_body)));
+    if (!collector.HadHit()) return 0;
+    const auto& hit = collector.mHit;
+    const Vec3 normal = -hit.mPenetrationAxis.NormalizedOr(Vec3::sAxisY());
+    output->fraction = hit.mFraction;
+    output->normal[0] = normal.GetX(); output->normal[1] = normal.GetY(); output->normal[2] = normal.GetZ();
+    output->body = hit.mBodyID2.GetIndexAndSequenceNumber();
+    return 1;
+}
 
 void jph_init(void) {
     RegisterDefaultAllocator();

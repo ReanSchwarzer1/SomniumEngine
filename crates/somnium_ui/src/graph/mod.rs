@@ -37,9 +37,11 @@
 
 pub mod animation;
 pub mod archetype;
+pub mod behavior;
 pub mod catalogues;
 pub mod geometry;
 pub mod material;
+pub mod scatter;
 pub mod serial;
 pub mod surface;
 pub mod widget;

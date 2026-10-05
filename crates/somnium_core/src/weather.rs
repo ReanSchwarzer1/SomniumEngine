@@ -39,6 +39,13 @@
 
 use somnium_ecs::Component;
 
+/// Marks the camera-following rain/snow emitter the app spawns. It is runtime
+/// state, not scene content: Save Scene and the authoring revision skip it, or
+/// every wind gust would read as an edit and a save would keep a stray emitter.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PrecipitationEmitter;
+impl Component for PrecipitationEmitter {}
+
 /// The scene's weather.
 ///
 /// Lives on the Environment entity beside [`SkyComponent`] and
@@ -104,6 +111,10 @@ pub struct WeatherComponent {
     pub transition_seconds: f32,
     /// Particles per second at full precipitation.
     pub particle_rate: f32,
+    /// How strongly plants sway in this wind, `0..2` (1 = as authored on
+    /// their materials; 0 stills them). Trees, ferns and grass read
+    /// [`Self::wind_speed`] through the renderer's foliage wind.
+    pub foliage_sway: f32,
 }
 
 impl Component for WeatherComponent {}
@@ -124,6 +135,7 @@ impl Default for WeatherComponent {
             ripple_strength: 0.6,
             transition_seconds: 8.0,
             particle_rate: 6_000.0,
+            foliage_sway: 1.0,
         }
     }
 }

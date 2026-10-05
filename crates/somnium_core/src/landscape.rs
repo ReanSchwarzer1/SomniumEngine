@@ -178,6 +178,11 @@ pub fn create_empty_terrain(
     }
     EntitySnapshot {
         spline: None,
+        blockout: None,
+        prefab: None,
+        persistent_id: None,
+        surface_tags: None,
+        reflected: Vec::new(),
         transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
         name: Some(Name::new("Terrain")),
         light: None,
@@ -342,6 +347,11 @@ pub fn create_water_body(
 
     Ok(EntitySnapshot {
         spline,
+        blockout: None,
+        prefab: None,
+        persistent_id: None,
+        surface_tags: None,
+        reflected: Vec::new(),
         transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
         name: Some(Name::new(kind.label())),
         light: None,
@@ -378,6 +388,11 @@ fn landscape_snapshots(
 ) -> (EntitySnapshot, EntitySnapshot) {
     let terrain = EntitySnapshot {
         spline: None,
+        blockout: None,
+        prefab: None,
+        persistent_id: None,
+        surface_tags: None,
+        reflected: Vec::new(),
         transform: Some(Transform::from_translation(preset.terrain_translation)),
         name: Some(Name::new("Terrain")),
         light: None,
@@ -408,6 +423,11 @@ fn landscape_snapshots(
     };
     let water = EntitySnapshot {
         spline: None,
+        blockout: None,
+        prefab: None,
+        persistent_id: None,
+        surface_tags: None,
+        reflected: Vec::new(),
         transform: Some(Transform::from_translation(preset.water_local_translation)),
         name: Some(Name::new("Water")),
         light: None,

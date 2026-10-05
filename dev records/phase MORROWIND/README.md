@@ -23,6 +23,13 @@ folder has a generator and a gate in it before it has a single image.
 | `MORROWIND-CS-CORRECTNESS.md` | hierarchy-correct gizmo translation and component-neutral viewport picking | — |
 | `golden/` | a windowed GPU capture, once one has been taken | see below |
 
+## 2026-09-09 implementation records
+
+[O: prefabs](MORROWIND-O.md), [P: splines/blockout](MORROWIND-P.md),
+[P2: scatter](MORROWIND-P2.md), [W: procedural animation](MORROWIND-W.md),
+[W2: compression/jobs](MORROWIND-W2.md), [X: navigation](MORROWIND-X.md),
+[Y: behavior/perception](MORROWIND-Y.md), [AF: saves](MORROWIND-AF.md).
+
 ## The rule this folder runs on
 
 Two of the three documents above are **generated**, and the census is checked by
@@ -32,41 +39,12 @@ already **27,329 lines out of date** when MORROWIND-A measured it on 2026-08-24,
 because Phase CONTROL landed in between. The generated version cannot drift
 without failing a gate.
 
-## Golden images
+## Current visual evidence
 
-`golden/` is empty and `golden/manifest.json` does not exist yet. That is the
-honest state: golden references need a **windowed GPU run**, and GHOSTFENCE
-reports the row as `SKIP` with the command attached rather than reporting a
-green it did not earn.
-
-To take a reference:
-
-```bash
-SOMNIUM_CAPTURE_UI_PNG="dev records/phase MORROWIND/golden/shell_1920.png" \
-SOMNIUM_CAPTURE_FRAME=120 \
-SOMNIUM_CAPTURE_QUIT=1 \
-cargo run -p hello_engine
-```
-
-Then record it in `golden/manifest.json`:
-
-```json
-{
-  "images": [
-    {
-      "name": "shell_1920",
-      "reference": "shell_1920.png",
-      "candidate": "target/ghostfence/shell_1920.png",
-      "threshold": { "channel_tolerance": 2, "failing_fraction": 0.001, "max_channel": 24 }
-    }
-  ]
-}
-```
-
-A failing comparison writes `target/ghostfence/<name>.diff.png`: the reference
-darkened to a quarter, with every failing pixel highlighted in magenta scaled by
-how far it moved. The point is that a failure tells you *where*, not just that a
-number changed.
+Golden references now exist. PERSONA intentionally changed the shell; the
+inherited image mismatch remains an acceptance item. Do not replace references
+as part of unrelated feature work. The [2026-09-09 session record](MORROWIND-2026-09-09.md)
+links new designer captures and the exact fast-gate result.
 
 ## Capture rule, inherited
 

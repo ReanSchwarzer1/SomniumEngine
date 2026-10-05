@@ -24,4 +24,5 @@ somnium_anim = { workspace = true }
 somnium_script = { workspace = true }
 somnium_asset = { workspace = true }
 somnium_jobs = { workspace = true }
+somnium_ai = { workspace = true }
 glam = { workspace = true }

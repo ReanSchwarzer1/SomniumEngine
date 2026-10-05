@@ -9,8 +9,10 @@ use crate::{
 
 /// The main physics simulation world.
 pub struct PhysicsWorld {
-    system: *mut c_void,
+    pub(crate) system: *mut c_void,
     config: PhysicsConfig,
+    pub(crate) ragdolls:
+        std::collections::BTreeMap<crate::animation::RagdollId, crate::animation::NativeRagdoll>,
 }
 
 impl PhysicsWorld {
@@ -31,7 +33,11 @@ impl PhysicsWorld {
                 config.gravity.z,
             );
 
-            Self { system, config }
+            Self {
+                system,
+                config,
+                ragdolls: Default::default(),
+            }
         }
     }
 
@@ -71,7 +77,13 @@ impl PhysicsWorld {
             // Release the shape reference since Jolt took ownership internally
             jph_shape_destroy(jolt_settings.shape);
 
-            BodyId(id)
+            let body = BodyId(id);
+            if !body.is_valid() {
+                // Jolt refuses bodies past `max_bodies`; say so rather than
+                // leave a wall or door without collision.
+                tracing::warn!(max_bodies = self.config.max_bodies, "create_body: body refused (limit reached?)");
+            }
+            body
         }
     }
 
@@ -237,6 +249,9 @@ impl PhysicsWorld {
 impl Drop for PhysicsWorld {
     fn drop(&mut self) {
         unsafe {
+            for (_, ragdoll) in std::mem::take(&mut self.ragdolls) {
+                jph_ragdoll_destroy(ragdoll.pointer);
+            }
             jph_physics_system_destroy(self.system);
             jph_shutdown();
         }

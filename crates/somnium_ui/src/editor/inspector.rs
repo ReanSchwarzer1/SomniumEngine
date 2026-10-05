@@ -23,7 +23,6 @@ use crate::{
         grid::{Column, GridBuilder, Row},
         image::ImageBuilder,
         numeric_field::NumericFieldBuilder,
-        popup::{PopupBuilder, PopupPlacement},
         property_row::PropertyRowBuilder,
         search_box::SearchBoxBuilder,
         stack_panel::{Orientation, StackPanelBuilder},
@@ -532,22 +531,8 @@ pub(crate) fn build_generated_details(
                             .build(),
                         row_handle,
                     );
-                    let popup = PopupBuilder::new(
-                        WidgetBuilder::new()
-                            .with_background(theme::active().semantic.surface.panel.bytes()),
-                    )
-                    .with_anchor(handle)
-                    .with_placement(PopupPlacement::AnchorBelow)
-                    .build();
-                    let popup = ui.add_node(popup, ui.root());
-                    let column = StackPanelBuilder::new(
-                        WidgetBuilder::new()
-                            .with_width(360.0)
-                            .with_background(theme::active().semantic.surface.panel.bytes()),
-                    )
-                    .with_orientation(Orientation::Vertical)
-                    .build();
-                    let column = ui.add_node(column, popup);
+                    let picker = picker_popup(ui, handle, 360.0);
+                    let popup = picker.popup;
                     let search = SearchBoxBuilder::new(
                         WidgetBuilder::new()
                             .with_height(theme::active().density.row_dense)
@@ -555,7 +540,7 @@ pub(crate) fn build_generated_details(
                     )
                     .with_font_id(font_id)
                     .build();
-                    let search = ui.add_node(search, column);
+                    let search = ui.add_node(search, picker.header);
                     let paths = std::iter::once(None)
                         .chain(candidates.iter().map(|candidate| {
                             assets
@@ -572,11 +557,8 @@ pub(crate) fn build_generated_details(
                         .with_popup(popup)
                         .with_font_id(font_id)
                         .build();
-                    let list = ui.add_node(list, column);
-                    let actions = StackPanelBuilder::new(WidgetBuilder::new())
-                        .with_orientation(Orientation::Horizontal)
-                        .build();
-                    let actions = ui.add_node(actions, column);
+                    let list = ui.add_node(list, picker.list_host);
+                    let actions = picker.footer;
                     for (label, action) in [
                         ("Use Selected", AssetPickerAction::UseDrawerSelection),
                         ("Edit", AssetPickerAction::Edit),
@@ -793,4 +775,134 @@ pub(crate) fn build_generated_details(
         asset_actions,
         collection_actions,
     )
+}
+
+#[cfg(test)]
+mod picker_regressions {
+    use super::*;
+    use crate::editor::inspector_gen::GeneratedPropertyRow;
+    use somnium_ecs::reflect::{FieldId, FieldType, ReflectValue, StableId};
+
+    #[test]
+    fn asset_picker_never_paints_over_the_editor() {
+        let mut ui = UserInterface::new(1280.0, 720.0);
+        let component = StableId::new("test.Asset");
+        let panels = [GeneratedComponentPanel {
+            component,
+            label: "Asset".into(),
+            preview_path: None,
+            rows: vec![GeneratedPropertyRow {
+                component,
+                field: FieldId(0),
+                name: "asset",
+                label: "Asset".into(),
+                group: None,
+                doc: None,
+                editor: PropertyEditorKind::AssetPicker,
+                ty: FieldType::Asset,
+                min: None,
+                max: None,
+                step: None,
+                soft_min: None,
+                soft_max: None,
+                precision: None,
+                unit: None,
+                slider: Default::default(),
+                asset_kind_mask: u64::MAX,
+                value: ReflectValue::Asset(None),
+                default: ReflectValue::Asset(None),
+                modified: false,
+                read_only: false,
+                mixed: false,
+            }],
+        }];
+        let root = ui.root();
+        let (_, _, _, _, searches, _, _) = build_generated_details(
+            &mut ui,
+            root,
+            0,
+            &panels,
+            &Default::default(),
+            &mut Default::default(),
+        );
+        let picker = searches.values().next().unwrap();
+        let mut popup = picker.list;
+        while ui.nodes.borrow(popup.transmute()).control.role() != crate::a11y::Role::Dialog {
+            popup = ui.nodes.borrow(popup.transmute()).widget.parent;
+            assert!(popup.is_some());
+        }
+        ui.send(UiMessage::new(
+            popup,
+            MessageDirection::ToWidget,
+            crate::widgets::popup::PopupMessage::Open,
+        ));
+        ui.update();
+        ui.perform_layout();
+        let node = ui.nodes.borrow(popup.transmute());
+        node.control.draw(&node.widget, &mut ui.draw_ctx);
+        assert!(
+            ui.draw_ctx.instances.is_empty(),
+            "asset popup click catcher must not paint a full-window background"
+        );
+        let combo = searches.values().next().unwrap().combo;
+        let list = searches.values().next().unwrap().list;
+        let search = *searches.keys().next().unwrap();
+        let before = ui.screen_bounds(search);
+        ui.send(UiMessage::new(
+            combo,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetItems(
+                (0..200)
+                    .map(|i| format!("textures/long_path_{i}.png"))
+                    .collect(),
+            ),
+        ));
+        ui.update();
+        ui.perform_layout();
+        let frame = ui.screen_bounds(ui.first_child(popup));
+        assert!(frame.h <= 290.0);
+        let viewer = ui.parent_of(list).unwrap();
+        let view = ui.screen_bounds(viewer);
+        ui.send(UiMessage::new(
+            list,
+            MessageDirection::ToWidget,
+            WidgetMessage::MouseWheel {
+                pos: glam::Vec2::ZERO,
+                delta: -100000.0,
+                mods: Default::default(),
+            },
+        ));
+        ui.update();
+        ui.perform_layout();
+        assert_eq!(
+            ui.screen_bounds(search).y,
+            before.y,
+            "search must stay above scrolling results"
+        );
+        let actions = &ui
+            .nodes
+            .borrow(ui.parent_of(viewer).unwrap().transmute())
+            .widget
+            .children;
+        let footer = ui.screen_bounds(actions[2]);
+        assert!(
+            footer.y >= view.y + view.h && footer.y + footer.h <= frame.y + frame.h,
+            "asset actions must stay visible: {footer:?} in {frame:?}"
+        );
+        ui.send(UiMessage::new(
+            combo,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetItems(vec!["None".into()]),
+        ));
+        ui.update();
+        ui.perform_layout();
+        assert!(
+            ui.screen_bounds(ui.first_child(popup)).h < 120.0,
+            "filtered picker must shrink"
+        );
+        assert!(
+            (ui.screen_bounds(list).y - ui.screen_bounds(viewer).y).abs() < 1.0,
+            "filtering must reset the old scroll offset"
+        );
+    }
 }

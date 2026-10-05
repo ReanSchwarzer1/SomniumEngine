@@ -324,19 +324,34 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Occlusion by geometry. The depth buffer is full resolution and this pass
-    // is quarter; a point sample of the matching texel is the conservative
-    // choice, and the alternative — a min over the 2×2 — makes clouds vanish
-    // behind a single foreground pixel.
+    // Occlusion by geometry, over the texel's whole footprint. The depth buffer
+    // is full resolution and this pass is quarter. A point sample at the texel
+    // centre stamped "no cloud" into every texel whose centre fell on a leaf,
+    // so through a canopy only the few texels centred on sky carried cloud and
+    // the composite rebuilt the sky from them in visible blocks. Now a texel is
+    // clamped by its farthest occluder and left unclamped when any of its
+    // footprint is sky; the composite decides per full-resolution pixel which
+    // geometry the cloud is in front of.
     let depth_dims = textureDimensions(scene_depth);
-    let depth_texel = vec2<i32>(uv * vec2<f32>(depth_dims));
-    let depth = textureLoad(scene_depth, depth_texel, 0);
-    if depth > 0.0 && depth < 1.0 {
-        // Reconstruct the world position of the occluder and clamp the march.
-        let occ_clip = cp.inv_view_proj * vec4<f32>(ndc, depth, 1.0);
-        let occ_ws = occ_clip.xyz / occ_clip.w;
-        let occ_distance = length(occ_ws - cp.camera_pos);
-        interval.y = min(interval.y, occ_distance);
+    let footprint = vec2<f32>(depth_dims) / vec2<f32>(dims);
+    let corner = vec2<f32>(gid.xy) * footprint;
+    var sky_seen = false;
+    var farthest = 0.0;
+    var taps = array<vec2<f32>, 5>(vec2(.5, .5), vec2(.1, .1), vec2(.9, .1), vec2(.1, .9), vec2(.9, .9));
+    for (var k = 0; k < 5; k = k + 1) {
+        let o = taps[k];
+        let px = min(vec2<i32>(corner + o * footprint), vec2<i32>(depth_dims) - 1);
+        let d = textureLoad(scene_depth, px, 0);
+        if d <= 0.0 || d >= 1.0 {
+            sky_seen = true;
+            break;
+        }
+        let tap_ndc = (vec2<f32>(px) + .5) / vec2<f32>(depth_dims);
+        let occ_clip = cp.inv_view_proj * vec4<f32>(tap_ndc.x * 2.0 - 1.0, 1.0 - tap_ndc.y * 2.0, d, 1.0);
+        farthest = max(farthest, length(occ_clip.xyz / occ_clip.w - cp.camera_pos));
+    }
+    if !sky_seen {
+        interval.y = min(interval.y, farthest);
         if interval.y <= interval.x {
             textureStore(scatter_out, vec2<i32>(gid.xy), vec4<f32>(0.0, 0.0, 0.0, 1.0));
             return;

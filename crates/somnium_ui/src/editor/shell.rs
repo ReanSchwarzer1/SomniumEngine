@@ -440,6 +440,15 @@ pub(crate) fn build_editor_layout(
         font_id,
         theme::active().density.row_chrome,
     );
+    let (vertex_paint_button, vertex_paint_label) = labeled_icon_button(
+        ui,
+        main_tb_stack_h,
+        IconId::PaintLayer,
+        "Paint",
+        &command_tooltip("editor.vertex_paint.edit"),
+        font_id,
+        theme::active().density.row_chrome,
+    );
     scope_separator(ui, main_tb_stack_h);
     let play_button = icon_tool_button(
         ui,
@@ -1514,14 +1523,13 @@ pub(crate) fn build_editor_layout(
     .build();
     let log_hdr_grid_h = ui.add_node(log_hdr_grid, log_header_stack);
 
-    let log_header = TextBuilder::new(WidgetBuilder::new().with_row(0).with_column(0).with_margin(
-        Thickness {
-            left: 8.0,
-            top: 4.0,
-            right: 0.0,
-            bottom: 0.0,
-        },
-    ))
+    let log_header = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_row(0)
+            .with_column(0)
+            .with_vertical_alignment(VerticalAlignment::Center)
+            .with_margin(Thickness::axes(8.0, 0.0)),
+    )
     .with_role(TextRole::SectionCaps)
     .with_text("Output Log")
     .build();
@@ -2189,10 +2197,8 @@ pub(crate) fn build_editor_layout(
     let color_picker = ui.add_node(color_picker_node, color_popup);
 
     let foliage_kind_combo = inspector_handles.foliage_kind_button;
-    let foliage_kind_popup =
-        attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
-    let viewport_res_popup =
-        attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
+    attach_combo_popup(ui, foliage_kind_combo, &FOLIAGE_KIND_NAMES, font_id);
+    attach_combo_popup(ui, viewport_res_combo, &VIEWPORT_RESOLUTION_NAMES, font_id);
     // CONTROL-G's snap combos were built without one of these, so pressing
     // them set `open = true` on a `ComboBox` whose popup handle was `NONE` and
     // every branch that would show a list was skipped. Nothing opened, no
@@ -2200,8 +2206,8 @@ pub(crate) fn build_editor_layout(
     // the right label because `set_snap_state` pushes `SetSelected` into it
     // every frame — which is exactly why "Snap does nothing" looked like a
     // handler bug and was not one.
-    let snap_grid_popup = attach_combo_popup(ui, snap_grid_combo, &SNAP_GRID_NAMES, font_id);
-    let snap_angle_popup = attach_combo_popup(ui, snap_angle_combo, &SNAP_ANGLE_NAMES, font_id);
+    attach_combo_popup(ui, snap_grid_combo, &SNAP_GRID_NAMES, font_id);
+    attach_combo_popup(ui, snap_angle_combo, &SNAP_ANGLE_NAMES, font_id);
 
     let menu_command_items = file_items
         .into_iter()
@@ -2254,6 +2260,7 @@ pub(crate) fn build_editor_layout(
         select_button,
         landscape_button,
         foliage_toolbar_button,
+        vertex_paint_button,
         terrain_tool_items,
         inspector_handles,
         viewport_handle,
@@ -2275,6 +2282,7 @@ pub(crate) fn build_editor_layout(
             select_label,
             landscape_label,
             foliage_mode_label,
+            vertex_paint_label,
         ],
         status_dirty,
         status_selection,
@@ -2341,10 +2349,6 @@ pub(crate) fn build_editor_layout(
         outliner_search,
         inspector_search,
         foliage_kind_combo,
-        snap_grid_popup,
-        snap_angle_popup,
-        foliage_kind_popup,
-        viewport_res_popup,
         save_button,
         palette_button,
         palette_popup,

@@ -613,6 +613,7 @@ impl SetFieldCmd {
         let field_schema = schema
             .field(field)
             .ok_or_else(|| format!("unknown field #{}", field.0))?;
+        crate::prefab::check_field_scope(world, entity, component, field_schema)?;
         if !field_schema.flags.contains(FieldFlags::EDIT) || field_schema.read_only {
             return Err("field is read-only".into());
         }
@@ -728,6 +729,8 @@ impl EditorCommand for SetFieldCmd {
 /// [`CreateEntityCmd`] to re-spawn a deleted creation on redo.
 #[derive(Clone, Default)]
 pub struct EntitySnapshot {
+    /// Serialized schema fields beyond transform/name/parent, shared by new authoring components.
+    pub reflected: Vec<(StableId, ReflectObject)>,
     pub transform: Option<Transform>,
     pub name: Option<Name>,
     pub light: Option<LightComponent>,
@@ -758,12 +761,40 @@ pub struct EntitySnapshot {
     /// that chain doubles the number of `match` arms in it and the chain is
     /// already the least pleasant function in this file.
     pub spline: Option<crate::SplineComponent>,
+    pub blockout: Option<crate::blockout::BlockoutComponent>,
+    pub prefab: Option<crate::prefab::PrefabMember>,
+    pub persistent_id: Option<somnium_ecs::PersistentId>,
+    pub surface_tags: Option<crate::scatter_scene::SurfaceTagsComponent>,
 }
 
 impl EntitySnapshot {
     /// Capture all editor components from a live entity.
     pub fn capture(world: &World, entity: Entity) -> Self {
+        let registry = crate::reflect_registry::component_registry();
+        let reflected = registry
+            .schemas_on(world, entity)
+            .into_iter()
+            .filter(|schema| {
+                ![
+                    StableId::new("somnium.Transform"),
+                    StableId::new("somnium.Name"),
+                    StableId::new("somnium.Parent"),
+                ]
+                .contains(&schema.stable_id)
+            })
+            .filter_map(|schema| {
+                let mut values = (schema.snapshot)(world, entity)?;
+                values.retain(|id, _| {
+                    schema
+                        .fields
+                        .iter()
+                        .any(|field| field.id == *id && field.flags.contains(FieldFlags::SERIALIZE))
+                });
+                (!values.is_empty()).then_some((schema.stable_id, values))
+            })
+            .collect();
         Self {
+            reflected,
             transform: world.get::<Transform>(entity).copied(),
             name: world.get::<Name>(entity).copied(),
             light: world.get::<LightComponent>(entity).copied(),
@@ -786,15 +817,55 @@ impl EntitySnapshot {
             parent: world.get::<Parent>(entity).copied(),
             children: world.get::<Children>(entity).copied(),
             spline: world.get::<crate::SplineComponent>(entity).cloned(),
+            blockout: world
+                .get::<crate::blockout::BlockoutComponent>(entity)
+                .copied(),
+            prefab: world.get::<crate::prefab::PrefabMember>(entity).cloned(),
+            persistent_id: world.persistent_id(entity),
+            surface_tags: world
+                .get::<crate::scatter_scene::SurfaceTagsComponent>(entity)
+                .cloned(),
         }
     }
 
     /// Spawn a new entity from this snapshot. Returns the new entity handle.
     pub fn respawn(self, world: &mut World) -> Entity {
+        let reflected = self.reflected.clone();
+        let parent = self.parent;
         let spline = self.spline.clone();
+        let blockout = self.blockout;
+        let prefab = self.prefab.clone();
+        let persistent_id = self.persistent_id;
+        let surface_tags = self.surface_tags.clone();
         let entity = self.respawn_core(world);
+        let registry = crate::reflect_registry::component_registry();
+        for (id, values) in reflected {
+            if let Some(schema) = registry.by_stable_id(id) {
+                if (schema.snapshot)(world, entity).is_none() {
+                    let _ = (schema.insert_default)(world, entity);
+                }
+                if let Err(error) = (schema.apply)(world, entity, &values) {
+                    tracing::error!(%error, "restore reflected entity component failed");
+                }
+            }
+        }
+        if let Some(parent) = parent {
+            let _ = world.insert_component(entity, parent);
+        }
         if let Some(spline) = spline {
             let _ = world.insert_component(entity, spline);
+        }
+        if let Some(blockout) = blockout {
+            let _ = world.insert_component(entity, blockout);
+        }
+        if let Some(prefab) = prefab {
+            let _ = world.insert_component(entity, prefab);
+        }
+        if let Some(persistent_id) = persistent_id {
+            let _ = world.set_persistent_id(entity, persistent_id);
+        }
+        if let Some(surface_tags) = surface_tags {
+            let _ = world.insert_component(entity, surface_tags);
         }
         entity
     }
@@ -1496,6 +1567,11 @@ impl EditorCommand for ReparentCmd {
 /// shared with the `Engine`, which drains it (with renderer access) right
 /// after every undo/redo call.
 pub enum TerrainRestoreOp {
+    /// Restore the authored foliage instances on one terrain.
+    Foliage {
+        terrain_id: u32,
+        instances: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    },
     /// Restore a heightmap region: inclusive vertex rect + row-major heights.
     Heights {
         terrain_id: u32,
@@ -1512,6 +1588,49 @@ pub enum TerrainRestoreOp {
 
 /// Queue of terrain restores shared between commands and the `Engine`.
 pub type TerrainRestoreQueue = std::sync::Arc<std::sync::Mutex<Vec<TerrainRestoreOp>>>;
+
+/// One reversible authored foliage stroke, applied through the renderer restore queue.
+pub struct FoliageEditCmd {
+    terrain_id: u32,
+    before: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    after: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+    queue: TerrainRestoreQueue,
+}
+impl FoliageEditCmd {
+    /// Record a completed stroke. The caller uses UndoStack::push_silent.
+    pub fn new(
+        terrain_id: u32,
+        before: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+        after: Vec<somnium_renderer::terrain::foliage_paint::PaintedFoliage>,
+        queue: TerrainRestoreQueue,
+    ) -> Self {
+        Self {
+            terrain_id,
+            before,
+            after,
+            queue,
+        }
+    }
+    fn restore(&self, instances: &[somnium_renderer::terrain::foliage_paint::PaintedFoliage]) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.push(TerrainRestoreOp::Foliage {
+                terrain_id: self.terrain_id,
+                instances: instances.to_vec(),
+            });
+        }
+    }
+}
+impl EditorCommand for FoliageEditCmd {
+    fn execute(&mut self, _world: &mut World, _selection: &mut Option<Entity>) {
+        self.restore(&self.after);
+    }
+    fn undo(&mut self, _world: &mut World, _selection: &mut Option<Entity>) {
+        self.restore(&self.before);
+    }
+    fn description(&self) -> &str {
+        "Paint Foliage Stroke"
+    }
+}
 
 /// Reversible terrain sculpt or paint stroke (Phase 14D-4 `TerrainEditCmd`).
 ///
@@ -1959,7 +2078,7 @@ fn do_reparent(world: &mut World, child_idx: u32, new_parent_idx: Option<u32>) {
     }
 }
 
-fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entity>) {
+pub(crate) fn do_reparent_entity(world: &mut World, child: Entity, new_parent: Option<Entity>) {
     if let Some(old) = world
         .get::<Parent>(child)
         .and_then(|p| world.is_alive(p.entity).then_some(p.entity))
@@ -2612,6 +2731,11 @@ mod landscape_tests {
     fn terrain_snapshot() -> EntitySnapshot {
         EntitySnapshot {
             spline: None,
+            blockout: None,
+            prefab: None,
+            persistent_id: None,
+            surface_tags: None,
+            reflected: Vec::new(),
             transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
             name: Some(Name::new("Terrain")),
             light: None,
@@ -2648,6 +2772,11 @@ mod landscape_tests {
     fn water_snapshot() -> EntitySnapshot {
         EntitySnapshot {
             spline: None,
+            blockout: None,
+            prefab: None,
+            persistent_id: None,
+            surface_tags: None,
+            reflected: Vec::new(),
             transform: Some(Transform::from_translation(glam::Vec3::new(
                 512.0, 15.0, 512.0,
             ))),

@@ -37,6 +37,7 @@ pub struct SkinPass {
     palette_capacity: usize,
     instance_capacity: usize,
     skin_vertex_capacity: usize,
+    retained_bindings: Vec<SkinVertex>,
     /// Size of the pool buffer the current bind group was built against.
     ///
     /// `GeometryPool` reallocates when it grows, and a bind group holding the
@@ -120,6 +121,7 @@ impl SkinPass {
             palette_capacity: Self::INITIAL_CAPACITY,
             instance_capacity: Self::INITIAL_CAPACITY,
             skin_vertex_capacity: Self::INITIAL_CAPACITY,
+            retained_bindings: Vec::new(),
             bound_pool_size: None,
         }
     }
@@ -138,18 +140,39 @@ impl SkinPass {
         bindings: &[somnium_anim::SkinBinding],
     ) {
         let end = pool_offset as usize + bindings.len();
-        if end > self.skin_vertex_capacity {
+        self.retained_bindings.resize(
+            end.max(self.retained_bindings.len()),
+            SkinVertex::pack(somnium_anim::SkinBinding {
+                joints: [0; 4],
+                weights: [0.0; 4],
+            }),
+        );
+        for (out, binding) in self.retained_bindings[pool_offset as usize..end]
+            .iter_mut()
+            .zip(bindings)
+        {
+            *out = SkinVertex::pack(*binding);
+        }
+        let grew = end > self.skin_vertex_capacity;
+        if grew {
             self.skin_vertex_capacity = end.next_power_of_two();
             self.skin_vertices =
                 storage_buffer::<SkinVertex>(device, "Skin vertices", self.skin_vertex_capacity);
-            // The bind group holds the old buffer.
             self.bind_group = None;
         }
-        let packed: Vec<SkinVertex> = bindings.iter().copied().map(SkinVertex::pack).collect();
+        // Buffer growth must retain every previous mesh's bindings.
+        let (offset, values) = if grew {
+            (0, &self.retained_bindings[..])
+        } else {
+            (
+                pool_offset as usize,
+                &self.retained_bindings[pool_offset as usize..end],
+            )
+        };
         queue.write_buffer(
             &self.skin_vertices,
-            pool_offset as u64 * std::mem::size_of::<SkinVertex>() as u64,
-            bytemuck::cast_slice(&packed),
+            offset as u64 * std::mem::size_of::<SkinVertex>() as u64,
+            bytemuck::cast_slice(values),
         );
     }
 

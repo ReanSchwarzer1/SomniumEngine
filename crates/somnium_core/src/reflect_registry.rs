@@ -641,24 +641,78 @@ fn mesh_kind_schema() -> ComponentSchema {
 #[must_use]
 pub fn component_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
+    crate::interaction::register_schema(&mut registry);
+    crate::work::register(&mut registry);
+    crate::staged_mirror::register(&mut registry);
     registry.register(audio_emitter_schema());
 
     registry.register(buoyant_vessel_schema());
     registry.register(camera_settings_schema());
     registry.register(decal_schema());
+    registry.register(light_flicker_schema());
+    registry.register(component_schema! {
+        crate::vertex_paint::VertexPaintComponent as "somnium.VertexPaint", display "Vertex Paint", version 1,
+        fields {
+            enabled { group: "Vertex Paint",
+                doc: "Show the paint. Off keeps it but renders the bare material." },
+            data { group: "Vertex Paint", advanced: true, read_only: true, display_name: "Masks",
+                doc: "Per-vertex R, G, B, A layer amounts. Edit with the Vertex Paint tool." },
+            layer_r { group: "Layers", display_name: "Layer R material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the R channel paints. Unset: built-in dirt and grime." },
+            layer_g { group: "Layers", display_name: "Layer G material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the G channel paints. Unset: built-in rust." },
+            layer_b { group: "Layers", display_name: "Layer B material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the B channel paints. Unset: built-in wetness." },
+            layer_a { group: "Layers", display_name: "Layer A material",
+                asset_kind_mask: somnium_asset::database::ASSET_KIND_MATERIAL,
+                doc: "Material the A channel paints. Unset: built-in blood." },
+            tiling { group: "Layers", min: 0.01, max: 16.0,
+                doc: "Per layer (R, G, B, A): texture repeats per metre. Layers are projected in world space, so 0.5 is a 2 m texture on every mesh." },
+            height_contrast { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 0 fades by the painted amount; toward 1 the height maps shape the edge, so the layer fills the surface's crevices before it covers it." },
+            slope_min { group: "Layers", min: -1.0, max: 1.0,
+                doc: "Per layer: lowest surface normal Y the layer shows on. 0.7 with max 1 keeps it to what faces up." },
+            slope_max { group: "Layers", min: -1.0, max: 1.0,
+                doc: "Per layer: highest surface normal Y the layer shows on. Min -0.3, max 0.3 keeps it to walls." },
+            breakup { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: how far world-space noise breaks part-painted areas into patches. 0 follows the painted gradient exactly." },
+            breakup_scale { group: "Layers", min: 0.05, max: 50.0,
+                doc: "Per layer: size of the breakup patches in metres." },
+            stain { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 0 replaces the surface with the layer material; 1 only stains it, keeping the surface's own pattern, normal and relief (grime on wood grain, soot on paint)." },
+            detile { group: "Layers", min: 0.0, max: 1.0,
+                doc: "Per layer: 1 hides the layer texture's repetition by blending two offset reads. For organic textures (mould, dirt, rust, moss); leave 0 for bricks, tiles and setts." },
+        }
+    });
     registry.register(editor_flags_schema());
     registry.register(foliage_schema());
     registry.register(light_schema());
     registry.register(material_schema());
+    crate::animation_authoring::register(&mut registry);
+    registry.register(component_schema! {
+        crate::ImportedMesh as "somnium.ImportedMesh", display "Imported Mesh Source", version 1,
+        fields {
+            source { read_only: true, doc: "Source file used when reopening this scene. Reimport to replace geometry." },
+            node { read_only: true, doc: "Mesh-node ordinal in the imported source." },
+        }
+    });
     registry.register(mesh_schema());
     registry.register(mesh_kind_schema());
     registry.register(name_schema());
     registry.register(parent_schema());
     registry.register(particle_emitter_schema());
     registry.register(post_process_schema());
+    crate::ai::register(&mut registry);
+    crate::save_game::editor::register(&mut registry);
     crate::character::register(&mut registry);
     crate::spline::register(&mut registry);
+    crate::blockout::register(&mut registry);
+    crate::scatter_scene::register(&mut registry);
     registry.register(sky_schema());
+    registry.register(sky_eye_schema());
     registry.register(terrain_schema());
     registry.register(world_partition_schema());
     registry.register(ui_canvas_schema());
@@ -667,6 +721,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(voxel_terrain_schema());
     registry.register(water_schema());
     registry.register(weather_schema());
+    crate::authoring::registration::extend_components(&mut registry);
 
     registry
 }
@@ -678,6 +733,7 @@ pub fn component_registry() -> TypeRegistry {
 #[must_use]
 pub fn editor_registry() -> TypeRegistry {
     let mut registry = component_registry();
+    crate::prefab_details::register(&mut registry);
     registry.register(somnium_asset::material::material_asset_schema());
     registry.register(editor_settings_schema());
     registry.register(project_settings_schema());
@@ -701,6 +757,24 @@ fn particle_emitter_schema() -> ComponentSchema {
     component_schema! {
         ParticleEmitter as "somnium.ParticleEmitter", display "Particle Emitter", version 1,
         fields {
+            enabled { group: "Emission", doc: "Stop new particles; existing particles finish naturally." },
+            texture { group: "Sprite", asset_kind_mask: somnium_asset::database::ASSET_KIND_TEXTURE, doc: "RGBA sprite or sprite-sheet texture. Empty uses the original soft round particle." },
+            texture_status { group: "Sprite", read_only: true, flags: FieldFlags::EDIT },
+            aspect { min: 0.01, max: 100.0, group: "Sprite", doc: "Height divided by width." },
+            additive { group: "Sprite", doc: "Emissive blending for fire and sparks." },
+            world_up { group: "Sprite", doc: "Keep flame sprites upright in world space." },
+            local_space { group: "Emission", doc: "Keep existing particles attached to this emitter. Clear before switching on a live effect." },
+            staged_reflection { group: "Sprite", doc: "Show this effect in the active staged mirror. Reuses the same simulated particles." },
+            tip_tint { min: 0.0, max: 100.0, group: "Sprite", doc: "RGB multiplier at the top edge; 1 keeps the lifetime colour." },
+            atlas_columns { min: 1, max: 64, group: "Flipbook" },
+            atlas_rows { min: 1, max: 64, group: "Flipbook" },
+            atlas_frames { min: 1, max: 4096, group: "Flipbook" },
+            atlas_fps { min: 0.0, max: 240.0, group: "Flipbook", doc: "Zero plays once over each particle's lifetime." },
+            rotation_spread { min: 0.0, max: 3.1415927, group: "Sprite", unit: "rad" },
+            spin { min: -20.0, max: 20.0, group: "Sprite", unit: "rad/s" },
+            flutter { min: 0.0, max: 0.4, group: "Sprite", doc: "Bend the tip of a textured sprite while keeping its base pinned. Zero disables motion." },
+            flutter_hz { min: 0.0, max: 30.0, group: "Sprite", unit: "Hz", doc: "Tip motion follows simulation time and pauses with the scene." },
+            burst { min: 0, max: 10000, group: "Emission", flags: FieldFlags::EDIT, doc: "Emit this many particles once, including while continuous emission is disabled." },
             max_particles { min: 0, group: "Emission" },
             spawn_rate { min: 0.0, step: 1.0, group: "Emission", unit: "particles/s" },
             lifetime { min: 0.0, step: 0.1, group: "Particle", unit: "s" },
@@ -735,7 +809,7 @@ fn buoyant_vessel_schema() -> ComponentSchema {
 }
 
 fn post_process_schema() -> ComponentSchema {
-    component_schema! {
+    let mut schema = component_schema! {
         PostProcessComponent as "somnium.PostProcess", display "Post Processing", version 1,
         fields {
             ev100 { step: 0.1, precision: 2, group: "Exposure" },
@@ -749,6 +823,9 @@ fn post_process_schema() -> ComponentSchema {
             saturation { min: 0.0, step: 0.01, group: "Color Grading" }, gain { min: 0.0, step: 0.01, group: "Color Grading" },
             lift { step: 0.01, group: "Color Grading" }, gamma { min: 0.0, step: 0.01, group: "Color Grading" },
             grain { min: 0.0, step: 0.01, group: "Lens" },
+            dream_mode { min: 0, max: 3, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear. The central interaction region stays clear." },
+            dream_strength { min: 0.0, max: 1.0, step: 0.01, group: "Dream Lens", doc: "Zero disables distortion. Use modest values; this effect should suggest unstable surroundings." },
+            dream_speed { min: 0.0, max: 3.0, step: 0.05, group: "Dream Lens" },
             response_curve { group: "Color Grading", display_name: "Response Curve",
                 min: 0.0, max: 1.0, soft_min: 0.0, soft_max: 1.0 },
             bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },
@@ -762,6 +839,7 @@ fn post_process_schema() -> ComponentSchema {
             motion_blur_enabled { group: "Motion Blur" },
             motion_blur_shutter { min: 0.0, max: 1.0, step: 0.01, group: "Motion Blur" },
             restir_gi_intensity { min: 0.0, step: 0.01, group: "Ray Tracing" },
+            restir_gi_distance { min: 1.0, step: 1.0, unit: "m", group: "Ray Tracing" },
             volumetrics_enabled { group: "Volumetrics" }, light_shafts { group: "Volumetrics" },
             fog_density { min: 0.0, step: 0.0001, precision: 5, group: "Volumetrics" },
             fog_height_falloff { min: 0.0, step: 1.0, unit: "m", group: "Volumetrics" },
@@ -794,9 +872,15 @@ fn post_process_schema() -> ComponentSchema {
             ddgi_hysteresis { min: 0.0, max: 0.99, step: 0.01, group: "Global Illumination", display_name: "DDGI Hysteresis",
                 doc: "Previous radiance retained per update; higher is steadier but slower." },
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
+            fog_sky_occlusion { min: 0.0, max: 1.0, step: 0.01, group: "Volumetrics", display_name: "Fog Sky Occlusion",
+                doc: "How far the sun's shadow also hides skylight from the fog; stops roofed interiors glowing with haze." },
              fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
+    };
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "dream_mode") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Heat drift", "Peripheral echo", "Architectural shear"]);
     }
+    schema
 }
 
 /// Water is the largest schema in the engine and the reason the macro
@@ -937,6 +1021,9 @@ fn foliage_schema() -> ComponentSchema {
             foliage_shadow_distance { min: 0.0 },
             lod_distance { min: 0.0 },
             impostor_distance { min: 0.0 },
+            near_distance { min: 0.0 },
+            shadow_proxy { group: "Level of Detail", display_name: "Shadow Proxy",
+                doc: "Far half of a LOD pair: also casts the pair's shadow, shadow-only, nearer than Near Distance." },
             max_instances,
         }
     }
@@ -1034,6 +1121,25 @@ fn sky_schema() -> ComponentSchema {
     schema
 }
 
+/// A burning eye in the sky (2026-09-28): see [`crate::sky::SkyEyeComponent`].
+fn sky_eye_schema() -> ComponentSchema {
+    component_schema! {
+        crate::sky::SkyEyeComponent as "somnium.SkyEye", display "Sky Eye", version 1,
+        fields {
+            enabled { group: "Eye" },
+            yaw_deg { min: -360.0, max: 360.0, step: 1.0, unit: "°", group: "Placement", display_name: "Bearing" },
+            pitch_deg { min: -10.0, max: 89.0, step: 0.5, unit: "°", group: "Placement", display_name: "Elevation" },
+            size_deg { min: 1.0, max: 170.0, step: 0.5, unit: "°", group: "Placement", display_name: "Angular Width" },
+            color { group: "Eye", display_name: "Iris Colour" },
+            intensity { min: 0.0, soft_max: 2000.0, step: 1.0, unit: "cd/m²", group: "Eye" },
+            openness { min: 0.05, max: 1.0, step: 0.01, precision: 2, group: "Shape" },
+            pupil { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Shape", display_name: "Pupil Width" },
+            pulse_hz { min: 0.0, soft_max: 2.0, step: 0.01, precision: 2, unit: "Hz", group: "Eye", display_name: "Pulse" },
+            glow { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Eye" },
+        }
+    }
+}
+
 /// CONTROL-N. Weather as a set of causes, not a pile of sliders.
 fn weather_schema() -> ComponentSchema {
     component_schema! {
@@ -1047,6 +1153,8 @@ fn weather_schema() -> ComponentSchema {
                 group: "Wind", display_name: "Wind Speed" },
             wind_direction_deg { min: 0.0, max: 360.0, step: 1.0, precision: 1,
                 group: "Wind", display_name: "Wind Direction" },
+            foliage_sway { min: 0.0, max: 2.0, step: 0.05, precision: 2,
+                group: "Wind", display_name: "Foliage Sway" },
             wetness_target { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Wetness",
                 display_name: "Wetness Target" },
             wetting_seconds { min: 0.1, soft_max: 120.0, step: 0.5, precision: 2, unit: "s",
@@ -1082,6 +1190,26 @@ fn decal_schema() -> ComponentSchema {
             normal_strength { min: 0.0, max: 1.0, step: 0.01, precision: 2,
                 group: "Projection", display_name: "Normal Strength" },
             roughness { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Projection" },
+            multiply { group: "Projection",
+                doc: "Darken the surface underneath (wet, damp, grime) instead of painting over it." },
+        }
+    }
+}
+
+/// A multiplier on a local light's output; the light itself is never written.
+fn light_flicker_schema() -> ComponentSchema {
+    component_schema! {
+        crate::light_flicker::LightFlickerComponent as "somnium.LightFlicker", display "Light Flicker", version 1,
+        fields {
+            enabled { group: "Flicker" },
+            strength { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Flicker",
+                doc: "Depth of the continuous buzz, as a fraction of the light's output." },
+            rate { min: 0.0, soft_max: 4.0, step: 0.05, precision: 2, unit: "Hz", group: "Flicker",
+                doc: "Average stutter bursts per second." },
+            dropout { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Flicker",
+                doc: "Chance that a burst takes the fixture nearly dark." },
+            seed { step: 1.0, precision: 1, group: "Flicker",
+                doc: "Decorrelates fixtures that share every other setting." },
         }
     }
 }
@@ -1294,35 +1422,54 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 25);
+        assert_eq!(registry.len(), 44);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
             vec![
+                "somnium.AnimationAuthoring",
+                "somnium.AnimationPreviewJoint",
                 "somnium.AudioEmitter",
+                "somnium.Behavior",
+                "somnium.Blockout",
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
                 "somnium.Decal",
                 "somnium.EditorFlags",
                 "somnium.Foliage",
+                "somnium.ImportedMesh",
+                "somnium.Interactable",
                 "somnium.Light",
+                "somnium.LightFlicker",
                 "somnium.Material",
                 "somnium.Mesh",
                 "somnium.MeshKind",
                 "somnium.Name",
+                "somnium.NavigationAgent",
+                "somnium.NavigationLink",
+                "somnium.NavigationObstacle",
+                "somnium.NavigationProfile",
                 "somnium.Parent",
                 "somnium.ParticleEmitter",
+                "somnium.Perception",
                 "somnium.PostProcess",
                 "somnium.RigidBody",
+                "somnium.SaveSettings",
+                "somnium.ScatterSettings",
                 "somnium.Sky",
+                "somnium.SkyEye",
                 "somnium.Spline",
+                "somnium.StagedMirror",
+                "somnium.SurfaceTags",
                 "somnium.Terrain",
                 "somnium.TimeOfDay",
                 "somnium.Transform",
                 "somnium.UiCanvas",
+                "somnium.VertexPaint",
                 "somnium.VoxelTerrain",
                 "somnium.Water",
                 "somnium.Weather",
+                "somnium.WorkTarget",
                 "somnium.WorldPartition",
             ],
             "iteration is sorted by stable id, not by registration order"
@@ -1506,6 +1653,18 @@ mod tests {
             LightShadowTechnique::Virtual,
             "the original enum encoding remains loadable"
         );
+    }
+
+    #[test]
+    fn the_gi_ray_distance_is_editable_and_old_scenes_keep_200_m() {
+        let registry = component_registry();
+        let schema = registry.by_name("somnium.PostProcess").unwrap();
+        let distance = schema.field_by_name("restir_gi_distance").unwrap();
+        assert_eq!(distance.ty, FieldType::F64);
+        assert_eq!(distance.group, Some("Ray Tracing"));
+        assert_eq!(distance.min, Some(1.0));
+        // A scene saved without the field loads the default: the pass's old constant.
+        assert_eq!(crate::PostProcessComponent::default().restir_gi_distance, 200.0);
     }
 
     #[test]

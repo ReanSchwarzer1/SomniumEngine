@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+thiserror = { workspace = true }
 # MORROWIND-U. The pose seam: an importer that reads a skin needs the types a
 # skin is made of, and they live in a crate with no renderer dependency.
 somnium_anim = { workspace = true }

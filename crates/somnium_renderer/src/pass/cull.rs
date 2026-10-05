@@ -221,13 +221,14 @@ impl CullPass {
     /// Upload this frame's AABBs and frustum planes.
     ///
     /// `aabbs` must be parallel to the indirect argument array — entry `i`
-    /// bounds draw `i`.
+    /// bounds draw `i`. `None` keeps last frame's bounds (the draw list is
+    /// unchanged), and only the view-dependent parameters are uploaded.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        aabbs: &[GpuCullAabb],
+        aabbs: Option<&[GpuCullAabb]>,
         view_proj: glam::Mat4,
         disabled: bool,
         hiz_size: (u32, u32),
@@ -237,22 +238,24 @@ impl CullPass {
         single_sided_args: usize,
         counted_draws: bool,
     ) {
-        self.staging.clear();
-        self.staging.extend_from_slice(aabbs);
+        if let Some(aabbs) = aabbs {
+            self.staging.clear();
+            self.staging.extend_from_slice(aabbs);
 
-        if self.staging.len() > self.capacity {
-            let mut cap = self.capacity.max(1);
-            while cap < self.staging.len() {
-                cap *= 2;
+            if self.staging.len() > self.capacity {
+                let mut cap = self.capacity.max(1);
+                while cap < self.staging.len() {
+                    cap *= 2;
+                }
+                self.aabb_buffer = Self::alloc_aabbs(device, cap);
+                self.flags_buffer = Self::alloc_flags(device, cap);
+                self.compact_buffer = Self::alloc_compact(device, cap);
+                self.capacity = cap;
             }
-            self.aabb_buffer = Self::alloc_aabbs(device, cap);
-            self.flags_buffer = Self::alloc_flags(device, cap);
-            self.compact_buffer = Self::alloc_compact(device, cap);
-            self.capacity = cap;
-        }
 
-        if !self.staging.is_empty() {
-            queue.write_buffer(&self.aabb_buffer, 0, bytemuck::cast_slice(&self.staging));
+            if !self.staging.is_empty() {
+                queue.write_buffer(&self.aabb_buffer, 0, bytemuck::cast_slice(&self.staging));
+            }
         }
 
         let mut params = GpuCullParams {
@@ -272,6 +275,22 @@ impl CullPass {
         queue.write_buffer(&self.params_buffers[0], 0, bytemuck::bytes_of(&params));
         params.phase = 1;
         queue.write_buffer(&self.params_buffers[1], 0, bytemuck::bytes_of(&params));
+    }
+
+    /// Overwrite individual bounds in place (skinned meshes re-bounded this
+    /// frame) without re-uploading the whole array.
+    pub fn patch_aabbs(&mut self, queue: &wgpu::Queue, patches: &[(usize, GpuCullAabb)]) {
+        let size = std::mem::size_of::<GpuCullAabb>() as u64;
+        for &(index, aabb) in patches {
+            if let Some(slot) = self.staging.get_mut(index) {
+                *slot = aabb;
+                queue.write_buffer(
+                    &self.aabb_buffer,
+                    index as u64 * size,
+                    bytemuck::bytes_of(&aabb),
+                );
+            }
+        }
     }
 
     /// Dispatch one phase of the cull, writing verdicts into `indirect_buffer`.

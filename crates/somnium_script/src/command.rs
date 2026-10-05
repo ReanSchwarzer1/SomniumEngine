@@ -93,11 +93,15 @@ pub enum AnimationParameterValue {
 /// game applies it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiValue {
+    /// Boolean widget state.
     Bool(bool),
+    /// Finite numeric widget value.
     Number(f64),
+    /// Authored UTF-8 widget text.
     Text(String),
 }
 
+/// One ordered mutation requested through the validated script boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptCommand {
     /// Write some fields of a component the entity already has.

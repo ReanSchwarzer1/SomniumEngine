@@ -51,13 +51,24 @@ pub struct GpuMaterial {
     /// material beside roughness rather than on the weather. Occupies what was
     /// padding, so the struct's size and alignment are unchanged.
     pub porosity: f32,
-    /// Explicit tail padding to a 16-byte multiple.
-    ///
-    /// WGSL requires the array stride of a storage-buffer element to be a
-    /// multiple of its alignment, which is 16 here because of `base_color`.
-    /// Adding a single f32 took the struct from 48 to 52 bytes, so the padding
-    /// is spelled out rather than left to the compiler to insert silently.
-    pub _pad: f32,
+    /// Normal-map XY strength, stored in the former tail padding.
+    pub normal_scale: f32,
+    /// Bindless index of the parallax-occlusion height map (white = high), or -1.
+    pub height_map: i32,
+    /// Relief depth in metres spanned by the height map. Zero disables parallax.
+    pub height_depth: f32,
+    /// Authored weathering, `0..1`: world-space staining, streaks, damp and
+    /// ledge grime added in `shading.wgsl`. Occupies what was padding.
+    pub weathering: f32,
+    /// 1 to de-tile the maps (two offset reads blended; see `shading.wgsl`
+    /// `detile`), 0 to read them once.
+    pub detile: f32,
+    /// Foliage wind response: `[bend, flutter, 0, 0]` (glTF extras
+    /// `somnium_wind_bend` / `somnium_wind_flutter`; see `wind.rs`). A plant's
+    /// trunk and needles carry the same bend so they sway together; flutter is
+    /// for needles, leaves and blades only. Zeroes are still. Took the stride
+    /// from 96 to 112.
+    pub wind: [f32; 4],
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -125,7 +136,12 @@ impl GpuMaterial {
             emissive_map: resolve_texture(asset.emissive_map),
             terrain_index: -1,
             porosity: asset.porosity,
-            _pad: 0.0,
+            normal_scale: asset.normal_scale,
+            height_map: resolve_texture(asset.height_map),
+            height_depth: asset.height_depth,
+            weathering: 0.0,
+            detile: 0.0,
+            wind: [0.0; 4],
         }
     }
 }
@@ -133,29 +149,66 @@ impl GpuMaterial {
 /// Manages a pool of materials in a GPU storage buffer.
 pub struct MaterialPool {
     pub buffer: wgpu::Buffer,
+    device: wgpu::Device,
+    max_buffer_bytes: u64,
     materials: Vec<GpuMaterial>,
     revision: u64,
 }
 
 impl MaterialPool {
     pub fn new(device: &wgpu::Device) -> Self {
+        let limits = device.limits();
+        let max_buffer_bytes = limits
+            .max_buffer_size
+            .min(u64::from(limits.max_storage_buffer_binding_size));
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Global Material Buffer"),
-            size: 1024 * 64, // 64KB
+            size: (1024 * 64).min(max_buffer_bytes),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         Self {
             buffer,
+            device: device.clone(),
+            max_buffer_bytes,
             materials: Vec::new(),
             revision: 0,
         }
     }
 
     /// Add a material to the pool and return its ID.
+    ///
+    /// IDs remain stable when the storage grows. The renderer must bind the
+    /// current `buffer` before recording the next frame; existing submissions
+    /// retain their old buffer through wgpu's resource ownership.
     pub fn add_material(&mut self, queue: &wgpu::Queue, material: GpuMaterial) -> u32 {
-        let id = self.materials.len() as u32;
+        let id = u32::try_from(self.materials.len()).expect("material ID space exhausted");
+        let required_bytes = (u64::from(id) + 1) * std::mem::size_of::<GpuMaterial>() as u64;
+        assert!(
+            required_bytes <= self.max_buffer_bytes,
+            "material pool exceeds the device storage-buffer limit"
+        );
+        if required_bytes > self.buffer.size() {
+            let capacity = self
+                .buffer
+                .size()
+                .saturating_mul(2)
+                .max(required_bytes)
+                .min(self.max_buffer_bytes);
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Global Material Buffer"),
+                size: capacity,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            // Materials already have a CPU shadow for inspection and ray data.
+            // Upload it once at growth, preserving every existing material ID.
+            if !self.materials.is_empty() {
+                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&self.materials));
+            }
+            self.buffer = buffer;
+        }
         self.materials.push(material);
         self.revision = self.revision.wrapping_add(1);
 
@@ -294,14 +347,17 @@ mod material_flag_tests {
             roughness: 0.2,
             emissive: somnium_asset::material::LinearColor([0.25, 0.5, 1.0]),
             emissive_intensity: 4.0,
+            normal_scale: 0.2,
             double_sided: true,
             ..Default::default()
         };
         let gpu = GpuMaterial::from_asset(&asset, |_| -1);
         assert_eq!((gpu.metallic, gpu.roughness), (1.0, 0.2));
         assert_eq!(gpu.emissive, [1.0, 2.0, 4.0]);
+        assert_eq!(gpu.normal_scale, 0.2);
         assert_eq!(gpu.flags & MATERIAL_FLAG_DOUBLE_SIDED, 1);
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+        assert_eq!(gpu.height_map, -1);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
     }
 
     #[test]
@@ -338,7 +394,7 @@ mod material_flag_tests {
     }
 
     #[test]
-    fn the_gpu_material_is_the_80_byte_shader_layout() {
+    fn the_gpu_material_is_the_112_byte_shader_layout() {
         // Must match `Material` in shading.wgsl, visibility.wgsl, shadow.wgsl
         // and transparent.wgsl. A mismatch does not fail validation; the shader
         // simply reads the wrong words, which is why this is pinned.
@@ -350,7 +406,9 @@ mod material_flag_tests {
         // a multiple of the element alignment — 16 here, because of
         // `base_color` — so it rounds to 64. The padding is declared explicitly
         // rather than left implicit for the same reason this test exists.
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+        // 96 after the parallax height map and its depth (two words of pad).
+        // 112 after the foliage wind vec4 (`wind.wgsl`).
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
     }
 

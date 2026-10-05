@@ -46,29 +46,46 @@
 
 /// Core application lifecycle and event loop management.
 pub mod a11y_bridge;
+pub mod ai;
+pub mod animation_motion;
 pub mod app;
 mod audio_scene;
+pub mod authoring;
 mod authoring_settings;
 pub mod autosave;
+pub mod blockout;
 pub mod character;
 pub mod clipboard;
 pub mod config;
 pub mod context;
+pub mod cpu_watchdog;
 /// Phase CONTROL-O: deferred decals.
 pub mod decal;
 pub mod editor_commands;
 mod editor_gizmo;
 pub mod error;
 pub mod event;
+mod foliage_palette;
+pub mod foliage_visibility;
 pub mod i18n;
 pub mod input_actions;
+pub mod interaction;
 pub mod jobs;
 pub mod landscape;
+/// Failing-fixture flicker applied to local lights at submission.
+pub mod light_flicker;
 pub mod light_units;
 pub mod log_capture;
 pub mod map;
+mod outliner_hierarchy;
+pub mod prefab;
 pub mod reflect_registry;
+pub mod save_game;
+pub mod scatter_scene;
+mod scene_delta;
 pub mod spline;
+pub mod staged_mirror;
+pub mod work;
 /// The `.somnium` container: a framed header the Content Drawer can read
 /// without parsing the scene, and the three-format routing that goes with it.
 ///
@@ -93,6 +110,7 @@ pub mod sky;
 pub mod somui_host;
 pub mod sun;
 pub mod time;
+pub mod vertex_paint;
 /// Phase CONTROL-L: the day cycle.
 pub mod time_of_day;
 /// Phase CONTROL-N: weather and the wetness it leaves.
@@ -834,6 +852,18 @@ pub struct FoliageComponent {
     /// Not a billboard — the dummy camera-facing quad was deleted. `0` keeps
     /// every remaining part.
     pub impostor_distance: f32,
+    /// Imported hierarchies only: nearer than this **horizontal** distance the
+    /// hierarchy is not drawn. The far half of a two-model LOD pair (a light
+    /// tree whose near twin is cut at the same distance). `0` draws from the
+    /// camera outward, which is every foliage authored before this existed.
+    pub near_distance: f32,
+    /// Imported hierarchies only, with a `near_distance`: nearer than it, this
+    /// (far, light) half is still submitted *shadow-only*, so a two-model LOD
+    /// pair casts its shadow from the light model everywhere and the heavy near
+    /// half can stop casting (give it a tiny `foliage_shadow_distance`). A tree
+    /// shadow is a soft shape on the ground; a quarter of the triangles draws
+    /// the same shape. Off for everything authored before it existed.
+    pub shadow_proxy: bool,
     /// Ceiling on instances, enforced by coarsening the scatter grid.
     pub max_instances: u32,
 }
@@ -861,6 +891,8 @@ impl Default for FoliageComponent {
             foliage_shadow_distance: 40.0,
             lod_distance: 45.0,
             impostor_distance: 90.0,
+            near_distance: 0.0,
+            shadow_proxy: false,
             max_instances: 18_000,
         }
     }
@@ -1078,6 +1110,10 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
+    /// Optional peripheral dream lens: 0 off, 1 heat drift, 2 echo, 3 shear.
+    pub dream_mode: u32,
+    pub dream_strength: f32,
+    pub dream_speed: f32,
     /// CONTROL-K: authored tone response, applied per channel after the fixed
     /// grade. An empty curve — the default — leaves grading exactly as Phase
     /// 24Y left it, so this field costs nothing until somebody uses it.
@@ -1153,6 +1189,10 @@ pub struct PostProcessComponent {
     pub motion_blur_shutter: f32,
     /// Strength of the traced indirect diffuse (Phase 24L).
     pub restir_gi_intensity: f32,
+    /// Metres a traced indirect bounce ray may travel. A bounce from farther
+    /// than this is left to the sky and probes; in a dense wood most of a
+    /// 200 m ray is spent walking canopy the fog hides anyway.
+    pub restir_gi_distance: f32,
     /// Froxel volumetrics: aerial perspective and fog (Phases 24U, 25I).
     ///
     /// Covers the whole volume. Aerial perspective is not separately optional —
@@ -1245,6 +1285,10 @@ pub struct PostProcessComponent {
     pub analytic_grad: bool,
     /// Light-shaft shadow contrast. 0 is neutral; 1 (or greater) is full.
     pub shaft_intensity: f32,
+    /// How far the sun's shadow map also hides skylight from the fog, 0..=1.
+    /// 0 (default) lights fog with the whole sky everywhere; toward 1, fog
+    /// under roofs and dense canopy loses its skylit glow.
+    pub fog_sky_occlusion: f32,
     /// FSR RCAS sharpness, 0..=1. Default 0.8.
     pub fsr_sharpness: f32,
 }
@@ -1306,6 +1350,9 @@ impl Default for PostProcessComponent {
             lift: 0.0,
             gamma: 1.0,
             grain: 0.0,
+            dream_mode: 0,
+            dream_strength: 0.0,
+            dream_speed: 1.0,
             response_curve: somnium_ecs::curve::Curve::empty(),
             // Deterministic audit switch; the editor checkbox remains the
             // runtime source of truth after startup.
@@ -1337,6 +1384,7 @@ impl Default for PostProcessComponent {
             motion_blur_enabled: std::env::var("SOMNIUM_MOTION_BLUR").as_deref() == Ok("1"),
             motion_blur_shutter: 0.5,
             restir_gi_intensity: 1.0,
+            restir_gi_distance: 200.0,
             volumetrics_enabled: std::env::var("SOMNIUM_VOLUMETRICS").as_deref() != Ok("0"),
             light_shafts: std::env::var("SOMNIUM_LIGHT_SHAFTS").as_deref() != Ok("0"),
             fog_density: 0.0002,
@@ -1391,6 +1439,7 @@ impl Default for PostProcessComponent {
             ddgi_hysteresis: 0.95,
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
+            fog_sky_occlusion: 0.0,
             aa,
             smaa_preset,
             // Off unless asked for. `SOMNIUM_OIT=1` is the A/B route; the
@@ -2078,272 +2127,174 @@ impl somnium_ecs::Component for WorldTransform {}
 
 // ─── Phase 11.5A-2: Transform Propagation System ──────────────────────────
 
+/// Durable origin of an imported mesh node. GPU offsets are rebuilt on load.
+#[derive(Clone, Debug, Default)]
+pub struct ImportedMesh {
+    /// Path relative to the project root, or absolute for projectless editors.
+    pub source: String,
+    /// Ordinal in the source's uploaded mesh-node list.
+    pub node: u32,
+}
+impl somnium_ecs::Component for ImportedMesh {}
+
 /// Propagates parent-child transform hierarchies, writing `WorldTransform` for
 /// every entity that has a `Transform` component.
 ///
 /// Run this in `on_update` after physics sync and before rendering. Entities
 /// without a `Parent` component are treated as roots (parent = identity).
 ///
-/// **Requires:** All spawned entities must include a `WorldTransform::identity()`
-/// component so the propagation system can write to them.
+/// Missing derived `WorldTransform` components are created, including after
+/// loading a scene that only stores local transforms.
 ///
 /// Algorithm: BFS starting from root entities (Transform + no Parent). For each
 /// root, `world_mat = Transform::to_matrix()`. For each child, `child_world =
 /// parent_world * local_transform.to_matrix()`.
+///
+/// TOWN-PERF: this ran several times a frame over every entity (2 ms at
+/// Town's ~10k), rebuilding a hash map of children each time, in scenes
+/// where almost nothing moves. The BFS order is now cached with the world
+/// and rebuilt only when the hierarchy changes (entities or `Parent`s), and
+/// the whole pass is skipped when no `Transform`, `Parent` or `WorldTransform`
+/// was written since it last ran.
 pub fn propagate_transforms(world: &mut World) {
     use somnium_ecs::ComponentId;
 
-    let t_id = ComponentId::of::<Transform>();
-
-    // Phase 1 — collect all entities with Transform, regardless of Parent
-    // component, then determine roots by checking Parent contents at runtime.
-    // This correctly handles `Parent { entity: DANGLING }` as a root.
-    let t_req = ComponentSet::from_ids(vec![t_id]);
-    let mut all_entities: Vec<(Entity, glam::Mat4)> = Vec::new();
-    for arch in world.query_archetypes(&t_req, &ComponentSet::empty()) {
-        let t_col = arch.column_index(t_id).unwrap();
-        for row in 0..arch.len() {
-            let entity = arch.entities()[row];
-            let t = unsafe { arch.column(t_col).get::<Transform>(row) };
-            all_entities.push((entity, t.to_matrix()));
-        }
+    let watched = [
+        ComponentId::of::<Transform>(),
+        ComponentId::of::<Parent>(),
+        ComponentId::of::<WorldTransform>(),
+    ];
+    let mut cache: TransformOrder = world.take_cache();
+    if cache.settled == Some(world.change_signature(&watched)) {
+        world.put_cache(cache);
+        return;
+    }
+    let hierarchy = world.change_signature(&[ComponentId::of::<Parent>()]);
+    if cache.hierarchy != Some(hierarchy) {
+        cache.rebuild(world);
+        cache.hierarchy = Some(hierarchy);
     }
 
-    // Phase 1b — seed the BFS stack with roots:
-    // root = no Parent component, OR Parent.entity is DANGLING, OR parent is dead.
-    let mut stack: Vec<(Entity, glam::Mat4)> = Vec::new();
-    for &(entity, local_mat) in &all_entities {
-        let is_root = match world.get::<Parent>(entity) {
-            None => true,
-            Some(p) => p.entity == Entity::DANGLING || !world.is_alive(p.entity),
+    cache.world.clear();
+    cache.world.reserve(cache.order.len());
+    for &(entity, parent) in &cache.order {
+        let local = world
+            .get::<Transform>(entity)
+            .map_or(glam::Mat4::IDENTITY, Transform::to_matrix);
+        let matrix = match cache.world.get(parent as usize) {
+            Some(parent_world) => *parent_world * local,
+            None => local,
         };
-        if is_root {
-            stack.push((entity, local_mat));
+        cache.world.push(matrix);
+    }
+    for (&(entity, _), &matrix) in cache.order.iter().zip(&cache.world) {
+        if let Some(wt) = world.get_mut::<WorldTransform>(entity) {
+            wt.0 = matrix;
+        } else {
+            let _ = world.insert_component(entity, WorldTransform(matrix));
         }
     }
+    // Taken after the writes above, which are this pass's own.
+    cache.settled = Some(world.change_signature(&watched));
+    world.put_cache(cache);
+}
 
-    // Phase 1c — BFS: accumulate world matrices for all children.
-    let mut i = 0;
-    while i < stack.len() {
-        let (entity, world_mat) = stack[i];
-        i += 1;
-        if let Some(children) = world.get::<Children>(entity) {
-            let children_copy = *children;
-            for &child in children_copy.as_slice() {
-                if world.is_alive(child) {
-                    if let Some(local_t) = world.get::<Transform>(child) {
-                        stack.push((child, world_mat * local_t.to_matrix()));
-                    }
+/// `propagate_transforms`' per-world state: parents before children, each
+/// with its parent's position in the order (`u32::MAX` for a root).
+#[derive(Default)]
+struct TransformOrder {
+    order: Vec<(Entity, u32)>,
+    world: Vec<glam::Mat4>,
+    hierarchy: Option<u64>,
+    settled: Option<u64>,
+}
+
+impl TransformOrder {
+    /// Roots are entities with a `Transform` and no live parent (no `Parent`,
+    /// `Parent { entity: DANGLING }`, or a dead one). Children are found
+    /// through `Parent`, which is authored; `Children` is an editor cache.
+    /// A child whose parent has no `Transform`, or that sits in a cycle, is
+    /// never reached, exactly as before.
+    fn rebuild(&mut self, world: &World) {
+        let transformed: Vec<Entity> = world.entities_with::<Transform>().collect();
+        let mut children = std::collections::HashMap::<Entity, Vec<Entity>>::new();
+        self.order.clear();
+        for &entity in &transformed {
+            match world.get::<Parent>(entity) {
+                Some(p) if p.entity != Entity::DANGLING && world.is_alive(p.entity) => {
+                    children.entry(p.entity).or_default().push(entity);
                 }
+                _ => self.order.push((entity, u32::MAX)),
             }
         }
-    }
-
-    // Phase 2 — write WorldTransform. All immutable borrows from phase 1 are
-    // released here; &mut self borrows are safe.
-    for (entity, world_mat) in stack {
-        let _ = world
-            .get_mut::<WorldTransform>(entity)
-            .map(|wt| wt.0 = world_mat);
-    }
-}
-
-// ─── Phase 11.5J: GPU Particle System ────────────────────────────────────────
-
-/// Per-particle runtime state (CPU-side).
-#[derive(Debug, Clone, Copy)]
-pub struct ParticleState {
-    /// World-space position.
-    pub position: glam::Vec3,
-    /// World-space velocity (m/s).
-    pub velocity: glam::Vec3,
-    /// Current age in seconds (0 = just born).
-    pub age: f32,
-    /// Total lifetime in seconds.
-    pub lifetime: f32,
-}
-
-/// ECS component that drives a GPU particle emitter.
-///
-/// Add this component to an entity together with `Transform` and `WorldTransform`.
-/// The engine simulates particles each frame and uploads the results to the
-/// `ParticlePass` for instanced billboard rendering.
-#[derive(Debug, Clone)]
-pub struct ParticleEmitter {
-    // ── Emitter parameters ────────────────────────────────────────────────────
-    /// Maximum number of live particles at once.
-    pub max_particles: u32,
-    /// New particles spawned per second.
-    pub spawn_rate: f32,
-    /// Each particle's lifetime in seconds.
-    pub lifetime: f32,
-    /// Initial speed in m/s (direction is randomized within `spread_angle`).
-    pub initial_speed: f32,
-    /// Cone half-angle (radians) for direction randomization (0 = straight up).
-    pub spread_angle: f32,
-    /// Particle size at birth (metres, billboard half-width).
-    pub size_start: f32,
-    /// Particle size at end of life.
-    pub size_end: f32,
-    /// CONTROL-K: linear RGBA over the particle's life, `0` at birth and `1`
-    /// at death.
-    ///
-    /// Replaces the `color_start`/`color_end` pair, which could express a
-    /// straight line between two colours and nothing else — no flash, no
-    /// fade-in-then-out, no hold. A two-stop ramp reproduces the old pair
-    /// exactly, so the default is that pair.
-    pub color_over_life: somnium_ecs::curve::Gradient,
-    /// Downward gravity acceleration (m/s²).
-    pub gravity: f32,
-    /// Phase CONTROL-N: a constant velocity added to every particle at birth.
-    ///
-    /// The cone spawn is right for a fountain and useless for rain, which
-    /// falls in one direction and is *sheared* by wind. One vector turns the
-    /// same emitter into both, which is the plan's "precipitation through the
-    /// existing particle emitter" rather than a second particle system.
-    pub velocity_bias: [f32; 3],
-    /// Phase CONTROL-N: half-extents of a box particles spawn in, around the
-    /// emitter's origin.
-    ///
-    /// Zero is the point emitter every existing scene has. Non-zero makes the
-    /// emitter a volume, which is what rain needs: a camera-anchored box
-    /// overhead, so precipitation exists where the player is and nowhere else.
-    pub spawn_extents: [f32; 3],
-
-    // ── Runtime state (not user-facing) ──────────────────────────────────────
-    /// Live particles owned by this emitter.
-    pub particles: Vec<ParticleState>,
-    /// Fractional carry-over for sub-frame spawning.
-    pub spawn_accum: f32,
-}
-
-impl Default for ParticleEmitter {
-    fn default() -> Self {
-        Self {
-            max_particles: 1000,
-            spawn_rate: 100.0,
-            lifetime: 3.0,
-            initial_speed: 5.0,
-            spread_angle: 0.8,
-            size_start: 1.0,
-            size_end: 0.2,
-            color_over_life: somnium_ecs::curve::Gradient::ramp(
-                [1.0, 0.4, 0.1, 1.0],
-                [0.2, 0.0, 0.0, 0.0],
-            ),
-            velocity_bias: [0.0; 3],
-            spawn_extents: [0.0; 3],
-            gravity: 1.0,
-            particles: Vec::new(),
-            spawn_accum: 0.0,
+        let mut i = 0;
+        while i < self.order.len() {
+            let (entity, _) = self.order[i];
+            if let Some(kids) = children.get(&entity) {
+                let at = u32::try_from(i).unwrap_or(u32::MAX);
+                self.order.extend(kids.iter().map(|&child| (child, at)));
+            }
+            i += 1;
         }
     }
 }
-impl somnium_ecs::Component for ParticleEmitter {}
 
-/// Simulate all particle emitters and return a flat list of GPU instances.
-///
-/// Call each frame in `about_to_wait` after physics and before `render()`.
-/// `seed` increments each frame (used for deterministic pseudo-random spawn direction).
-pub fn simulate_particles(
-    world: &mut somnium_ecs::World,
-    dt: f32,
-    frame: u64,
-) -> Vec<somnium_renderer::pass::particle::GpuParticle> {
-    use somnium_renderer::pass::particle::GpuParticle;
+#[cfg(test)]
+mod propagate_tests {
+    use super::*;
+    use glam::Vec3;
 
-    let mut gpu_particles = Vec::new();
-
-    let emitter_entities: Vec<somnium_ecs::Entity> = world
-        .entities()
-        .filter(|e| world.get::<ParticleEmitter>(*e).is_some())
-        .collect();
-
-    for entity in emitter_entities {
-        // Borrow world piecemeal to satisfy the borrow checker.
-        let origin = world
-            .get::<WorldTransform>(entity)
-            .map(|wt| glam::Vec3::new(wt.0.w_axis.x, wt.0.w_axis.y, wt.0.w_axis.z))
-            .or_else(|| world.get::<Transform>(entity).map(|t| t.translation))
-            .unwrap_or(glam::Vec3::ZERO);
-
-        let Some(emitter) = world.get_mut::<ParticleEmitter>(entity) else {
-            continue;
-        };
-
-        // ── 1. Advance existing particles ─────────────────────────────────────
-        let gravity = emitter.gravity;
-        emitter.particles.retain_mut(|p| {
-            p.age += dt;
-            p.velocity.y -= gravity * dt;
-            p.position += p.velocity * dt;
-            p.age < p.lifetime
-        });
-
-        // ── 2. Spawn new particles ────────────────────────────────────────────
-        emitter.spawn_accum += emitter.spawn_rate * dt;
-        let to_spawn = emitter.spawn_accum.floor() as u32;
-        emitter.spawn_accum -= to_spawn as f32;
-        let available = emitter
-            .max_particles
-            .saturating_sub(emitter.particles.len() as u32);
-        let count = to_spawn.min(available);
-
-        let speed = emitter.initial_speed;
-        let spread = emitter.spread_angle;
-        let lifetime = emitter.lifetime;
-
-        for i in 0..count {
-            // Deterministic LCG pseudo-random — good enough for particles.
-            let seed = frame
-                .wrapping_mul(1_000_003)
-                .wrapping_add((i as u64).wrapping_mul(6_364_136_223_846_793_005));
-            let r1 = ((seed >> 33) & 0xFFFF) as f32 / 65535.0; // 0..1
-            let r2 = ((seed >> 17) & 0xFFFF) as f32 / 65535.0 * 2.0 * std::f32::consts::PI;
-            let theta = r1 * spread;
-            let dir = glam::Vec3::new(theta.sin() * r2.cos(), theta.cos(), theta.sin() * r2.sin());
-            // CONTROL-N: a spawn volume and a constant velocity, both zero for
-            // every emitter authored before this existed.
-            let extents = glam::Vec3::from(emitter.spawn_extents);
-            let jitter = if extents == glam::Vec3::ZERO {
-                glam::Vec3::ZERO
-            } else {
-                let r3 = ((seed >> 5) & 0xFFFF) as f32 / 65535.0;
-                let r4 = ((seed >> 41) & 0xFFFF) as f32 / 65535.0;
-                let r5 = ((seed >> 23) & 0xFFFF) as f32 / 65535.0;
-                (glam::Vec3::new(r3, r4, r5) * 2.0 - glam::Vec3::ONE) * extents
-            };
-            emitter.particles.push(ParticleState {
-                position: origin + jitter,
-                velocity: dir * speed + glam::Vec3::from(emitter.velocity_bias),
-                age: 0.0,
-                lifetime,
-            });
-        }
-
-        // ── 3. Emit GPU instances ─────────────────────────────────────────────
-        let size_start = emitter.size_start;
-        let size_end = emitter.size_end;
-        // CONTROL-K: the ramp is sampled per particle rather than baked into a
-        // table, because an emitter's particle count is the small number here
-        // and a table would need invalidating whenever the ramp was edited —
-        // which is every frame of a drag.
-        let ramp = &emitter.color_over_life;
-
-        for p in &emitter.particles {
-            let frac = (p.age / p.lifetime).clamp(0.0, 1.0);
-            let size = size_start + (size_end - size_start) * frac;
-            let color = ramp.evaluate(frac);
-            gpu_particles.push(GpuParticle {
-                position: p.position.to_array(),
-                size,
-                color,
-            });
-        }
+    fn at(world: &World, e: Entity) -> Vec3 {
+        world
+            .get::<WorldTransform>(e)
+            .unwrap()
+            .0
+            .transform_point3(Vec3::ZERO)
     }
 
-    gpu_particles
+    #[test]
+    fn cached_order_follows_moves_reparenting_and_dead_parents() {
+        let mut world = World::new();
+        let root = world.spawn((Transform::from_translation(Vec3::X),));
+        let child = world.spawn((
+            Transform::from_translation(Vec3::Y),
+            Parent { entity: root },
+        ));
+        let grandchild = world.spawn((
+            Transform::from_translation(Vec3::Z),
+            Parent { entity: child },
+        ));
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(1.0, 1.0, 1.0));
+
+        // Nothing written: the pass is skipped and results stand.
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(1.0, 1.0, 1.0));
+
+        // A local move reaches the whole subtree.
+        world.get_mut::<Transform>(root).unwrap().translation = Vec3::new(5.0, 0.0, 0.0);
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(5.0, 1.0, 1.0));
+
+        // Reparenting rebuilds the order.
+        world.get_mut::<Parent>(grandchild).unwrap().entity = root;
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, grandchild), Vec3::new(5.0, 0.0, 1.0));
+
+        // A dead parent makes its child a root.
+        world.despawn(root);
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, child), Vec3::Y);
+
+        // A direct write to WorldTransform is corrected, as before caching.
+        world.get_mut::<WorldTransform>(child).unwrap().0 = glam::Mat4::IDENTITY;
+        propagate_transforms(&mut world);
+        assert_eq!(at(&world, child), Vec3::Y);
+    }
 }
+
+mod particle;
+pub use particle::{ParticleEmitter, ParticleState, simulate_particles};
 
 // ── Water Component ─────────────────────────────────────────────────────────
 
@@ -2378,6 +2329,7 @@ pub enum WaterBodyKind {
 }
 
 impl WaterBodyKind {
+    /// Decode persisted water kind, retaining Lake as the compatibility default.
     #[must_use]
     pub fn from_u32(raw: u32) -> Self {
         match raw {
@@ -2388,6 +2340,7 @@ impl WaterBodyKind {
         }
     }
 
+    /// Designer-facing water kind name.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -2814,3 +2767,8 @@ mod camera_speed_tests {
 #[derive(Clone, Copy)]
 pub(crate) struct AssetEditSession;
 impl somnium_ecs::Component for AssetEditSession {}
+
+/// Native animation preview controls, visible rigs and runtime clip binding.
+pub mod animation_authoring;
+
+mod prefab_details;

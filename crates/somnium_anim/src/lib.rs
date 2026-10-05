@@ -33,8 +33,14 @@
 
 use glam::{Mat4, Quat, Vec3};
 
+mod compression;
+mod motion;
+mod procedural;
 mod runtime;
 
+pub use compression::*;
+pub use motion::*;
+pub use procedural::*;
 pub use runtime::*;
 
 /// A joint's local transform. Separate components rather than a matrix, because
@@ -469,3 +475,6 @@ mod tests;
 
 #[cfg(test)]
 mod runtime_tests;
+
+#[cfg(test)]
+mod morrowind_tests;

@@ -38,7 +38,7 @@ use crate::{
     AudioEmitterComponent, CameraSettingsComponent, EditorFlags, FoliageComponent, LightComponent,
     LightType, MaterialComponent, MeshComponent, MeshKind, Name, Parent, PostProcessComponent,
     TerrainComponent, Transform, UiCanvasComponent, VoxelTerrainComponent, WaterComponent,
-    WorldPartitionComponent, WorldTransform, look_rotation_neg_z, simulate_particles,
+    WorldPartitionComponent, WorldTransform, look_rotation_neg_z,
 };
 use somnium_ecs::{Entity, World};
 use somnium_renderer::terrain::brush::{BrushMode, TerrainBrush, apply_paint, apply_sculpt};
@@ -53,7 +53,7 @@ fn normalize_post_process_singleton(
     selected_entity: &mut Option<somnium_ecs::Entity>,
 ) {
     let entities: Vec<_> = world
-        .entities()
+        .entities_with::<PostProcessComponent>()
         .filter(|entity| world.get::<PostProcessComponent>(*entity).is_some())
         .collect();
     if entities.is_empty() {
@@ -442,8 +442,21 @@ struct TerrainStroke {
 
 /// Trait to be implemented by the user's game.
 pub trait GameApp {
+    /// Read-only game diagnostics for the authoring host. Game-specific state
+    /// stays in the private game; the engine transports the returned document.
+    fn authoring_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Register game components, documents and presets before engine initialization.
+    fn register_authoring(&mut self, _registration: &mut crate::authoring::GameRegistration) {}
+
     /// Called once when the engine starts.
     fn on_init(&mut self, _ctx: &mut EngineContext) {}
+
+    /// A scene has successfully replaced the authored world. Games can update
+    /// checkpoint identity and discard their previous scene's runtime state.
+    fn on_scene_loaded(&mut self, _ctx: &mut EngineContext, _path: &std::path::Path) {}
 
     /// Called for every window event.
     fn on_event(&mut self, _ctx: &mut EngineContext, _event: &EngineEvent) {}
@@ -562,7 +575,9 @@ enum LifecycleState {
 /// true the moment TSUSHIMA-I added a fifth.
 #[derive(Clone, Copy)]
 pub struct FoliageEntry {
+    /// Label in the foliage palette.
     pub name: &'static str,
+    /// Source mesh path relative to project content.
     pub path: &'static str,
     /// One instance per click, at the cursor, ignoring density.
     pub single: bool,
@@ -571,6 +586,7 @@ pub struct FoliageEntry {
     /// Terrain layer this entry wants underneath it. `min_layer_weight` of 0
     /// means the entry does not care and the test is skipped entirely.
     pub layer: u8,
+    /// Minimum terrain-layer contribution required for placement.
     pub min_layer_weight: f32,
     /// Largest lean from vertical, degrees. Zero for anything that grew.
     pub max_tilt_deg: f32,
@@ -578,7 +594,9 @@ pub struct FoliageEntry {
     /// the whole reason this is per-entry: the brush's 40° default is right for
     /// grass and refuses to put a rock wall anywhere a rock wall belongs.
     pub max_slope_deg: f32,
+    /// Lower uniform scale bound for deterministic placement.
     pub scale_min: f32,
+    /// Upper uniform scale bound for deterministic placement.
     pub scale_max: f32,
 }
 
@@ -666,9 +684,9 @@ impl FoliageEntry {
 /// The foliage palette: what the brush can paint (Phase 17F, extended by
 /// TSUSHIMA-I).
 ///
-/// Fixed for now. Once there is a content drawer this becomes whatever the
-/// project has imported, which is why the brush stores a palette *index* rather
-/// than anything about the mesh itself.
+/// Legacy built-in kinds retain their saved indices. A project's
+/// `foliage.palette.json` extends the picker with explicit stable IDs 128..255
+/// and authored source/primitive selections; see `foliage_palette` for its schema.
 ///
 /// All CC0 from Poly Haven — see ATTRIBUTION.md. `tools/fetch_foliage.sh`
 /// downloads every one of them and verifies it against the publisher's MD5;
@@ -950,6 +968,9 @@ struct MaterialDocument {
 }
 
 /// The central engine controller that manages the lifecycle and orchestration of all subsystems.
+/// TOWN-PERF: longest the outliner rows may lag a rename or reparent.
+const OUTLINER_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub struct Engine<G: GameApp> {
     game: Box<G>,
     config: EngineConfig,
@@ -961,18 +982,28 @@ pub struct Engine<G: GameApp> {
     /// reflection inspector — the whole point being that there is exactly
     /// one of these.
     type_registry: somnium_ecs::reflect::TypeRegistry,
+    authoring: Option<authoring_host::AuthoringHost>,
+    authoring_frame_timings: [f64; 6],
+    /// Logs when the CPU, not the GPU, is holding the frame rate down.
+    cpu_watchdog: crate::cpu_watchdog::CpuWatchdog,
     physics: Option<PhysicsWorld>,
     audio: Option<AudioEngine>,
     audio_scene: crate::audio_scene::AudioScene,
     window: Option<Arc<Window>>,
     render_ctx: Option<RenderContext>,
     renderer: Option<SomniumRenderer>,
+    /// Uploaded source nodes survive scene changes, never renderer recreation.
+    imported_uploads: import_cache::ImportedUploadCache,
     ui_manager: Option<UiManager>,
     /// MORROWIND-I. The platform screen-reader adapter, attached to the window
     /// before it is shown. `None` in a headless run.
     a11y: Option<crate::a11y_bridge::A11yBridge>,
     /// Shared bounded workers for imports, inventory scans, bakes and previews.
     jobs: JobSystem,
+    navigation_editor: crate::ai::NavigationEditor,
+    animation_authoring: crate::animation_authoring::AnimationAuthoringSystem,
+    designer_saves: crate::save_game::editor::DesignerSaves,
+    animation_event_owner: Option<somnium_ecs::Entity>,
     /// MORROWIND-S production coordinator driven by the reflected component
     /// attached to a terrain entity.
     world_partition: Option<crate::world_partition::WorldPartition>,
@@ -1033,6 +1064,9 @@ pub struct Engine<G: GameApp> {
         somnium_asset::database::AssetId,
         JobHandle<somnium_asset::LoadedTexture>,
     >,
+    /// Avoid retrying a broken sprite every frame; changed sources retry immediately.
+    material_texture_failures:
+        std::collections::HashMap<somnium_asset::database::AssetId, (u64, u64, std::time::Instant)>,
     /// Entity edit sessions and their last observed reflected value. The actual
     /// editable value is the `MaterialAsset` component temporarily attached to
     /// the entity and therefore uses the normal generated Details undo path.
@@ -1048,6 +1082,7 @@ pub struct Engine<G: GameApp> {
             String,
             somnium_asset::LoadedScene,
             Vec<somnium_asset::database::AssetId>,
+            Option<import_cache::SourceStamp>,
         )>,
     >,
     import_spawn_at: [f32; 3],
@@ -1060,6 +1095,11 @@ pub struct Engine<G: GameApp> {
     /// selection means "the rows between these two", so the range has to be
     /// resolved against the order the user can actually see.
     outliner_order: Vec<somnium_ecs::entity::Entity>,
+    outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy,
+    /// TOWN-PERF: when the outliner rows were last gathered, and the entity
+    /// count and primary selection they were gathered for. See `OUTLINER_REFRESH`.
+    outliner_refreshed: Option<std::time::Instant>,
+    outliner_seen: (usize, Option<u32>),
     /// Seam 4: preferences, project settings, and which of them the
     /// environment has taken out of the author's hands.
     settings: crate::settings::SettingsStore,
@@ -1082,6 +1122,9 @@ pub struct Engine<G: GameApp> {
     pending_recovery: Option<crate::autosave::Recovery>,
     /// Most-recently-opened scenes, newest first.
     recent_scenes: Vec<std::path::PathBuf>,
+    /// The project's levels (`ProjectPaths::level_scenes`), listed in the File
+    /// menu ahead of recents so no level depends on having been opened lately.
+    level_scenes: Vec<std::path::PathBuf>,
     /// The entity clipboard. Values, never handles — see `clipboard.rs`.
     entity_clipboard: crate::clipboard::EntityClipboard,
     /// Pending "frame this" request for the game-owned editor camera:
@@ -1113,9 +1156,12 @@ pub struct Engine<G: GameApp> {
     /// Uploaded geometry per palette entry, filled in the first time each one
     /// is painted — loading four scanned models up front would add seconds to
     /// startup for meshes the user may never place.
-    foliage_meshes: [Option<Vec<FoliagePart>>; FOLIAGE_PALETTE.len()],
+    foliage_meshes: [Option<Vec<FoliagePart>>; 256],
+    foliage_lod_meshes: [Option<Vec<FoliagePart>>; 256],
     /// Palette entries whose import failed, so we stop retrying them.
-    foliage_failed: [bool; FOLIAGE_PALETTE.len()],
+    foliage_failed: [bool; 256],
+    project_foliage: std::collections::BTreeMap<u8, crate::foliage_palette::ProjectEntry>,
+    project_foliage_sources: std::collections::HashMap<std::path::PathBuf, Vec<FoliagePart>>,
     /// Phase 17F: the foliage brush.
     foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush,
     /// When true, dragging in the viewport paints foliage instead of sculpting.
@@ -1135,6 +1181,22 @@ pub struct Engine<G: GameApp> {
     /// One message per stroke. A brush dabs on every mouse-move, so a refusal
     /// reported per dab would bury the log the moment anyone dragged.
     foliage_refusal_reported: bool,
+    /// Vertex Paint mode: dragging on the selected mesh paints its masks.
+    pub vertex_paint_active: bool,
+    vertex_paint_brush: crate::vertex_paint::VertexPaintBrush,
+    /// Mask preview: 0 off, 1 all channels, 2..=5 one channel.
+    vertex_paint_preview: u32,
+    vertex_paint_sync: crate::vertex_paint::VertexPaintSync,
+    /// The painted entity's mesh, read back from the GPU when painting starts
+    /// on it, plus its world positions under the model they were taken at.
+    vertex_paint_mesh: Option<crate::vertex_paint::PaintMesh>,
+    vertex_paint_world: (glam::Mat4, Vec<glam::Vec3>),
+    /// The paint before the stroke in progress: one undo step per stroke.
+    vertex_paint_stroke: Option<(
+        somnium_ecs::Entity,
+        Option<crate::vertex_paint::VertexPaintComponent>,
+    )>,
+    vertex_paint_clipboard: Option<Vec<u32>>,
     /// Phase 17B: static heightfield body per terrain, with the terrain
     /// revision it was built from so it is only rebuilt after a real edit.
     terrain_colliders: std::collections::HashMap<u32, (u64, BodyId)>,
@@ -1168,6 +1230,7 @@ pub struct Engine<G: GameApp> {
     /// True from Play until Stop, including while a play session is paused.
     /// Editor-only overlays and authoring tools stay disabled for the session.
     play_session_active: bool,
+    play_cursor: play_input::PlayCursor,
     /// Carries fractional wall-clock time between 60 Hz physics steps.
     simulation_accumulator: f32,
     /// True after a mutating editor action until Save or New.
@@ -1509,7 +1572,7 @@ impl FloatingWindow {
 
 impl<G: GameApp + 'static> Engine<G> {
     /// Start the engine loop. This will take control of the current thread.
-    pub fn run(mut config: EngineConfig, game: G) -> Result<(), EngineError> {
+    pub fn run(mut config: EngineConfig, mut game: G) -> Result<(), EngineError> {
         // Phase 11.5M: install both the fmt layer and the log-capture layer.
         let (capture_layer, log_rx) = crate::log_capture::make_log_capture();
         {
@@ -1556,21 +1619,67 @@ impl<G: GameApp + 'static> Engine<G> {
         } else {
             config.content_root = resolved_root;
         }
+        let mut level_scenes = Vec::new();
+        if let Some(root) = &config.project_root {
+            let project =
+                crate::authoring::project::ProjectPaths::open(root).map_err(EngineError::Config)?;
+            project.create_directories().map_err(EngineError::Config)?;
+            config.content_root = project
+                .resolve(&project.manifest.content)
+                .map_err(EngineError::Config)?;
+            level_scenes = project.level_scenes();
+            config.project_root = Some(project.root);
+        }
+        let mut registration = crate::authoring::GameRegistration::default();
+        let project_foliage = crate::foliage_palette::load(&config).map_err(EngineError::Config)?;
+        game.register_authoring(&mut registration);
+        crate::authoring::registration::install(registration).map_err(EngineError::Config)?;
+        if config.player_mode && config.startup_scene.is_none() {
+            return Err(EngineError::Config(
+                "Player mode requires a startup scene".into(),
+            ));
+        }
+        if let Some(path) = &config.startup_scene {
+            // Reject incomplete schema content before opening a game window.
+            let (_, document) = crate::scene_file::read(path)
+                .map_err(|e| EngineError::Config(format!("Startup scene: {e}")))?;
+            let mut staging = World::new();
+            let report = crate::scene_schema::scene_from_json(
+                &mut staging,
+                &crate::reflect_registry::component_registry(),
+                &document,
+            )
+            .map_err(|e| EngineError::Config(format!("Startup scene: {e}")))?;
+            if !report.warnings.is_empty() {
+                return Err(EngineError::Config(format!(
+                    "Startup scene has {} unresolved component(s)",
+                    report.warnings.len(),
+                )));
+            }
+        }
         let mut engine = Self {
             game: Box::new(game),
             time: TimeState::new(config.target_fps),
             config,
             world: World::new(),
             type_registry: crate::reflect_registry::component_registry(),
+            authoring: None,
+            authoring_frame_timings: [0.0; 6],
+            cpu_watchdog: crate::cpu_watchdog::CpuWatchdog::default(),
             physics: None,
             audio: None,
             audio_scene: crate::audio_scene::AudioScene::default(),
             window: None,
             render_ctx: None,
             renderer: None,
+            imported_uploads: import_cache::ImportedUploadCache::default(),
             ui_manager: None,
             a11y: None,
             jobs: JobSystem::default(),
+            navigation_editor: crate::ai::NavigationEditor::default(),
+            animation_authoring: crate::animation_authoring::AnimationAuthoringSystem::default(),
+            designer_saves: crate::save_game::editor::DesignerSaves::default(),
+            animation_event_owner: None,
             world_partition: None,
             world_partition_cell_size: 0.0,
             world_partition_pin: None,
@@ -1591,12 +1700,16 @@ impl<G: GameApp + 'static> Engine<G> {
             material_runtime: std::collections::HashMap::new(),
             material_textures: std::collections::HashMap::new(),
             material_texture_jobs: std::collections::HashMap::new(),
+            material_texture_failures: std::collections::HashMap::new(),
             material_sessions: std::collections::HashMap::new(),
             import_job: None,
             import_spawn_at: [0.0; 3],
             external_import_job: None,
             selection: crate::selection::Selection::default(),
             outliner_order: Vec::new(),
+            outliner_hierarchy: crate::outliner_hierarchy::OutlinerHierarchy::default(),
+            outliner_refreshed: None,
+            outliner_seen: (0, None),
             settings: settings_store,
             camera_bookmarks: [None; 9],
             orbit_selection: false,
@@ -1605,6 +1718,7 @@ impl<G: GameApp + 'static> Engine<G> {
             autosave: crate::autosave::AutosaveClock::new(autosave_interval),
             pending_recovery: None,
             recent_scenes: crate::settings::load_recent_scenes(),
+            level_scenes,
             entity_clipboard: crate::clipboard::EntityClipboard::default(),
             camera_focus_request: None,
             state: LifecycleState::Uninitialized,
@@ -1615,7 +1729,10 @@ impl<G: GameApp + 'static> Engine<G> {
             gizmo_drag: None,
             marquee: None,
             foliage_meshes: std::array::from_fn(|_| None),
-            foliage_failed: [false; FOLIAGE_PALETTE.len()],
+            foliage_lod_meshes: std::array::from_fn(|_| None),
+            foliage_failed: [false; 256],
+            project_foliage,
+            project_foliage_sources: std::collections::HashMap::new(),
             foliage_brush: somnium_renderer::terrain::foliage_paint::FoliageBrush::default(),
             foliage_paint_active: false,
             foliage_erase: false,
@@ -1623,6 +1740,14 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_stroke_seed: 0,
             foliage_painting: false,
             foliage_refusal_reported: false,
+            vertex_paint_active: false,
+            vertex_paint_brush: crate::vertex_paint::VertexPaintBrush::default(),
+            vertex_paint_preview: 0,
+            vertex_paint_sync: crate::vertex_paint::VertexPaintSync::default(),
+            vertex_paint_mesh: None,
+            vertex_paint_world: (glam::Mat4::ZERO, Vec::new()),
+            vertex_paint_stroke: None,
+            vertex_paint_clipboard: None,
             terrain_colliders: std::collections::HashMap::new(),
             log_rx: Some(log_rx),
             shortcut_modifiers: somnium_ui::message::Modifiers::default(),
@@ -1641,6 +1766,7 @@ impl<G: GameApp + 'static> Engine<G> {
             simulation_clock: SimulationClock::default(),
             path_trace_previous_simulation_state: None,
             play_session_active: false,
+            play_cursor: play_input::PlayCursor::default(),
             simulation_accumulator: 0.0,
             scene_dirty: false,
             day_state: None,
@@ -1679,10 +1805,13 @@ impl<G: GameApp> Engine<G> {
             WorldPartition,
         };
 
-        let owner = self.world.entities().find(|entity| {
-            self.world.get::<TerrainComponent>(*entity).is_some()
-                && self.world.get::<WorldPartitionComponent>(*entity).is_some()
-        });
+        let owner = self
+            .world
+            .entities_with::<WorldPartitionComponent>()
+            .find(|entity| {
+                self.world.get::<TerrainComponent>(*entity).is_some()
+                    && self.world.get::<WorldPartitionComponent>(*entity).is_some()
+            });
         let Some(owner) = owner else {
             // Deleting/reloading the terrain must not strand streamed actors
             // in the ECS. Drain the coordinator before dropping it; empty
@@ -1875,18 +2004,37 @@ impl<G: GameApp> Engine<G> {
 
     /// Reconstruct every authored material reference after scene load, without
     /// requiring the entity to be selected first.
+    ///
+    /// Runs every frame, so it walks the world once: each asset resolves once
+    /// however many entities share it, and only stale bindings are written.
+    /// Resolving per referencing entity, each walking the whole world, cost
+    /// 70 ms a frame on Town (323 decals x 10,167 entities).
     fn sync_authored_material_components(&mut self) {
-        let assets: Vec<_> = self
+        let bound: Vec<_> = self
             .world
-            .entities()
-            .filter_map(|entity| self.world.get::<MaterialComponent>(entity))
-            .map(|material| material.asset)
-            .filter(|asset| *asset != somnium_asset::database::AssetId::NONE)
+            .entities_with::<MaterialComponent>()
+            .filter_map(|entity| Some((entity, *self.world.get::<MaterialComponent>(entity)?)))
+            .filter(|(_, material)| material.asset != somnium_asset::database::AssetId::NONE)
             .collect();
-        for asset in assets {
-            if self.load_material_document(asset) {
-                self.queue_material_textures(asset);
-                self.ensure_material_runtime(asset);
+        let mut runtime = std::collections::HashMap::new();
+        for (_, material) in &bound {
+            if runtime.contains_key(&material.asset) {
+                continue;
+            }
+            let id = if self.load_material_document(material.asset) {
+                self.queue_material_textures(material.asset);
+                self.resolve_material_runtime(material.asset)
+            } else {
+                None
+            };
+            runtime.insert(material.asset, id);
+        }
+        for (entity, material) in bound {
+            if let Some(Some(id)) = runtime.get(&material.asset).copied()
+                && id != material.runtime_id
+                && let Some(component) = self.world.get_mut::<MaterialComponent>(entity)
+            {
+                component.runtime_id = id;
             }
         }
     }
@@ -1947,6 +2095,18 @@ impl<G: GameApp> Engine<G> {
         };
         self.scripts
             .update(&mut self.world, time, &input, &mut services);
+    }
+
+    fn script_behavior_update(&mut self, dt: f32) {
+        let time = self.script_time(self.simulation_clock.fixed_delta_seconds, dt);
+        let input = self.script_input.snapshot();
+        let mut services = crate::script_host::HostServices {
+            physics: self.physics.as_mut(),
+            audio: self.audio.as_mut(),
+            ui: self.game.ui_documents(),
+        };
+        self.scripts
+            .tick_behaviors(&mut self.world, time, &input, &mut services);
     }
 
     /// Phase 16-E: recompile scripts whose file changed and settled.
@@ -2099,6 +2259,9 @@ impl<G: GameApp> Engine<G> {
     /// because the person has not saved anything and the title bar would be
     /// lying to them.
     fn write_autosave(&mut self, reason: crate::autosave::AutosaveReason) {
+        if self.config.player_mode {
+            return;
+        }
         let path = crate::autosave::autosave_path(&self.config.content_root, reason);
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
@@ -2117,6 +2280,20 @@ impl<G: GameApp> Engine<G> {
     }
 
     /// Per-frame autosave tick, and the interval setting tracking its control.
+    /// CPU profiler zones for the frame stages that had none, so a timing
+    /// run attributes the whole frame instead of leaving a remainder.
+    fn zone_begin(&mut self, name: &'static str) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_begin(name);
+        }
+    }
+
+    fn zone_end(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.profiler.cpu_end();
+        }
+    }
+
     fn tick_autosave(&mut self, dt: f32) {
         self.autosave
             .set_interval(self.settings.project().autosave_interval_s);
@@ -2131,6 +2308,9 @@ impl<G: GameApp> Engine<G> {
     /// opened with a file they have never seen is a worse failure than losing
     /// the autosave, and they are the only one who knows which they want.
     fn check_crash_recovery(&mut self) {
+        if self.config.player_mode {
+            return;
+        }
         let scene = std::path::PathBuf::from("scene.somnium");
         self.pending_recovery = crate::autosave::find_recovery(&self.config.content_root, &scene);
         if let Some(recovery) = &self.pending_recovery {
@@ -2175,6 +2355,10 @@ impl<G: GameApp> Engine<G> {
         };
         let kind = SceneKind::of(&document);
         let _ = header;
+        self.animation_authoring
+            .clear(&mut self.world, self.physics.as_mut());
+        self.navigation_editor.clear(&mut self.world);
+        self.animation_event_owner = None;
 
         // The renderer's scene-side state is torn down once, for every route,
         // so a half-loaded scene cannot inherit the previous one's colliders.
@@ -2225,8 +2409,9 @@ impl<G: GameApp> Engine<G> {
     fn load_schema_scene(&mut self, path: &str, document: &serde_json::Value) {
         if let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
             renderer.wait_gpu(render_ctx);
-            renderer.reset_scene_gpu();
+            renderer.reset_scene_gpu(render_ctx);
         }
+        self.release_outgoing_scene_gpu(document);
         for entity in self.world.entities().collect::<Vec<_>>() {
             self.world.despawn(entity);
         }
@@ -2261,6 +2446,94 @@ impl<G: GameApp> Engine<G> {
         self.after_scene_load(path);
     }
 
+    /// Where an `ImportedMesh.source` lives on disk, contained by the project.
+    fn imported_source_path(&self, source: &str) -> Result<std::path::PathBuf, String> {
+        let source_path = std::path::Path::new(source);
+        match self.config.project_root.as_ref() {
+            Some(root) => crate::authoring::project::ProjectPaths::open(root)
+                .and_then(|project| project.resolve(source_path)),
+            None => Ok(source_path.to_path_buf()),
+        }
+    }
+
+    /// Hand the outgoing scene's GPU uploads back before `incoming` arrives.
+    ///
+    /// Nothing used to be released: every level opened in a session stayed in
+    /// the geometry pool, the bindless table and BLAS memory. Gardens then
+    /// Road filled the 256 MB vertex pool, so interiors opened next lost every
+    /// mesh ("Mesh skipped" — populated outliner, empty viewport), and Town's
+    /// ~880 images after any other level exhausted the texture table (panic).
+    ///
+    /// Imported sources the incoming scene also uses stay resident and are
+    /// reused; the rest, the old entities' own uploads (primitives, blockouts)
+    /// and the foliage palette are released. Foliage re-uploads lazily for the
+    /// kinds the next terrain actually paints. Runs with the GPU idle.
+    fn release_outgoing_scene_gpu(&mut self, incoming: &serde_json::Value) {
+        let keep: std::collections::HashSet<std::path::PathBuf> = incoming
+            .get("entities")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entity| {
+                entity
+                    .pointer("/components/somnium.ImportedMesh/fields/source")?
+                    .as_str()
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|source| self.imported_source_path(source).ok()?.canonicalize().ok())
+            .collect();
+        let released = self.imported_uploads.retain_sources(&keep);
+        let retained = self.imported_uploads.vertex_offsets();
+
+        // A skipped upload reports offset 0 with no indices; offset 0 is a
+        // real mesh, so only allocations that drew something are released.
+        let mut meshes: std::collections::BTreeSet<u32> = released
+            .iter()
+            .filter(|node| node.index_count > 0)
+            .map(|node| node.vertex_offset)
+            .collect();
+        let mut materials: std::collections::BTreeSet<u32> =
+            released.iter().map(|node| node.material_id).collect();
+        for entity in self.world.entities() {
+            if let Some(mesh) = self.world.get::<MeshComponent>(entity)
+                && mesh.index_count > 0
+                && !retained.contains(&mesh.vertex_offset)
+            {
+                meshes.insert(mesh.vertex_offset);
+            }
+        }
+        let foliage = self
+            .project_foliage_sources
+            .drain()
+            .flat_map(|(_, parts)| parts)
+            .chain(self.foliage_meshes.iter_mut().filter_map(Option::take).flatten())
+            .chain(self.foliage_lod_meshes.iter_mut().filter_map(Option::take).flatten())
+            .collect::<Vec<_>>();
+        self.foliage_failed = [false; 256];
+        for part in foliage {
+            if part.index_count > 0 && !retained.contains(&part.vertex_offset) {
+                meshes.insert(part.vertex_offset);
+            }
+            materials.insert(part.material_id);
+        }
+
+        let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) else {
+            return;
+        };
+        let (meshes, textures) = renderer.release_uploads(ctx, meshes, materials);
+        let (vertex_bytes, index_bytes) = renderer.geometry.live_bytes();
+        info!(
+            meshes,
+            textures,
+            kept_sources = keep.len(),
+            live_textures = renderer.texture_pool.live_count(),
+            vertex_mib = vertex_bytes / 1_048_576,
+            index_mib = index_bytes / 1_048_576,
+            "Released outgoing scene uploads"
+        );
+    }
+
     /// Re-upload the GPU state a schema scene does not carry.
     fn reconstruct_scene_gpu(&mut self, path: &str) {
         // ── primitives ──────────────────────────────────────────────────────
@@ -2285,10 +2558,31 @@ impl<G: GameApp> Engine<G> {
                     MeshKind::Sphere => somnium_asset::generate_sphere(0.5, 16, 16),
                     MeshKind::Cylinder => somnium_asset::generate_cylinder(0.5, 1.0, 16),
                 };
-                let material = self
-                    .world
-                    .get::<MaterialComponent>(entity)
-                    .map_or(0, |material| material.runtime_id);
+                let binding = self.world.get::<MaterialComponent>(entity).copied();
+                let material = match binding {
+                    Some(material)
+                        if material.runtime_id != 0
+                            || material.asset != somnium_asset::database::AssetId::NONE =>
+                    {
+                        material.runtime_id
+                    }
+                    _ => *self.default_material_id.get_or_insert_with(|| {
+                        renderer.materials_pool.add_material(
+                            &render_ctx.queue,
+                            somnium_renderer::material::pool::GpuMaterial::from_asset(
+                                &somnium_asset::material::MaterialAsset::default(),
+                                |_| -1,
+                            ),
+                        )
+                    }),
+                };
+                let _ = self.world.insert_component(
+                    entity,
+                    MaterialComponent {
+                        asset: binding.map_or(somnium_asset::database::AssetId::NONE, |m| m.asset),
+                        runtime_id: material,
+                    },
+                );
                 let alloc =
                     renderer
                         .geometry
@@ -2306,30 +2600,164 @@ impl<G: GameApp> Engine<G> {
             }
         }
 
+        // Imported nodes retain a durable source instead of saving GPU offsets.
+        let mut imported = std::collections::BTreeMap::<String, Vec<(Entity, u32)>>::new();
+        for entity in self.world.entities() {
+            if let Some(source) = self.world.get::<crate::ImportedMesh>(entity) {
+                imported
+                    .entry(source.source.clone())
+                    .or_default()
+                    .push((entity, source.node));
+            }
+        }
+        for (source, entities) in imported {
+            let resolved = match self.imported_source_path(&source) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(%error,%source,"Imported mesh path rejected");
+                    continue;
+                }
+            };
+            let stamp = import_cache::SourceStamp::read(&resolved);
+            let cached = stamp
+                .as_ref()
+                .and_then(|stamp| self.imported_uploads.get(stamp));
+            if let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+                let uploaded = if let Some(nodes) = cached {
+                    nodes
+                } else {
+                    let scene = match somnium_asset::load_gltf(&resolved) {
+                        Ok(scene) => scene,
+                        Err(error) => {
+                            warn!(%error,%source,"Imported mesh could not be restored");
+                            continue;
+                        }
+                    };
+                    let nodes = renderer.upload_scene(ctx, &scene);
+                    if let Some(stamp) = stamp {
+                        self.imported_uploads.insert(stamp, &nodes);
+                    }
+                    nodes
+                };
+                for (entity, ordinal) in entities {
+                    if let Some(node) = uploaded.get(ordinal as usize) {
+                        let _ = self.world.insert_component(
+                            entity,
+                            MeshComponent {
+                                vertex_offset: node.vertex_offset,
+                                index_offset: node.index_offset,
+                                index_count: node.index_count,
+                            },
+                        );
+                        if let Some(material) = self.world.get_mut::<MaterialComponent>(entity) {
+                            material.runtime_id = node.material_id;
+                        }
+                    } else {
+                        warn!(%source,ordinal,"Imported mesh node no longer exists");
+                    }
+                }
+            }
+        }
+
         // ── terrain sidecars ────────────────────────────────────────────────
         // Heightmaps and splatmaps are megabytes of painted data and live
         // beside the scene rather than inside it. Each is named after the
         // scene, so moving a scene moves its terrain with it.
-        let terrains: Vec<_> = self
+        let mut terrains: Vec<_> = self
             .world
             .entities()
-            .filter_map(|entity| self.world.get::<TerrainComponent>(entity).copied())
+            .filter_map(|entity| {
+                self.world
+                    .get::<TerrainComponent>(entity)
+                    .copied()
+                    .map(|component| (entity, component))
+            })
             .collect();
-        for component in terrains {
-            let sidecar = format!("{path}.terrain{}.bin", component.terrain_id);
-            if !std::path::Path::new(&sidecar).exists() {
-                continue;
-            }
-            let Some(renderer) = self.renderer.as_mut() else {
+        // Serialized ids name sidecars; fresh renderer ids depend on allocation
+        // order. Remap both terrain entities and terrain-linked water.
+        terrains.sort_by_key(|(_, component)| component.terrain_id);
+        let mut terrain_ids = std::collections::HashMap::new();
+        let asset_dir = self.config.content_root.join("terrain");
+        for (entity, component) in terrains {
+            let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) else {
                 break;
             };
-            let Some(terrain) = renderer.terrain_mut(component.terrain_id) else {
-                warn!(sidecar, "no renderer terrain to restore into");
-                continue;
+            let runtime_id = if let Some(&id) = terrain_ids.get(&component.terrain_id) {
+                id
+            } else {
+                let desc = somnium_renderer::terrain::TerrainDescriptor {
+                    chunk_cells: component.chunk_cells,
+                    grid_size: [component.grid_x, component.grid_z],
+                    cell_size: component.cell_size,
+                    height_scale: component.height_scale,
+                    virtual_texturing: component.virtual_texturing,
+                    ..Default::default()
+                };
+                let valid_axis = |chunks: u32| {
+                    chunks > 0
+                        && chunks
+                            .checked_mul(desc.chunk_cells)
+                            .and_then(|cells| cells.checked_add(1))
+                            .is_some()
+                };
+                if !desc.chunk_cells.is_power_of_two()
+                    || desc.chunk_cells < (1 << somnium_renderer::terrain::mesh::MAX_TERRAIN_LOD)
+                    || !valid_axis(component.grid_x)
+                    || !valid_axis(component.grid_z)
+                    || !desc.cell_size.is_finite()
+                    || desc.cell_size <= 0.0
+                    || !desc.height_scale.is_finite()
+                    || desc.height_scale <= 0.0
+                    || desc
+                        .total_vertices_x()
+                        .checked_mul(desc.total_vertices_z())
+                        .is_none()
+                {
+                    warn!(
+                        terrain_id = component.terrain_id,
+                        "invalid saved terrain descriptor"
+                    );
+                    continue;
+                }
+                // Prefab reconstruction also calls this method without resetting
+                // the scene. Its existing terrain must retain sculpted data.
+                let existed = renderer.terrain(component.terrain_id).is_some();
+                let id = if existed {
+                    component.terrain_id
+                } else {
+                    renderer.create_terrain_with_asset_dir(ctx, desc, &asset_dir)
+                };
+                let sidecar = format!("{path}.terrain{}.bin", component.terrain_id);
+                if (!existed || std::path::Path::new(&sidecar).is_file())
+                    && let Some(terrain) = renderer.terrain_mut(id)
+                {
+                    match terrain.load_binary(&sidecar) {
+                        Ok(()) => info!(
+                            "Terrain {} restored as {id} from {sidecar}",
+                            component.terrain_id
+                        ),
+                        Err(error) => {
+                            warn!(%error, "terrain sidecar failed to load; flat terrain retained")
+                        }
+                    }
+                }
+                terrain_ids.insert(component.terrain_id, id);
+                id
             };
-            match terrain.load_binary(&sidecar) {
-                Ok(()) => info!("Terrain {} restored from {sidecar}", component.terrain_id),
-                Err(error) => warn!(%error, "terrain sidecar failed to load"),
+            if let Some(saved) = self.world.get_mut::<TerrainComponent>(entity) {
+                saved.terrain_id = runtime_id;
+                saved.virtual_texture_resident_pages = 0;
+                saved.virtual_texture_pending_pages = 0;
+                saved.virtual_texture_hits = 0;
+                saved.virtual_texture_misses = 0;
+                saved.virtual_texture_evictions = 0;
+            }
+        }
+        for entity in self.world.entities().collect::<Vec<_>>() {
+            if let Some(water) = self.world.get_mut::<WaterComponent>(entity)
+                && let Some(&id) = terrain_ids.get(&water.terrain_id)
+            {
+                water.terrain_id = id;
             }
         }
 
@@ -2363,6 +2791,30 @@ impl<G: GameApp> Engine<G> {
         self.terrain_edit_active = false;
         self.terrain_stroke = None;
         self.after_selection_change();
+        if let (Some(physics), Some(audio), Some(ui)) = (
+            self.physics.as_mut(),
+            self.audio.as_mut(),
+            self.ui_manager.as_mut(),
+        ) {
+            let mut ctx = EngineContext::new(
+                &self.time,
+                &self.config,
+                &mut self.world,
+                physics,
+                audio,
+                &mut self.jobs,
+                &mut self.navigation_editor,
+                self.render_ctx.as_ref(),
+                self.renderer.as_mut(),
+                &mut self.selection.primary,
+                ui,
+                crate::camera_speed_from_normalized(self.camera_speed_norm),
+                self.simulation_clock,
+                &mut self.scripts,
+            );
+            self.game
+                .on_scene_loaded(&mut ctx, std::path::Path::new(path));
+        }
     }
 
     /// Show a file in the OS file browser.
@@ -2517,16 +2969,7 @@ impl<G: GameApp> Engine<G> {
             .selection
             .as_slice()
             .iter()
-            .filter_map(|entity| {
-                self.world
-                    .get::<WorldTransform>(*entity)
-                    .map(|world| world.0.to_scale_rotation_translation().2)
-                    .or_else(|| {
-                        self.world
-                            .get::<Transform>(*entity)
-                            .map(|transform| transform.translation)
-                    })
-            })
+            .flat_map(|entity| designer::designer_focus_points(&self.world, *entity))
             .collect();
         let first = points.first().copied()?;
         let mut min = first;
@@ -2600,7 +3043,11 @@ impl<G: GameApp> Engine<G> {
         // Terrain sculpting, foliage painting and Play each own the viewport
         // and have already cleared the gizmo; re-placing it here would undo
         // that every frame.
-        if self.play_session_active || self.terrain_edit_active || self.foliage_paint_active {
+        if self.play_session_active
+            || self.terrain_edit_active
+            || self.foliage_paint_active
+            || self.vertex_paint_active
+        {
             return;
         }
         let anchor = gizmo_anchor(&self.world, self.selection.primary);
@@ -2772,64 +3219,25 @@ impl<G: GameApp> Engine<G> {
 
     /// Write the edited table back, one file per locale.
     fn save_localisation(&mut self) {
-        let dir = self.locale_dir();
-        let Some(table) = self
-            .ui_manager
-            .as_ref()
-            .and_then(UiManager::localisation_table)
-            .cloned()
-        else {
-            return;
-        };
-        // The loaded catalogue is the template: it carries the display name and
-        // the font list, which a grid of strings cannot hold and which a save
-        // that dropped them would cost a language its typeface.
-        let template = self
-            .locale_catalog
-            .clone()
-            .unwrap_or_else(|| somnium_i18n::Catalog::new("en"));
-        let catalog = crate::i18n::table_to_catalog(&table, &template);
-        match crate::i18n::save_catalog(&dir, &catalog) {
-            Ok(()) => {
-                let locales = catalog.locales().len();
-                self.locale_catalog = Some(catalog);
-                // Rescan: the files just changed on disk, and the drawer is
-                // showing them.
-                self.next_asset_scan = std::time::Instant::now();
-                if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.append_log(&format!(
-                        "[locale] saved {locales} locale(s) to {}",
-                        dir.display()
-                    ));
-                    ui.push_toast("Localisation saved");
-                }
-            }
-            Err(error) => self.report_content_error(&dir, &error),
+        let result = self.save_localisation_result();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(
+                &result
+                    .map(|_| "Localisation saved".to_owned())
+                    .unwrap_or_else(|e| e),
+            );
         }
     }
 
     /// Hand the table to a translator as one CSV.
     fn export_localisation_csv(&mut self) {
-        let Some(table) = self
-            .ui_manager
-            .as_ref()
-            .and_then(UiManager::localisation_table)
-            .cloned()
-        else {
-            return;
-        };
-        let path = self.locale_dir().join("localisation.csv");
-        match std::fs::create_dir_all(self.locale_dir())
-            .and_then(|()| std::fs::write(&path, table.to_csv()))
-        {
-            Ok(()) => {
-                self.next_asset_scan = std::time::Instant::now();
-                if let Some(ui) = self.ui_manager.as_mut() {
-                    ui.append_log(&format!("[locale] exported {}", path.display()));
-                    ui.push_toast("Exported localisation.csv");
-                }
-            }
-            Err(error) => self.report_content_error(&path, &format!("{error}")),
+        let result = self.export_localisation_result();
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.push_toast(
+                &result
+                    .map(|_| "Exported localisation.csv".to_owned())
+                    .unwrap_or_else(|e| e),
+            );
         }
     }
 
@@ -2969,12 +3377,17 @@ impl<G: GameApp> Engine<G> {
             &mut self.world,
             &self.type_registry,
         ));
+        self.designer_saves
+            .begin(&mut self.world, &self.type_registry);
         self.script_step = 0;
         self.scripts.runtime_mut().set_world_seed(SCRIPT_WORLD_SEED);
     }
 
     /// Tear every script down and restore the world exactly as it was.
     fn end_play_session(&mut self) {
+        self.animation_authoring
+            .clear(&mut self.world, self.physics.as_mut());
+        crate::ai::reset_editor_runtime(&mut self.world);
         self.audio_scene.stop_all();
         let mut services = crate::script_host::HostServices {
             physics: self.physics.as_mut(),
@@ -2985,6 +3398,7 @@ impl<G: GameApp> Engine<G> {
         if let Some(checkpoint) = self.play_checkpoint.take() {
             checkpoint.restore(&mut self.world, &self.type_registry);
         }
+        self.designer_saves.end();
         self.script_step = 0;
         self.drain_script_output();
     }
@@ -3153,8 +3567,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ordinary run does not dirty the working tree — and so a
         // component added to the registry updates it without anyone
         // having to remember to regenerate.
-        {
-            let path = crate::script_decls::default_declarations_path();
+        if !self.config.player_mode {
+            // A separately opened project must never overwrite the launcher's
+            // declarations. Shipped players do not generate authoring files.
+            let path = self.config.content_root.join("scripts/somnium.d.luau");
             let generated = crate::script_decls::generate_declarations(&self.type_registry);
             let current = std::fs::read_to_string(&path).is_ok_and(|on_disk| on_disk == generated);
             if !current {
@@ -3187,6 +3603,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3244,7 +3661,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     Arc::clone(&window),
                 );
                 ui_manager.set_render_toggles(renderer.debug_toggles.clone());
+                ui_manager.set_foliage_palette(&self.foliage_palette_labels());
                 self.render_ctx = Some(render_ctx);
+                self.imported_uploads.clear();
+                self.project_foliage_sources.clear();
+                self.foliage_meshes = std::array::from_fn(|_| None);
+                self.foliage_lod_meshes = std::array::from_fn(|_| None);
+                self.foliage_failed = [false; 256];
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
@@ -3280,6 +3703,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
                     &mut self.jobs,
+                    &mut self.navigation_editor,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -3293,6 +3717,15 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 if ctx.should_exit {
                     self.initiate_shutdown(event_loop);
                     return;
+                }
+                if let Some(path) = self.config.startup_scene.clone() {
+                    self.load_scene_file(&path.to_string_lossy());
+                }
+                if self.config.player_mode {
+                    if let Some(ui) = &mut self.ui_manager {
+                        ui.set_immersive(true);
+                    }
+                    self.handle_editor_event(EditorEvent::PlaySimulation);
                 }
             }
             Err(err) => {
@@ -3313,6 +3746,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3332,6 +3766,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         event: WindowEvent,
     ) {
         if self.state != LifecycleState::Running {
+            return;
+        }
+
+        if self.route_play_input(event_loop, window_id, &event) {
             return;
         }
 
@@ -3433,8 +3871,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.cancel_persona_stroke();
                         return;
                     }
-                    let action =
-                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard);
+                    let action = if self.config.player_mode {
+                        None
+                    } else {
+                        shortcut_action_for(code, self.shortcut_modifiers, game_owns_keyboard)
+                    };
                     use somnium_ui::commands::CommandAction as A;
                     match action {
                         Some(A::NewScene) => {
@@ -3576,6 +4017,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        if self.capture_on_viewport_click(window_id, &event)
+            || self.suppress_released_play_input(&event)
+        {
+            return;
+        }
+
         // Once the editor has declined the event, feed the same physical
         // transition to the action system. Scripts never see this hardware
         // event; they sample the named actions evaluated from it.
@@ -3589,23 +4036,31 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // a game's HUD can take a click the shell did not want but the sculpt
         // brush would have. See `GameApp::on_os_event` for why the order is
         // MORROWIND-N's to revisit.
-        {
-            let mut ctx = EngineContext::new(
-                &self.time,
-                &self.config,
-                &mut self.world,
-                self.physics.as_mut().unwrap(),
-                self.audio.as_mut().unwrap(),
-                &mut self.jobs,
-                self.render_ctx.as_ref(),
-                self.renderer.as_mut(),
-                &mut self.selection.primary,
-                self.ui_manager.as_mut().unwrap(),
-                crate::camera_speed_from_normalized(self.camera_speed_norm),
-                self.simulation_clock,
-                &mut self.scripts,
-            );
-            if self.game.on_os_event(&mut ctx, &event) {
+        if self.dispatch_game_os_event(&event) {
+            return;
+        }
+
+        // ── 3.3 Vertex paint brush — before the gizmo, like the other brushes ──
+        if !self.play_session_active && self.vertex_paint_active {
+            if let WindowEvent::MouseInput {
+                state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } = &event
+            {
+                if *state == winit::event::ElementState::Pressed {
+                    if self.vertex_paint_dab(true) {
+                        return;
+                    }
+                } else if self.vertex_paint_stroke.is_some() {
+                    self.end_vertex_paint_stroke();
+                    return;
+                }
+            }
+            if self.vertex_paint_stroke.is_some()
+                && let WindowEvent::CursorMoved { .. } = &event
+            {
+                self.vertex_paint_dab(false);
                 return;
             }
         }
@@ -3789,6 +4244,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         if self.state != LifecycleState::Running {
             return;
         }
+        if self.play_session_active && self.play_cursor.window.is_none() {
+            return;
+        }
 
         let engine_event: Option<EngineEvent> = match event {
             winit::event::DeviceEvent::MouseMotion { delta } => {
@@ -3812,6 +4270,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -3825,6 +4284,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.sync_play_cursor();
         self.maintain_floating_placement();
         if self.state != LifecycleState::Running {
             return;
@@ -3838,6 +4298,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // handed to the profiler at the end of the frame and read by the timing
         // harness during the *next* one; see `GpuProfiler::frame_cpu_ms`.
         let frame_body_started = std::time::Instant::now();
+        // Queries run inside poll_authoring below. Keep in-progress markers
+        // local so diagnostics observes one complete previous frame throughout.
+        let mut frame_timings = [0.0; 6];
 
         self.time.tick();
         let dt = self.time.delta_time().as_secs_f32();
@@ -3849,10 +4312,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Phase 16-F: the script profiler counters are per frame, and the
         // frame starts here.
         self.scripts.begin_frame();
+        self.zone_begin("Simulation step");
 
         let path_tracer_active = self
             .world
-            .entities()
+            .entities_with::<PostProcessComponent>()
             .find_map(|entity| self.world.get::<PostProcessComponent>(entity))
             .is_some_and(|post| post.path_tracer);
         synchronize_path_trace_pause(
@@ -3907,6 +4371,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         self.physics.as_mut().unwrap(),
                         self.audio.as_mut().unwrap(),
                         &mut self.jobs,
+                        &mut self.navigation_editor,
                         self.render_ctx.as_ref(),
                         self.renderer.as_mut(),
                         &mut self.selection.primary,
@@ -3950,6 +4415,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.simulation_clock.interpolation_alpha =
+            if self.simulation_clock.state == SimulationState::Playing {
+                (self.simulation_accumulator / self.simulation_clock.fixed_delta_seconds)
+                    .clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+
+        self.zone_end();
+        self.zone_begin("Game update");
         // ── Gizmo drag: update entity transform each frame while dragging ────
         // Snapping is settings, not constants (Seam 4), and `command()` held
         // during the drag inverts it.
@@ -4057,6 +4532,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -4086,12 +4562,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         self.poll_script_reloads();
         self.drain_script_output();
 
+        self.zone_end();
+        self.zone_begin("Water sync");
         // Phase IV-C: ECS membership is authoritative for renderer-owned water
         // data. Delete drops textures; undo/redo recreates them from the small
         // stable descriptor, so no stale GPU handle survives in a component.
         let water_descriptors: Vec<_> = self
             .world
-            .entities()
+            .entities_with::<WaterComponent>()
             .filter(|entity| !crate::is_hidden(&self.world, *entity))
             .filter_map(|entity| {
                 let water = self.world.get::<WaterComponent>(entity).copied()?;
@@ -4115,91 +4593,66 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             renderer.water_bodies.retain_ids(&active);
         }
 
+        self.zone_end();
         // ── Update native UI panels with current frame state ─────────────────
         // PORTAL-0-B: the editor's per-frame panel rebuild had no zone at
         // all, which is why `Frame wall` was the only number anyone could
         // quote about editor cost.
+        frame_timings[0] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Editor panels");
         }
-        {
-            let all_entities: Vec<somnium_ecs::Entity> = self
-                .world
-                .entities()
-                .filter(|e| self.world.get::<crate::AssetEditSession>(*e).is_none())
-                .collect();
-            let mut names: Vec<(u32, String, Option<u32>)> = all_entities
-                .iter()
-                .map(|&e| {
-                    let name = self
-                        .world
-                        .get::<Name>(e)
-                        .map(|n| n.as_str().to_owned())
-                        .unwrap_or_else(|| format!("Entity {}", e.index()));
-                    let parent = self.world.get::<Parent>(e).and_then(|p| {
-                        if p.entity == somnium_ecs::Entity::DANGLING {
-                            None
-                        } else {
-                            Some(p.entity.index())
-                        }
-                    });
-                    (e.index(), name, parent)
-                })
-                .collect();
-            names.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
-            let mut children: std::collections::HashMap<u32, Vec<u32>> =
-                std::collections::HashMap::new();
-            let mut name_of: std::collections::HashMap<u32, String> =
-                std::collections::HashMap::new();
-            for (id, name, parent) in &names {
-                name_of.insert(*id, name.clone());
-                if let Some(p) = parent {
-                    children.entry(*p).or_default().push(*id);
-                }
-            }
-            fn walk(
-                id: u32,
-                depth: u8,
-                name_of: &std::collections::HashMap<u32, String>,
-                children: &std::collections::HashMap<u32, Vec<u32>>,
-                out: &mut Vec<somnium_ui::OutlinerRow>,
-            ) {
-                let has = children.get(&id).map(|c| !c.is_empty()).unwrap_or(false);
-                out.push(somnium_ui::OutlinerRow {
-                    id,
-                    name: name_of.get(&id).cloned().unwrap_or_default(),
-                    depth,
-                    has_children: has,
-                    hidden: false,
-                    locked: false,
-                    script_error: false,
-                    tags: Vec::new(),
-                });
-                if let Some(kids) = children.get(&id) {
-                    for kid in kids {
-                        walk(*kid, depth.saturating_add(1), name_of, children, out);
+        if self.config.player_mode {
+            // A shipped player has no outliner, inspector or panels to feed.
+            // Resolving authored materials to runtime ids is the one part of
+            // this block a running game depends on.
+            self.zone_begin("Material sync");
+            self.sync_authored_material_components();
+            self.zone_end();
+        } else {
+            self.zone_begin("Outliner");
+            // TOWN-PERF: gathering, decorating and diffing a row per entity cost
+            // 4-7 ms a frame at Town's ~10k entities, for a panel that only a
+            // person reads. Rows refresh at most every `OUTLINER_REFRESH`, or at
+            // once when the entity count or the primary selection changes, so
+            // spawns, deletes and clicks still show on the frame they happen.
+            let selection_key = self.selection.primary.map(|e| e.index());
+            let refresh = self
+                .outliner_refreshed
+                .is_none_or(|at| at.elapsed() >= OUTLINER_REFRESH)
+                || self.outliner_seen != (self.world.entity_count(), selection_key);
+            let all_entities: Vec<somnium_ecs::Entity> = if refresh {
+                self.world
+                    .entities()
+                    .filter(|e| self.world.get::<crate::AssetEditSession>(*e).is_none())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut hierarchy = std::mem::take(&mut self.outliner_hierarchy);
+            if refresh {
+                hierarchy.refresh(all_entities.iter().map(|&entity| {
+                    crate::outliner_hierarchy::Source {
+                        id: entity.index(),
+                        generation: entity.generation(),
+                        name: self.world.get::<Name>(entity).map(Name::as_str),
+                        parent: self.world.get::<Parent>(entity).and_then(|parent| {
+                            (parent.entity != somnium_ecs::Entity::DANGLING)
+                                .then_some(parent.entity.index())
+                        }),
                     }
-                }
+                }));
             }
-            let mut tree = Vec::new();
-            for (id, _, parent) in &names {
-                let is_root = match parent {
-                    None => true,
-                    Some(p) => !name_of.contains_key(p),
-                };
-                if is_root {
-                    walk(*id, 0, &name_of, &children, &mut tree);
-                }
-            }
+            let tree = hierarchy.rows_mut();
             // One reconciliation point per frame. Commands, undo, redo, game
             // code and the drag routes all write `selection.primary` through
             // the `&mut Option<Entity>` shim; this is where the ordered set is
             // brought back into agreement with it and with the world, so no
             // stale or orphaned handle can reach a multi-entity command.
             // Row facts: the badges and the typed filters both read them, and
-            // they are gathered here rather than in `walk` because they need
-            // the world and `walk` is a pure tree flatten.
-            for row in &mut tree {
+            // they are gathered every frame outside the retained hierarchy so
+            // component changes never wait for a structural/name change.
+            for row in tree.iter_mut().filter(|_| refresh) {
                 let Some(entity) = self.world.find_entity_by_index(row.id) else {
                     continue;
                 };
@@ -4207,14 +4660,40 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     row.hidden = flags.hidden;
                     row.locked = flags.locked;
                 }
-                row.tags = entity_tags(&self.world, entity);
+                entity_tags(&self.world, entity, &mut row.tags);
+                if self
+                    .world
+                    .get::<crate::prefab::PrefabMember>(entity)
+                    .is_some()
+                {
+                    row.tags.push("prefab");
+                    row.name.push_str(" [Prefab]");
+                    if self.selection.primary == Some(entity) {
+                        let count = crate::prefab_details::refresh(
+                            &mut self.world,
+                            entity,
+                            &self.type_registry,
+                        );
+                        if count > 0 {
+                            row.name.push_str(&format!(" [{count} overrides*]"));
+                        }
+                    }
+                } else if self.selection.primary == Some(entity) {
+                    crate::prefab_details::refresh(&mut self.world, entity, &self.type_registry);
+                }
             }
             self.selection.retain_alive(&self.world);
             self.selection.reconcile();
-            self.outliner_order = tree
-                .iter()
-                .filter_map(|row| self.world.find_entity_by_index(row.id))
-                .collect();
+            if refresh {
+                self.outliner_order = tree
+                    .iter()
+                    .filter_map(|row| self.world.find_entity_by_index(row.id))
+                    .collect();
+                self.outliner_refreshed = Some(std::time::Instant::now());
+                self.outliner_seen = (self.world.entity_count(), selection_key);
+            }
+            self.zone_end();
+            self.zone_begin("Inspector state");
             let selected_idx = self.selection.primary.map(|e| e.index());
             let selected_ids: Vec<u32> = self
                 .selection
@@ -4303,9 +4782,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // because it reads the world and the script host.
             let tool_context = self.persona_tool_context();
             let sel_scripts = self.script_inspector_state();
+            self.zone_end();
+            self.zone_begin("Material sync");
             self.sync_material_sessions();
             self.sync_authored_material_components();
             self.ensure_material_session();
+            self.zone_end();
+            self.zone_begin("Panel build");
             let mut generated_panels = self
                 .selection.primary
                 .map(|entity| {
@@ -4457,8 +4940,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             let drop_probe_entity = self.viewport_entity_drop_pick();
             let drop_probe_hit = self.viewport_terrain_drop_hit();
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_outliner_tree(&tree, selected_idx);
-                ui.set_outliner_entity_handles(all_entities.iter().copied());
+                if refresh {
+                    ui.update_outliner_tree(tree, selected_idx);
+                    ui.set_outliner_entity_handles(all_entities.iter().copied());
+                }
                 ui.set_outliner_selection(selected_ids);
                 ui.set_clipboard_filled(!self.entity_clipboard.is_empty());
                 ui.set_history(history_entries, history_position);
@@ -4474,12 +4959,24 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 if ui.preferences_open() {
                     ui.update_settings_panels(settings_panels, &settings_overrides);
                 }
-                ui.set_recent_scenes(
-                    self.recent_scenes
-                        .iter()
-                        .map(|path| (path.to_string_lossy().into_owned(), path.exists()))
-                        .collect(),
-                );
+                // Levels first, then a separator (empty path), then recents
+                // that are not levels — fewer of them beside a level list, so
+                // the menu still fits a 900-pixel window.
+                let entry = |path: &std::path::PathBuf| (path.to_string_lossy().into_owned(), path.exists());
+                let recent_cap = if self.level_scenes.is_empty() { usize::MAX } else { 5 };
+                let recents: Vec<_> = self
+                    .recent_scenes
+                    .iter()
+                    .filter(|path| !self.level_scenes.contains(path))
+                    .take(recent_cap)
+                    .map(entry)
+                    .collect();
+                let mut menu: Vec<(String, bool)> = self.level_scenes.iter().map(entry).collect();
+                if !menu.is_empty() && !recents.is_empty() {
+                    menu.push((String::new(), false));
+                }
+                menu.extend(recents);
+                ui.set_recent_scenes(menu);
                 ui.set_marquee(
                     self.marquee
                         .filter(crate::selection::Marquee::is_dragged)
@@ -4524,6 +5021,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.refresh_modified_dots();
                 ui.refresh_inspector_filter();
             }
+            self.zone_end();
+            self.outliner_hierarchy = hierarchy;
         }
 
         // Phase 29: the overlay is refreshed every frame rather than on
@@ -4715,6 +5214,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        frame_timings[1] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Jobs & assets");
         }
@@ -4732,6 +5232,45 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        // Evaluate author intent before the game publishes this frame's draw data.
+        self.zone_begin("Editor tools");
+        let playing = self.simulation_clock.state == SimulationState::Playing || self.stepping_now;
+        let preview_dt = if self.stepping_now {
+            self.simulation_clock.fixed_delta_seconds
+        } else if self.simulation_clock.state == SimulationState::Paused {
+            0.0
+        } else {
+            dt
+        };
+        if let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+            crate::blockout::sync(&mut self.world, renderer, render_ctx);
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            self.navigation_editor.update(
+                &mut self.world,
+                renderer,
+                &mut self.jobs,
+                preview_dt,
+                playing,
+            );
+        }
+        self.animation_authoring.update(
+            &mut self.world,
+            self.physics.as_mut(),
+            &mut self.jobs,
+            preview_dt,
+        );
+        self.zone_end();
+        self.zone_begin("Transforms");
+        crate::propagate_transforms(&mut self.world);
+        self.zone_end();
+        if playing {
+            self.designer_saves.tick(preview_dt);
+            self.script_behavior_update(preview_dt);
+        }
+
+        self.sync_vertex_paint();
+        self.zone_begin("Game render hook");
         {
             let mut ctx = EngineContext::new(
                 &self.time,
@@ -4740,6 +5279,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.physics.as_mut().unwrap(),
                 self.audio.as_mut().unwrap(),
                 &mut self.jobs,
+                &mut self.navigation_editor,
                 self.render_ctx.as_ref(),
                 self.renderer.as_mut(),
                 &mut self.selection.primary,
@@ -4756,6 +5296,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.zone_end();
+        frame_timings[2] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.zone_begin("World partition & terrain");
         // `on_render` is where a game publishes its active editor/player view
         // through `renderer.set_view`. Stream from that same-frame position,
         // not from a stale ECS settings transform or last frame's renderer.
@@ -4783,12 +5326,55 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // ── Particle simulation (Phase 11.5J) ────────────────────────────────
         {
             let frame = self.time.frame_count();
-            let particle_dt = if self.simulation_clock.state != SimulationState::Paused {
-                dt
-            } else {
-                0.0
-            };
-            let gpu_particles = simulate_particles(&mut self.world, particle_dt, frame);
+            let particle_dt =
+                crate::particle::simulation_delta(&self.simulation_clock, self.stepping_now, dt);
+            let sprite_entities: Vec<_> = self
+                .world
+                .entities_with::<crate::ParticleEmitter>()
+                .filter_map(|e| {
+                    self.world
+                        .get::<crate::ParticleEmitter>(e)
+                        .map(|p| (e, p.texture))
+                })
+                .collect();
+            self.queue_texture_ids(
+                &sprite_entities
+                    .iter()
+                    .map(|(_, texture)| *texture)
+                    .collect::<Vec<_>>(),
+            );
+            for (entity, texture) in sprite_entities {
+                let slot = self.material_textures.get(&texture).copied().unwrap_or(-1);
+                let status = if texture == somnium_asset::database::AssetId::NONE {
+                    "Soft round particle"
+                } else if slot >= 0 {
+                    "Ready"
+                } else if self.material_texture_jobs.contains_key(&texture) {
+                    "Loading texture"
+                } else {
+                    "Texture unavailable; check Content and Output Log"
+                };
+                if let Some(emitter) = self.world.get_mut::<crate::ParticleEmitter>(entity) {
+                    emitter.texture_slot = slot;
+                    if emitter.texture_status != status {
+                        emitter.texture_status = status.into();
+                    }
+                }
+            }
+            let reflection = self.renderer.as_ref().and_then(|renderer| {
+                crate::staged_mirror::active(
+                    &self.world,
+                    renderer.camera_pos,
+                    renderer.proj_matrix * renderer.view_matrix,
+                )
+                .map(|mirror| mirror.reflection)
+            });
+            let gpu_particles = crate::particle::simulate_particles_reflected(
+                &mut self.world,
+                particle_dt,
+                frame,
+                reflection,
+            );
             if let Some(r) = &mut self.renderer {
                 r.set_particles(gpu_particles);
             }
@@ -4808,6 +5394,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         } else {
             self.update_terrain_editing(dt);
         }
+        self.update_vertex_paint_cursor();
+        self.zone_end();
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Scene submit");
         }
@@ -4821,6 +5409,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        self.zone_begin("Editor gizmos");
         // The gizmo follows the entity, not the last selection event. After
         // the game layer has propagated transforms, so a child is anchored
         // where it is drawn rather than where its parent's origin is.
@@ -4833,6 +5422,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.submit_spline_gizmos();
         }
 
+        self.zone_end();
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
         if let Some(r) = &mut self.renderer {
             r.profiler.cpu_begin("Environment");
@@ -4970,6 +5560,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     self.physics.as_mut().unwrap(),
                     self.audio.as_mut().unwrap(),
                     &mut self.jobs,
+                    &mut self.navigation_editor,
                     self.render_ctx.as_ref(),
                     self.renderer.as_mut(),
                     &mut self.selection.primary,
@@ -4986,6 +5577,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             return;
         }
 
+        frame_timings[3] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.zone_begin("Authoring (MCP)");
+        self.poll_authoring();
+        self.zone_end();
+
+        frame_timings[4] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
         // ── Forward log entries to the output log panel ───────────────────────
         {
             let mut entries: Vec<String> = Vec::new();
@@ -5001,9 +5598,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        frame_timings[5] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        self.authoring_frame_timings = frame_timings;
         // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
         if let Some(r) = &mut self.renderer {
             r.profiler.frame_cpu_ms = frame_body_started.elapsed().as_secs_f32() * 1000.0;
+            // Waits on the GPU and vsync sit inside the render stage; the
+            // present half is last frame's, which is close enough for a mean.
+            let wait_ms = r.profiler.surface_acquire_ms + r.profiler.submit_present_ms;
+            if let Some(report) = self.cpu_watchdog.frame(dt * 1000.0, frame_timings, wait_ms) {
+                warn!("{report}");
+            }
         }
 
         self.time.wait_for_frame_budget();
@@ -5139,8 +5744,13 @@ impl<G: GameApp> Engine<G> {
             document.asset.metallic_roughness_map,
             document.asset.occlusion_map,
             document.asset.emissive_map,
+            document.asset.height_map,
         ];
-        for texture_id in slots {
+        self.queue_texture_ids(&slots);
+    }
+
+    fn queue_texture_ids(&mut self, slots: &[somnium_asset::database::AssetId]) {
+        for &texture_id in slots {
             if texture_id == somnium_asset::database::AssetId::NONE
                 || self.material_textures.contains_key(&texture_id)
                 || self.material_texture_jobs.contains_key(&texture_id)
@@ -5155,6 +5765,19 @@ impl<G: GameApp> Engine<G> {
             let Some(record) = record else {
                 continue;
             };
+            if record.kind != somnium_asset::database::AssetKind::Texture {
+                continue;
+            }
+            if self.material_texture_failures.get(&texture_id).is_some_and(
+                |(bytes, modified, retry_at)| {
+                    *bytes == record.metadata.bytes
+                        && *modified == record.metadata.modified_unix_ms
+                        && std::time::Instant::now() < *retry_at
+                },
+            ) {
+                continue;
+            }
+            self.material_texture_failures.remove(&texture_id);
             let path = record.absolute_path;
             match self
                 .jobs
@@ -5197,15 +5820,27 @@ impl<G: GameApp> Engine<G> {
     }
 
     fn ensure_material_runtime(&mut self, asset_id: somnium_asset::database::AssetId) {
-        let Some(document) = self.material_documents.get(&asset_id) else {
+        let Some(runtime_id) = self.resolve_material_runtime(asset_id) else {
             return;
         };
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        let Some(ctx) = self.render_ctx.as_ref() else {
-            return;
-        };
+        let entities: Vec<_> = self.world.entities().collect();
+        for entity in entities {
+            if let Some(material) = self.world.get_mut::<MaterialComponent>(entity)
+                && material.asset == asset_id
+            {
+                material.runtime_id = runtime_id;
+            }
+        }
+    }
+
+    /// The renderer slot for an authored material, allocated on first use.
+    fn resolve_material_runtime(
+        &mut self,
+        asset_id: somnium_asset::database::AssetId,
+    ) -> Option<u32> {
+        let document = self.material_documents.get(&asset_id)?;
+        let renderer = self.renderer.as_mut()?;
+        let ctx = self.render_ctx.as_ref()?;
         let runtime_id = if let Some(runtime_id) = self.material_runtime.get(&asset_id).copied() {
             runtime_id
         } else {
@@ -5222,15 +5857,7 @@ impl<G: GameApp> Engine<G> {
             self.material_runtime.insert(asset_id, runtime_id);
             runtime_id
         };
-
-        let entities: Vec<_> = self.world.entities().collect();
-        for entity in entities {
-            if let Some(material) = self.world.get_mut::<MaterialComponent>(entity)
-                && material.asset == asset_id
-            {
-                material.runtime_id = runtime_id;
-            }
-        }
+        Some(runtime_id)
     }
 
     /// Detect reflected edits (including undo/redo), update the shared runtime
@@ -5323,6 +5950,14 @@ impl<G: GameApp> Engine<G> {
         if !cfg!(debug_assertions) {
             return;
         }
+        // A timed or automated run must be able to pin the compiled shaders
+        // even while another author edits files in the shared checkout.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| {
+            std::env::var("SOMNIUM_SHADER_HOT_RELOAD").as_deref() != Ok("0")
+        }) {
+            return;
+        }
         const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         let now = std::time::Instant::now();
         if now.duration_since(self.last_shader_poll) < INTERVAL {
@@ -5372,6 +6007,11 @@ impl<G: GameApp> Engine<G> {
             self.material_texture_jobs.remove(&texture_id);
             match result {
                 Ok(texture) => {
+                    // Colour maps decode as sRGB; any other slot keeps the bytes linear.
+                    let colour = self.material_documents.values().any(|document| {
+                        document.asset.albedo_map == texture_id
+                            || document.asset.emissive_map == texture_id
+                    });
                     if let (Some(renderer), Some(ctx)) =
                         (self.renderer.as_mut(), self.render_ctx.as_ref())
                     {
@@ -5380,6 +6020,7 @@ impl<G: GameApp> Engine<G> {
                             &texture.data,
                             texture.width,
                             texture.height,
+                            colour,
                         );
                         self.material_textures.insert(texture_id, slot);
                     }
@@ -5394,6 +6035,7 @@ impl<G: GameApp> Engine<G> {
                                 material.metallic_roughness_map,
                                 material.occlusion_map,
                                 material.emissive_map,
+                                material.height_map,
                             ]
                             .contains(&texture_id)
                         })
@@ -5403,7 +6045,23 @@ impl<G: GameApp> Engine<G> {
                         self.refresh_material_gpu(asset);
                     }
                 }
-                Err(error) => warn!(?error, "material texture decode failed"),
+                Err(error) => {
+                    if let Some(record) = self
+                        .asset_gate
+                        .published()
+                        .and_then(|snapshot| snapshot.get(texture_id))
+                    {
+                        self.material_texture_failures.insert(
+                            texture_id,
+                            (
+                                record.metadata.bytes,
+                                record.metadata.modified_unix_ms,
+                                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                            ),
+                        );
+                    }
+                    warn!(?error, "material texture decode failed; retry delayed");
+                }
             }
         }
 
@@ -5559,8 +6217,18 @@ impl<G: GameApp> Engine<G> {
         if let Some(result) = completed_import {
             self.import_job = None;
             match result {
-                Ok((path, scene, materials)) => self.finish_import_model(path, scene, materials),
+                Ok((path, scene, materials, stamp)) => {
+                    if self.authoring_import_may_publish() {
+                        let before = self.world.entity_count();
+                        self.finish_import_model(path, scene, materials, stamp);
+                        self.authoring_import_finished(Ok(self
+                            .world
+                            .entity_count()
+                            .saturating_sub(before)));
+                    }
+                }
                 Err(error) => {
+                    self.authoring_import_finished(Err(format!("{error:?}")));
                     warn!(?error, "model import failed");
                     if let Some(ui) = self.ui_manager.as_mut() {
                         ui.push_toast("Import failed — see the Output Log");
@@ -5653,6 +6321,7 @@ impl<G: GameApp> Engine<G> {
             self.physics.as_mut().unwrap(),
             self.audio.as_mut().unwrap(),
             &mut self.jobs,
+            &mut self.navigation_editor,
             self.render_ctx.as_ref(),
             self.renderer.as_mut(),
             &mut self.selection.primary,
@@ -5690,6 +6359,7 @@ impl<G: GameApp> Engine<G> {
             return;
         }
         info!("Initiating engine shutdown");
+        self.release_play_cursor();
         self.state = LifecycleState::ShuttingDown;
         self.game.on_shutdown();
         event_loop.exit();
@@ -6081,8 +6751,21 @@ impl<G: GameApp> Engine<G> {
     }
     fn persona_tool_context(&self) -> somnium_ui::editor::tool_context::ToolContext {
         use somnium_ui::editor::tool_context::{ToolContext, ToolMode};
+        let brush = self.vertex_paint_brush;
         ToolContext {
-            mode: if self.foliage_paint_active {
+            paint_reason: self.vertex_paint_target().err().map(str::to_owned),
+            paint_brush: [brush.radius, brush.strength, brush.falloff],
+            paint_flags: [
+                brush.erase,
+                brush.channels[0],
+                brush.channels[1],
+                brush.channels[2],
+                brush.channels[3],
+                self.vertex_paint_preview != 0,
+            ],
+            mode: if self.vertex_paint_active {
+                ToolMode::VertexPaint
+            } else if self.foliage_paint_active {
                 ToolMode::Foliage
             } else if self.terrain_edit_active {
                 ToolMode::Landscape
@@ -6133,6 +6816,289 @@ impl<G: GameApp> Engine<G> {
                 .map_or(0, |t| t.layers.len()),
         }
     }
+    /// Publish changed paint to the renderer, with each layer's material
+    /// loaded and resolved to its renderer slot the way an entity's own
+    /// material is. Free on a frame where nothing about paint changed.
+    fn sync_vertex_paint(&mut self) {
+        if !self.vertex_paint_sync.stale(&self.world) {
+            return;
+        }
+        let mut materials = std::collections::HashMap::new();
+        for asset in crate::vertex_paint::layer_assets(&self.world) {
+            if self.load_material_document(asset) {
+                self.queue_material_textures(asset);
+                if let Some(id) = self.resolve_material_runtime(asset) {
+                    materials.insert(asset, id);
+                }
+            }
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            self.vertex_paint_sync.sync(&self.world, r, &materials);
+        }
+    }
+
+    /// The entity Vertex Paint works on, or why there is none.
+    fn vertex_paint_target(&self) -> Result<somnium_ecs::Entity, &'static str> {
+        let entity = self.selection.primary.ok_or("Select a mesh to paint.")?;
+        if self
+            .world
+            .get::<EditorFlags>(entity)
+            .is_some_and(|flags| flags.locked || flags.hidden)
+        {
+            return Err("Unlock and show the selected mesh before painting.");
+        }
+        if self.world.get::<MeshComponent>(entity).is_none() {
+            return Err("The selection has no mesh. Select a mesh entity to paint.");
+        }
+        Ok(entity)
+    }
+
+    fn entity_model(&self, entity: somnium_ecs::Entity) -> glam::Mat4 {
+        self.world.get::<WorldTransform>(entity).map_or_else(
+            || {
+                self.world
+                    .get::<Transform>(entity)
+                    .map_or(glam::Mat4::IDENTITY, Transform::to_matrix)
+            },
+            |world| world.0,
+        )
+    }
+
+    /// Make sure the read-back mesh and its world positions are `entity`'s.
+    fn vertex_paint_prepare(&mut self, entity: somnium_ecs::Entity) -> bool {
+        let offset = self.world.get::<MeshComponent>(entity).map(|m| m.vertex_offset);
+        if !self
+            .vertex_paint_mesh
+            .as_ref()
+            .is_some_and(|m| m.entity == entity && Some(m.vertex_offset) == offset)
+        {
+            let (Some(r), Some(ctx)) = (self.renderer.as_ref(), self.render_ctx.as_ref()) else {
+                return false;
+            };
+            self.vertex_paint_mesh = crate::vertex_paint::PaintMesh::read(&self.world, r, ctx, entity);
+            self.vertex_paint_world.0 = glam::Mat4::ZERO;
+        }
+        let model = self.entity_model(entity);
+        match &self.vertex_paint_mesh {
+            Some(mesh) => {
+                if self.vertex_paint_world.0 != model {
+                    self.vertex_paint_world = (model, mesh.world(model).0);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Where the cursor ray meets the painted mesh, if it does.
+    fn vertex_paint_hit(&mut self) -> Option<(somnium_ecs::Entity, glam::Vec3)> {
+        let entity = self.vertex_paint_target().ok()?;
+        if !self.vertex_paint_prepare(entity) {
+            return None;
+        }
+        let (origin, dir) = self.cursor_ray()?;
+        let hit = self
+            .vertex_paint_mesh
+            .as_ref()?
+            .raycast(self.vertex_paint_world.0, origin, dir)?;
+        Some((entity, hit))
+    }
+
+    /// One dab under the cursor; `start` begins a stroke. False when the
+    /// cursor is not over the selected mesh, so the click falls through.
+    fn vertex_paint_dab(&mut self, start: bool) -> bool {
+        let Some((entity, hit)) = self.vertex_paint_hit() else {
+            return false;
+        };
+        let positions = &self.vertex_paint_world.1;
+        let mut colors = crate::vertex_paint::colors_of(&self.world, entity, positions.len());
+        if start {
+            self.vertex_paint_stroke = Some((
+                entity,
+                self.world
+                    .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                    .cloned(),
+            ));
+        }
+        if crate::vertex_paint::dab(&mut colors, positions, hit, &self.vertex_paint_brush) > 0 {
+            crate::vertex_paint::store(&mut self.world, entity, &colors);
+            self.scene_dirty = true;
+        }
+        true
+    }
+
+    fn end_vertex_paint_stroke(&mut self) {
+        let Some((entity, before)) = self.vertex_paint_stroke.take() else {
+            return;
+        };
+        if let Some(after) = self
+            .world
+            .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+            .cloned()
+            && before.as_ref() != Some(&after)
+        {
+            self.undo_stack
+                .push_silent(Box::new(crate::vertex_paint::VertexPaintCmd {
+                    entity,
+                    before,
+                    after,
+                }));
+        }
+    }
+
+    /// The brush ring and the mask preview, published to the renderer.
+    fn update_vertex_paint_cursor(&mut self) {
+        let mut ring = [0.0; 4];
+        if self.vertex_paint_active && !self.play_session_active {
+            if let Some(r) = self.renderer.as_mut() {
+                r.clear_gizmo();
+            }
+            if let Some((_, hit)) = self.vertex_paint_hit() {
+                ring = [hit.x, hit.y, hit.z, self.vertex_paint_brush.radius];
+            }
+        }
+        let preview = if self.vertex_paint_active && !self.play_session_active {
+            self.vertex_paint_preview
+        } else {
+            0
+        };
+        if let Some(r) = self.renderer.as_mut() {
+            r.vertex_paint.brush = ring;
+            r.vertex_paint.preview = preview;
+        }
+    }
+
+    fn handle_vertex_paint_event(&mut self, event: somnium_ui::VertexPaintEvent) {
+        use somnium_ui::VertexPaintEvent as E;
+        match event {
+            E::Toggle => {
+                self.end_vertex_paint_stroke();
+                self.vertex_paint_active = !self.vertex_paint_active;
+                if self.vertex_paint_active {
+                    self.terrain_edit_active = false;
+                    self.foliage_paint_active = false;
+                    if let Err(reason) = self.vertex_paint_target() {
+                        self.toast(reason);
+                    }
+                }
+                info!(
+                    "Vertex paint: {}",
+                    if self.vertex_paint_active { "ON" } else { "off" }
+                );
+            }
+            E::SetFlag(index, on) => match index {
+                0 => self.vertex_paint_brush.erase = on,
+                1..=4 => self.vertex_paint_brush.channels[usize::from(index - 1)] = on,
+                5 => self.vertex_paint_preview = u32::from(on),
+                _ => {}
+            },
+            E::SetBrush(index, value) => match index {
+                0 => self.vertex_paint_brush.radius = value.max(0.01),
+                1 => self.vertex_paint_brush.strength = value.clamp(0.0, 1.0),
+                2 => self.vertex_paint_brush.falloff = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+            E::Copy => {
+                let Ok(entity) = self.vertex_paint_target() else {
+                    return;
+                };
+                let count = self.vertex_paint_count(entity);
+                self.vertex_paint_clipboard =
+                    Some(crate::vertex_paint::colors_of(&self.world, entity, count));
+                self.toast("Vertex paint copied");
+            }
+            E::Fill | E::Clear | E::Paste | E::AutoWeather => self.vertex_paint_selection(event),
+        }
+    }
+
+    /// Vertex count of `entity`'s mesh as uploaded, 0 when unknown.
+    fn vertex_paint_count(&self, entity: somnium_ecs::Entity) -> usize {
+        self.world
+            .get::<MeshComponent>(entity)
+            .and_then(|m| self.renderer.as_ref()?.geometry.static_vertex_count(m.vertex_offset))
+            .map_or(0, |n| n as usize)
+    }
+
+    /// Fill, clear, paste or auto-weather every selected mesh, one undo step each.
+    fn vertex_paint_selection(&mut self, event: somnium_ui::VertexPaintEvent) {
+        use somnium_ui::VertexPaintEvent as E;
+        let entities: Vec<_> = self
+            .selection
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|e| self.world.get::<MeshComponent>(*e).is_some())
+            .collect();
+        if entities.is_empty() {
+            self.toast("Select one or more meshes first");
+            return;
+        }
+        let mut changed = 0;
+        for entity in entities {
+            let count = self.vertex_paint_count(entity);
+            if count == 0 {
+                continue;
+            }
+            let colors = crate::vertex_paint::colors_of(&self.world, entity, count);
+            let new = match event {
+                E::Fill => {
+                    let mut c = colors;
+                    let value = if self.vertex_paint_brush.erase { 0.0 } else { 1.0 };
+                    crate::vertex_paint::fill(&mut c, self.vertex_paint_brush.channels, value);
+                    c
+                }
+                E::Clear => vec![0; count],
+                E::Paste => match &self.vertex_paint_clipboard {
+                    Some(c) if c.len() == count => c.clone(),
+                    _ => {
+                        self.toast("Paste needs copied paint from a mesh with the same vertex count");
+                        continue;
+                    }
+                },
+                _ => {
+                    let (Some(r), Some(ctx)) = (self.renderer.as_ref(), self.render_ctx.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(mesh) = crate::vertex_paint::PaintMesh::read(&self.world, r, ctx, entity)
+                    else {
+                        continue;
+                    };
+                    let metal = self
+                        .world
+                        .get::<MaterialComponent>(entity)
+                        .and_then(|m| r.materials_pool.get(m.runtime_id))
+                        .is_some_and(|m| m.metallic > 0.5);
+                    let (positions, normals) = mesh.world(self.entity_model(entity));
+                    crate::vertex_paint::auto_weather(&colors, &positions, &normals, &mesh.indices, metal)
+                }
+            };
+            let before = self
+                .world
+                .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                .cloned();
+            crate::vertex_paint::store(&mut self.world, entity, &new);
+            if let Some(after) = self
+                .world
+                .get::<crate::vertex_paint::VertexPaintComponent>(entity)
+                .cloned()
+                && before.as_ref() != Some(&after)
+            {
+                self.undo_stack
+                    .push_silent(Box::new(crate::vertex_paint::VertexPaintCmd {
+                        entity,
+                        before,
+                        after,
+                    }));
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.scene_dirty = true;
+            self.toast(&format!("Vertex paint applied to {changed} mesh(es)"));
+        }
+    }
+
     fn cancel_persona_stroke(&mut self) {
         let Some(stroke) = self.terrain_stroke.take() else {
             return;
@@ -6381,6 +7347,15 @@ impl<G: GameApp> Engine<G> {
         };
         for op in ops {
             match op {
+                TerrainRestoreOp::Foliage {
+                    terrain_id,
+                    instances,
+                } => {
+                    if let Some(terrain) = renderer.terrain_mut(terrain_id) {
+                        terrain.painted_foliage = instances;
+                        terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+                    }
+                }
                 TerrainRestoreOp::Heights {
                     terrain_id,
                     region,
@@ -6459,6 +7434,7 @@ impl<G: GameApp> Engine<G> {
                 ctx.set_progress(0.05);
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
+                let stamp = import_cache::SourceStamp::read(std::path::Path::new(&worker_path));
                 let scene = somnium_asset::load_gltf(&worker_path)?;
                 ctx.set_progress(0.7);
                 let materials = somnium_asset::material::materialize_gltf_assets(
@@ -6467,7 +7443,7 @@ impl<G: GameApp> Engine<G> {
                     &content_root,
                 )?;
                 ctx.set_progress(1.0);
-                Ok((worker_path, scene, materials))
+                Ok((worker_path, scene, materials, stamp))
             }) {
             Ok(handle) => {
                 self.import_job = Some(handle);
@@ -6547,6 +7523,7 @@ impl<G: GameApp> Engine<G> {
         path_str: String,
         scene: somnium_asset::LoadedScene,
         material_assets: Vec<somnium_asset::database::AssetId>,
+        stamp: Option<import_cache::SourceStamp>,
     ) {
         let Some((renderer, render_ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref())
         else {
@@ -6554,7 +7531,19 @@ impl<G: GameApp> Engine<G> {
             return;
         };
 
-        let uploaded = renderer.upload_scene(render_ctx, &scene);
+        let stamp = stamp.filter(import_cache::SourceStamp::is_current);
+        let uploaded = if let Some(nodes) = stamp
+            .as_ref()
+            .and_then(|stamp| self.imported_uploads.get(stamp))
+        {
+            nodes
+        } else {
+            let nodes = renderer.upload_scene(render_ctx, &scene);
+            if let Some(stamp) = stamp {
+                self.imported_uploads.insert(stamp, &nodes);
+            }
+            nodes
+        };
         if uploaded.is_empty() {
             warn!("{} contained no renderable meshes", path_str);
             return;
@@ -6564,7 +7553,16 @@ impl<G: GameApp> Engine<G> {
         let offset = glam::Vec3::from_array(self.import_spawn_at);
         let mut commands: Vec<Box<dyn crate::editor_commands::EditorCommand>> =
             Vec::with_capacity(count);
-        for node in uploaded {
+        let source_path = std::path::Path::new(&path_str);
+        let source = self
+            .config
+            .project_root
+            .as_ref()
+            .and_then(|root| source_path.strip_prefix(root).ok())
+            .unwrap_or(source_path)
+            .to_string_lossy()
+            .into_owned();
+        for (ordinal, node) in uploaded.into_iter().enumerate() {
             let (scale, rotation, translation) = node.transform.to_scale_rotation_translation();
             let name = if node.entity_name.is_empty() {
                 Name::new("Imported Mesh")
@@ -6573,6 +7571,23 @@ impl<G: GameApp> Engine<G> {
             };
             let snapshot = EntitySnapshot {
                 spline: None,
+                blockout: None,
+                prefab: None,
+                persistent_id: None,
+                surface_tags: None,
+                reflected: vec![(
+                    somnium_ecs::reflect::StableId::new("somnium.ImportedMesh"),
+                    std::collections::BTreeMap::from([
+                        (
+                            somnium_ecs::reflect::FieldId(0),
+                            somnium_ecs::reflect::ReflectValue::Str(source.clone()),
+                        ),
+                        (
+                            somnium_ecs::reflect::FieldId(1),
+                            somnium_ecs::reflect::ReflectValue::I64(ordinal as i64),
+                        ),
+                    ]),
+                )],
                 transform: Some(Transform {
                     translation: translation + offset,
                     rotation,
@@ -6637,11 +7652,15 @@ impl<G: GameApp> Engine<G> {
     /// before `apply_post_process` pushes the authored values they replace.
     fn apply_time_of_day(&mut self, dt: f32) {
         self.day_state = None;
-        let Some(entity) = self.world.entities().find(|e| {
-            self.world
-                .get::<crate::time_of_day::TimeOfDayComponent>(*e)
-                .is_some()
-        }) else {
+        let Some(entity) = self
+            .world
+            .entities_with::<crate::time_of_day::TimeOfDayComponent>()
+            .find(|e| {
+                self.world
+                    .get::<crate::time_of_day::TimeOfDayComponent>(*e)
+                    .is_some()
+            })
+        else {
             return;
         };
         // The clock only runs during a play session. An editor that advanced
@@ -6686,7 +7705,7 @@ impl<G: GameApp> Engine<G> {
         // The sun is the first directional light. Not a named entity: a scene
         // that renamed "SunLight" would silently stop having a day cycle, and
         // a name is not a type.
-        let sun = self.world.entities().find(|e| {
+        let sun = self.world.entities_with::<LightComponent>().find(|e| {
             self.world
                 .get::<LightComponent>(*e)
                 .is_some_and(|light| light.light_type == LightType::Directional)
@@ -6721,9 +7740,19 @@ impl<G: GameApp> Engine<G> {
     /// for, and the reason coverage is a track on the clock rather than a
     /// second slider on the sky.
     fn apply_sky(&mut self, dt: f32) {
+        // The eye in the sky: the first one that is not hidden (a visibility
+        // gate hides it by hiding its entity).
+        let eye = self
+            .world
+            .entities_with::<crate::sky::SkyEyeComponent>()
+            .filter(|e| !crate::is_hidden(&self.world, *e))
+            .find_map(|e| self.world.get::<crate::sky::SkyEyeComponent>(e).copied());
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.sky_eye = eye.map_or_else(somnium_renderer::SkyEyeParams::default, |e| e.to_params());
+        }
         let sky = self
             .world
-            .entities()
+            .entities_with::<crate::sky::SkyComponent>()
             .find_map(|e| self.world.get::<crate::sky::SkyComponent>(e).copied());
         let coverage_override = self.day_state.and_then(|state| state.cloud_coverage);
         let Some(renderer) = self.renderer.as_mut() else {
@@ -6766,7 +7795,7 @@ impl<G: GameApp> Engine<G> {
     fn submit_decals(&mut self) {
         let collected: Vec<(glam::Mat4, crate::decal::DecalComponent, Option<u32>)> = self
             .world
-            .entities()
+            .entities_with::<crate::decal::DecalComponent>()
             .filter_map(|entity| {
                 if crate::is_hidden(&self.world, entity) {
                     return None;
@@ -6787,6 +7816,12 @@ impl<G: GameApp> Engine<G> {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        let camera = renderer.camera_pos;
+        let collected = crate::decal::keep_nearest(
+            collected,
+            somnium_renderer::pass::decal::MAX_DECALS,
+            |(transform, _, _)| transform.w_axis.truncate().distance_squared(camera),
+        );
         renderer.decals.clear();
         for (transform, decal, material) in collected {
             let source = material.and_then(|id| renderer.materials_pool.get(id));
@@ -6817,6 +7852,7 @@ impl<G: GameApp> Engine<G> {
                         angle_fade_degrees: decal.angle_fade_degrees,
                         normal_strength: decal.normal_strength,
                         roughness: decal.roughness,
+                        multiply: decal.multiply,
                     },
                 ));
         }
@@ -6832,13 +7868,19 @@ impl<G: GameApp> Engine<G> {
     /// fields that are themselves saved, and a world that got dirty by raining
     /// would make "unsaved changes" meaningless.
     fn apply_weather(&mut self, dt: f32) {
-        let weather = self.world.entities().find_map(|e| {
-            self.world
-                .get::<crate::weather::WeatherComponent>(e)
-                .copied()
-        });
+        let weather = self
+            .world
+            .entities_with::<crate::weather::WeatherComponent>()
+            .find_map(|e| {
+                self.world
+                    .get::<crate::weather::WeatherComponent>(e)
+                    .copied()
+            });
         let Some(weather) = weather else {
             self.weather_state = crate::weather::WeatherState::default();
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_foliage_wind([0.0, 0.0], 0.0);
+            }
             return;
         };
         self.weather_state = weather.step(self.weather_state, dt);
@@ -6854,21 +7896,30 @@ impl<G: GameApp> Engine<G> {
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.cloud_pass.settings.wind = state.wind;
                 renderer.water_pass.rain_ripple = state.ripples;
+                // Plants: a uniform, not a component write (`wind.rs`).
+                renderer.set_foliage_wind(state.wind, weather.foliage_sway);
             }
             // The sea roughens because the wind does, through the spectrum the
             // water already had — not through a second "storminess" knob.
             let bodies: Vec<somnium_ecs::Entity> = self
                 .world
-                .entities()
+                .entities_with::<WaterComponent>()
                 .filter(|e| self.world.get::<WaterComponent>(*e).is_some())
                 .collect();
             for entity in bodies {
-                if let Some(water) = self.world.get_mut::<WaterComponent>(entity) {
+                // Compare first: `get_mut` marks the component changed, and a
+                // write every frame would rebuild every cache keyed on water.
+                let stale = self
+                    .world
+                    .get::<WaterComponent>(entity)
+                    .is_some_and(|w| w.wind_speed != speed);
+                if let Some(water) = stale.then(|| self.world.get_mut::<WaterComponent>(entity)).flatten() {
                     water.wind_speed = speed;
                 }
             }
         } else if let Some(renderer) = self.renderer.as_mut() {
             renderer.water_pass.rain_ripple = 0.0;
+            renderer.set_foliage_wind([0.0, 0.0], 0.0);
         }
 
         // ── Wetness ──────────────────────────────────────────────────────────
@@ -6907,7 +7958,9 @@ impl<G: GameApp> Engine<G> {
     ) {
         use crate::weather::Precipitation;
 
-        let falling = weather.enabled && state.rate > 0.01;
+        // No particle rate means wet ground without visible rain: no emitter
+        // to move with the camera every frame.
+        let falling = weather.enabled && state.rate > 0.01 && weather.particle_rate > 0.0;
         if !falling {
             if let Some(entity) = self.precipitation_entity.take() {
                 // Despawned rather than left with a zero rate: an emitter with
@@ -6974,6 +8027,7 @@ impl<G: GameApp> Engine<G> {
                     Name::new("Precipitation"),
                     WorldTransform::identity(),
                     emitter,
+                    crate::weather::PrecipitationEmitter,
                 ));
                 self.precipitation_entity = Some(entity);
             }
@@ -7055,11 +8109,14 @@ impl<G: GameApp> Engine<G> {
     /// a cycle you are about to scrub — while the driver must do nothing at
     /// all when it is off.
     fn publish_time_of_day(&mut self) {
-        let hour = self.world.entities().find_map(|e| {
-            self.world
-                .get::<crate::time_of_day::TimeOfDayComponent>(e)
-                .map(|tod| tod.hour.rem_euclid(24.0))
-        });
+        let hour = self
+            .world
+            .entities_with::<crate::time_of_day::TimeOfDayComponent>()
+            .find_map(|e| {
+                self.world
+                    .get::<crate::time_of_day::TimeOfDayComponent>(e)
+                    .map(|tod| tod.hour.rem_euclid(24.0))
+            });
         if let Some(ui) = self.ui_manager.as_mut() {
             ui.update_time_of_day(hour);
         }
@@ -7082,10 +8139,13 @@ impl<G: GameApp> Engine<G> {
             .and_then(|e| self.world.get::<PostProcessComponent>(e).cloned())
             .or_else(|| {
                 self.world
-                    .entities()
+                    .entities_with::<PostProcessComponent>()
                     .find_map(|e| self.world.get::<PostProcessComponent>(e).cloned())
             });
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
+            // The player's graphics tier: gates and scales what the scene
+            // authored, never enables what it left off (see `quality`).
+            let budget = r.graphics_budget();
             // Phase 24A: exposure is now derived from EV100 rather than being a
             // free multiplier. Auto-exposure overrides it on the GPU from the
             // metered histogram, so this value is what a manual camera would use
@@ -7101,8 +8161,16 @@ impl<G: GameApp> Engine<G> {
                 .and_then(|state| state.exposure_compensation)
                 .unwrap_or(pp.exposure_compensation);
             r.shading_mode = u32::from(pp.cel_shading)
-                | if pp.pcss_enabled { 2 } else { 0 }
-                | if pp.contact_shadows_enabled { 4 } else { 0 }
+                | if pp.pcss_enabled && budget.soft_shadows {
+                    2
+                } else {
+                    0
+                }
+                | if pp.contact_shadows_enabled && budget.contact_shadows {
+                    4
+                } else {
+                    0
+                }
                 | if pp.analytic_grad { 8 } else { 0 };
             let path_active = pp.path_tracer && r.raytrace_pass.supported();
             // The path tracer already owns temporal accumulation. Feeding that
@@ -7125,27 +8193,34 @@ impl<G: GameApp> Engine<G> {
             let fsr_fallback = pp.fsr_enabled() && !path_active && !fsr_active;
             r.taa_pass
                 .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !path_active);
-            r.gtao_pass.enabled = pp.gtao_enabled && !path_active;
+            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
-            r.dof_pass.enabled = pp.dof_enabled && !path_active;
+            r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !path_active;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
-            r.restir_pass.enabled = pp.restir_enabled && !path_active;
-            let restir_gi_active =
-                pp.restir_gi_enabled && r.restir_gi_pass.supported() && !path_active;
+            r.restir_pass.enabled = pp.restir_enabled && budget.traced_direct && !path_active;
+            let restir_gi_active = pp.restir_gi_enabled
+                && budget.traced_gi
+                && r.restir_gi_pass.supported()
+                && !path_active;
+            // A tier without traced GI keeps the scene lit indirectly with
+            // probes rather than dropping bounce light altogether.
+            let gi_stand_in = pp.restir_gi_enabled && !budget.traced_gi && budget.probes;
             r.restir_gi_pass.enabled = restir_gi_active;
             // `probes` is the pre-AB scene field. Treat it as a compatibility
             // request for the portable tier; ReSTIR remains the explicit
             // higher-quality winner if both old/new fields are authored.
-            let ddgi_active = (pp.ddgi_enabled || pp.probes) && !restir_gi_active && !path_active;
+            let ddgi_active = ((pp.ddgi_enabled || pp.probes) && budget.probes || gi_stand_in)
+                && !restir_gi_active
+                && !path_active;
             r.ddgi_pass.configure(
                 ddgi_active,
                 somnium_renderer::pass::ddgi::DdgiConfig {
                     spacing: pp.ddgi_probe_spacing_m,
                     update_budget: pp.ddgi_update_budget,
                     hysteresis: pp.ddgi_hysteresis,
-                    intensity: if pp.ddgi_enabled {
+                    intensity: if pp.ddgi_enabled || gi_stand_in {
                         pp.ddgi_intensity
                     } else {
                         pp.probe_intensity
@@ -7153,15 +8228,17 @@ impl<G: GameApp> Engine<G> {
                 },
             );
             r.water_reflection_pass.enabled =
-                pp.rt_reflect_enabled && r.water_reflection_pass.supported();
+                pp.rt_reflect_enabled && budget.traced_water && r.water_reflection_pass.supported();
             r.water_reflection_pass.refract_enabled =
-                pp.rt_refract_enabled && r.water_reflection_pass.supported();
+                pp.rt_refract_enabled && budget.traced_water && r.water_reflection_pass.supported();
             r.cas_pass.enabled = pp.cas_enabled && !fsr_active;
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
-            r.motion_blur_pass.enabled = pp.motion_blur_enabled && !path_active;
+            r.motion_blur_pass.enabled =
+                pp.motion_blur_enabled && budget.camera_effects && !path_active;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
             r.restir_gi_pass.intensity = pp.restir_gi_intensity;
+            r.restir_gi_pass.max_distance = pp.restir_gi_distance;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
             r.volumetric_pass.enabled = pp.volumetrics_enabled && !path_active;
@@ -7171,8 +8248,9 @@ impl<G: GameApp> Engine<G> {
                 .unwrap_or(pp.fog_density);
             r.volumetric_pass.fog.height_falloff = pp.fog_height_falloff;
             r.volumetric_pass.fog.asymmetry = pp.fog_asymmetry;
-            r.volumetric_pass.fog.shafts = pp.light_shafts;
+            r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
+            r.volumetric_pass.fog.sky_occlusion = pp.fog_sky_occlusion;
             {
                 use somnium_renderer::pass::lighting_extra::{
                     FLAG_CACHE, FLAG_PATH, FLAG_PROBES, FLAG_SDF, FLAG_SPECULAR,
@@ -7185,10 +8263,10 @@ impl<G: GameApp> Engine<G> {
                     // wastes work and risks cross-mode history contamination.
                     flags = FLAG_PATH;
                 } else {
-                    if pp.world_cache && rt && !ddgi_active {
+                    if pp.world_cache && budget.traced_gi && rt && !ddgi_active {
                         flags |= FLAG_CACHE;
                     }
-                    if pp.specular_gi && rt {
+                    if pp.specular_gi && budget.traced_gi && rt {
                         flags |= FLAG_SPECULAR;
                     }
                     if ddgi_active || (pp.mesh_sdf && !pp.world_cache) {
@@ -7217,6 +8295,12 @@ impl<G: GameApp> Engine<G> {
                 lift: pp.lift,
                 gamma: pp.gamma,
                 grain: pp.grain,
+                dream: [
+                    pp.dream_mode.min(3) as f32,
+                    pp.dream_strength.clamp(0.0, 1.0),
+                    pp.dream_speed.clamp(0.0, 3.0),
+                    0.0,
+                ],
                 time: self.time.elapsed().as_secs_f32(),
                 // CONTROL-K: the authored curve is sampled here, once per
                 // frame, and the renderer never sees a keyframe. This is the
@@ -7251,9 +8335,18 @@ impl<G: GameApp> Engine<G> {
     fn apply_camera_settings(&mut self) {
         let settings = self
             .world
-            .entities()
+            .entities_with::<CameraSettingsComponent>()
             .find_map(|e| self.world.get::<CameraSettingsComponent>(e).copied());
-        let Some(cam) = settings else { return };
+        let Some(cam) = settings else {
+            // No Camera entity: the renderer keeps its own scale, capped by the tier.
+            if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
+                let cap = r.graphics_budget().render_scale;
+                if cap < 1.0 {
+                    r.set_graphics_scale(c, cap);
+                }
+            }
+            return;
+        };
         if let Some(r) = self.renderer.as_mut() {
             r.set_cpu_frustum(cam.frustum_cull);
         }
@@ -7261,7 +8354,8 @@ impl<G: GameApp> Engine<G> {
         // render context as well — switching the controller off resizes the
         // scene targets back to the base extent there and then.
         if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
-            r.set_graphics_scale(c, cam.graphics_scalability.scale());
+            let cap = r.graphics_budget().render_scale;
+            r.set_graphics_scale(c, cam.graphics_scalability.scale().min(cap));
             r.set_dynamic_resolution(
                 c,
                 cam.dynamic_resolution,
@@ -7280,7 +8374,7 @@ impl<G: GameApp> Engine<G> {
     fn sync_terrain_colliders(&mut self) {
         let terrains: Vec<(u32, glam::Vec3)> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 let tc = self.world.get::<TerrainComponent>(e)?;
                 let pos = self
@@ -7362,6 +8456,7 @@ impl<G: GameApp> Engine<G> {
     /// pipeline — indirect draws, frustum, Hi-Z and per-cluster culling —
     /// without foliage needing to know any of it exists.
     fn submit_foliage(&mut self) {
+        let mut counts = somnium_renderer::profiler::FoliageCounters::default();
         let camera_ws = self
             .renderer
             .as_ref()
@@ -7376,7 +8471,7 @@ impl<G: GameApp> Engine<G> {
             somnium_ecs::curve::Curve,
         )> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 if crate::is_hidden(&self.world, e) {
                     return None;
@@ -7448,15 +8543,28 @@ impl<G: GameApp> Engine<G> {
             };
             self.foliage_batch.clear();
             for inst in &t.painted_foliage {
+                counts.candidates = counts.candidates.saturating_add(1);
                 let d = inst.position - camera_local;
                 // Horizontal distance: flying up should not make ground cover
                 // vanish out from under you.
                 if d.x * d.x + d.z * d.z > cull_sq {
+                    counts.distance_culled = counts.distance_culled.saturating_add(1);
                     continue;
                 }
                 let Some(Some(parts)) = self.foliage_meshes.get(inst.kind as usize) else {
+                    counts.unavailable_mesh = counts.unavailable_mesh.saturating_add(1);
                     continue;
                 };
+                let far_parts = self
+                    .project_foliage
+                    .get(&inst.kind)
+                    .and_then(|entry| entry.lod.as_ref())
+                    .filter(|lod| d.x * d.x + d.z * d.z > lod.distance * lod.distance)
+                    .and_then(|_| self.foliage_lod_meshes[inst.kind as usize].as_ref());
+                if far_parts.is_some() {
+                    counts.lod_instances += 1;
+                }
+                let parts = far_parts.unwrap_or(parts);
                 // Terrain-local placement composed with the terrain's own
                 // transform, so moving the terrain carries its foliage.
                 // CONTROL-K: the authored falloff curve, evaluated against
@@ -7471,6 +8579,7 @@ impl<G: GameApp> Engine<G> {
                     inst.scale * lod_falloff.evaluate(horizontal_sq.sqrt() / cull_distance)
                 };
                 if scale <= 0.0 {
+                    counts.scale_culled = counts.scale_culled.saturating_add(1);
                     continue;
                 }
                 // Yaw then lean. `Ry · Rx` and not the other way round: the
@@ -7495,10 +8604,18 @@ impl<G: GameApp> Engine<G> {
                 // (trunk / branches). Past lod_distance drop the leaf/twig
                 // cutouts. Index-count is only the fallback when the glTF did
                 // not mark any part as foliage.
-                let keep_only =
-                    impostor_distance > 0.0 && dist > impostor_distance && parts.len() > 1;
-                let drop_heavy =
-                    !keep_only && lod_distance > 0.0 && dist > lod_distance && parts.len() > 1;
+                // A project entry can be a mixed planted patch. Its material
+                // parts are not tree LODs: keep all until distance culling.
+                let legacy_lod = inst.kind < 128;
+                let keep_only = legacy_lod
+                    && impostor_distance > 0.0
+                    && dist > impostor_distance
+                    && parts.len() > 1;
+                let drop_heavy = legacy_lod
+                    && !keep_only
+                    && lod_distance > 0.0
+                    && dist > lod_distance
+                    && parts.len() > 1;
                 let has_leaf = parts.iter().any(|p| p.is_leaf);
                 let cheapest = parts
                     .iter()
@@ -7510,6 +8627,7 @@ impl<G: GameApp> Engine<G> {
                     .enumerate()
                     .max_by_key(|(_, p)| p.index_count)
                     .map(|(i, _)| i);
+                let parts_before = self.foliage_batch.len();
                 for (i, part) in parts.iter().enumerate() {
                     if keep_only {
                         if has_leaf {
@@ -7531,6 +8649,11 @@ impl<G: GameApp> Engine<G> {
                     }
                     self.foliage_batch
                         .push((*part, model * placement * part.local, casts));
+                    counts.submitted_parts = counts.submitted_parts.saturating_add(1);
+                    counts.shadow_parts = counts.shadow_parts.saturating_add(u32::from(casts));
+                }
+                if self.foliage_batch.len() != parts_before {
+                    counts.submitted_instances = counts.submitted_instances.saturating_add(1);
                 }
             }
             self.foliage_batch.sort_by_key(|(part, _, _)| {
@@ -7540,6 +8663,7 @@ impl<G: GameApp> Engine<G> {
             if let Some(r) = self.renderer.as_mut() {
                 for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
+                        paint: 0,
                         sort_key: somnium_renderer::command::SortKey::new(0, 0, 0),
                         vertex_offset: part.vertex_offset,
                         index_offset: part.index_offset,
@@ -7552,6 +8676,7 @@ impl<G: GameApp> Engine<G> {
             }
         }
         if let Some(r) = self.renderer.as_mut() {
+            r.foliage_submission = counts;
             r.profiler.cpu_end();
         }
     }
@@ -7564,6 +8689,19 @@ impl<G: GameApp> Engine<G> {
     /// allowed onto ground the grass default refuses, and that is a fact about
     /// the cliff.
     fn apply_foliage_palette_defaults(&mut self) {
+        if let Some(entry) = self.project_foliage.get(&self.foliage_brush.kind) {
+            let d = &entry.brush;
+            let b = &mut self.foliage_brush;
+            b.single = d.single;
+            b.density = d.density;
+            b.layer = d.layer;
+            b.min_layer_weight = d.min_layer_weight;
+            b.max_tilt_deg = d.max_tilt_deg;
+            b.max_slope_deg = d.max_slope_deg;
+            b.scale_min = d.scale_min;
+            b.scale_max = d.scale_max;
+            return;
+        }
         let Some(entry) = FOLIAGE_PALETTE.get(self.foliage_brush.kind as usize) else {
             return;
         };
@@ -7580,6 +8718,10 @@ impl<G: GameApp> Engine<G> {
 
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
+        if kind >= 128 {
+            self.ensure_project_palette_mesh(kind);
+            return;
+        }
         let idx = kind as usize;
         if idx >= FOLIAGE_PALETTE.len()
             || self.foliage_meshes[idx].is_some()
@@ -7778,6 +8920,7 @@ impl<G: GameApp> Engine<G> {
         let local_hit = model.inverse().transform_point3(hit);
         let center = [local_hit.x, local_hit.z];
 
+        let before = terrain.painted_foliage.clone();
         if erase {
             let removed = somnium_renderer::terrain::foliage_paint::erase(
                 &mut terrain.painted_foliage,
@@ -7787,6 +8930,17 @@ impl<G: GameApp> Engine<G> {
             );
             if removed > 0 {
                 info!("Foliage: erased {removed}");
+            }
+            if terrain.painted_foliage != before {
+                terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+                self.undo_stack
+                    .push_silent(Box::new(crate::editor_commands::FoliageEditCmd::new(
+                        tc.terrain_id,
+                        before,
+                        terrain.painted_foliage.clone(),
+                        self.terrain_restore_queue.clone(),
+                    )));
+                self.scene_dirty = true;
             }
             return true;
         }
@@ -7803,15 +8957,26 @@ impl<G: GameApp> Engine<G> {
             |x, z| terrain.ground_sample(x, z, brush.layer),
         );
         terrain.painted_foliage = painted;
+        if terrain.painted_foliage != before {
+            terrain.edit_revision = terrain.edit_revision.wrapping_add(1);
+            self.undo_stack
+                .push_silent(Box::new(crate::editor_commands::FoliageEditCmd::new(
+                    tc.terrain_id,
+                    before,
+                    terrain.painted_foliage.clone(),
+                    self.terrain_restore_queue.clone(),
+                )));
+            self.scene_dirty = true;
+        }
         let total = terrain.painted_foliage.len();
-        let entry = &FOLIAGE_PALETTE[brush.kind as usize % FOLIAGE_PALETTE.len()];
+        let entry_name = self.foliage_kind_name(brush.kind).to_owned();
         if report.placed > 0 {
             info!(
                 "Foliage: painted {} of {} (total {total})",
-                report.placed, entry.name,
+                report.placed, entry_name,
             );
         } else if report.refused() {
-            self.report_refused_foliage_dab(entry.name, &brush, &report);
+            self.report_refused_foliage_dab(&entry_name, &brush, &report);
         }
         true
     }
@@ -8029,7 +9194,7 @@ impl<G: GameApp> Engine<G> {
     fn submit_terrains(&mut self) {
         let terrains: Vec<(Entity, TerrainComponent, glam::Mat4)> = self
             .world
-            .entities()
+            .entities_with::<TerrainComponent>()
             .filter_map(|e| {
                 // The Outliner's eye means "not drawn", for a terrain exactly
                 // as for a mesh.
@@ -8664,6 +9829,146 @@ impl<G: GameApp> Engine<G> {
         use somnium_ui::{CreateKind, FoliageBrushField as FB, TerrainToolField as TT};
 
         match ev {
+            EditorEvent::AuthoringRequest { method, params } => {
+                let result = self.authoring_request(&method, params);
+                if let Some(ui) = &mut self.ui_manager {
+                    if result.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+                        let message = result["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Authoring request failed");
+                        ui.push_toast(message);
+                    }
+                }
+            }
+            EditorEvent::CreateComponent(name) => self.create_designer_component(&name),
+            EditorEvent::DesignerTool(action) => self.run_designer_tool(action),
+            EditorEvent::Prefab(action) => {
+                self.selection.reconcile();
+                let registry = crate::reflect_registry::component_registry();
+                let source_before = if matches!(
+                    action,
+                    somnium_ui::editor_event::PrefabAction::Propagate
+                        | somnium_ui::editor_event::PrefabAction::Nest
+                ) {
+                    self.selection
+                        .primary
+                        .and_then(|entity| self.world.get::<crate::prefab::PrefabMember>(entity))
+                        .and_then(|member| {
+                            let path = std::path::PathBuf::from(&member.source);
+                            std::fs::read(&path).ok().map(|bytes| (path, bytes))
+                        })
+                } else {
+                    None
+                };
+                let before = crate::scene_schema::scene_to_json(&mut self.world, &registry);
+                match crate::prefab::editor_action(&mut self.world, &mut self.selection, action) {
+                    Ok(message) => {
+                        if matches!(
+                            action,
+                            somnium_ui::editor_event::PrefabAction::Instantiate
+                                | somnium_ui::editor_event::PrefabAction::Revert
+                                | somnium_ui::editor_event::PrefabAction::Propagate
+                                | somnium_ui::editor_event::PrefabAction::Nest
+                        ) {
+                            self.reconstruct_scene_gpu("assets/prefab.somprefab");
+                        }
+                        let after = crate::scene_schema::scene_to_json(&mut self.world, &registry);
+                        let sources = source_before
+                            .and_then(|(path, before)| {
+                                std::fs::read(&path).ok().map(|after| (path, before, after))
+                            })
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        if before != after
+                            || sources.iter().any(|(_, before, after)| before != after)
+                        {
+                            self.undo_stack.push_silent(Box::new(
+                                crate::prefab::PrefabEditCommand::with_sources(
+                                    before, after, sources,
+                                ),
+                            ));
+                            self.scene_dirty = true;
+                        }
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast(&message);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.push_toast(&error);
+                        }
+                    }
+                }
+            }
+            EditorEvent::ExportBlockout => {
+                let result = (|| -> Result<(), String> {
+                    let entity = self.selection.primary.ok_or("Select a blockout entity")?;
+                    let blockout = self
+                        .world
+                        .get::<crate::blockout::BlockoutComponent>(entity)
+                        .ok_or("Selection has no Blockout component")?;
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("glTF mesh", &["glb"])
+                        .set_directory("assets")
+                        .set_file_name("Blockout.glb")
+                        .save_file()
+                    {
+                        blockout.write_glb(&path)?;
+                    }
+                    Ok(())
+                })();
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.push_toast(
+                        &result.map_or_else(|e| e, |()| "Blockout export finished".into()),
+                    );
+                }
+            }
+            EditorEvent::OpenAuthoringGraph => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Authoring graph", &["somgraph"])
+                    .set_directory("assets")
+                    .pick_file()
+                {
+                    let result = (|| -> Result<(), String> {
+                        let bytes = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                        let document: serde_json::Value =
+                            serde_json::from_str(&bytes).map_err(|e| e.to_string())?;
+                        let catalogue = document["catalogue"]
+                            .as_str()
+                            .ok_or("Graph has no catalogue")?;
+                        let ui = self.ui_manager.as_mut().ok_or("Editor unavailable")?;
+                        ui.edit_authoring_graph(catalogue, &bytes)?;
+                        ui.set_authoring_graph_source(&path.to_string_lossy());
+                        Ok(())
+                    })();
+                    if let Err(error) = result
+                        && let Some(ui) = &mut self.ui_manager
+                    {
+                        ui.push_toast(&error);
+                    }
+                }
+            }
+            EditorEvent::AuthoringGraph {
+                catalogue,
+                json,
+                apply,
+                preview,
+                source,
+            } => {
+                let result = self.apply_authoring_graph(
+                    &catalogue,
+                    &json,
+                    apply,
+                    preview,
+                    source.as_deref(),
+                );
+                if let Some(ui) = &mut self.ui_manager {
+                    let error = result.is_err();
+                    let message = result.unwrap_or_else(|e| e);
+                    ui.set_authoring_graph_status(&message, error);
+                    ui.push_toast(&message);
+                }
+            }
             EditorEvent::CompleteDrop(request) => {
                 use somnium_ui::DropRequest;
                 match request {
@@ -8953,32 +10258,17 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::OpenProjectPicker => {
-                // 27-G's picker, unblocked: that phase deferred it because it
-                // needed an `EditorEvent` addition it had forbidden itself.
                 let Some(folder) = rfd::FileDialog::new()
-                    .set_title("Open Project")
+                    .set_title("Open Game Project (game.project.json)")
                     .pick_folder()
                 else {
                     return;
                 };
-                let (component, field) =
-                    crate::settings::field_address("somnium.ProjectSettings", "content_root");
-                let value =
-                    somnium_ecs::reflect::ReflectValue::Str(folder.to_string_lossy().into_owned());
-                match self.settings.set(component, field, value) {
-                    Ok(()) => {
-                        self.config.content_root = folder;
-                        self.next_asset_scan = std::time::Instant::now();
-                        self.asset_scan_stamp = None;
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.push_toast("Project opened");
-                        }
-                    }
-                    Err(reason) => {
-                        if let Some(ui) = self.ui_manager.as_mut() {
-                            ui.push_toast(&reason);
-                        }
-                    }
+                let result = self.open_editor_project(&folder);
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.push_toast(
+                        &result.unwrap_or_else(|e| format!("Project could not open: {e}")),
+                    );
                 }
             }
 
@@ -9028,11 +10318,15 @@ impl<G: GameApp> Engine<G> {
                 let Some(renderer) = self.renderer.as_ref() else {
                     return;
                 };
-                let forward = renderer
-                    .view_proj
-                    .inverse()
-                    .transform_vector3(glam::Vec3::NEG_Z);
-                let forward = forward.normalize_or_zero();
+                let (width, height) = self.viewport_size();
+                let point = ndc_to_world(
+                    width * 0.5,
+                    height * 0.5,
+                    width,
+                    height,
+                    &renderer.picking_view_proj().inverse(),
+                );
+                let forward = (point - renderer.camera_pos).normalize_or_zero();
                 let yaw = forward.z.atan2(forward.x).to_degrees();
                 let pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
                 self.camera_bookmarks[index.min(8)] = Some((renderer.camera_pos, yaw, pitch));
@@ -9233,6 +10527,11 @@ impl<G: GameApp> Engine<G> {
                 // (and tears it down when the entity is deleted).
                 let snapshot = EntitySnapshot {
                     spline: None,
+                    blockout: None,
+                    prefab: None,
+                    persistent_id: None,
+                    surface_tags: None,
+                    reflected: Vec::new(),
                     transform: Some(Transform::from_translation(glam::Vec3::ZERO)),
                     name: Some(Name::new("Voxel Terrain")),
                     light: None,
@@ -9498,7 +10797,12 @@ impl<G: GameApp> Engine<G> {
                                     emissive_map: -1,
                                     terrain_index: -1,
                                     porosity: 0.5,
-                                    _pad: 0.0,
+                                    normal_scale: 1.0,
+                                    height_map: -1,
+                                    height_depth: 0.0,
+                                    weathering: 0.0,
+                                    detile: 0.0,
+                                    wind: [0.0; 4],
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -9554,6 +10858,12 @@ impl<G: GameApp> Engine<G> {
                 let world = WorldTransform(transform.to_matrix());
                 let snapshot = EntitySnapshot {
                     spline,
+                    blockout: (kind == CreateKind::Blockout)
+                        .then(crate::blockout::BlockoutComponent::default),
+                    prefab: None,
+                    persistent_id: None,
+                    surface_tags: None,
+                    reflected: Vec::new(),
                     transform: Some(transform),
                     name: Some(Name::new(name_str)),
                     light,
@@ -9868,9 +11178,17 @@ impl<G: GameApp> Engine<G> {
                         );
                     }
                     TT::DebugView => {
-                        self.terrain_debug_view = value.round().clamp(0.0, 34.0);
+                        self.terrain_debug_view = value.round().clamp(0.0, 35.0);
                         if let Some(renderer) = self.renderer.as_mut() {
                             renderer.shading_debug = self.terrain_debug_view;
+                        }
+                        if let Some(view) = somnium_ui::debug::DEBUG_VIEWS
+                            .iter()
+                            .find(|view| view.code == self.terrain_debug_view)
+                        {
+                            if let Some(ui) = self.ui_manager.as_mut() {
+                                ui.set_active_debug_view(view.id);
+                            }
                         }
                     }
                     TT::TileScale
@@ -9968,8 +11286,12 @@ impl<G: GameApp> Engine<G> {
                     FB::Radius => brush.radius = value.clamp(0.25, 200.0),
                     FB::MaxSlope => brush.max_slope_deg = value.clamp(0.0, 90.0),
                     FB::Kind => {
-                        brush.kind =
-                            (value.round().max(0.0) as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                        let kind = value.round().clamp(0.0, 255.0) as u8;
+                        if (kind as usize) < FOLIAGE_PALETTE.len()
+                            || self.project_foliage.contains_key(&kind)
+                        {
+                            brush.kind = kind;
+                        }
                         // The same entry defaults `SelectFoliageKind` applies.
                         // Two ways to change one field that behave differently
                         // is how a slider ends up painting pebbles with a
@@ -10055,6 +11377,10 @@ impl<G: GameApp> Engine<G> {
 
             EditorEvent::NewScene => {
                 info!("Creating new scene");
+                self.animation_authoring
+                    .clear(&mut self.world, self.physics.as_mut());
+                self.navigation_editor.clear(&mut self.world);
+                self.animation_event_owner = None;
                 // Clear the world
                 let all_entities: Vec<somnium_ecs::Entity> = self
                     .world
@@ -10150,7 +11476,18 @@ impl<G: GameApp> Engine<G> {
                     let mut dup_transform = transform;
                     dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
                     let snapshot = EntitySnapshot {
-                        spline: None,
+                        reflected: EntitySnapshot::capture(&self.world, entity).reflected,
+                        spline: self.world.get::<crate::SplineComponent>(entity).cloned(),
+                        blockout: self
+                            .world
+                            .get::<crate::blockout::BlockoutComponent>(entity)
+                            .copied(),
+                        prefab: None,
+                        persistent_id: Some(somnium_ecs::PersistentId::mint()),
+                        surface_tags: self
+                            .world
+                            .get::<crate::scatter_scene::SurfaceTagsComponent>(entity)
+                            .cloned(),
                         transform: Some(dup_transform),
                         name: Some(name),
                         light,
@@ -10621,6 +11958,8 @@ impl<G: GameApp> Engine<G> {
                 }
                 self.simulation_clock.state = SimulationState::Playing;
                 self.play_session_active = true;
+                self.play_cursor.requested = true;
+                self.sync_play_cursor();
                 self.audio_scene.set_paused(false);
                 self.gizmo_drag = None;
                 self.terrain_stroke = None;
@@ -10635,6 +11974,7 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::PauseSimulation => {
+                self.release_play_cursor();
                 self.simulation_clock.state = SimulationState::Paused;
                 self.audio_scene.set_paused(true);
                 if self.play_session_active {
@@ -10665,6 +12005,8 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::StopSimulation => {
+                self.release_play_cursor();
+                crate::ai::reset_behaviors(&mut self.world);
                 self.pending_steps = 0;
                 self.simulation_clock.state = SimulationState::Editing;
                 self.simulation_clock.elapsed_seconds = 0.0;
@@ -10691,6 +12033,8 @@ impl<G: GameApp> Engine<G> {
                 self.end_terrain_stroke();
                 self.terrain_edit_active = false;
                 self.foliage_paint_active = false;
+                self.end_vertex_paint_stroke();
+                self.vertex_paint_active = false;
                 if let Some(r) = &mut self.renderer {
                     r.gizmo_mode = match mode {
                         1 => somnium_renderer::pass::gizmo::GizmoMode::Rotate,
@@ -10705,6 +12049,7 @@ impl<G: GameApp> Engine<G> {
                     self.terrain_edit_active = !self.terrain_edit_active;
                     if self.terrain_edit_active {
                         self.foliage_paint_active = false;
+                        self.vertex_paint_active = false;
                     }
                     info!(
                         "Terrain edit mode: {}",
@@ -10723,6 +12068,9 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::ToggleImmersiveViewport => {
+                if self.config.player_mode {
+                    return;
+                }
                 let entering = self
                     .ui_manager
                     .as_ref()
@@ -10731,19 +12079,10 @@ impl<G: GameApp> Engine<G> {
                     ui.set_immersive(entering);
                 }
                 if entering {
-                    self.simulation_clock.state = SimulationState::Playing;
-                    self.play_session_active = true;
-                    self.gizmo_drag = None;
-                    self.terrain_stroke = None;
-                    if let Some(r) = &mut self.renderer {
-                        r.set_editor_overlays_enabled(false);
-                    }
-                    if let Some(ui) = &mut self.ui_manager {
-                        ui.update_simulation_controls(1);
-                        ui.set_play_overlays_hidden(true);
-                    }
+                    self.handle_editor_event(EditorEvent::PlaySimulation);
                     info!("Immersive viewport");
                 } else {
+                    self.release_play_cursor();
                     info!("Immersive viewport exited");
                 }
             }
@@ -10808,6 +12147,7 @@ impl<G: GameApp> Engine<G> {
                 // Sculpting and foliage painting both claim the left button.
                 if self.foliage_paint_active {
                     self.terrain_edit_active = false;
+                    self.vertex_paint_active = false;
                 }
                 info!(
                     "Foliage paint: {}",
@@ -10818,6 +12158,7 @@ impl<G: GameApp> Engine<G> {
                     }
                 );
             }
+            EditorEvent::VertexPaint(event) => self.handle_vertex_paint_event(event),
             EditorEvent::ToggleFoliageErase => {
                 self.foliage_erase = !self.foliage_erase;
             }
@@ -10825,7 +12166,10 @@ impl<G: GameApp> Engine<G> {
                 self.foliage_brush.single = !self.foliage_brush.single;
             }
             EditorEvent::SelectFoliageKind(kind) => {
-                self.foliage_brush.kind = (kind as usize).min(FOLIAGE_PALETTE.len() - 1) as u8;
+                if !self.foliage_kind_exists(kind) {
+                    return;
+                }
+                self.foliage_brush.kind = kind;
                 // Trees want one-per-click, ground cover wants a spread, and
                 // debris wants a layer test and a lean. Setting the obvious
                 // default saves a second click almost every time — and reading
@@ -10834,7 +12178,7 @@ impl<G: GameApp> Engine<G> {
                 self.apply_foliage_palette_defaults();
                 info!(
                     "Foliage brush: {}",
-                    FOLIAGE_PALETTE[self.foliage_brush.kind as usize].name
+                    self.foliage_kind_name(self.foliage_brush.kind)
                 );
             }
 
@@ -11326,8 +12670,8 @@ fn apply_gizmo_drag(
 /// Derived from the components actually present rather than from a name
 /// heuristic, which is the difference between `type:light` finding the lights
 /// and `type:light` finding everything called "Lamp".
-fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> {
-    let mut tags = Vec::new();
+fn entity_tags(world: &World, entity: somnium_ecs::Entity, tags: &mut Vec<&'static str>) {
+    tags.clear();
     if world.get::<LightComponent>(entity).is_some() {
         tags.push("light");
     }
@@ -11364,7 +12708,6 @@ fn entity_tags(world: &World, entity: somnium_ecs::Entity) -> Vec<&'static str> 
     {
         tags.push("script");
     }
-    tags
 }
 
 /// The platform command that reads stdin onto the clipboard.
@@ -11490,7 +12833,10 @@ fn ray_aabb_distance(
         near = near.max(t0.min(t1));
         far = far.min(t0.max(t1));
     }
-    (far >= near.max(0.0)).then(|| near.max(0.0))
+    // A camera inside a box (a town-wide merged mesh, the room it stands in)
+    // must not report distance zero, or that box wins every click. Its exit
+    // is where the ray actually meets the enclosing surface.
+    (far >= near.max(0.0)).then(|| if near >= 0.0 { near } else { far })
 }
 
 #[cfg(test)]
@@ -11735,6 +13081,16 @@ mod viewport_control_tests {
             None,
             "a box the ray misses is not under the cursor"
         );
+        // A town-wide mesh enclosing the camera ranks by its far side, so the
+        // small prop actually under the cursor still wins.
+        let enclosing = ray_aabb_distance(
+            origin,
+            forward,
+            glam::Vec3::splat(-50.0),
+            glam::Vec3::splat(50.0),
+        );
+        assert_eq!(enclosing, Some(50.0));
+        assert!(near.unwrap() < enclosing.unwrap());
     }
 
     #[test]
@@ -12029,10 +13385,11 @@ mod viewport_control_tests {
         assert_eq!(super::gizmo_anchor(&somnium_ecs::World::new(), None), None);
     }
 
-    /// A ray that starts inside a box hits it at zero, not at a negative
-    /// distance — otherwise a camera inside geometry would sort it last.
+    /// A ray that starts inside a box hits it where it leaves, never at a
+    /// negative distance (the box stays pickable) and never at zero (a
+    /// town-wide mesh around the camera would otherwise win every click).
     #[test]
-    fn a_ray_starting_inside_a_box_hits_it_at_zero() {
+    fn a_ray_starting_inside_a_box_hits_it_at_its_exit() {
         assert_eq!(
             ray_aabb_distance(
                 glam::Vec3::ZERO,
@@ -12040,7 +13397,7 @@ mod viewport_control_tests {
                 glam::Vec3::splat(-1.0),
                 glam::Vec3::splat(1.0),
             ),
-            Some(0.0)
+            Some(1.0)
         );
     }
 
@@ -12157,3 +13514,195 @@ mod viewport_control_tests {
         }
     }
 }
+
+impl<G: GameApp> Engine<G> {
+    fn apply_authoring_graph(
+        &mut self,
+        catalogue: &str,
+        json: &str,
+        apply: bool,
+        preview: bool,
+        document_source: Option<&str>,
+    ) -> Result<String, String> {
+        if !apply {
+            let catalogue_def = match catalogue {
+                "somnium.scatter" => somnium_ui::graph::scatter::catalogue(),
+                "somnium.behavior" => somnium_ui::graph::behavior::catalogue(),
+                _ => return Err("Open a scatter or behavior graph first".into()),
+            };
+            let graph = somnium_ui::graph::serial::from_json(json, &catalogue_def)
+                .map_err(|e| e.to_string())?;
+            // Source graphs can be saved as drafts; Preview and Apply enforce
+            // runtime validity without discarding the designer's work.
+            let validation = if catalogue == "somnium.scatter" {
+                somnium_ui::graph::scatter::compile(&graph).map(|_| ())
+            } else {
+                somnium_ui::graph::behavior::compile(&graph).map(|_| ())
+            };
+            let path = document_source.map(std::path::PathBuf::from).or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Authoring graph", &["somgraph"])
+                    .set_directory("assets")
+                    .set_file_name("NewGraph.somgraph")
+                    .save_file()
+            });
+            if let Some(path) = path {
+                crate::save_game::atomic_write(&path, json.as_bytes())?;
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.set_authoring_graph_source(&path.to_string_lossy());
+                }
+                return Ok(validation.map_or_else(
+                    |error| format!("Saved draft · {error}"),
+                    |()| format!("Saved {}", path.display()),
+                ));
+            }
+            return Ok("Graph save cancelled".into());
+        }
+        if catalogue == "somnium.behavior" && preview {
+            let graph = somnium_ui::graph::serial::from_json(
+                json,
+                &somnium_ui::graph::behavior::catalogue(),
+            )
+            .map_err(|e| e.to_string())?;
+            somnium_ui::graph::behavior::compile(&graph)?;
+            return Ok(format!(
+                "Behavior valid · {} nodes · Apply attaches to the selected entity",
+                graph.nodes().len()
+            ));
+        }
+        let source = self
+            .selection
+            .primary
+            .ok_or("Select a scene entity first")?;
+        if catalogue == "somnium.behavior" {
+            let before = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            crate::ai::attach_behavior(&mut self.world, source, json.to_owned())?;
+            let after = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            self.undo_stack
+                .push_silent(Box::new(crate::prefab::PrefabEditCommand::new(
+                    before, after,
+                )));
+            self.after_selection_change();
+            self.scene_dirty = true;
+            return Ok("Attached behavior graph to selected entity".into());
+        }
+        if catalogue != "somnium.scatter" {
+            return Err("Open a scatter or behavior graph first".into());
+        }
+        let graph =
+            somnium_ui::graph::serial::from_json(json, &somnium_ui::graph::scatter::catalogue())
+                .map_err(|e| e.to_string())?;
+        let rule = somnium_ui::graph::scatter::compile(&graph)?;
+        let origin = self
+            .world
+            .get::<Transform>(source)
+            .map_or(glam::Vec3::ZERO, |t| t.translation);
+        let settings = crate::scatter_scene::ScatterSettings::for_source(&self.world, source);
+        let origin = self
+            .world
+            .get::<WorldTransform>(source)
+            .map_or(origin, |transform| transform.0.w_axis.truncate());
+        let (min, max) = settings.region(origin)?;
+        let terrains: Vec<_> = self
+            .world
+            .entities()
+            .filter_map(|e| {
+                let component = self.world.get::<TerrainComponent>(e)?;
+                Some((
+                    component.terrain_id,
+                    self.world
+                        .get::<Transform>(e)
+                        .map_or(glam::Mat4::IDENTITY, Transform::to_matrix),
+                    self.world
+                        .get::<crate::scatter_scene::SurfaceTagsComponent>(e)
+                        .cloned()
+                        .unwrap_or_default()
+                        .tags(),
+                ))
+            })
+            .collect();
+        let images = rule.load_images(min, max)?;
+        let renderer = &mut self.renderer;
+        let snapshots =
+            crate::scatter_scene::bake(&self.world, source, &rule, min, max, &images, |p| {
+                let sample = |renderer: &mut Option<SomniumRenderer>,
+                              x: f32,
+                              z: f32|
+                 -> Option<(f32, usize)> {
+                    if terrains.is_empty() {
+                        return Some((origin.y, usize::MAX));
+                    }
+                    let renderer = renderer.as_mut()?;
+                    let mut best: Option<(f32, usize)> = None;
+                    for (index, (id, model, _)) in terrains.iter().enumerate() {
+                        if let Some(terrain) = renderer.terrain_mut(*id) {
+                            terrain.model = *model;
+                            if let Some(hit) = terrain.raycast(
+                                glam::Vec3::new(x, origin.y + 10_000.0, z),
+                                glam::Vec3::NEG_Y,
+                            ) {
+                                if best.is_none_or(|(height, _)| hit.y > height) {
+                                    best = Some((hit.y, index));
+                                }
+                            }
+                        }
+                    }
+                    best
+                };
+                let (height, terrain_index) = sample(renderer, p.x, p.y)?;
+                let dx = sample(renderer, p.x + 0.1, p.y).map_or(height, |v| v.0)
+                    - sample(renderer, p.x - 0.1, p.y).map_or(height, |v| v.0);
+                let dz = sample(renderer, p.x, p.y + 0.1).map_or(height, |v| v.0)
+                    - sample(renderer, p.x, p.y - 0.1).map_or(height, |v| v.0);
+                let tags = terrains.get(terrain_index).map_or_else(
+                    || std::collections::BTreeMap::from([("ground".into(), 1.0)]),
+                    |terrain| terrain.2.clone(),
+                );
+                Some(somnium_asset::scatter::SurfacePoint {
+                    position: glam::Vec3::new(p.x, height, p.y),
+                    normal: glam::Vec3::new(-dx, 0.2, -dz).normalize(),
+                    tags,
+                })
+            })?;
+        let count = snapshots.len();
+        if preview {
+            return Ok(format!(
+                "Preview: {count} instances in {:.1} × {:.1} m · Apply creates one undo step",
+                settings.width, settings.depth
+            ));
+        }
+        let commands = snapshots
+            .into_iter()
+            .map(|snapshot| {
+                Box::new(CreateEntityCmd::new(snapshot)) as Box<dyn crate::EditorCommand>
+            })
+            .collect();
+        self.undo_stack.push(
+            Box::new(crate::editor_commands::CommandGroup::new(
+                "Apply scatter graph",
+                commands,
+            )),
+            &mut self.world,
+            &mut self.selection.primary,
+        );
+        self.scene_dirty |= count > 0;
+        Ok(format!(
+            "Scattered {count} instances in {:.1} × {:.1} m; Undo reverses the batch",
+            settings.width, settings.depth
+        ))
+    }
+}
+
+#[path = "app_designer.rs"]
+mod designer;
+
+#[path = "app_authoring.rs"]
+mod authoring_host;
+
+#[path = "app_import_cache.rs"]
+mod import_cache;
+
+#[path = "app_play_input.rs"]
+mod play_input;
+
+include!("app_project_foliage.rs");

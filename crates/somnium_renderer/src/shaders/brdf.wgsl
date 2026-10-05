@@ -143,7 +143,14 @@ fn diffuse_hammon(
 ) -> vec3<f32> {
     let alpha = roughness * roughness;
     let facing = 0.5 + 0.5 * l_dot_v;
-    let rough = facing * (0.9 - 0.4 * facing) * ((0.5 + n_dot_h) / max(n_dot_h, 1e-4));
+    // n_dot_h is never below (n_dot_l + n_dot_v) / 2 for a real view/light
+    // pair (h = (l + v)/|l + v| and |l + v| <= 2), so this floor changes nothing
+    // there. It bites where the shading normal faces away from the camera but
+    // toward the light — normal-mapped bark at a trunk's edge, a low-poly LOD —
+    // where n_dot_v saturates to 0 and n_dot_h with it, and 0.5/1e-4 returned
+    // ~5000x the light: white strips down tree trunks, splotches indoors.
+    let nh = max(n_dot_h, max(0.5 * (n_dot_l + n_dot_v), 1e-4));
+    let rough = facing * (0.9 - 0.4 * facing) * ((0.5 + nh) / nh);
     let smooth_t = 1.05
         * (1.0 - pow(1.0 - n_dot_l, 5.0))
         * (1.0 - pow(1.0 - n_dot_v, 5.0));
@@ -246,7 +253,7 @@ fn clamp_specular_lobe(specular: vec3<f32>, roughness: f32) -> vec3<f32> {
 /// The correction applies to the **specular term only**. Diffuse reflection
 /// does not care how large the source is, only how much light arrives, so
 /// scaling it here would darken every lit surface as a side effect.
-fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
+fn evaluate_brdf_area_lobe(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
     let angular = get_angular_info(surface.normal, surface.view_dir, l);
 
     let alpha = surface.roughness * surface.roughness;
@@ -280,7 +287,23 @@ fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> ve
         );
     }
 
-    return (kD * Fd + Fr) * angular.n_dot_l;
+    // The firefly bound, on the specular lobe alone and for every light that
+    // comes through here. It used to wrap the whole BRDF at the sun and
+    // point/spot call sites, which capped *diffuse* too: a white wall
+    // (albedo/pi ~ 0.25) under a lamp was held to 0.08, a third of its light.
+    // Rect, disc and tube lights had no bound at all, so a crease seen edge-on
+    // (n_dot_v -> 0) returned hundreds of times the incident light and bloom
+    // spread each such pixel into a white blob.
+    let n_dot_l = max(angular.n_dot_l, 1e-4);
+    Fr = clamp_specular_lobe(Fr * n_dot_l, surface.roughness) / n_dot_l;
+
+    return kD * Fd + Fr;
+}
+
+// Directional/point sources still need the receiver cosine. Finite emitter
+// integrals already include it and use evaluate_brdf_area_lobe directly.
+fn evaluate_brdf_area(surface: Surface, l: vec3<f32>, angular_radius: f32) -> vec3<f32> {
+    return evaluate_brdf_area_lobe(surface, l, angular_radius) * saturate(dot(surface.normal, l));
 }
 
 fn evaluate_brdf(surface: Surface, l: vec3<f32>) -> vec3<f32> {

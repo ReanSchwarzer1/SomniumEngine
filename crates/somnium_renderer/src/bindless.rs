@@ -23,7 +23,13 @@ use crate::cluster::ClusterGrid;
 use wgpu;
 
 /// Maximum number of sampled textures in the bindless array.
-pub const MAX_BINDLESS_TEXTURES: u32 = 1024;
+///
+/// 2048 since TSF's Town alone references ~880 imported images before
+/// terrain, foliage and authored materials; at 1024 opening it after any other
+/// level exhausted the pool, which panics. Scene switches now release imported
+/// slots (`SomniumRenderer::release_uploads`), so this bounds one level, not
+/// a session.
+pub const MAX_BINDLESS_TEXTURES: u32 = 2048;
 
 /// A global pool of resources mapped to a single bind group.
 ///
@@ -126,9 +132,14 @@ impl GlobalResourcePool {
                     },
                     count: std::num::NonZeroU32::new(MAX_BINDLESS_TEXTURES),
                 },
+                // Materials reach the vertex stage for foliage wind (`wind.wgsl`):
+                // the visibility and shadow rasters displace by the material's
+                // bend and flutter.
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                    visibility: wgpu::ShaderStages::VERTEX
+                        | wgpu::ShaderStages::FRAGMENT
+                        | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,

@@ -484,6 +484,7 @@ pub struct TimingRun {
     frame_cpu: Accum,
     /// Of which, blocked acquiring the swap-chain texture (PORTAL-0-B).
     surface_acquire: Accum,
+    submit_present: Accum,
     last_tick_at: Option<Instant>,
     counters: FrameCounters,
     stats: Vec<StatsResult>,
@@ -527,6 +528,7 @@ impl TimingRun {
             previous_alloc_names: None,
             frame_cpu: Accum::default(),
             surface_acquire: Accum::default(),
+            submit_present: Accum::default(),
             // Seeded, not `None`. `from_env` runs while the renderer is being
             // built, so this makes the *first* recorded interval cover device
             // and pipeline creation, map load and the first present — the
@@ -594,6 +596,7 @@ impl TimingRun {
             self.frame_cpu.push(profiler.frame_cpu_ms);
         }
         self.surface_acquire.push(profiler.surface_acquire_ms);
+        self.submit_present.push(profiler.submit_present_ms);
 
         // DOOM-J. Sampled every measured frame rather than only at the ends,
         // because a resource created on one frame and released on the next
@@ -824,6 +827,7 @@ impl TimingRun {
             ("Frame wall", &self.wall_frame),
             ("Frame CPU", &self.frame_cpu),
             ("Surface acquire", &self.surface_acquire),
+            ("Submit + present", &self.submit_present),
         ] {
             if a.n == 0 {
                 continue;

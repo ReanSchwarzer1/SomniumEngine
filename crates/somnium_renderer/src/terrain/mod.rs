@@ -673,6 +673,23 @@ impl TerrainData {
         desc: TerrainDescriptor,
         bc_supported: bool,
     ) -> Self {
+        Self::new_with_asset_dir(
+            device,
+            queue,
+            desc,
+            bc_supported,
+            std::path::Path::new("assets/terrain"),
+        )
+    }
+
+    /// Create terrain using the active project's packed texture directory.
+    pub fn new_with_asset_dir(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        desc: TerrainDescriptor,
+        bc_supported: bool,
+        asset_dir: &std::path::Path,
+    ) -> Self {
         assert!(
             desc.chunk_cells.is_power_of_two() && desc.chunk_cells >= (1 << MAX_TERRAIN_LOD),
             "chunk_cells must be a power of two ≥ {}",
@@ -698,12 +715,13 @@ impl TerrainData {
             }
         }
 
+        let tiling = textures::layer_tiling_at(asset_dir);
         let layers = LAYER_NAMES
             .iter()
             .enumerate()
             .map(|(i, name)| TerrainLayer {
                 name: (*name).to_string(),
-                tiling: textures::LAYER_TILING[i],
+                tiling: tiling[i],
                 blend: blend::LAYER_BLENDS[i],
             })
             .collect();
@@ -730,8 +748,13 @@ impl TerrainData {
         // is loaded instead, which is the arrangement that predates the cache.
         let virtual_texturing =
             desc.virtual_texturing && clipmap::TerrainClipmap::env_default_enabled();
-        let layer_textures =
-            TerrainLayerTextures::load_or_generate(device, queue, bc_supported, virtual_texturing);
+        let layer_textures = TerrainLayerTextures::load_or_generate_at(
+            device,
+            queue,
+            bc_supported,
+            virtual_texturing,
+            asset_dir,
+        );
         let virtual_capacity = layer_textures
             .virtual_texture
             .as_ref()
@@ -1048,6 +1071,18 @@ impl TerrainData {
         let capacity = self.chunk_vertex_capacity;
         for chunk in &mut self.chunks {
             chunk.vertex_offset = pool.reserve_vertices(capacity).unwrap_or(UNALLOCATED);
+        }
+    }
+
+    pub fn release_pool_spans(&mut self, pool: &mut crate::geometry::GeometryPool) {
+        for chunk in &mut self.chunks {
+            if chunk.vertex_offset != UNALLOCATED {
+                pool.release_vertices(chunk.vertex_offset);
+                chunk.vertex_offset = UNALLOCATED;
+            }
+        }
+        for (_, (offset, _)) in self.index_blocks.drain() {
+            pool.release_indices(offset);
         }
     }
 
@@ -1837,7 +1872,8 @@ impl TerrainData {
         out.extend(
             bytemuck::cast_slice::<[u8; TERRAIN_LAYER_COUNT as usize], u8>(&self.splatmap.data),
         );
-        std::fs::write(path, out)
+        std::fs::write(path, out)?;
+        foliage_paint::save_instances(path, &self.painted_foliage)
     }
 
     /// Load heightmap + splatmap from a sidecar binary written by
@@ -1879,11 +1915,13 @@ impl TerrainData {
         let body = bytes
             .get(24..24 + h_bytes + s_bytes)
             .ok_or("truncated terrain sidecar")?;
+        let painted_foliage = foliage_paint::load_instances(path)?;
         self.heightmap
             .copy_from_slice(bytemuck::cast_slice(&body[..h_bytes]));
         let splat_src = &body[h_bytes..];
         self.splatmap.data =
             crate::terrain::splat::migrate_sidecar_splat(version, splat_src, texel_count)?;
+        self.painted_foliage = painted_foliage;
         self.macro_dirty = true;
         self.horizon_dirty = true;
         for chunk in &mut self.chunks {

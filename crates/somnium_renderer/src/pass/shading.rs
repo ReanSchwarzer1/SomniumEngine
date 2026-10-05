@@ -19,6 +19,9 @@ pub struct ShadingSpec {
     pub clipmap: bool,
     pub debug: bool,
     pub terrain_scan: u32,
+    /// Union of uploaded painted layers across live terrain draws. Unpainted
+    /// slots can leave the shader without changing the authored material mix.
+    pub terrain_active_layers: u32,
     /// Keep `evaluate_terrain_material` in the module (Phase DF audit).
     ///
     /// False only when every terrain queued this frame shades through its
@@ -76,11 +79,23 @@ impl ShadingSpec {
         clipmap: false,
         debug: false,
         terrain_scan: 16,
+        terrain_active_layers: u32::MAX,
         live_terrain: true,
         ablate: ablate::OFF,
     };
 
-    fn constants(self) -> [(&'static str, f64); 9] {
+    fn constants(self) -> [(&'static str, f64); 12] {
+        static BRANCHLESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let branchless = *BRANCHLESS.get_or_init(|| {
+            std::env::var("SOMNIUM_TERRAIN_BRANCHLESS_SELECT").as_deref() == Ok("1")
+        });
+        static STORAGE_READS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let storage_reads = *STORAGE_READS.get_or_init(|| {
+            // Native A/B/A reduced terrain shading from ~17 to ~7.4 ms with
+            // the same material values, coordinates and quality. Keep an
+            // explicit reference opt-out for regression diagnosis.
+            std::env::var("SOMNIUM_TERRAIN_STORAGE_READS").as_deref() != Ok("0")
+        });
         [
             ("enable_hex", f64::from(u32::from(self.hex))),
             ("enable_pom", f64::from(u32::from(self.pom))),
@@ -94,6 +109,9 @@ impl ShadingSpec {
                 f64::from(u32::from(self.live_terrain)),
             ),
             ("shade_ablate", f64::from(self.ablate)),
+            ("terrain_active_layers", f64::from(self.terrain_active_layers)),
+            ("terrain_branchless_select", f64::from(u32::from(branchless))),
+            ("terrain_storage_reads", f64::from(u32::from(storage_reads))),
         ]
     }
 }
@@ -156,6 +174,8 @@ pub struct ShadingPass {
     restir_view: wgpu::TextureView,
     /// Phase 24L: traced indirect diffuse.
     restir_gi_view: wgpu::TextureView,
+    /// Shared scene structure; absent on devices without ray queries.
+    local_shadow_tlas: Option<wgpu::Tlas>,
     /// Phases 24U/25I: froxel volume, its sampler, and the range uniform.
     volumetric_view: wgpu::TextureView,
     volumetric_sampler: wgpu::Sampler,
@@ -182,6 +202,11 @@ pub struct ShadingPass {
     virtual_shadow_params: wgpu::Buffer,
     /// DREAMS-B's shared stochastic sampling atlas.
     grain_packed: wgpu::Buffer,
+    /// Vertex paint words (see `crate::vertex_paint`), grown on demand.
+    paint_buffer: wgpu::Buffer,
+    paint_capacity_words: u64,
+    /// Kept so growing the paint buffer can rebuild the bind group.
+    visibility_view: wgpu::TextureView,
     _virtual_shadow_dummy: wgpu::Texture,
     /// Phase DF: sampled 2D arrays of the material clipmap (group 2). Dummy
     /// 1×1 until `set_clipmap_arrays` after a terrain is created.
@@ -217,10 +242,9 @@ impl ShadingPass {
         cloud_shadow_params: &wgpu::Buffer,
         decals: &crate::pass::decal::DecalGrid,
         grain_packed: &wgpu::Buffer,
+        local_shadow_tlas: Option<&wgpu::Tlas>,
     ) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shading Pass Bind Group Layout"),
-            entries: &[
+        let mut layout_entries = vec![
                 // binding 0: vis_buffer (R32Uint)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -514,7 +538,28 @@ impl ShadingPass {
                     },
                     count: None,
                 },
-            ],
+                // binding 30: vertex paint (header, masks, instance table)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 30,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ];
+        if local_shadow_tlas.is_some() {
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 29,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                count: None,
+            });
+        }
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shading Pass Bind Group Layout"), entries: &layout_entries,
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -603,6 +648,8 @@ impl ShadingPass {
             decals.params_buffer.clone(),
         ];
 
+        let paint_capacity_words = 1024;
+        let paint_buffer = Self::make_paint_buffer(device, paint_capacity_words);
         let bind_group = Self::make_bind_group(
             device,
             &bind_group_layout,
@@ -632,11 +679,16 @@ impl ShadingPass {
             &virtual_shadow_page_table,
             &virtual_shadow_params,
             grain_packed,
+            &paint_buffer,
+            local_shadow_tlas,
         );
 
         // MORROWIND-C: composition is declared in `shading.wgsl` and
         // resolved by `somnium_shader`; this site no longer knows the order.
-        let defines = crate::shaders::define::DREAMS_STF;
+        let mut defines = crate::shaders::define::DREAMS_STF;
+        if local_shadow_tlas.is_some() {
+            defines = defines.with(crate::shaders::define::LOCAL_SHADOWS);
+        }
         let shader_source = shaders
             .source("shading.wgsl", defines)
             .unwrap_or_else(|error| panic!("shading.wgsl composition failed: {error}"));
@@ -748,6 +800,7 @@ impl ShadingPass {
             depth_view: depth_view.clone(),
             restir_view: restir_view.clone(),
             restir_gi_view: restir_gi_view.clone(),
+            local_shadow_tlas: local_shadow_tlas.cloned(),
             volumetric_view: volumetric_view.clone(),
             volumetric_sampler: volumetric_sampler.clone(),
             volumetric_range,
@@ -764,6 +817,9 @@ impl ShadingPass {
             virtual_shadow_page_table,
             virtual_shadow_params,
             grain_packed: grain_packed.clone(),
+            paint_buffer,
+            paint_capacity_words,
+            visibility_view: visibility_view.clone(),
             _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
             clipmap_sampler,
@@ -1158,11 +1214,10 @@ impl ShadingPass {
         virtual_shadow_page_table: &wgpu::Buffer,
         virtual_shadow_params: &wgpu::Buffer,
         grain_packed: &wgpu::Buffer,
+        paint: &wgpu::Buffer,
+        local_shadow_tlas: Option<&wgpu::Tlas>,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shading Pass Bind Group"),
-            layout,
-            entries: &[
+        let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(visibility_view),
@@ -1279,7 +1334,18 @@ impl ShadingPass {
                     binding: 28,
                     resource: grain_packed.as_entire_binding(),
                 },
-            ],
+                wgpu::BindGroupEntry {
+                    binding: 30,
+                    resource: paint.as_entire_binding(),
+                },
+            ];
+        if let Some(tlas) = local_shadow_tlas {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 29, resource: wgpu::BindingResource::AccelerationStructure(tlas),
+            });
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shading Pass Bind Group"), layout, entries: &entries,
         })
     }
 
@@ -1447,10 +1513,15 @@ impl ShadingPass {
         self.restir_gi_view = restir_gi_view.clone();
         self.lighting_aux_view = lighting_aux_view.clone();
         self.world_volume_view = world_volume_view.clone();
+        self.visibility_view = visibility_view.clone();
+        self.rebind(device);
+    }
+
+    fn rebind(&mut self, device: &wgpu::Device) {
         self.bind_group = Self::make_bind_group(
             device,
             &self.bind_group_layout,
-            visibility_view,
+            &self.visibility_view,
             &self.sampler,
             &self.shadow_atlas_view,
             &self.shadow_sampler,
@@ -1476,7 +1547,37 @@ impl ShadingPass {
             &self.virtual_shadow_page_table,
             &self.virtual_shadow_params,
             &self.grain_packed,
+            &self.paint_buffer,
+            self.local_shadow_tlas.as_ref(),
         );
+    }
+
+    fn make_paint_buffer(device: &wgpu::Device, words: u64) -> wgpu::Buffer {
+        // Created zeroed, so word 0 already reads "nothing painted".
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vertex Paint"),
+            size: words * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Grow the vertex paint buffer to at least `words`. True when it was
+    /// recreated, in which case everything must be uploaded again.
+    pub fn ensure_paint_capacity(&mut self, device: &wgpu::Device, words: u64) -> bool {
+        if words <= self.paint_capacity_words {
+            return false;
+        }
+        self.paint_capacity_words = words.next_power_of_two();
+        self.paint_buffer = Self::make_paint_buffer(device, self.paint_capacity_words);
+        self.rebind(device);
+        true
+    }
+
+    pub fn write_paint(&self, queue: &wgpu::Queue, word: u32, data: &[u32]) {
+        if !data.is_empty() {
+            queue.write_buffer(&self.paint_buffer, u64::from(word) * 4, bytemuck::cast_slice(data));
+        }
     }
 
     /// Bind the renderer-owned sparse shadow cache into opaque/terrain shading.
@@ -1490,36 +1591,8 @@ impl ShadingPass {
         self.virtual_shadow_sampler = gpu.comparison_sampler.clone();
         self.virtual_shadow_page_table = gpu.page_table.clone();
         self.virtual_shadow_params = gpu.params.clone();
-        self.bind_group = Self::make_bind_group(
-            device,
-            &self.bind_group_layout,
-            visibility_view,
-            &self.sampler,
-            &self.shadow_atlas_view,
-            &self.shadow_sampler,
-            &self.env_view,
-            &self.env_sampler,
-            &self.gtao_view,
-            &self.depth_view,
-            &self.restir_view,
-            &self.restir_gi_view,
-            &self.volumetric_view,
-            &self.volumetric_sampler,
-            &self.volumetric_range,
-            &self.lighting_aux_view,
-            &self.world_volume_view,
-            &self.lighting_extra,
-            &self.sh_probes,
-            &self.cloud_shadow_view,
-            &self.cloud_shadow_params,
-            &self.weather,
-            &self.decal_buffers,
-            &self.virtual_shadow_view,
-            &self.virtual_shadow_sampler,
-            &self.virtual_shadow_page_table,
-            &self.virtual_shadow_params,
-            &self.grain_packed,
-        );
+        self.visibility_view = visibility_view.clone();
+        self.rebind(device);
     }
 
     /// Publish this frame's wetness. All zero leaves shading bit-identical to
@@ -1545,6 +1618,11 @@ impl ShadingPass {
     }
 
     /// Publish the volume's range for this frame. 0 disables the lookup.
+    /// The volume's range uniform (x = metres, 0 when off), shared with water.
+    pub fn volumetric_range_buffer(&self) -> &wgpu::Buffer {
+        &self.volumetric_range
+    }
+
     pub fn set_volumetric_range(&self, queue: &wgpu::Queue, range: f32) {
         queue.write_buffer(
             &self.volumetric_range,

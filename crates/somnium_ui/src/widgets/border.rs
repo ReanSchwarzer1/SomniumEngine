@@ -10,7 +10,17 @@ use crate::{
 };
 use glam::Vec2;
 
+/// Explicit surface treatment; layout and per-side insets remain unchanged.
+#[derive(Clone, Copy, Default)]
+pub enum Surface {
+    #[default]
+    Flat,
+    Popup,
+    Modal,
+}
+
 pub struct Border {
+    surface: Surface,
     pub stroke_thickness: Thickness,
 }
 
@@ -53,6 +63,19 @@ impl Control for Border {
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let b = widget.screen_bounds();
+        if !matches!(self.surface, Surface::Flat) {
+            let t = crate::theme::active();
+            let mut paint = crate::style::popup();
+            if matches!(self.surface, Surface::Modal) {
+                paint.radius = t.geometry.radius_modal;
+                paint.background = t.semantic.surface.panel.bytes();
+                paint.elevation = Some(t.elevation.modal);
+            } else {
+                paint.elevation = Some(t.elevation.popup);
+            }
+            ctx.push_paint(b, &paint);
+            return;
+        }
         let st = self.stroke_thickness;
         ctx.push_rect_filled(b, widget.background);
         // Per-side stroke (drawn on top)
@@ -89,6 +112,7 @@ impl Control for Border {
 }
 
 pub struct BorderBuilder {
+    surface: Surface,
     widget: WidgetBuilder,
     stroke_thickness: Thickness,
 }
@@ -97,8 +121,15 @@ impl BorderBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
             widget,
+            surface: Surface::Flat,
             stroke_thickness: Thickness::uniform(1.0),
         }
+    }
+
+    pub fn with_surface(mut self, surface: Surface) -> Self {
+        self.surface = surface;
+        self.widget = self.widget.with_clip_to_bounds(false);
+        self
     }
 
     pub fn with_stroke_thickness(mut self, t: Thickness) -> Self {
@@ -110,6 +141,7 @@ impl BorderBuilder {
         UiNode::new(
             self.widget.build(),
             Box::new(Border {
+                surface: self.surface,
                 stroke_thickness: self.stroke_thickness,
             }),
         )

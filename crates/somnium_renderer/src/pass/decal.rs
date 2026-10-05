@@ -29,14 +29,19 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::cluster::ClusterVolume;
 
-/// Decals a frame may carry.
+/// Decals a frame may carry (the nearest to the camera win; see
+/// `somnium_core::decal::keep_nearest`).
 ///
-/// Sized to match `MAX_LOCAL_LIGHTS`: the two share a screen and there is no
-/// reason to believe a scene wants an order of magnitude more of one than the
-/// other.
-pub const MAX_DECALS: usize = 256;
-/// Flattened froxel → decal index entries.
-pub const MAX_DECAL_INDICES: usize = 64 * 1024;
+/// Weathering is dense and small: damp at every wall foot, grime under every
+/// sill, leaves under every tree. 256 kept only a street's worth; binning is
+/// per froxel, so the cost of a larger list is its upload, not the shading.
+pub const MAX_DECALS: usize = 768;
+/// Flattened froxel → decal index entries (8 MB). The shared counting sort
+/// caps its list at the light grid's size, so this matches it: a smaller
+/// buffer would leave the far froxels' offsets pointing past the upload.
+/// Entries past it are dropped from the far end of the grid, so a
+/// decal-dense view loses its distant decals first; `assign_and_upload` warns.
+pub const MAX_DECAL_INDICES: usize = crate::cluster::MAX_LIGHT_INDICES;
 
 /// One decal, as the shading pass reads it. **Size**: 128 bytes.
 #[repr(C)]
@@ -73,7 +78,8 @@ pub struct GpuDecal {
     /// Roughness the decal writes where it is fully opaque.
     pub roughness: f32,
     /// Padding to 128 bytes.
-    pub _pad: f32,
+    /// 1 multiplies the surface albedo by the decal colour; 0 replaces it.
+    pub blend: f32,
 }
 
 /// Everything about a decal that is not its box.
@@ -100,6 +106,8 @@ pub struct DecalLook {
     pub normal_strength: f32,
     /// Roughness written where the decal is fully opaque.
     pub roughness: f32,
+    /// Multiply the surface albedo instead of replacing it.
+    pub multiply: bool,
 }
 
 impl ClusterVolume for GpuDecal {
@@ -108,6 +116,17 @@ impl ClusterVolume for GpuDecal {
     }
     fn bounding_radius(&self) -> f32 {
         self.radius
+    }
+    fn corners_ws(&self) -> Option<[glam::Vec3; 8]> {
+        let to_world = glam::Mat4::from_cols_array_2d(&self.inv_transform).inverse();
+        Some(std::array::from_fn(|i| {
+            let corner = glam::Vec3::new(
+                if i & 1 == 0 { -0.5 } else { 0.5 },
+                if i & 2 == 0 { -0.5 } else { 0.5 },
+                if i & 4 == 0 { -0.5 } else { 0.5 },
+            );
+            to_world.transform_point3(corner)
+        }))
     }
 }
 
@@ -130,6 +149,7 @@ impl GpuDecal {
             angle_fade_degrees,
             normal_strength,
             roughness,
+            multiply,
         } = look;
         let (scale, _, translation) = transform.to_scale_rotation_translation();
         // The bounding sphere has to contain the box at any rotation, so it is
@@ -148,7 +168,7 @@ impl GpuDecal {
             angle_fade_cos: angle_fade_degrees.clamp(0.0, 89.9).to_radians().cos(),
             normal_strength: normal_strength.clamp(0.0, 1.0),
             roughness: roughness.clamp(0.0, 1.0),
-            _pad: 0.0,
+            blend: if multiply { 1.0 } else { 0.0 },
         }
     }
 }
@@ -172,11 +192,13 @@ pub struct DecalGrid {
     scratch: crate::cluster::BinScratch,
     sorted: Vec<GpuDecal>,
     last_count: u32,
+    /// The index list overflowed once already; warn only the first time.
+    warned_overflow: bool,
 }
 
 impl DecalGrid {
-    /// Allocate the buffers. They are sized once and never resized: 256 decals
-    /// is 32 KB and the index list is 256 KB, which is not worth a growth path.
+    /// Allocate the buffers. They are sized once and never resized: 768 decals
+    /// is 96 KB and the index list is 8 MB, which is not worth a growth path.
     #[must_use]
     pub fn new(device: &wgpu::Device) -> Self {
         let storage = |label: &str, size: u64| {
@@ -207,6 +229,7 @@ impl DecalGrid {
             scratch: crate::cluster::BinScratch::default(),
             sorted: Vec::new(),
             last_count: 0,
+            warned_overflow: false,
         }
     }
 
@@ -271,7 +294,17 @@ impl DecalGrid {
 
         queue.write_buffer(&self.decal_buffer, 0, bytemuck::cast_slice(&self.sorted));
         if !self.scratch.index_list.is_empty() {
-            let capped = self.scratch.index_list.len().min(MAX_DECAL_INDICES);
+            let wanted = self.scratch.index_list.len();
+            let capped = wanted.min(MAX_DECAL_INDICES);
+            if wanted > MAX_DECAL_INDICES && !self.warned_overflow {
+                self.warned_overflow = true;
+                tracing::warn!(
+                    wanted,
+                    capacity = MAX_DECAL_INDICES,
+                    decals = count,
+                    "decal froxel list overflowed: distant decals are dropped this frame"
+                );
+            }
             queue.write_buffer(
                 &self.index_buffer,
                 0,
@@ -302,6 +335,7 @@ mod tests {
             angle_fade_degrees,
             normal_strength: 1.0,
             roughness: 0.5,
+            multiply: false,
         }
     }
 

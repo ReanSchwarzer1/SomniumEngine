@@ -10,6 +10,9 @@ use glam::{Quat, Vec2, Vec3};
 
 use crate::{JointIndex, Pose, Skeleton, SkeletonId};
 
+mod task_graph;
+pub use task_graph::*;
+
 // ── time, clips and sync tracks ─────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1829,29 +1832,32 @@ impl AnimGraphAsset {
         node: AnimNodeId,
         name: &str,
     ) -> Result<(&AnimationClip, Playback), AnimGraphError> {
-        let item = self
-            .nodes
-            .get(node.0 as usize)
-            .ok_or(AnimGraphError::UnknownNode)?;
-        match item {
-            AnimNode::Clip { clip, playback } => {
-                let clip = self.clip(*clip)?;
-                clip.sync_track(name)
-                    .ok_or_else(|| AnimGraphError::MissingSyncTrack(name.to_string()))?;
-                Ok((clip, *playback))
-            }
-            AnimNode::Blend1D {
-                samples,
-                sync_leader,
-                ..
-            } => self.sync_anchor(samples[*sync_leader].node, name),
-            AnimNode::Blend2D {
-                samples,
-                sync_leader,
-                ..
-            } => self.sync_anchor(samples[*sync_leader].node, name),
-            AnimNode::Layer { base, .. } => self.sync_anchor(*base, name),
-            AnimNode::Cache { source } => self.sync_anchor(*source, name),
+        let mut current = node;
+        loop {
+            let item = self
+                .nodes
+                .get(current.0 as usize)
+                .ok_or(AnimGraphError::UnknownNode)?;
+            current = match item {
+                AnimNode::Clip { clip, playback } => {
+                    let clip = self.clip(*clip)?;
+                    clip.sync_track(name)
+                        .ok_or_else(|| AnimGraphError::MissingSyncTrack(name.to_string()))?;
+                    return Ok((clip, *playback));
+                }
+                AnimNode::Blend1D {
+                    samples,
+                    sync_leader,
+                    ..
+                } => samples[*sync_leader].node,
+                AnimNode::Blend2D {
+                    samples,
+                    sync_leader,
+                    ..
+                } => samples[*sync_leader].node,
+                AnimNode::Layer { base, .. } => *base,
+                AnimNode::Cache { source } => *source,
+            };
         }
     }
 

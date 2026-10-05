@@ -2,6 +2,17 @@
 
 These controls live on the **Post Processing** entity unless noted. Select that entity in the Outliner, then use Details. Expensive paths default **off**; turn them on from Details.
 
+**Dream Lens** adds optional, restrained distortion: **Heat drift**, **Peripheral echo** or **Architectural shear**. Strength zero disables it; Speed controls movement. The central interaction region stays clear. Echo is a spatial offset, not temporal history. Use low strength (roughly 0.1–0.2) for atmosphere and disable it for motion-sensitive play. Hello's left **Game / Authoring → Dream Lens Demo** selects an example; all three controls also support scene save, scripting and automation.
+
+```mermaid
+flowchart LR
+  D[Details / script / automation] --> P[Post Processing component]
+  P --> U[Grading uniform]
+  U --> L[Optional peripheral lens]
+  L --> T[Exposure and tone mapping]
+  T --> V[Viewport]
+```
+
 ## Anti-aliasing
 
 One control, **Anti-aliasing**, with six values. It used to be three separate checkboxes; the FXAA box was checked by default and never ran a pass, because FSR was also on and took precedence. There is one value now, and whatever it says is what runs.
@@ -105,8 +116,23 @@ The transmitted lobe carries the same shadow visibility the reflected light does
 
 Occlusion composes. GTAO, a material's own occlusion map, baked terrain sky visibility and terrain layer occlusion all multiply into one ambient number, so a tuft gets the contact darkening where it meets the ground as well as its own interior shade. Micro-shadowing is direct light and deliberately takes the material-scale value alone.
 
+GTAO normalizes visibility against an open hemisphere sampled with the same slices. Bent normals describe only the change caused by occluders; open surfaces retain their mesh normal. Directional bending fades with occlusion strength so sparse samples cannot tint almost-open surfaces. Disabling GTAO removes both occlusion and normal bending. This prevents horizontal ambient-light bands on plain walls while preserving contact shading.
+
+```mermaid
+flowchart LR
+  Depth[Depth horizons] --> Integral[Visible arc / open arc]
+  Integral --> AO[Contact visibility]
+  Depth --> Bend[Occluder-only direction change]
+  Bend --> Filter[Depth-aware denoise]
+  Filter --> Normal[Mesh normal when no bending]
+  AO --> IBL[Environment lighting]
+  Normal --> IBL
+```
+
 Night has one deliberate asymmetry: the moon has no transmitted lobe. The shading pass cannot yet trace shadow visibility toward the moon, and an unshadowed transmission term under night exposure turns isolated back-facing grass into bright green pinpricks. Reflected moonlight stays, on the same area BRDF and specular bound the sun uses. Transmitted moonlight returns once there is a moon-direction shadow to multiply it by.
 
 ## Profiler (29)
 
 The overlay lists **GPU** pass times, then the **Graph** (pass order), then **CPU** zones (instances, cluster cull, foliage, lighting extra), then draw counters. Toggle **Profiler** on the viewport bar.
+
+The shared sampling mask scrambles equal-distance rank ties instead of assigning them in scan order. This removes repeating horizontal noise ramps from AO and other stochastic lighting passes while preserving the progressive spatial spacing.

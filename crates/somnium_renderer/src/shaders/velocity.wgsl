@@ -1,4 +1,6 @@
 // Somnium Engine — screen-space velocity (Phase 24AD).
+//!include "global_pool.wgsl"
+//!include "wind.wgsl"
 //
 // Where each pixel was on the previous frame, in UV space. Written once and
 // consumed by anything that needs to walk backwards through time: motion blur
@@ -47,8 +49,11 @@ struct VelocityParams {
     _pad: f32,
 }
 
-@group(0) @binding(0) var depth_tex: texture_depth_2d;
-@group(0) @binding(1) var<uniform> vp: VelocityParams;
+// @group(0) is the global pool (instances, materials, the view buffer's wind).
+@group(1) @binding(0) var depth_tex: texture_depth_2d;
+@group(1) @binding(1) var<uniform> vp: VelocityParams;
+// Which instance covers the pixel, for foliage that moves on its own.
+@group(1) @binding(2) var vis_tex: texture_2d<u32>;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -90,6 +95,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec2<f32> {
         world = world_from_ndc(vec3<f32>(ndc_xy, 0.9999));
     } else {
         world = world_from_ndc(vec3<f32>(ndc_xy, depth));
+    }
+
+    // Foliage wind moves a point without the camera moving: take this frame's
+    // swayed position back to its rest pose (two fixed-point steps; the sway
+    // barely depends on where along it the point is) and forward to where the
+    // wind had it last frame. Same `wind_offset` as every raster pass.
+    if depth < 1.0 {
+        let vis = textureLoad(vis_tex, coord, 0).xy;
+        if vis.x != 0u {
+            let inst = instances[vis.x - 1u];
+            let m = materials[inst.material_id];
+            if m.terrain_index < 0 && (m.wind_bend > 0.0 || m.wind_flutter > 0.0) {
+                let pivot = inst.model[3].xyz;
+                var rest = world - wind_offset(world, pivot, m.wind_bend, m.wind_flutter,
+                                               view.wind_time.x, view.wind, view.camera_pos);
+                rest = world - wind_offset(rest, pivot, m.wind_bend, m.wind_flutter,
+                                           view.wind_time.x, view.wind, view.camera_pos);
+                world = rest + wind_offset(rest, pivot, m.wind_bend, m.wind_flutter,
+                                           view.wind_time.y, view.wind, view.camera_pos);
+            }
+        }
     }
 
     let prev_clip = vp.prev_view_proj * vec4<f32>(world, 1.0);

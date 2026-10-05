@@ -39,6 +39,9 @@ pub struct SimulationClock {
     pub elapsed_seconds: f32,
     /// Duration of one gameplay/physics step, in seconds.
     pub fixed_delta_seconds: f32,
+    /// Blend between the previous and current fixed poses for presentation.
+    /// Playing uses the remaining fixed-step fraction; Pause/Step uses 1.0.
+    pub interpolation_alpha: f32,
 }
 
 #[cfg(test)]
@@ -60,6 +63,7 @@ impl Default for SimulationClock {
             state: SimulationState::Editing,
             elapsed_seconds: 0.0,
             fixed_delta_seconds: 1.0 / 60.0,
+            interpolation_alpha: 1.0,
         }
     }
 }
@@ -98,6 +102,10 @@ pub struct EngineContext<'a> {
     /// The engine's one background scheduler. Game-side streaming systems use
     /// this instead of creating a private pool or detached Rayon task.
     pub jobs: &'a mut JobSystem,
+
+    /// The engine's navigation service. Game code queues bakes here; the engine
+    /// publishes results, advances agents and draws previews once per frame.
+    pub navigation: &'a mut crate::ai::NavigationEditor,
 
     /// The renderer context containing wgpu state. Optional if headless.
     pub render_ctx: Option<&'a RenderContext>,
@@ -195,6 +203,7 @@ impl<'a> EngineContext<'a> {
         physics: &'a mut PhysicsWorld,
         audio: &'a mut AudioEngine,
         jobs: &'a mut JobSystem,
+        navigation: &'a mut crate::ai::NavigationEditor,
         render_ctx: Option<&'a RenderContext>,
         renderer: Option<&'a mut SomniumRenderer>,
         selected_entity: &'a mut Option<somnium_ecs::entity::Entity>,
@@ -210,6 +219,7 @@ impl<'a> EngineContext<'a> {
             physics,
             audio,
             jobs,
+            navigation,
             render_ctx,
             renderer,
             selected_entity,

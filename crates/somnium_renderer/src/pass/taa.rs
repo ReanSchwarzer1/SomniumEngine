@@ -64,6 +64,8 @@ pub struct TaaPass {
     enabled: bool,
     /// Metered exposure, for normalising the blend space.
     exposure_buffer: wgpu::Buffer,
+    /// Indexed by visibility instance ID; isolated from terrain morph packing.
+    reactive_instances: wgpu::Buffer,
     /// Debug visualisation selector, from `SOMNIUM_TAA_DEBUG`.
     ///
     /// 1 raw history · 2 clipped history · 3 current · 4 neighbourhood min
@@ -126,6 +128,17 @@ impl TaaPass {
                 },
                 texture_entry(6, wgpu::TextureSampleType::Float { filterable: false }),
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(8, wgpu::TextureSampleType::Uint),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -187,6 +200,7 @@ impl TaaPass {
             prev_view_proj: glam::Mat4::IDENTITY,
             frame_index: 0,
             exposure_buffer: exposure_buffer.clone(),
+            reactive_instances: Self::make_reactive_buffer(device, 1),
             history_valid: false,
             enabled: std::env::var("SOMNIUM_TAA").as_deref() != Ok("0"),
             dilation_epsilon: std::env::var("SOMNIUM_TAA_DILATE_EPS")
@@ -199,6 +213,30 @@ impl TaaPass {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
         }
+    }
+
+    fn make_reactive_buffer(device: &wgpu::Device, count: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("TAA dynamic instance flags"),
+            size: (count.max(1).next_power_of_two() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Upload flags after sorting draws, preserving the visibility buffer's indexing.
+    pub fn set_reactive_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        flags: &[u32],
+    ) {
+        let flags = if flags.is_empty() { &[0] } else { flags };
+        if self.reactive_instances.size() < (flags.len() * 4) as u64 {
+            self.reactive_instances = Self::make_reactive_buffer(device, flags.len());
+            self.bind_groups = None;
+        }
+        queue.write_buffer(&self.reactive_instances, 0, bytemuck::cast_slice(flags));
     }
 
     fn make_history(
@@ -306,6 +344,7 @@ impl TaaPass {
         depth_view: &wgpu::TextureView,
         velocity_view: &wgpu::TextureView,
         water_surface_view: &wgpu::TextureView,
+        visibility_view: &wgpu::TextureView,
     ) {
         if self.bind_groups.is_none() {
             self.rebuild(
@@ -314,6 +353,7 @@ impl TaaPass {
                 depth_view,
                 velocity_view,
                 water_surface_view,
+                visibility_view,
             );
         }
     }
@@ -326,6 +366,7 @@ impl TaaPass {
         depth_view: &wgpu::TextureView,
         velocity_view: &wgpu::TextureView,
         water_surface_view: &wgpu::TextureView,
+        visibility_view: &wgpu::TextureView,
     ) {
         let make = |read: usize| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -363,6 +404,14 @@ impl TaaPass {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(water_surface_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(visibility_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.reactive_instances.as_entire_binding(),
                     },
                 ],
             })
@@ -542,5 +591,22 @@ mod tests {
                 halton(i, 2),
             );
         }
+    }
+}
+
+/// Exact draw identity keeps a static instance of a shared tool mesh unaffected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ReactiveDrawKey([u32; 4], [u32; 16]);
+impl ReactiveDrawKey {
+    pub(crate) fn of(cmd: &crate::command::DrawCommand) -> Self {
+        Self(
+            [
+                cmd.vertex_offset,
+                cmd.index_offset,
+                cmd.index_count,
+                cmd.material_id,
+            ],
+            cmd.transform.to_cols_array().map(f32::to_bits),
+        )
     }
 }

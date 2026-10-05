@@ -16,6 +16,15 @@ use crate::{
 };
 use glam::Vec2;
 
+/// A paint-only subtree scope. No copied geometry or retained frame snapshots.
+#[derive(Clone, Copy)]
+pub(crate) struct PresentationMark {
+    quads: usize,
+    shapes: usize,
+    commands: usize,
+    clip: Rect,
+}
+
 /// One instanced draw: a contiguous run of primitives sharing a clip rect.
 ///
 /// The bound texture is no longer part of the key. Every atlas is bound at once
@@ -51,6 +60,7 @@ pub struct DrawingContext {
     /// The frame's primitive instances, in paint order.
     pub instances: Vec<Primitive>,
     pub commands: Vec<DrawCommand>,
+    presentation_barrier: bool,
     clip_stack: Vec<Rect>,
     current_clip: Rect,
     pub font_atlas: FontAtlas,
@@ -108,6 +118,7 @@ impl DrawingContext {
         Self {
             instances: Vec::new(),
             commands: Vec::new(),
+            presentation_barrier: false,
             clip_stack: Vec::new(),
             current_clip: root_clip,
             font_atlas: FontAtlas::new(),
@@ -129,6 +140,7 @@ impl DrawingContext {
     pub fn clear(&mut self, screen_w: f32, screen_h: f32) {
         self.instances.clear();
         self.commands.clear();
+        self.presentation_barrier = false;
         self.clip_stack.clear();
         self.current_clip = Rect::new(0.0, 0.0, screen_w, screen_h);
         self.shaped.clear();
@@ -170,7 +182,8 @@ impl DrawingContext {
     /// the stream match. Merging across streams would put shaped vertices and
     /// quad instances in one run, and the pass has no way to draw that.
     fn begin_command_in(&mut self, stream: crate::shaped::Stream) {
-        if let Some(last) = self.commands.last()
+        if !std::mem::take(&mut self.presentation_barrier)
+            && let Some(last) = self.commands.last()
             && last.clip_rect == self.current_clip
             && last.stream == stream
         {
@@ -188,11 +201,83 @@ impl DrawingContext {
         });
     }
 
+    pub(crate) fn begin_presentation(&mut self) -> PresentationMark {
+        self.presentation_barrier = true;
+        PresentationMark {
+            quads: self.instances.len(),
+            shapes: self.shaped.instances.len(),
+            commands: self.commands.len(),
+            clip: self.current_clip,
+        }
+    }
+
+    /// Apply a uniform scale/opacity to just-emitted paint, including text,
+    /// shaped geometry and scissor rectangles. Layout and hit geometry never move.
+    pub(crate) fn finish_presentation(
+        &mut self,
+        mark: PresentationMark,
+        origin: Vec2,
+        scale: f32,
+        opacity: f32,
+    ) {
+        let alpha = |color: &mut [u8; 4]| {
+            color[3] = (color[3] as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
+        };
+        let rect = |r: Rect| {
+            Rect::new(
+                origin.x + (r.x - origin.x) * scale,
+                origin.y + (r.y - origin.y) * scale,
+                r.w * scale,
+                r.h * scale,
+            )
+        };
+        for p in &mut self.instances[mark.quads..] {
+            let r = rect(Rect::new(p.rect[0], p.rect[1], p.rect[2], p.rect[3]));
+            p.rect = [r.x, r.y, r.w, r.h];
+            for v in &mut p.radii {
+                *v *= scale;
+            }
+            if p.flags & crate::primitive::FLAG_SHADOW != 0 {
+                for v in &mut p.shadow {
+                    *v *= scale;
+                }
+            }
+            p.border_width *= scale;
+            p.expand *= scale;
+            alpha(&mut p.fill_a);
+            alpha(&mut p.fill_b);
+            alpha(&mut p.border_color);
+            alpha(&mut p.shadow_color);
+        }
+        for p in &mut self.shaped.instances[mark.shapes..] {
+            for v in &mut p.xform[..4] {
+                *v *= scale;
+            }
+            p.xform[4] = origin.x + (p.xform[4] - origin.x) * scale;
+            p.xform[5] = origin.y + (p.xform[5] - origin.y) * scale;
+            alpha(&mut p.fill_a);
+            alpha(&mut p.fill_b);
+        }
+        for command in &mut self.commands[mark.commands..] {
+            command.clip_rect = rect(command.clip_rect).intersect(&mark.clip);
+        }
+        // Following siblings may share the original clip, never this scope's
+        // transformed scissor. This also preserves mixed-stream paint order.
+        self.presentation_barrier = true;
+    }
+
     /// The native Styx entry point. Every other `push_*` builds on this.
     ///
     /// `texture_id` selects the atlas sampled when the primitive carries
     /// `FLAG_TEXTURED`; it no longer breaks the batch.
-    pub fn push_primitive(&mut self, primitive: Primitive, texture_id: Option<u32>) {
+    pub fn push_primitive(&mut self, mut primitive: Primitive, texture_id: Option<u32>) {
+        if primitive.flags & crate::primitive::FLAG_GRADIENT != 0 {
+            let amplitude = crate::theme::active().opacity.gradient_dither_lsb;
+            if amplitude > 0.0 {
+                primitive.flags |= crate::primitive::FLAG_DITHER;
+                primitive.shadow[0] = amplitude;
+            }
+        }
         self.begin_command();
         let primitive = match texture_id {
             Some(id) => primitive.with_texture_layer(id),
@@ -463,6 +548,9 @@ impl DrawingContext {
             fill = fill.with_gradient(gradient.to.bytes(), gradient.axis);
             fill.fill_a = gradient.from.bytes();
         }
+        if let Some(emboss) = paint.emboss.filter(|c| c[3] > 0) {
+            fill = fill.with_emboss(emboss);
+        }
         self.push_primitive(fill, None);
 
         if let Some(inset) = paint.inset {
@@ -572,14 +660,7 @@ impl DrawingContext {
         }
         let direction = crate::text::Direction::of_paragraph(text);
         let line = {
-            let Some(line) = crate::text::shape::shape_line(
-                text,
-                px,
-                &self.font_atlas,
-                self.font_atlas.chain(),
-                direction,
-                font_id,
-            ) else {
+            let Some(line) = self.font_atlas.shape_line(text, px, direction, font_id) else {
                 return false;
             };
             line
@@ -1444,5 +1525,53 @@ mod tests {
             bytemuck::cast_slice::<_, u8>(&b.instances)
         );
         assert_eq!(a.commands, b.commands);
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn presentation_scopes_transform_both_streams_and_isolate_neighbor_clips() {
+        let mut ctx = DrawingContext::new(400.0, 300.0);
+        let before = Primitive::fill(Rect::new(1.0, 2.0, 10.0, 10.0), [20, 30, 40, 255]);
+        ctx.push_primitive(before, None);
+        let mark = ctx.begin_presentation();
+        ctx.push_clip_rect(Rect::new(40.0, 40.0, 100.0, 100.0));
+        ctx.push_primitive(
+            Primitive::fill(Rect::new(40.0, 40.0, 40.0, 20.0), [100, 120, 140, 200]),
+            None,
+        );
+        ctx.push_shaped(
+            crate::shaped::ShapedInstance::identity([80, 90, 100, 200]),
+            &[
+                Vec2::new(40.0, 40.0),
+                Vec2::new(60.0, 40.0),
+                Vec2::new(40.0, 60.0),
+            ],
+        );
+        ctx.pop_clip_rect();
+        ctx.finish_presentation(mark, Vec2::ZERO, 0.5, 0.5);
+        ctx.push_primitive(before, None);
+        assert_eq!(ctx.instances[0], before);
+        assert_eq!(ctx.instances[2], before);
+        assert_eq!(ctx.instances[1].rect, [20.0, 20.0, 20.0, 10.0]);
+        assert_eq!(ctx.instances[1].fill_a[3], 100);
+        assert_eq!(
+            ctx.shaped.instances[0].xform,
+            [0.5, 0.0, 0.0, 0.5, 0.0, 0.0]
+        );
+        assert_eq!(ctx.shaped.instances[0].fill_a[3], 100);
+        assert_eq!(ctx.commands[1].clip_rect, Rect::new(20.0, 20.0, 50.0, 50.0));
+        assert_eq!(ctx.commands[2].clip_rect, ctx.commands[1].clip_rect);
+        assert_eq!(
+            ctx.commands[0].clip_rect,
+            ctx.commands.last().unwrap().clip_rect
+        );
+        assert_eq!(
+            ctx.commands.len(),
+            4,
+            "neighbors must not join a transformed batch"
+        );
     }
 }

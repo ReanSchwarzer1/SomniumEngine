@@ -2,6 +2,7 @@
 // `format!` of `include_str!` calls at this pass's construction site. The
 // resolver (`somnium_shader`) emits each module once, in this order, and
 // hoists every `enable` above everything.
+//!include "sky_eye.wgsl"
 //!include "global_pool.wgsl"
 //!include "brdf.wgsl"
 //!include "sampling.wgsl"
@@ -9,6 +10,36 @@
 //!include "hextile.wgsl"
 //!include "terrain_material.wgsl"
 //!include "clipmap_shade.wgsl"
+//!include "wind.wgsl"
+//!if LOCAL_SHADOWS
+enable wgpu_ray_query;
+@group(1) @binding(29) var local_shadow_accel: acceleration_structure;
+//!endif
+
+/// Direct practical shadows use the same built scene as indirect transport.
+/// Stable centre visibility uses one ray per contributing light. Reactive
+/// surfaces (including hands) bypass TAA, so per-frame random emitter samples
+/// cannot be denoised there. Finite-source penumbrae need a dedicated filter.
+fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3<f32>) -> f32 {
+    //!if LOCAL_SHADOWS
+    if (cluster_params.shading_mode & 16u) != 0u {
+        let origin = p + geometric_normal * 0.012;
+        let delta = emitter - origin;
+        let distance = length(delta);
+        if distance > 0.10 {
+            var rq: ray_query;
+            // Stop 6 cm short of the centre so the diffuser/enclosure does not
+            // shadow its own authored source. This is a world-space fixture
+            // tolerance, not a distance-dependent leak across room partitions.
+            rayQueryInitialize(&rq, local_shadow_accel,
+                RayDesc(0x4u, 0x1u, 0.008, distance - 0.06, origin, delta / distance));
+            rayQueryProceed(&rq);
+            return select(0.0, 1.0, rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE);
+        }
+    }
+    //!endif
+    return 1.0;
+}
 
 // Somnium Engine — Visibility Buffer Shading Pass
 // Phase 12: Clustered Local Lights + Cel-Shading Mode
@@ -77,7 +108,8 @@ struct Decal {
     angle_fade_cos: f32,
     normal_strength: f32,
     roughness: f32,
-    _pad: f32,
+    /// 1 multiplies the surface albedo by the decal colour; 0 replaces it.
+    blend: f32,
 }
 
 @group(1) @binding(20) var<storage, read> decals: array<Decal>;
@@ -101,6 +133,13 @@ struct VirtualShadowParams {
 @group(1) @binding(26) var<storage, read> virtual_shadow_pages: array<u32>;
 @group(1) @binding(27) var<uniform> virtual_shadow: VirtualShadowParams;
 @group(1) @binding(28) var<uniform> grain_words: array<vec4<u32>, 1024>;
+// Vertex paint (`vertex_paint.rs`): word 0 = start of the per-instance handle
+// table (0 = nothing painted), word 1 = preview mode, words 2..5 = the editor
+// brush (centre, radius) as f32 bits, then per painted mesh a slot: a
+// `PAINT_SLOT_HEADER` of layer settings and one RGBA8 mask per vertex. A
+// channel with a layer material blends that material in; without one it is
+// the built-in weathering (R dirt, G rust, B wetness, A blood).
+@group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;
 
 /// Sun visibility through the cloud layer at a world position.
 ///
@@ -175,6 +214,348 @@ fn apply_wetness(surface: ptr<function, Surface>, porosity: f32) {
     }
 }
 
+/// An orthonormal rotation that takes paint breakup noise off the world axes.
+const PAINT_ROT = mat3x3<f32>(
+    vec3<f32>(0.8, 0.36, -0.48),
+    vec3<f32>(-0.6, 0.48, -0.64),
+    vec3<f32>(0.0, 0.8, 0.6),
+);
+
+/// Words of layer settings at the start of a paint slot (`vertex_paint.rs`
+/// `SLOT_HEADER_WORDS`): four material ids, four tilings, four packed
+/// parameter words, four breakup-noise frequencies, four more packed words
+/// (stain, de-tile).
+const PAINT_SLOT_HEADER: u32 = 20u;
+const PAINT_NO_LAYER: u32 = 0xffffffffu;
+
+/// This instance's paint slot, or 0 when it is unpainted.
+fn vertex_paint_slot(instance_id: u32) -> u32 {
+    let table = vertex_paint[0];
+    if table == 0u {
+        return 0u;
+    }
+    return vertex_paint[table + instance_id];
+}
+
+/// The interpolated vertex-paint mask of this pixel's triangle.
+fn vertex_paint_mask(slot: u32, i0: u32, i1: u32, i2: u32, bary: vec3<f32>) -> vec4<f32> {
+    let base = slot + PAINT_SLOT_HEADER;
+    return unpack4x8unorm(vertex_paint[base + i0]) * bary.x
+        + unpack4x8unorm(vertex_paint[base + i1]) * bary.y
+        + unpack4x8unorm(vertex_paint[base + i2]) * bary.z;
+}
+
+/// One read of a painted layer's material.
+struct PaintLayer {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    occlusion: f32,
+    height: f32,
+}
+
+/// A layer material read on one world plane. `t_axis` and `b_axis` are the
+/// world directions the plane's U and its image-up run along, which is the
+/// tangent frame the normal map was authored in.
+///
+/// `detiled` reads every map twice at noise-picked offsets and blends them
+/// (`detile_uv`), so an organic texture's blotches stop landing on a lattice
+/// across a long wall. It is per layer because it is wrong for anything with
+/// courses or joints: two offsets of a brick bond ghost through each other.
+fn paint_layer_plane(
+    m: Material,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    t_axis: vec3<f32>,
+    b_axis: vec3<f32>,
+    n: vec3<f32>,
+    detiled: bool,
+) -> PaintLayer {
+    var out: PaintLayer;
+    var dt = detile_uv(uv);
+    out.albedo = m.base_color.rgb;
+    if m.albedo_map >= 0 {
+        if detiled {
+            let a = textureSampleGrad(textures[m.albedo_map], default_sampler, dt.a, ddx, ddy).rgb;
+            let b = textureSampleGrad(textures[m.albedo_map], default_sampler, dt.b, ddx, ddy).rgb;
+            // The darker read wins the seam, as for a de-tiled base material.
+            dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
+            out.albedo *= mix(a, b, dt.t);
+        } else {
+            out.albedo *= textureSampleGrad(textures[m.albedo_map], default_sampler, uv, ddx, ddy).rgb;
+        }
+    }
+    out.roughness = max(m.roughness, 0.05);
+    out.metallic = m.metallic;
+    out.occlusion = 1.0;
+    if m.metallic_roughness_map >= 0 {
+        let arm = sample_material_map(m.metallic_roughness_map, uv, dt, detiled, ddx, ddy, true);
+        out.roughness = max(arm.g, 0.05);
+        out.metallic = arm.b;
+        // A packed AO/roughness/metal map: one read serves both slots.
+        if m.occlusion_map == m.metallic_roughness_map {
+            out.occlusion = arm.r;
+        }
+    }
+    if m.occlusion_map >= 0 && m.occlusion_map != m.metallic_roughness_map {
+        out.occlusion = sample_material_map(m.occlusion_map, uv, dt, detiled, ddx, ddy, true).r;
+    }
+    out.normal = n;
+    if m.normal_map >= 0 {
+        let t = sample_material_map(m.normal_map, uv, dt, detiled, ddx, ddy, true).xyz * 2.0 - 1.0;
+        out.normal = n * max(t.z, 0.05) + (t_axis * t.x + b_axis * t.y) * m.normal_scale;
+    }
+    // Height around the map's own mean, like the surface's (see `fs_main`).
+    // Without a height map the albedo stands in: mortar, cracks and soil are
+    // darker than what stands proud of them often enough to shape an edge.
+    out.height = 0.5;
+    if m.height_map >= 0 {
+        out.height += sample_material_map(m.height_map, uv, dt, detiled, ddx, ddy, true).r
+            - textureSampleLevel(textures[m.height_map], default_sampler, uv, 7.0).r;
+    } else if m.albedo_map >= 0 {
+        let mean = m.base_color.rgb * textureSampleLevel(textures[m.albedo_map], default_sampler, uv, 7.0).rgb;
+        out.height += dot(out.albedo - mean, vec3<f32>(0.5));
+    }
+    return out;
+}
+
+fn paint_layer_add(sum: ptr<function, PaintLayer>, s: PaintLayer, w: f32) {
+    (*sum).albedo += s.albedo * w;
+    (*sum).normal += s.normal * w;
+    (*sum).roughness += s.roughness * w;
+    (*sum).metallic += s.metallic * w;
+    (*sum).occlusion += s.occlusion * w;
+    (*sum).height += s.height * w;
+}
+
+/// A layer material projected in world space at `tiling` repeats per metre,
+/// so one material keeps one texel density on every mesh whatever its UVs.
+/// A flat wall or floor reads one plane; only a surface turned between axes
+/// reads a second or third (weights below 0.12 are dropped, not sampled).
+fn paint_layer(
+    m: Material,
+    tiling: f32,
+    p: vec3<f32>,
+    pdx: vec3<f32>,
+    pdy: vec3<f32>,
+    n: vec3<f32>,
+    detiled: bool,
+) -> PaintLayer {
+    let an = abs(n);
+    var w = an * an;
+    w = w * w;
+    w = w / (w.x + w.y + w.z);
+    w = max(w - vec3<f32>(0.12), vec3<f32>(0.0));
+    w = w / (w.x + w.y + w.z);
+    var sum: PaintLayer;
+    sum.albedo = vec3<f32>(0.0);
+    sum.normal = vec3<f32>(0.0);
+    sum.roughness = 0.0;
+    sum.metallic = 0.0;
+    sum.occlusion = 0.0;
+    sum.height = 0.0;
+    // Image-up is +Y on walls, so stains and courses stay upright.
+    if w.y > 0.0 {
+        paint_layer_add(&sum, paint_layer_plane(m, p.xz * tiling, pdx.xz * tiling, pdy.xz * tiling,
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, -1.0), n, detiled), w.y);
+    }
+    if w.x > 0.0 {
+        let flip = vec2<f32>(tiling, -tiling);
+        paint_layer_add(&sum, paint_layer_plane(m, p.zy * flip, pdx.zy * flip, pdy.zy * flip,
+            vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), n, detiled), w.x);
+    }
+    if w.z > 0.0 {
+        let flip = vec2<f32>(tiling, -tiling);
+        paint_layer_add(&sum, paint_layer_plane(m, p.xy * flip, pdx.xy * flip, pdy.xy * flip,
+            vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), n, detiled), w.z);
+    }
+    sum.normal = normalize(sum.normal);
+    return sum;
+}
+
+/// How much of a layer shows where `cover` of it is painted, the surface
+/// under it stands `h_base` high and the layer `h_layer` (both 0..1).
+///
+/// The classic height blend: each side's height is offset by its share of the
+/// paint and the taller one wins within a band. At `contrast` 0 the band is
+/// as wide as the heights and this is a plain fade; toward 1 the heights
+/// decide, so half-painted mud lies in the joints of a cobble and leaves the
+/// stones proud, and the edge of a patch follows the texture instead of the
+/// mesh's vertices.
+fn paint_height_blend(cover: f32, h_base: f32, h_layer: f32, contrast: f32) -> f32 {
+    let depth = 1.0 - 0.94 * contrast;
+    let a = h_base * contrast + (1.0 - cover);
+    let b = h_layer * contrast + cover;
+    let top = max(a, b) - depth;
+    let wa = max(a - top, 0.0);
+    let wb = max(b - top, 0.0);
+    // Pinned at the ends: unpainted is none of it, fully painted all of it.
+    return max(wb / max(wa + wb, 1.0e-5) * smoothstep(0.0, 0.06, cover), smoothstep(0.94, 1.0, cover));
+}
+
+/// How much of a layer shows where its painted amount is `m` and the breakup
+/// noise is `n` (~0.2..0.8). Full paint covers everything; half paint leaves
+/// blotches where the noise is low, the way grime and rust really gather,
+/// instead of a smooth gradient that betrays the vertex spacing.
+fn paint_coverage(m: f32, n: f32) -> f32 {
+    return saturate((m * 1.25 - n) * 4.0);
+}
+
+/// Blend the painted layer materials over the surface, in channel order.
+///
+/// Each channel that has a material in its slot header is a full PBR layer:
+/// albedo, normal, roughness, metal, occlusion and height replace the
+/// surface's by the blend weight. A layer set to *stain* instead keeps the
+/// surface's own colour pattern, normal and relief and takes only the
+/// layer's tone and some of its roughness: grime on wood grain, soot on
+/// paint, a tide mark on a panel. The weight is the painted amount, limited
+/// to the layer's slope range, broken up by world-space noise where it is
+/// part-painted (so a low-poly wall's two rows of vertices still give ragged
+/// patches), then sharpened against the height maps. `height` carries the
+/// surface height from one layer to the next. Returns, per channel, whether
+/// it was a material layer; the rest are left to `apply_vertex_weathering`.
+fn apply_vertex_layers(
+    surface: ptr<function, Surface>,
+    slot: u32,
+    mask: vec4<f32>,
+    p: vec3<f32>,
+    pdx: vec3<f32>,
+    pdy: vec3<f32>,
+    geo_normal: vec3<f32>,
+    base_height: f32,
+) -> vec4<f32> {
+    var is_layer = vec4<f32>(0.0);
+    var height = base_height;
+    for (var c = 0u; c < 4u; c++) {
+        let material_id = vertex_paint[slot + c];
+        if material_id == PAINT_NO_LAYER {
+            continue;
+        }
+        is_layer[c] = 1.0;
+        let params = unpack4x8unorm(vertex_paint[slot + 8u + c]);
+        let slope_lo = params.y * 2.0 - 1.0;
+        let slope_hi = params.z * 2.0 - 1.0;
+        var cover = mask[c]
+            * smoothstep(slope_lo - 0.1, slope_lo + 0.05, geo_normal.y)
+            * (1.0 - smoothstep(slope_hi - 0.05, slope_hi + 0.1, geo_normal.y));
+        // The least cover at which the height blend can show any of this
+        // layer over a surface standing `height` high. In
+        // `paint_height_blend` the layer's side clears the band only when
+        // cover > contrast * (0.94 + h_base - h_layer) / 2, and a layer's
+        // mean-centred height stays under 1.15. Below that its maps need
+        // not be read at all, and most of a patchy mask is below it.
+        let floor_cover = max(0.004, 0.5 * params.x * (height - 0.21));
+        let spread = 4.0 * cover * (1.0 - cover) * params.w;
+        // The breakup noise tops out near 0.85: +0.84 * spread.
+        if cover + 0.84 * spread < floor_cover {
+            continue;
+        }
+        // Each layer gets its own noise, so two part-painted layers do not
+        // land in the same blotches.
+        let noise = weather_fbm(PAINT_ROT * p * bitcast<f32>(vertex_paint[slot + 12u + c])
+            + vec3<f32>(f32(c) * 19.7));
+        cover = saturate(cover + (noise - 0.5) * 2.4 * spread);
+        if cover < floor_cover {
+            continue;
+        }
+        // x: stain (0 replaces the surface, 1 only tones it); y: de-tile.
+        let extra = unpack4x8unorm(vertex_paint[slot + 16u + c]);
+        let layer = paint_layer(materials[material_id], bitcast<f32>(vertex_paint[slot + 4u + c]),
+            p, pdx, pdy, geo_normal, extra.y > 0.5);
+        let w = paint_height_blend(cover, height, layer.height, params.x);
+        // A mid-grey layer leaves a stained surface as it was; its darks
+        // darken and its lights (lime, dust) lift a little.
+        let stained = (*surface).albedo * min(layer.albedo * 2.2, vec3<f32>(1.6));
+        (*surface).albedo = mix((*surface).albedo, mix(layer.albedo, stained, extra.x), w);
+        // What a stain leaves alone: the surface's own shape.
+        let shape = w * (1.0 - extra.x);
+        (*surface).normal = normalize(mix((*surface).normal, layer.normal, shape));
+        (*surface).roughness = mix((*surface).roughness, layer.roughness, w * (1.0 - 0.5 * extra.x));
+        (*surface).metallic = mix((*surface).metallic, layer.metallic, shape);
+        // The layer's occlusion replaces the material's own, not GTAO's
+        // share of `occlusion`.
+        let occlusion = mix(micro_occlusion, layer.occlusion, shape);
+        (*surface).occlusion = (*surface).occlusion / max(micro_occlusion, 0.05) * occlusion;
+        micro_occlusion = occlusion;
+        height = mix(height, layer.height, shape);
+    }
+    return is_layer;
+}
+
+/// Layer the built-in painted weathering over the material, before `f0` is
+/// derived. `mask` has the channels that carry a layer material zeroed.
+///
+/// Values are measured albedos: soot and grime 0.06-0.12, settled dust
+/// ~0.2, iron oxide from
+/// orange (0.42, 0.17, 0.06) to dark scale (0.13, 0.06, 0.035), fresh blood
+/// (0.20, 0.01, 0.01) drying to (0.075, 0.018, 0.012). Wetness darkens the
+/// way `apply_wetness` does (Lekner & Dorf: the exponent rises with absorbed
+/// water) and smooths the microsurface toward a water film.
+fn apply_vertex_weathering(surface: ptr<function, Surface>, mask: vec4<f32>, p: vec3<f32>) {
+    if max(max(mask.x, mask.y), max(mask.z, mask.w)) < 0.004 {
+        return;
+    }
+    let broad = weather_fbm(p * 3.1);
+    let fine = weather_noise(p * 21.0);
+    // Coverage edges need noise off the value-noise lattice: sharpened, an
+    // axis-aligned octave turns into visible squares. Rotated fbm does not.
+    let speck = weather_fbm(PAINT_ROT * p * 7.0);
+
+    // Grime gathers in specks and smears, not clouds: part of its breakup is
+    // the fine noise, so a light coat reads as dirt rather than a stain.
+    let dirt = paint_coverage(mask.x, mix(broad, speck, 0.4));
+    if dirt > 0.0 {
+        // Dust settles pale on what faces up; grime and soot stay dark on
+        // walls and undersides.
+        let up = saturate((*surface).normal.y);
+        let grime = mix(vec3<f32>(0.085, 0.072, 0.056), vec3<f32>(0.24, 0.21, 0.17), up * 0.85)
+            * (0.8 + 0.4 * fine);
+        (*surface).albedo = mix((*surface).albedo, grime, dirt * 0.85);
+        (*surface).roughness = mix((*surface).roughness, 0.92, dirt);
+        (*surface).metallic = mix((*surface).metallic, 0.0, dirt);
+    }
+
+    let rust = paint_coverage(mask.y, mix(broad, speck, 0.45));
+    if rust > 0.0 {
+        let oxide = mix(vec3<f32>(0.42, 0.17, 0.06), vec3<f32>(0.13, 0.06, 0.035), fine);
+        (*surface).albedo = mix((*surface).albedo, oxide, rust);
+        (*surface).roughness = mix((*surface).roughness, 0.86, rust);
+        (*surface).metallic = mix((*surface).metallic, 0.0, rust);
+    }
+
+    let blood = paint_coverage(mask.w, mix(speck, broad, 0.3));
+    if blood > 0.0 {
+        let dried = smoothstep(0.35, 0.75, broad);
+        let stain = mix(vec3<f32>(0.20, 0.012, 0.01), vec3<f32>(0.075, 0.018, 0.012), dried);
+        (*surface).albedo = mix((*surface).albedo, stain, blood);
+        (*surface).roughness = mix((*surface).roughness, mix(0.22, 0.62, dried), blood);
+        (*surface).metallic = mix((*surface).metallic, 0.0, blood);
+    }
+
+    // Water wicks: no blotching, just the painted gradient.
+    let wet = saturate(mask.z);
+    if wet > 0.0 {
+        (*surface).albedo = pow(max((*surface).albedo, vec3<f32>(0.0)), vec3<f32>(1.0 + 0.8 * wet));
+        (*surface).roughness = clamp(mix((*surface).roughness, 0.07, wet * 0.9), 0.015, 1.0);
+    }
+}
+
+/// Editor preview of the raw mask: 1 = all channels (dirt brown, rust orange,
+/// wet blue, blood red), 2..5 = one channel as grey.
+fn vertex_paint_preview(mask: vec4<f32>, mode: u32) -> vec3<f32> {
+    if mode >= 2u && mode <= 5u {
+        return vec3<f32>(mask[mode - 2u]);
+    }
+    let base = vec3<f32>(0.06);
+    return base
+        + mask.x * vec3<f32>(0.45, 0.32, 0.18)
+        + mask.y * vec3<f32>(0.9, 0.42, 0.08)
+        + mask.z * vec3<f32>(0.1, 0.35, 0.9)
+        + mask.w * vec3<f32>(0.85, 0.02, 0.05);
+}
+
 /// Phase CONTROL-O: project this froxel's decals onto the surface.
 ///
 /// A deferred decal is a box. A pixel is inside one when its position, taken
@@ -218,7 +599,14 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
 
         // The decal projects along its own -Y, so its UVs are the other two
         // axes and its facing is +Y in decal space taken back to the world.
-        let axis = normalize((decal.inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
+        // `inv_transform` maps world to decal space; its 3x3 is S^-1 R^T, so
+        // the transpose (its rows) carries a decal axis back out as R S^-1.
+        // Multiplying a direction by the inverse itself instead returned world
+        // up *in decal space*, which only equals the decal's +Y for decals
+        // turned about the vertical: every wall decal failed the facing test
+        // below and never drew, unless its wall happened to face -Z.
+        let inv = decal.inv_transform;
+        let axis = normalize(vec3<f32>(inv[0].y, inv[1].y, inv[2].y));
         let facing = dot(geometric_normal, axis);
         if facing <= decal.angle_fade_cos {
             continue;
@@ -241,7 +629,9 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
             continue;
         }
 
-        (*surface).albedo = mix((*surface).albedo, colour.rgb, alpha);
+        // Wetness and grime darken what is there; paint and patches replace it.
+        let decal_albedo = select(colour.rgb, (*surface).albedo * colour.rgb, decal.blend > 0.5);
+        (*surface).albedo = mix((*surface).albedo, decal_albedo, alpha);
         (*surface).roughness = mix((*surface).roughness, decal.roughness, alpha);
         if decal.orm_map >= 0 {
             let orm = textureSampleLevel(
@@ -258,11 +648,16 @@ fn apply_decals(surface: ptr<function, Surface>, world_pos: vec3<f32>, froxel: u
             // tangent basis from the surface would rotate it with whatever it
             // happened to land on.
             let n = axis;
-            let t = normalize((decal.inv_transform * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz);
+            let t = normalize(vec3<f32>(inv[0].x, inv[1].x, inv[2].x));
             let b = cross(n, t);
             let mapped = normalize(t * tangent_normal.x + n * tangent_normal.z + b * tangent_normal.y);
             (*surface).normal = normalize(mix(
                 (*surface).normal, mapped, alpha * decal.normal_strength));
+        } else if decal.roughness < 0.1 {
+            // A mirror-smooth decal with no relief of its own is a liquid
+            // film: standing water fills the joints and lies level, so it
+            // reflects as one sheet instead of scattering off every cobble.
+            (*surface).normal = normalize(mix((*surface).normal, axis, alpha));
         }
     }
 }
@@ -350,6 +745,105 @@ const ABLATE_TERRAIN: u32 = 4u;
 /// is no longer required.
 
 
+/// Parallax-occlusion mapping for a mesh material with a height map.
+///
+/// Marches the height field along the view ray below the surface and returns
+/// the UV where the ray meets it. Built on the triangle's own world-space
+/// `dP/du` and `dP/dv`, not the shading TBN, so it is independent of the
+/// normal-map handedness convention and `depth_m` is a real depth in metres
+/// whatever the mesh's UV density.
+///
+/// `view_ws` points from the surface to the eye. Heights are white = high, so
+/// the relief carves down to `depth_m` below the triangle's plane. Returns
+/// `uv` unchanged when the view is edge-on or the step would be degenerate.
+fn parallax_uv(
+    map: i32,
+    uv: vec2<f32>,
+    view_ws: vec3<f32>,
+    normal: vec3<f32>,
+    dpdu: vec3<f32>,
+    dpdv: vec3<f32>,
+    depth_m: f32,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> vec2<f32> {
+    let vn = dot(view_ws, normal);
+    if vn <= 0.02 {
+        return uv;
+    }
+    let lateral = view_ws - normal * vn;
+    // Where a full-depth descent along the view ray lands, in UV.
+    let travel = -lateral * (depth_m / max(vn, 0.12));
+    let full = vec2<f32>(
+        dot(travel, dpdu) / max(dot(dpdu, dpdu), 1.0e-12),
+        dot(travel, dpdv) / max(dot(dpdv, dpdv), 1.0e-12),
+    );
+    if dot(full, full) < 1.0e-12 {
+        return uv;
+    }
+    // Grazing views need more layers; head-on views barely move. Bounded for
+    // cost: streets and walls within 30 m all run this.
+    let steps = mix(18.0, 6.0, clamp(vn, 0.0, 1.0));
+    let step_uv = full / steps;
+    let layer_step = 1.0 / steps;
+    var cur = uv;
+    var layer = 0.0;
+    var depth = 1.0 - textureSampleGrad(textures[map], default_sampler, cur, ddx, ddy).r;
+    for (var i = 0; i < 20; i = i + 1) {
+        if layer >= depth || layer >= 1.0 {
+            break;
+        }
+        cur = cur + step_uv;
+        layer = layer + layer_step;
+        depth = 1.0 - textureSampleGrad(textures[map], default_sampler, cur, ddx, ddy).r;
+    }
+    // Refine between the last two samples by intersecting their depth segments.
+    let prev = cur - step_uv;
+    let after = depth - layer;
+    let before = (1.0 - textureSampleGrad(textures[map], default_sampler, prev, ddx, ddy).r) - (layer - layer_step);
+    let w = clamp(after / (after - before + 1.0e-6), 0.0, 1.0);
+    return mix(cur, prev, w);
+}
+
+/// Interior mapping, for a window whose colour map is the room behind it as
+/// seen through a pinhole `2 * depth_m` in front of the glass, framing the
+/// window exactly (the Town's shop windows, rendered in Blender). The view ray
+/// carries on through the glass into a box `depth_m` deep whose mouth is the
+/// UV square; wherever it meets the box (back wall, side walls, floor or
+/// ceiling) that point is projected back through the pinhole into the image,
+/// so every face of the room is the rendered room, in perspective, from any
+/// angle. (An orthographic back-wall image painted the box's other faces with
+/// its blurred edge colour: a band that slid up and down over the shelves as
+/// the camera moved.) Returns the UV to read and a brightness (1: the image
+/// carries the room's own light).
+fn interior_uv(
+    uv: vec2<f32>,
+    view_ws: vec3<f32>,
+    normal: vec3<f32>,
+    dpdu: vec3<f32>,
+    dpdv: vec3<f32>,
+    depth_m: f32,
+) -> vec3<f32> {
+    let vn = dot(view_ws, normal);
+    if vn <= 1.0e-3 {
+        return vec3<f32>(uv, 1.0);
+    }
+    // UV per metre along the ray, which runs from the eye on into the room.
+    let s = vec2<f32>(
+        dot(-view_ws, dpdu) / max(dot(dpdu, dpdu), 1.0e-12),
+        dot(-view_ws, dpdv) / max(dot(dpdv, dpdv), 1.0e-12),
+    );
+    let t_back = depth_m / vn;
+    let wall = select(vec2<f32>(0.0), vec2<f32>(1.0), s > vec2<f32>(0.0));
+    let t_side = select(vec2<f32>(1.0e9), (wall - uv) / s, abs(s) > vec2<f32>(1.0e-9));
+    let t = min(t_back, min(t_side.x, t_side.y));
+    let hit = clamp(uv + s * t, vec2<f32>(0.0), vec2<f32>(1.0));
+    let z = clamp(t * vn, 0.0, depth_m); // metres behind the glass
+    let pinhole = 2.0 * depth_m;
+    let img = vec2<f32>(0.5) + (hit - vec2<f32>(0.5)) * (pinhole / (pinhole + z));
+    return vec3<f32>(clamp(img, vec2<f32>(0.001), vec2<f32>(0.999)), 1.0);
+}
+
 /// Perspective-correct barycentric at an NDC sample (Phase 25N).
 fn vis_barycentric(
     ndc0: vec2<f32>, ndc1: vec2<f32>, ndc2: vec2<f32>,
@@ -424,6 +918,121 @@ fn specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
     return saturate(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
 }
 
+// ── Authored weathering (TOWN-W) ─────────────────────────────────────────────
+//
+// A tiled scan repeats and stays as clean as the day it was photographed. Real
+// masonry, render and painted timber are uneven in colour across a whole wall,
+// streaked where rain runs off ledges, dark and damp at the foot, and grimy on
+// every upward face. `Material.weathering` (0..1, glTF material extras
+// `somnium_weathering`) adds those in *world* space, so the variation runs
+// across neighbouring meshes and never repeats with the texture. 0 leaves the
+// scan untouched, which is every material that does not ask for it.
+fn weather_hash(p: vec3<f32>) -> f32 {
+    let q = fract(p * 0.3183099 + vec3<f32>(0.71, 0.113, 0.419)) * 17.0;
+    return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+fn weather_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let x00 = mix(weather_hash(i), weather_hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(weather_hash(i + vec3<f32>(0.0, 1.0, 0.0)), weather_hash(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(weather_hash(i + vec3<f32>(0.0, 0.0, 1.0)), weather_hash(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(weather_hash(i + vec3<f32>(0.0, 1.0, 1.0)), weather_hash(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+fn weather_fbm(p: vec3<f32>) -> f32 {
+    return 0.5 * weather_noise(p) + 0.3 * weather_noise(p * 2.03 + 11.0) + 0.2 * weather_noise(p * 4.07 + 23.0);
+}
+
+/// Texture de-tiling (material `detile`), after Quilez, "Texture repetition",
+/// technique 3. A low-frequency noise over UV picks one of eight offsets per
+/// region; every map is read at its region's offset and at the next one's and
+/// the two are blended across the band where the noise steps, so a scan's
+/// stains and blotches stop repeating in a grid. Offsets are constant within a
+/// region, so the plain UV's gradients stay valid. `t` is refined from the
+/// albedo pair (the blend favours the darker read, which hides the seam) and
+/// then shared by every map so they stay registered.
+struct Detile {
+    a: vec2<f32>,
+    b: vec2<f32>,
+    f: f32,
+    t: f32,
+}
+
+fn detile_uv(uv: vec2<f32>) -> Detile {
+    let l = weather_noise(vec3<f32>(uv * 0.45, 0.5)) * 8.0;
+    let i = floor(l);
+    var d: Detile;
+    d.a = uv + sin(vec2<f32>(3.0, 7.0) * i);
+    d.b = uv + sin(vec2<f32>(3.0, 7.0) * (i + 1.0));
+    d.f = l - i;
+    d.t = smoothstep(0.2, 0.8, d.f);
+    return d;
+}
+
+/// One material map at `uv`: de-tiled, with analytic gradients, or implicit.
+fn sample_material_map(
+    map: i32,
+    uv: vec2<f32>,
+    d: Detile,
+    detiled: bool,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    analytic: bool,
+) -> vec4<f32> {
+    if detiled {
+        let a = textureSampleGrad(textures[map], default_sampler, d.a, ddx, ddy);
+        let b = textureSampleGrad(textures[map], default_sampler, d.b, ddx, ddy);
+        return mix(a, b, d.t);
+    }
+    if analytic {
+        return textureSampleGrad(textures[map], default_sampler, uv, ddx, ddy);
+    }
+    return textureSample(textures[map], default_sampler, uv);
+}
+
+/// Apply `amount` of weathering to `surface` at `world_pos`, facing `normal`
+/// (geometric, world space), `local_height` metres above its object's origin
+/// (grounded assets sit on it, so this is height above their foot), with
+/// `crevice` the scan's own occlusion.
+fn apply_weathering(
+    surface: ptr<function, Surface>,
+    amount: f32,
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    local_height: f32,
+    crevice: f32,
+) {
+    let vertical = 1.0 - abs(normal.y);
+    // Along a vertical face, horizontally: streaks and the damp line follow it.
+    let along = world_pos.x * normal.z - world_pos.z * normal.x;
+    // Uneven colour across the whole surface, a few metres a blotch.
+    let macro_v = weather_fbm(world_pos * 0.22);
+    // Rain streaks: narrow across the wall, long down it, in runs.
+    let streak = smoothstep(0.3, 0.62,
+        weather_noise(vec3<f32>(along * 7.0, world_pos.y * 0.5, 3.7))
+        * weather_noise(vec3<f32>(along * 1.9, world_pos.y * 0.12, 9.1)) * 1.6) * vertical;
+    // Rising damp: dark to a ragged line 0.3-0.9 m above the foot.
+    let line = 0.3 + 0.6 * weather_noise(vec3<f32>(along * 1.3, 0.0, 5.3));
+    let damp = (1.0 - smoothstep(line * 0.45, line, local_height)) * vertical
+        * step(-0.25, local_height);
+    // Grime and moss where dirt settles: ledges, sills, copings, treads.
+    let up = saturate(normal.y);
+    let moss = up * smoothstep(0.42, 0.72, weather_fbm(world_pos * 2.3 + 17.0));
+
+    var albedo = (*surface).albedo * mix(1.0, 0.8 + 0.4 * macro_v, amount);
+    albedo *= 1.0 - amount * (0.26 * streak + 0.34 * damp);
+    albedo = mix(albedo, albedo * vec3<f32>(0.52, 0.6, 0.36), amount * 0.55 * moss);
+    albedo *= mix(1.0, 0.78 + 0.22 * crevice, amount);
+    (*surface).albedo = albedo;
+    (*surface).roughness = clamp(
+        (*surface).roughness + amount * (0.06 * streak - 0.14 * damp + (0.5 - macro_v) * 0.08),
+        0.05, 1.0);
+}
+
 /// Lambert irradiance of a quad (Phase 24R). Linearly Transformed Cosines
 /// reduce to this closed form for the diffuse lobe; specular still uses the
 /// existing area BRDF with an equivalent angular radius.
@@ -435,6 +1044,10 @@ fn ltc_quad_diffuse(
     half_x: f32,
     half_y: f32,
 ) -> f32 {
+    // Local -Z is the emitting normal, not the receiving side of the panel.
+    if dot(light_n, pos - center) <= 0.0 {
+        return 0.0;
+    }
     var up = vec3<f32>(0.0, 1.0, 0.0);
     if abs(dot(light_n, up)) > 0.95 {
         up = vec3<f32>(1.0, 0.0, 0.0);
@@ -461,7 +1074,9 @@ fn ltc_quad_diffuse(
             sum += h * dot(x / xl, n);
         }
     }
-    return max(sum, 0.0) * 0.5 / 3.14159265;
+    // These corners wind around light_n. Seen from an illuminated receiver,
+    // the projected edge integral has the opposite orientation.
+    return max(-sum, 0.0) * 0.5 / 3.14159265;
 }
 
 fn ltc_disc_diffuse(
@@ -471,6 +1086,9 @@ fn ltc_disc_diffuse(
     light_n: vec3<f32>,
     radius: f32,
 ) -> f32 {
+    if dot(light_n, pos - center) <= 0.0 {
+        return 0.0;
+    }
     var up = vec3<f32>(0.0, 1.0, 0.0);
     if abs(dot(light_n, up)) > 0.95 {
         up = vec3<f32>(1.0, 0.0, 0.0);
@@ -494,13 +1112,24 @@ fn ltc_disc_diffuse(
         }
         prev = p;
     }
-    return max(sum, 0.0) * 0.5 / 3.14159265;
+    return max(-sum, 0.0) * 0.5 / 3.14159265;
 }
 
 fn closest_on_segment(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
     let ab = b - a;
     let t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
     return a + ab * t;
+}
+
+// GPU local colours retain the shared flux/(4*pi) convention. A one-sided
+// uniform emitter has radiance flux/(pi*area); the normalized LTC integral
+// already includes solid angle, distance and receiver cosine. Only the finite
+// range fade remains. Applying point attenuation here would fall off as d^-4.
+fn area_irradiance_scale(integral: f32, area: f32, dist: f32, range: f32) -> f32 {
+    let ratio = dist / max(range, 0.0001);
+    let ratio2 = ratio * ratio;
+    let cutoff = clamp(1.0 - ratio2 * ratio2, 0.0, 1.0);
+    return integral * (12.5663706 / max(area, 0.0001)) * cutoff * cutoff;
 }
 
 fn sh_irradiance(n: vec3<f32>, base: u32) -> vec3<f32> {
@@ -573,10 +1202,94 @@ fn sh_probe_volume_weight(pos: vec3<f32>) -> f32 {
 }
 
 /// Image-based ambient: diffuse irradiance + split-sum specular.
-/// Phase 24L: `traced_diffuse` replaces the diffuse half when the GI pass has a
-/// result for this pixel. Only the diffuse half — the specular lobe still comes
-/// from the environment cubemap, because ReSTIR GI resolves *diffuse* indirect
-/// and a mirror needs a sharp reflection this pass cannot give it.
+/// ReSTIR estimates directional-light bounce only: escaped rays carry no sky
+/// energy and local lights are not sampled. Keep environment illumination and
+/// add the measured bounce, including when a valid reservoir measures zero.
+/// ReSTIR GI arrives on a coarser grid (restir_gi.rs `GI_SCALE`): each texel
+/// traced one pixel of its block and stored that surface's camera distance in
+/// alpha (0: none). Bilinear weights, each also asking that the texel's surface
+/// be as far from the camera as this pixel's, so indirect light is smooth
+/// across a surface and never bleeds across a silhouette. `a` of the result is
+/// 1 when any texel could vouch for this pixel.
+///
+/// The footprint is 4x4 texels with a Gaussian falloff, and it denoises as
+/// well as upsamples: one reservoir per texel is still a stochastic estimate,
+/// and a texel that drew a rare bright sample (a bounce off a lamp housing) was
+/// reproduced as a gold firefly — always on the first-person hands, which keep
+/// little temporal history, and on everything while running.
+///
+/// Two bounds per tap, both relative so they need no exposure. A tap may not
+/// exceed `GI_SPECK_RATIO` times its brightest same-surface neighbour in the
+/// footprint: an isolated hot texel is exactly a speck, while real bounce is
+/// smooth and its neighbours vouch for it. A cap against the footprint mean
+/// alone could not do this — the speck lifts the mean it is measured against,
+/// so a texel 100x its neighbours came out 18x and stayed visible. The mean
+/// cap stays as the backstop for small clusters.
+fn gi_upsample(pixel: vec2<f32>, dist: f32) -> vec4<f32> {
+    let gdims = vec2<i32>(textureDimensions(restir_gi));
+    let ratio = vec2<f32>(textureDimensions(vis_buffer)) / vec2<f32>(gdims);
+    let gp = pixel / ratio - 0.5;
+    let g0 = vec2<i32>(floor(gp));
+    let f = gp - floor(gp);
+    var taps: array<vec4<f32>, 16>;
+    // Tap luminance, or -1 for a tap on another surface (or none).
+    var luma: array<f32, 16>;
+    var mean = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = 0; k < 16; k = k + 1) {
+        let d = vec2<i32>(k & 3, k >> 2) - vec2<i32>(1);
+        let t = textureLoad(restir_gi, clamp(g0 + d, vec2<i32>(0), gdims - 1), 0);
+        luma[k] = -1.0;
+        if t.a <= 0.0 {
+            taps[k] = vec4<f32>(0.0);
+            continue;
+        }
+        let offset = vec2<f32>(d) - f;
+        let ws = exp(-0.5 * dot(offset, offset) / (GI_FILTER_SIGMA * GI_FILTER_SIGMA));
+        let wd = exp(-abs(t.a - dist) / (dist * 0.025 + 0.05));
+        let w = (ws + 0.002) * wd;
+        taps[k] = vec4<f32>(t.rgb, w);
+        if wd > 0.1 {
+            luma[k] = dot(t.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        }
+        mean += t.rgb * w;
+        wsum += w;
+    }
+    if wsum < 1.0e-4 {
+        return vec4<f32>(0.0);
+    }
+    mean /= wsum;
+    let mean_ceiling = GI_FIREFLY_RATIO * dot(mean, vec3<f32>(0.2126, 0.7152, 0.0722)) + 1.0e-6;
+    var sum = vec3<f32>(0.0);
+    for (var k = 0; k < 16; k = k + 1) {
+        if taps[k].a <= 0.0 {
+            continue;
+        }
+        var neighbour_max = -1.0;
+        for (var n = 0; n < 9; n = n + 1) {
+            let x = (k & 3) + n % 3 - 1;
+            let y = (k >> 2) + n / 3 - 1;
+            if n != 4 && x >= 0 && x < 4 && y >= 0 && y < 4 {
+                neighbour_max = max(neighbour_max, luma[y * 4 + x]);
+            }
+        }
+        var ceiling = mean_ceiling;
+        if neighbour_max >= 0.0 {
+            ceiling = min(ceiling, GI_SPECK_RATIO * neighbour_max + 1.0e-6);
+        }
+        let l = dot(taps[k].rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        sum += taps[k].rgb * min(1.0, ceiling / max(l, 1.0e-6)) * taps[k].a;
+    }
+    return vec4<f32>(sum / wsum, 1.0);
+}
+
+/// Gaussian radius of the GI upsample, in GI texels.
+const GI_FILTER_SIGMA: f32 = 1.0;
+/// A GI texel may be at most this many times brighter than its neighbourhood.
+const GI_FIREFLY_RATIO: f32 = 2.5;
+/// ...and than its brightest same-surface neighbour.
+const GI_SPECK_RATIO: f32 = 1.25;
+
 fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     let n = surface.normal;
 
@@ -590,14 +1303,9 @@ fn evaluate_ibl_diffuse(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
     let irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
     let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
-    var diffuse = irradiance * surface.albedo * kd;
+    var diffuse = irradiance * light.ibl_intensity * surface.albedo * kd;
     if traced_diffuse.a > 0.5 {
-        // The traced term is irradiance, so the albedo and the dielectric
-        // fraction still belong here. Applying them in the shading pass rather
-        // than in the GI pass keeps one definition of what a surface's colour
-        // is — the GI pass only ever sees the *bounce* surface's albedo, never
-        // this one's, and applying both would square it.
-        diffuse = traced_diffuse.rgb * surface.albedo * kd;
+        diffuse += traced_diffuse.rgb * surface.albedo * kd;
     }
 
     return diffuse * surface.occlusion;
@@ -684,13 +1392,13 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         surface.roughness,
     );
 
-    // The same bent-normal gather and the same traced-diffuse override the
-    // single-scatter path used, so TSUSHIMA-C's landscape-scale bent normal
-    // and Phase 24L's ReSTIR result both still reach this.
+    // The environment control scales the sky, not traced transport from the
+    // sun or local lamps. Lowering outdoor sky fill must not extinguish a
+    // hospital's practical-light bounce.
     let gather_n = normalize(mix(n, surface.bent_normal, 0.75));
-    var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb;
+    var irradiance = textureSampleLevel(env_cube, env_sampler, gather_n, ENV_MAX_MIP).rgb * light.ibl_intensity;
     if traced_diffuse.a > 0.5 {
-        irradiance = traced_diffuse.rgb;
+        irradiance += traced_diffuse.rgb;
     }
 
     let fss_ess = k_s * ab.x + ab.y;
@@ -701,18 +1409,18 @@ fn evaluate_ibl_ms(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
         * (1.0 - surface.metallic);
 
     let spec_ao = specular_occlusion(n_dot_v, surface.occlusion, surface.roughness);
-    return fss_ess * radiance * spec_ao
+    return fss_ess * radiance * light.ibl_intensity * spec_ao
         + (fms_ems + k_d) * irradiance * surface.occlusion;
 }
 
 fn evaluate_ibl(surface: Surface, traced_diffuse: vec4<f32>) -> vec3<f32> {
     if brdf_multiscatter {
-        return evaluate_ibl_ms(surface, traced_diffuse) * light.ibl_intensity;
+        return evaluate_ibl_ms(surface, traced_diffuse);
     }
     // Occlusion applies to indirect light only. The sun already has shadow
     // maps, and multiplying it by AO as well double-darkens lit surfaces.
-    return (evaluate_ibl_diffuse(surface, traced_diffuse)
-        + evaluate_ibl_specular(surface)) * light.ibl_intensity;
+    return evaluate_ibl_diffuse(surface, traced_diffuse)
+        + evaluate_ibl_specular(surface) * light.ibl_intensity;
 }
 
 // ─── Vertex shader ───────────────────────────────────────────────────────────
@@ -1211,13 +1919,20 @@ fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, view_depth: f32, pixel
 
 // ─── Clustered lighting helpers ──────────────────────────────────────────────
 
-// UE4/5 physically-based inverse-square attenuation with smooth cutoff
-fn smooth_distance_attenuation(dist: f32, range: f32) -> f32 {
+// UE4/5 physically-based inverse-square attenuation with smooth cutoff.
+//
+// Held finite inside the emitter: a surface closer to a lamp than its bulb
+// radius cannot receive more than the bulb's own surface irradiance. The old
+// 1 cm floor gave a fixture's housing ~10,000x the light of the room around it,
+// so every practical whose Light sits on its own lamp blew out white and bloomed
+// into a large splotch in a dark, high-exposure interior.
+fn smooth_distance_attenuation(dist: f32, range: f32, radius: f32) -> f32 {
     let ratio = dist / range;
     let ratio2 = ratio * ratio;
     let ratio4 = ratio2 * ratio2;
     let factor = saturate(1.0 - ratio4);
-    return (factor * factor) / max(dist * dist, 0.0001);
+    let floor_r = max(radius, 0.08);
+    return (factor * factor) / max(dist * dist, floor_r * floor_r);
 }
 
 // Exponential depth slice (matches CPU side)
@@ -1287,8 +2002,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let moon_dir = normalize(light.moon_direction);
         let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
         let detail = sky_detail(ray_dir, sun_dir, sun_illuminance, moon_dir, moon_strength);
+        // The eye in the sky (somnium.SkyEye): drawn here, behind the cloud
+        // composite, where fog does not reach.
+        let eye = sky_eye(ray_dir, normalize(light.eye_direction), light.eye_tan_half_width, light.eye_color,
+                          light.eye_intensity, light.eye_shape, view.time);
 
-        return vec4<f32>(sky + detail, 1.0);
+        return vec4<f32>((sky + detail) * (1.0 - eye.a) + eye.rgb, 1.0);
     }
 
     // ── PBR surface ─────────────────────────────────────────────────────────
@@ -1326,13 +2045,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let v1 = vertices[instance.vertex_offset + i1];
     let v2 = vertices[instance.vertex_offset + i2];
 
-    let p0 = (instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0)).xyz;
-    let p1 = (instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0)).xyz;
-    let p2 = (instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0)).xyz;
+    var p0 = (instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0)).xyz;
+    var p1 = (instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0)).xyz;
+    var p2 = (instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0)).xyz;
+    // The triangle the visibility pass rasterised, wind included (visibility.wgsl):
+    // reconstructing the rest pose would shade a leaf where it is not drawn.
+    if material.terrain_index < 0 {
+        let pivot = instance.model[3].xyz;
+        p0 += wind_offset(p0, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+        p1 += wind_offset(p1, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+        p2 += wind_offset(p2, pivot, material.wind_bend, material.wind_flutter, view.wind_time.x, view.wind, view.camera_pos);
+    }
 
-    let c0 = view.view_proj * instance.model * vec4<f32>(v0.pos_x, v0.pos_y, v0.pos_z, 1.0);
-    let c1 = view.view_proj * instance.model * vec4<f32>(v1.pos_x, v1.pos_y, v1.pos_z, 1.0);
-    let c2 = view.view_proj * instance.model * vec4<f32>(v2.pos_x, v2.pos_y, v2.pos_z, 1.0);
+    let c0 = view.view_proj * vec4<f32>(p0, 1.0);
+    let c1 = view.view_proj * vec4<f32>(p1, 1.0);
+    let c2 = view.view_proj * vec4<f32>(p2, 1.0);
 
     let ndc0 = c0.xy / c0.w;
     let ndc1 = c1.xy / c1.w;
@@ -1344,7 +2071,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let uv0 = vec2<f32>(v0.u, v0.v);
     let uv1 = vec2<f32>(v1.u, v1.v);
     let uv2 = vec2<f32>(v2.u, v2.v);
-    let uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+    var uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+    var paint_slot = 0u;
+    var paint_mask = vec4<f32>(0.0);
+    if material.terrain_index < 0 {
+        paint_slot = vertex_paint_slot(instance_id);
+        if paint_slot != 0u {
+            paint_mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary);
+        }
+    }
 
     // Phase 25N: analytic UV gradients. Implicit dpdx across a vis-buffer
     // 2×2 quad straddles unrelated triangles, so foliage mips jump per pixel.
@@ -1355,6 +2090,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // on every terrain pixel for a feature terrain does not use.
     var uv_ddx = vec2<f32>(0.0);
     var uv_ddy = vec2<f32>(0.0);
+    var paint_pos_ddx = vec3<f32>(0.0);
+    var paint_pos_ddy = vec3<f32>(0.0);
     let analytic_grad = (cluster_params.shading_mode & 8u) != 0u;
     if analytic_grad {
         let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
@@ -1362,6 +2099,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
         uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
         uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+        // World-position gradients for the world-projected paint layers,
+        // only where a layer can show.
+        if paint_slot != 0u {
+            let here = p0 * bary.x + p1 * bary.y + p2 * bary.z;
+            paint_pos_ddx = (p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here;
+            paint_pos_ddy = (p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here;
+        }
     }
 
     let normal_interp = normalize(
@@ -1387,6 +2131,53 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let hit_point = p0 * bary.x + p1 * bary.y + p2 * bary.z;
+
+    let dbg = select(0.0, light._pad2_z, enable_debug);
+    // Source texels per world metre, independent of camera distance, render
+    // resolution and mip selection. Evaluate before lighting/normal maps.
+    if dbg > 34.5 && dbg < 35.5 {
+        var density = 0.0;
+        if material.terrain_index >= 0 {
+            // Terrain UVs address splats, not layer textures. Report nominal
+            // authored density of the dominant painted layer, including when
+            // the visible colour comes from a clipmap. This is deliberately
+            // not a claim about cache residency or cliff-projection stretch.
+            let terrain_index = u32(material.terrain_index);
+            let tm = terrain_materials[terrain_index];
+            let splats = terrain_fetch_splats(tm, terrain_index, uv,
+                dpdx(hit_point.xz) * tm.inv_world_size,
+                dpdy(hit_point.xz) * tm.inv_world_size);
+            var weights = terrain_unpack_splats_painted(splats, tm, hit_point.xz - tm.terrain_origin);
+            let dominant = terrain_strongest_four(&weights)[0];
+            let map = terrain_layer_albedo_map(tm, terrain_index, dominant);
+            if map >= 0 && weights[dominant] > 0.0 {
+                let dims = vec2<f32>(textureDimensions(textures[map], 0));
+                density = sqrt(dims.x * dims.y) * abs(terrain_layer_tiling(tm, terrain_index, dominant));
+            }
+        } else if material.albedo_map >= 0 {
+            let world_area = length(face_cross);
+            let du = uv1 - uv0;
+            let dv = uv2 - uv0;
+            let uv_area = abs(du.x * dv.y - du.y * dv.x);
+            if world_area > 1.0e-12 && uv_area > 1.0e-12 {
+                let dims = vec2<f32>(textureDimensions(textures[material.albedo_map], 0));
+                // Both areas omit 1/2, which cancels. Model scaling is already
+                // in face_cross; rectangular maps and mirrored UVs are valid.
+                density = sqrt(uv_area * dims.x * dims.y / world_area);
+            }
+        }
+        if density <= 0.0 {
+            return vec4<f32>(0.18, 0.18, 0.18, 1.0);
+        }
+        // Continuous logarithmic scale: each colour stop doubles resolution.
+        let stops = array<vec3<f32>, 5>(
+            vec3<f32>(0.02, 0.08, 1.0), vec3<f32>(0.0, 1.0, 1.0),
+            vec3<f32>(0.05, 1.0, 0.02), vec3<f32>(1.0, 1.0, 0.0),
+            vec3<f32>(1.0, 0.02, 0.01));
+        let level = clamp(log2(density / 128.0), 0.0, 4.0);
+        let band = min(u32(level), 3u);
+        return vec4<f32>(mix(stops[band], stops[band + 1u], level - f32(band)), 1.0);
+    }
 
     // Phase 17D: a double-sided surface can be seen from behind, where its
     // authored normal points away and every lighting term comes out dark. Flip
@@ -1463,28 +2254,54 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let bitangent = cross(geo_normal, tangent) * handedness;
     let tbn       = mat3x3<f32>(tangent, bitangent, geo_normal);
 
+    // Parallax occlusion: every map below is sampled at the displaced UV.
+    // Faded out past 30 m, where the relief is sub-pixel and the march is waste.
+    // A negative depth is a window onto a room (interior mapping): no fade,
+    // since the room is the window's whole content at any distance.
+    var interior_shade = 1.0;
+    if material.height_depth < 0.0 && abs(tbn_det) > 1.0e-12 {
+        let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
+        let dpdv = (edge1 * duv0.x - edge0 * duv1.x) / tbn_det;
+        let room = interior_uv(uv, view_dir_early, geo_normal, dpdu, dpdv, -material.height_depth);
+        uv = room.xy;
+        interior_shade = room.z;
+    } else if material.height_map >= 0 && material.height_depth > 0.0 && abs(tbn_det) > 1.0e-12
+        && distance(hit_point, view.camera_pos) < 30.0 {
+        let dpdu = (edge0 * duv1.y - edge1 * duv0.y) / tbn_det;
+        let dpdv = (edge1 * duv0.x - edge0 * duv1.x) / tbn_det;
+        uv = parallax_uv(material.height_map, uv, view_dir_early, geo_normal, dpdu, dpdv,
+            material.height_depth, uv_ddx, uv_ddy);
+    }
+
     // PBR surface setup
     var surface: Surface;
     surface.albedo    = material.base_color.rgb;
     surface.normal    = geo_normal;
+    // De-tiling needs the analytic gradients: implicit ones jump at every
+    // region's offset and would pick the finest mip along the seams.
+    let detiled = material.detile > 0.5 && analytic_grad;
+    var dt = detile_uv(uv);
     if material.albedo_map >= 0 {
-        if analytic_grad {
+        if detiled {
+            let a = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.a, uv_ddx, uv_ddy).rgb;
+            let b = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.b, uv_ddx, uv_ddy).rgb;
+            dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
+            surface.albedo *= mix(a, b, dt.t);
+        } else if analytic_grad {
             surface.albedo *= textureSampleGrad(
                 textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
         } else {
             surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
         }
     }
+    surface.albedo *= interior_shade;
 
     surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
     surface.metallic  = material.metallic;
     if material.metallic_roughness_map >= 0 {
-        let mr = select(
-            textureSample(textures[material.metallic_roughness_map], default_sampler, uv),
-            textureSampleGrad(textures[material.metallic_roughness_map], default_sampler, uv, uv_ddx, uv_ddy),
-            analytic_grad,
-        );
+        let mr = sample_material_map(material.metallic_roughness_map, uv, dt, detiled, uv_ddx, uv_ddy,
+            analytic_grad);
         surface.roughness = max(mr.g, 0.05);
         surface.metallic  = mr.b;
     }
@@ -1502,7 +2319,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let bent_view = gtao.rgb * 2.0 - 1.0;
     let bent_world = normalize(
         (transpose(view.view) * vec4<f32>(bent_view, 0.0)).xyz);
-    surface.bent_normal = select(geo_normal, bent_world, length(bent_view) > 0.1);
+    // Two horizon slices give weak directional evidence at low occlusion.
+    // Fade their normal override with occlusion so sample rotation cannot tint
+    // an almost-open wall in bands. Scalar contact visibility remains intact.
+    let bent_weight = select(0.0, 1.0 - gtao.a, length(bent_view) > 0.1);
+    surface.bent_normal = normalize(mix(geo_normal, bent_world, bent_weight));
 
     // Occlusion comes from its own texture, never from the metallic-roughness
     // map: glTF leaves that map's red channel undefined, and models that store
@@ -1512,12 +2333,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Foliage leans on this heavily — a grass tuft's interior sits in its own
     // shade, and without it every blade receives full open sky.
     if material.occlusion_map >= 0 {
-        let material_occlusion = select(
-            textureSample(textures[material.occlusion_map], default_sampler, uv).r,
-            textureSampleGrad(
-                textures[material.occlusion_map], default_sampler, uv, uv_ddx, uv_ddy).r,
-            analytic_grad,
-        );
+        let material_occlusion = sample_material_map(material.occlusion_map, uv, dt, detiled, uv_ddx,
+            uv_ddy, analytic_grad).r;
         // GTAO and the authored map see different scales. Keep both instead of
         // replacing the screen-space visibility on every mapped material.
         surface.occlusion *= material_occlusion;
@@ -1527,12 +2344,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var normal_variance = 0.0;
     if material.normal_map >= 0 && tbn_valid {
-        let nm_sample = select(
-            textureSample(textures[material.normal_map], default_sampler, uv).rgb,
-            textureSampleGrad(textures[material.normal_map], default_sampler, uv, uv_ddx, uv_ddy).rgb,
-            analytic_grad,
-        );
-        let tangent_n  = nm_sample * 2.0 - vec3<f32>(1.0);
+        let nm_sample = sample_material_map(material.normal_map, uv, dt, detiled, uv_ddx, uv_ddy,
+            analytic_grad).rgb;
+        let source_normal = nm_sample * 2.0 - vec3<f32>(1.0);
+        var tangent_n = source_normal;
+        tangent_n = vec3<f32>(tangent_n.xy * material.normal_scale, tangent_n.z);
         surface.normal = normalize(tbn * tangent_n);
 
         // Phase 24F: specular anti-aliasing. A normal-map texel that averages
@@ -1543,8 +2359,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         //
         // Without it, thin or distant detail flickers on every camera move, and
         // TAA fights the flicker rather than resolving it.
-        let len = length(tbn * tangent_n);
-        normal_variance = saturate(1.0 - len * len);
+        let len = length(tbn * source_normal);
+        normal_variance = saturate(1.0 - len * len) * min(material.normal_scale * material.normal_scale, 1.0);
     }
 
     // Widen roughness by the variance the normal map lost to mipping.
@@ -1552,6 +2368,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if normal_variance > 0.0 {
         let alpha = surface.roughness * surface.roughness;
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + normal_variance)));
+    }
+
+    // Authored weathering; see `apply_weathering`. After the maps and the
+    // normal-variance widening, before any path that overrides the surface.
+    if material.weathering > 0.0 {
+        let up_axis = instance.model[1].xyz;
+        let local_height = dot(hit_point - instance.model[3].xyz, up_axis)
+            / max(dot(up_axis, up_axis), 1.0e-6);
+        apply_weathering(&surface, material.weathering, hit_point, geo_normal, local_height,
+            micro_occlusion);
     }
 
     // ── Foliage: curved card normals (Phase 17E, re-gated in TSUSHIMA-J) ─────
@@ -1639,10 +2465,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // it cannot delete either body, and occupancy is the union of both.
         if !enable_live_terrain {
             terrain = evaluate_clipmap_material(
-                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+                terrain_materials[tm_idx], tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else if enable_clipmap && terrain_materials[tm_idx].clipmap_enabled != 0u {
             terrain = evaluate_clipmap_material(
-                terrain_materials[tm_idx], hit_point, geo_normal, uv, world_ddx, world_ddy);
+                terrain_materials[tm_idx], tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
         } else {
             terrain = evaluate_terrain_material(
                 tm_idx, hit_point, geo_normal, uv, world_ddx, world_ddy);
@@ -1810,6 +2636,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 
     surface.view_dir = normalize(view.camera_pos - hit_point);
+    // Vertex paint goes under the decals: a decal is placed over a surface,
+    // and the surface is what got dirty.
+    if material.terrain_index < 0 {
+        // The paint brush cursor: where the brush sphere cuts a surface.
+        let ring_radius = bitcast<f32>(vertex_paint[5]);
+        if ring_radius > 0.0 {
+            let centre = vec3<f32>(bitcast<f32>(vertex_paint[2]), bitcast<f32>(vertex_paint[3]), bitcast<f32>(vertex_paint[4]));
+            if abs(distance(hit_point, centre) - ring_radius) < max(ring_radius * 0.035, 0.006) {
+                return vec4<f32>(10.0, 7.0, 1.0, 1.0);
+            }
+        }
+        if vertex_paint[1] != 0u {
+            return vec4<f32>(vertex_paint_preview(paint_mask, vertex_paint[1]), 1.0);
+        }
+        if paint_slot != 0u {
+            if !analytic_grad {
+                paint_pos_ddx = dpdx(hit_point);
+                paint_pos_ddy = dpdy(hit_point);
+            }
+            // What the layers height-blend against: the material's own
+            // relief where it has a height map, else its brightness, in both
+            // cases as the difference from its local mean (a coarse mip).
+            // The blend compares heights across materials, and a map that
+            // sits near white all over (a flat floor) would otherwise out-top
+            // every layer until it was painted solid.
+            var base_height = 0.5;
+            if analytic_grad {
+                if material.height_map >= 0 {
+                    base_height += textureSampleGrad(
+                        textures[material.height_map], default_sampler, uv, uv_ddx, uv_ddy).r
+                        - textureSampleLevel(textures[material.height_map], default_sampler, uv, 7.0).r;
+                } else if material.albedo_map >= 0 {
+                    let mean = material.base_color.rgb
+                        * textureSampleLevel(textures[material.albedo_map], default_sampler, uv, 7.0).rgb;
+                    base_height += dot(surface.albedo - mean, vec3<f32>(0.5));
+                }
+            }
+            let layered = apply_vertex_layers(&surface, paint_slot, paint_mask, hit_point,
+                paint_pos_ddx, paint_pos_ddy, geo_normal, base_height);
+            apply_vertex_weathering(&surface, paint_mask * (vec4<f32>(1.0) - layered), hit_point);
+        }
+    }
     // CONTROL-O. Before `f0` is derived, because a decal changes base colour
     // and metallic and `f0` is a function of both — deriving it first and
     // then painting over the albedo would leave a decal with the surface's
@@ -1822,6 +2690,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             + decal_tile.y * cluster_params.grid_width
             + decal_slice * cluster_params.grid_width * cluster_params.grid_height;
         apply_decals(&surface, hit_point, decal_froxel);
+    }
+
+    surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
+    if material.terrain_index >= 0 {
+        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
+    } else {
+        // CONTROL-N. Meshes only: terrain already has XV-H's own wetness
+        // path, driven by the same weather state one level up, and applying
+        // both would darken the ground twice.
+        apply_wetness(&surface, material.porosity);
     }
 
     // ── Geometric specular antialiasing (TSUSHIMA-E) ─────────────────────────
@@ -1842,9 +2720,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // decals overwrote it again after that. The comment there claimed it ran
     // "after every other write", which was the intent and not the code.
     //
-    // It now runs after terrain, relief, wetness and decals: the last point
-    // where anything writes the normal or the roughness, and before `f0` is
-    // derived from them. `dpdx` is also well defined here, which it would not
+    // It runs after terrain, relief, decals and mesh wetness: the last point
+    // where anything writes the normal or roughness. Wetness must precede this
+    // filter because it narrows roughness and can replace the shading normal.
+    // Deriving f0 first is safe: it depends on albedo/metallic, not roughness.
+    // `dpdx` is also well defined here, which it would not
     // be inside the terrain branch — that is a storage read the compiler
     // cannot prove uniform, and a derivative taken in non-uniform control flow
     // is undefined.
@@ -1858,16 +2738,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let kernel = min(2.0 * variance, SPEC_AA_KAPPA);
         let alpha = surface.roughness * surface.roughness;
         surface.roughness = sqrt(sqrt(saturate(alpha * alpha + kernel)));
-    }
-
-    surface.f0       = mix(vec3<f32>(0.04), surface.albedo, surface.metallic);
-    if material.terrain_index >= 0 {
-        surface.f0 = surface.f0 + vec3<f32>(terrain_wet_f0);
-    } else {
-        // CONTROL-N. Meshes only: terrain already has XV-H's own wetness
-        // path, driven by the same weather state one level up, and applying
-        // both would darken the ground twice.
-        apply_wetness(&surface, material.porosity);
     }
 
     // ── Shadow factor ────────────────────────────────────────────────────────
@@ -1938,7 +2808,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 9 = albedo, 10 = shading normal, 11 = terrain_index as a flag.
     // Material-path probes: a surface that renders black is either unlit or
     // untextured, and only looking at the channels separately tells which.
-    let dbg = select(0.0, light._pad2_z, enable_debug);
     if dbg > 8.5 && dbg < 9.5 {
         return vec4<f32>(surface.albedo, 1.0);
     }
@@ -2137,7 +3006,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if d > ll.range { continue; }
 
                 let Ll = lv / d;
-                var atten = smooth_distance_attenuation(d, ll.range);
+                var atten = smooth_distance_attenuation(d, ll.range, ll.radius);
                 if ll.light_type == 1u {
                     let ca = dot(-Ll, normalize(ll.direction_ws));
                     atten *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, ca);
@@ -2179,10 +3048,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // had already returned zero. Treat the moon as the same apparent
             // disc size as the sun and keep its sub-pixel specular peaks under
             // the direct-lobe energy bound as well.
-            moonlight = clamp_specular_lobe(
-                evaluate_brdf_area(surface, moon_dir, light.sun_angular_radius),
-                surface.roughness,
-            ) * moon_color;
+            moonlight = evaluate_brdf_area(surface, moon_dir, light.sun_angular_radius) * moon_color;
 
             // Do not add the thin-leaf transmission lobe here. Unlike the sun,
             // the moon has no directional shadow receiver yet, so transmission
@@ -2195,10 +3061,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // the sun's illuminance, so the ceiling is a fraction of the light
         // actually arriving rather than an absolute number that would mean
         // something different at noon and at dusk.
-        var direct_light = clamp_specular_lobe(
-            evaluate_brdf_area(surface, light_dir, light.sun_angular_radius),
-            surface.roughness,
-        ) * light_color * shadow_factor + moonlight;
+        var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
+            * light_color * shadow_factor + moonlight;
 
         // Transmitted sunlight follows the same atmospheric fade as every
         // other direct term, with no independent elevation threshold.
@@ -2208,7 +3072,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 surface, light_dir, light_color, material.transmission) * shadow_factor;
         }
 
-        let gi_texel = textureLoad(restir_gi, vec2<i32>(in.clip_pos.xy), 0);
+        let gi_texel = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
         var ambient = evaluate_ibl(surface, gi_texel);
         let extra_flags = bitcast<u32>(lighting_extra.x);
         let vol_uvw = world_volume_uvw(hit_point);
@@ -2273,6 +3137,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             for (var i = 0u; i < cluster_data.count; i++) {
                 let light_idx = light_index_list[cluster_data.offset + i];
                 let ll = local_lights[light_idx];
+                if max(ll.color.x, max(ll.color.y, ll.color.z)) <= 0.0 { continue; }
 
                 if ll.light_type == 4u {
                     let axis = normalize(ll.direction_ws);
@@ -2284,12 +3149,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let dist_t = length(to_l);
                     if dist_t > ll.range { continue; }
                     let Lt = to_l / max(dist_t, 1e-4);
-                    let atten_t = smooth_distance_attenuation(dist_t, ll.range);
+                    if dot(surface.normal, Lt) <= 0.0 { continue; } // zero BRDF: no shadow ray
                     let r = max(ll.radius, 0.01);
                     let angular = atan(r / max(dist_t, 1e-3));
                     let facing = max(length(cross(Lt, axis)), 0.15);
-                    local_light_contrib += evaluate_brdf_area(surface, Lt, angular)
-                        * ll.color * atten_t * facing;
+                    let lit_t = evaluate_brdf_area(surface, Lt, angular) * ll.color * facing
+                        * smooth_distance_attenuation(dist_t, ll.range, ll.radius);
+                    local_light_contrib += lit_t * practical_visibility(hit_point, shadow_normal, q);
                     continue;
                 }
 
@@ -2298,17 +3164,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if dist > ll.range { continue; }
 
                 let L = light_vec / dist;
-                var atten_val = smooth_distance_attenuation(dist, ll.range);
+                var atten_val = smooth_distance_attenuation(dist, ll.range, ll.radius);
                 if ll.light_type == 2u {
                     let half_x = max(ll._pad1, 0.05);
                     let half_y = max(ll._pad2, 0.05);
                     let ln = normalize(ll.direction_ws);
                     let irr = ltc_quad_diffuse(
                         hit_point, surface.normal, ll.position_ws, ln, half_x, half_y);
-                    let eq_r = sqrt(half_x * half_y / 3.14159265);
+                    if irr <= 0.0 { continue; }
+                    let area = 4.0 * half_x * half_y;
+                    let eq_r = sqrt(area / 3.14159265);
                     let angular = atan(eq_r / max(dist, 1e-3));
-                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
-                        * ll.color * atten_val * irr * 3.14159265;
+                    let lit_q = evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+                    local_light_contrib += lit_q * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 3u {
@@ -2316,9 +3185,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let ln = normalize(ll.direction_ws);
                     let irr = ltc_disc_diffuse(
                         hit_point, surface.normal, ll.position_ws, ln, r);
+                    if irr <= 0.0 { continue; }
                     let angular = atan(r / max(dist, 1e-3));
-                    local_light_contrib += evaluate_brdf_area(surface, L, angular)
-                        * ll.color * atten_val * irr * 3.14159265;
+                    // Match the area of the inscribed eight-sided integration
+                    // polygon so the authored flux stays constant with radius.
+                    let area = 2.82842712 * r * r;
+                    let lit_d = evaluate_brdf_area_lobe(surface, L, angular)
+                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+                    local_light_contrib += lit_d * practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     continue;
                 }
                 if ll.light_type == 1u {
@@ -2331,9 +3205,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // and that is what stops its highlight being a single pixel on
                 // anything polished.
                 let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
-                local_light_contrib += clamp_specular_lobe(
-                    evaluate_brdf_area(surface, L, angular), surface.roughness,
-                ) * ll.color * atten_val;
+                // evaluate_brdf_area carries saturate(n.l): a light behind the
+                // surface, or outside its cone, adds exactly nothing, so it must
+                // not pay for a shadow ray. With dozens of practicals in reach
+                // (the lit interiors) those rays were most of the shading pass.
+                if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 { continue; }
+                let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                local_light_contrib += lit_p * practical_visibility(hit_point, shadow_normal, ll.position_ws);
             }
         }
 
@@ -2349,6 +3227,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     textures[material.emissive_map], default_sampler, uv).rgb;
             }
         }
+        emissive *= interior_shade;
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
 
@@ -2432,7 +3311,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(t, 0.2 * (1.0 - t), 1.0 - t, 1.0) * 4.0;
         }
         if dbg < 25.5 {
-            let gi = textureLoad(restir_gi, pixel_coords, 0);
+            let gi = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
             return vec4<f32>(gi.rgb * 4.0, 1.0);
         }
         if dbg < 26.5 {

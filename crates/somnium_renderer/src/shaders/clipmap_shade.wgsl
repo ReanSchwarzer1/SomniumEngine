@@ -224,6 +224,7 @@ fn clipmap_blend_taps(a: ClipmapTap, b: ClipmapTap, w: f32) -> ClipmapTap {
 
 fn evaluate_clipmap_material(
     tm: TerrainMaterial,
+    terrain_index: u32,
     world_pos: vec3<f32>,
     geo_normal: vec3<f32>,
     splat_uv: vec2<f32>,
@@ -328,10 +329,11 @@ fn evaluate_clipmap_material(
         let local_pos = world_pos - vec3(tm.terrain_origin.x, 0.0, tm.terrain_origin.y);
         let cliff = terrain_projected_pbr(
             tm,
+            terrain_index,
             tm.cliff_layer,
             local_pos,
             geo_normal,
-            terrain_layer_tiling(tm, tm.cliff_layer),
+            terrain_layer_tiling(tm, terrain_index, tm.cliff_layer),
             world_ddx,
             world_ddy,
         );

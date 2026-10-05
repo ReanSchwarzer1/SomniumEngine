@@ -18,6 +18,18 @@ impl SoundHandle {
         let _ = self.handle.stop(kira::tween::Tween::default());
     }
 
+    /// Current position reported by the audio thread, in seconds.
+    #[must_use]
+    pub fn position_seconds(&self) -> f64 {
+        self.handle.position()
+    }
+
+    /// Whether the audio thread has completed its pause transition.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        matches!(self.handle.state(), kira::sound::PlaybackState::Paused)
+    }
+
     /// Whether playback has drained or has been stopped.
     #[must_use]
     pub fn is_stopped(&self) -> bool {
