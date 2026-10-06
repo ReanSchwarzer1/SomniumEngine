@@ -137,6 +137,13 @@ pub struct LoadedMaterial {
     /// Foliage wind flutter amplitude in metres (extras
     /// `somnium_wind_flutter`): needles, leaves and blades, never a trunk.
     pub wind_flutter: f32,
+    /// How far light travels under the surface, `0..1` (glTF material extras
+    /// `somnium_subsurface`): skin. The shading pass wraps direct light round
+    /// the shadow edge, red furthest, and lets it through parts thinner than
+    /// its reach (an ear, the wing of a nose). The base colour texture's
+    /// alpha scales it per texel on an opaque material, which makes no other
+    /// use of that channel; 0 is an ordinary surface.
+    pub subsurface: f32,
     /// This material is painted on **flat cut-out cards whose `uv.x` runs
     /// across the blade**, which is what `shading.wgsl`'s curved-card normal
     /// needs to be true.
@@ -279,6 +286,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             detile: material_extra(&mat, "somnium_detile") > 0.5,
             wind_bend: material_extra(&mat, "somnium_wind_bend"),
             wind_flutter: material_extra(&mat, "somnium_wind_flutter"),
+            subsurface: material_extra(&mat, "somnium_subsurface"),
             // Authored only: see the field's own note on why no import can
             // honestly infer it.
             foliage_card: false,
@@ -358,6 +366,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             detile: false,
             wind_bend: 0.0,
             wind_flutter: 0.0,
+            subsurface: 0.0,
             foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
@@ -1187,11 +1196,14 @@ mod normal_scale_tests {
         std::fs::remove_file(&path).unwrap();
         let document = serde_json::json!({
             "asset":{"version":"2.0"},
-            "materials":[{"extras":{"somnium_wind_bend":0.00035,"somnium_wind_flutter":0.02}}]
+            "materials":[{"extras":{"somnium_wind_bend":0.00035,"somnium_wind_flutter":0.02}},
+                         {"extras":{"somnium_subsurface":0.7}}]
         });
         std::fs::write(&path, document.to_string()).unwrap();
         let loaded = super::load_gltf(&path).unwrap();
         assert_eq!((loaded.materials[0].wind_bend, loaded.materials[0].wind_flutter), (0.00035, 0.02));
+        assert_eq!(loaded.materials[0].subsurface, 0.0, "no extras, no scattering");
+        assert_eq!(loaded.materials[1].subsurface, 0.7, "skin");
         assert_eq!(loaded.materials[0].height_depth, 0.0, "no extras, no room");
         std::fs::remove_file(&path).unwrap();
         // A window onto a room carries the room's depth as a negative height depth.

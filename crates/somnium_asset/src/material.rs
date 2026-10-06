@@ -554,6 +554,7 @@ mod tests {
                 detile: false,
                 wind_bend: 0.0,
                 wind_flutter: 0.0,
+                subsurface: 0.0,
                 foliage_card: false,
                 emissive: [0.0; 3],
                 emissive_intensity: 1.0,

@@ -41,6 +41,33 @@ fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3
     return 1.0;
 }
 
+/// Whether light from `emitter` reaches `p` once whatever lies within `reach`
+/// metres of `p` on the way is taken as passed through (skin, `skin_scatter`).
+///
+/// Light enters skin and comes out a centimetre or two away, so the part of a
+/// face just past the shadow edge is lit by what went in on the lit side, and
+/// an ear is lit through. The same ray that shadows a practical answers both
+/// if it starts `reach` along: where the head between `p` and the light is
+/// thinner than that, nothing is left to hit; behind a whole skull there is.
+/// Without ray tracing nothing is known about thickness and the answer is no.
+fn skin_visibility(p: vec3<f32>, emitter: vec3<f32>, reach: f32) -> f32 {
+    //!if LOCAL_SHADOWS
+    if (cluster_params.shading_mode & 16u) != 0u {
+        let delta = emitter - p;
+        let distance = length(delta);
+        if distance > reach + 0.07 {
+            var rq: ray_query;
+            rayQueryInitialize(&rq, local_shadow_accel,
+                RayDesc(0x4u, 0x1u, reach, distance - 0.06, p, delta / distance));
+            rayQueryProceed(&rq);
+            return select(0.0, 1.0, rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE);
+        }
+        return 1.0;
+    }
+    //!endif
+    return 0.0;
+}
+
 // Somnium Engine — Visibility Buffer Shading Pass
 // Phase 12: Clustered Local Lights + Cel-Shading Mode
 
@@ -902,6 +929,25 @@ fn transmitted_light(
     let scatter = mix(0.35, 1.0, view_scatter);
 
     return light_color * surface.albedo * transmission * back_wrap * scatter;
+}
+
+/// What scattering under skin adds to a direct light's diffuse term
+/// (`Material.subsurface`, glTF extras `somnium_subsurface`).
+///
+/// A real subsurface solve gathers light over an area of the surface; this
+/// pass shades one point. What that solve looks like at one point is known,
+/// though (Penner's pre-integrated skin): the light does not stop at the
+/// shadow edge but runs past it, red furthest, because red travels furthest
+/// through flesh. So the diffuse term is wrapped round the terminator by a
+/// different amount for each colour, and this returns the wrapped term less
+/// the plain one: nothing where the surface faces the light, a reddening band
+/// at and past the edge. Unshadowed; the caller asks `skin_visibility`.
+fn skin_scatter(surface: Surface, light_dir: vec3<f32>, scatter: f32) -> vec3<f32> {
+    let n_dot_l = dot(surface.normal, light_dir);
+    let wrap = vec3<f32>(0.60, 0.24, 0.12) * scatter;
+    let wrapped = saturate((vec3<f32>(n_dot_l) + wrap) / (vec3<f32>(1.0) + wrap));
+    let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
+    return surface.albedo * kd * (wrapped - vec3<f32>(saturate(n_dot_l))) * (0.8 / 3.14159265);
 }
 
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
@@ -2281,6 +2327,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // region's offset and would pick the finest mip along the seams.
     let detiled = material.detile > 0.5 && analytic_grad;
     var dt = detile_uv(uv);
+    // Skin's scatter, 0 for everything else. The albedo texture's alpha
+    // scales it per texel (an ear more than a brow).
+    var skin = material.subsurface;
     if material.albedo_map >= 0 {
         if detiled {
             let a = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.a, uv_ddx, uv_ddy).rgb;
@@ -2288,10 +2337,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
             surface.albedo *= mix(a, b, dt.t);
         } else if analytic_grad {
-            surface.albedo *= textureSampleGrad(
-                textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
+            let texel = textureSampleGrad(
+                textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy);
+            surface.albedo *= texel.rgb;
+            skin *= texel.a;
         } else {
-            surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+            let texel = textureSample(textures[material.albedo_map], default_sampler, uv);
+            surface.albedo *= texel.rgb;
+            skin *= texel.a;
         }
     }
     surface.albedo *= interior_shade;
@@ -3070,6 +3123,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if sun_illuminance > 1.0e-6 {
             transmitted = transmitted_light(
                 surface, light_dir, light_color, material.transmission) * shadow_factor;
+            if skin > 0.0 {
+                // Facing the sun the ordinary shadow term stands; at and past
+                // the edge the surface shadows itself, and how much of itself
+                // is in the way is the question.
+                var through = shadow_factor;
+                if dot(surface.normal, light_dir) < 0.2 {
+                    through = skin_visibility(hit_point, hit_point + light_dir * 400.0, 0.02 * skin);
+                }
+                transmitted += skin_scatter(surface, light_dir, skin) * light_color * through;
+            }
         }
 
         let gi_texel = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
@@ -3209,9 +3272,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // surface, or outside its cone, adds exactly nothing, so it must
                 // not pay for a shadow ray. With dozens of practicals in reach
                 // (the lit interiors) those rays were most of the shading pass.
-                if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 { continue; }
-                let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
-                local_light_contrib += lit_p * practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                let facing = dot(surface.normal, L);
+                if atten_val <= 0.0 || (facing <= 0.0 && skin <= 0.0) { continue; }
+                var reaches = 0.0;
+                if facing > 0.0 {
+                    let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                    reaches = practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                    local_light_contrib += lit_p * reaches;
+                }
+                if skin > 0.0 && facing > -0.6 * skin {
+                    // Skin: the light runs on past the shadow edge. See
+                    // `skin_scatter`; rect, disc and tube lights do not have it.
+                    if facing < 0.2 {
+                        reaches = skin_visibility(hit_point, ll.position_ws, 0.02 * skin);
+                    }
+                    local_light_contrib += skin_scatter(surface, L, skin) * ll.color * atten_val * reaches;
+                }
             }
         }
 

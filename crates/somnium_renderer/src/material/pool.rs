@@ -63,12 +63,19 @@ pub struct GpuMaterial {
     /// 1 to de-tile the maps (two offset reads blended; see `shading.wgsl`
     /// `detile`), 0 to read them once.
     pub detile: f32,
-    /// Foliage wind response: `[bend, flutter, 0, 0]` (glTF extras
+    /// Foliage wind response: `[bend, flutter]` (glTF extras
     /// `somnium_wind_bend` / `somnium_wind_flutter`; see `wind.rs`). A plant's
     /// trunk and needles carry the same bend so they sway together; flutter is
-    /// for needles, leaves and blades only. Zeroes are still. Took the stride
-    /// from 96 to 112.
-    pub wind: [f32; 4],
+    /// for needles, leaves and blades only. Zeroes are still. With the two
+    /// fields below this took the stride from 96 to 112.
+    pub wind: [f32; 2],
+    /// How far light travels under the surface, `0..1` (glTF extras
+    /// `somnium_subsurface`): skin. See `shading.wgsl` `skin_scatter`. The
+    /// albedo texture's alpha scales it per texel. Occupies what was the wind
+    /// vector's unused third float.
+    pub subsurface: f32,
+    /// Unused; keeps the stride at 112.
+    pub reserved: f32,
 }
 
 /// `GpuMaterial::flags` bit 0 — the material renders from both sides.
@@ -141,7 +148,9 @@ impl GpuMaterial {
             height_depth: asset.height_depth,
             weathering: 0.0,
             detile: 0.0,
-            wind: [0.0; 4],
+            wind: [0.0; 2],
+            subsurface: 0.0,
+            reserved: 0.0,
         }
     }
 }

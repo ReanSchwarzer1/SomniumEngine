@@ -10802,7 +10802,9 @@ impl<G: GameApp> Engine<G> {
                                     height_depth: 0.0,
                                     weathering: 0.0,
                                     detile: 0.0,
-                                    wind: [0.0; 4],
+                                    wind: [0.0; 2],
+                                    subsurface: 0.0,
+                                    reserved: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);

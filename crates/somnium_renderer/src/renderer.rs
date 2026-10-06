@@ -1558,7 +1558,9 @@ impl SomniumRenderer {
                         height_depth: mat.height_depth,
                         weathering: mat.weathering,
                         detile: if mat.detile { 1.0 } else { 0.0 },
-                        wind: [mat.wind_bend, mat.wind_flutter, 0.0, 0.0],
+                        wind: [mat.wind_bend, mat.wind_flutter],
+                        subsurface: mat.subsurface,
+                        reserved: 0.0,
                     },
                 );
                 // Phase 17D: remember double-sidedness so the visibility pass can
@@ -2888,7 +2890,9 @@ impl SomniumRenderer {
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
-                wind: [0.0; 4],
+                wind: [0.0; 2],
+                subsurface: 0.0,
+                reserved: 0.0,
             },
         );
         // Opaque and single-sided, which is what an unregistered material
