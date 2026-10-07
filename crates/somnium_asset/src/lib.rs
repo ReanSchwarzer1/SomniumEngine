@@ -144,6 +144,13 @@ pub struct LoadedMaterial {
     /// alpha scales it per texel on an opaque material, which makes no other
     /// use of that channel; 0 is an ordinary surface.
     pub subsurface: f32,
+    /// An eyeball (glTF material extras `somnium_eye`): the shading pass
+    /// keeps a small wet highlight in it whatever the room's lamps are doing.
+    pub eye: bool,
+    /// Hair drawn as cards whose texture runs root to tip along `uv.y` (extras
+    /// `somnium_hair`): the shading pass adds the highlight that runs across
+    /// strands, which a card's own flat normal cannot give.
+    pub hair: bool,
     /// This material is painted on **flat cut-out cards whose `uv.x` runs
     /// across the blade**, which is what `shading.wgsl`'s curved-card normal
     /// needs to be true.
@@ -287,6 +294,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             wind_bend: material_extra(&mat, "somnium_wind_bend"),
             wind_flutter: material_extra(&mat, "somnium_wind_flutter"),
             subsurface: material_extra(&mat, "somnium_subsurface"),
+            eye: material_extra(&mat, "somnium_eye") > 0.5,
+            hair: material_extra(&mat, "somnium_hair") > 0.5,
             // Authored only: see the field's own note on why no import can
             // honestly infer it.
             foliage_card: false,
@@ -367,6 +376,8 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
             wind_bend: 0.0,
             wind_flutter: 0.0,
             subsurface: 0.0,
+            eye: false,
+            hair: false,
             foliage_card: false,
             emissive: [0.0; 3],
             emissive_intensity: 1.0,
@@ -1197,13 +1208,16 @@ mod normal_scale_tests {
         let document = serde_json::json!({
             "asset":{"version":"2.0"},
             "materials":[{"extras":{"somnium_wind_bend":0.00035,"somnium_wind_flutter":0.02}},
-                         {"extras":{"somnium_subsurface":0.7}}]
+                         {"extras":{"somnium_subsurface":0.7}},
+                         {"extras":{"somnium_eye":1}}, {"extras":{"somnium_hair":1}}]
         });
         std::fs::write(&path, document.to_string()).unwrap();
         let loaded = super::load_gltf(&path).unwrap();
         assert_eq!((loaded.materials[0].wind_bend, loaded.materials[0].wind_flutter), (0.00035, 0.02));
         assert_eq!(loaded.materials[0].subsurface, 0.0, "no extras, no scattering");
         assert_eq!(loaded.materials[1].subsurface, 0.7, "skin");
+        assert_eq!(loaded.materials.iter().map(|m| (m.eye, m.hair)).collect::<Vec<_>>(),
+            [(false, false), (false, false), (true, false), (false, true)]);
         assert_eq!(loaded.materials[0].height_depth, 0.0, "no extras, no room");
         std::fs::remove_file(&path).unwrap();
         // A window onto a room carries the room's depth as a negative height depth.

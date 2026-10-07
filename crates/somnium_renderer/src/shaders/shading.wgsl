@@ -950,6 +950,53 @@ fn skin_scatter(surface: Surface, light_dir: vec3<f32>, scatter: f32) -> vec3<f3
     return surface.albedo * kd * (wrapped - vec3<f32>(saturate(n_dot_l))) * (0.8 / 3.14159265);
 }
 
+/// The highlight that runs across hair (`Material.flags & 16u`, glTF extras
+/// `somnium_hair`).
+///
+/// Hair is drawn as cards, and a card's normal says nothing of the thousand
+/// cylinders painted on it. What a head of hair is known by is the band of
+/// light that lies across the strands, and that depends on the strand's
+/// direction, not on a surface normal (Kajiya and Kay). `strand` is that
+/// direction: the card's `uv.y`, root to tip. Two bands, as hair has
+/// (Marschner): a narrow white one off the strand's surface, shifted toward
+/// the tip, and a wider one in the hair's own colour from light that went
+/// through the strand, shifted toward the root. Added to the card's ordinary
+/// shading; unshadowed, like every lobe here.
+fn hair_strand(surface: Surface, strand: vec3<f32>, light_dir: vec3<f32>) -> vec3<f32> {
+    let h = normalize(light_dir + surface.view_dir);
+    let off_surface = normalize(strand + surface.normal * 0.10);
+    let through = normalize(strand - surface.normal * 0.22);
+    let a = dot(off_surface, h);
+    let b = dot(through, h);
+    let white = pow(sqrt(max(1.0 - a * a, 0.0)), 110.0);
+    let coloured = pow(sqrt(max(1.0 - b * b, 0.0)), 40.0);
+    // Hair is lit further round than a wall is: light gets in between strands.
+    let lit = saturate(dot(surface.normal, light_dir) * 0.65 + 0.35);
+    return (vec3<f32>(0.020) * white + surface.albedo * 0.45 * coloured) * lit;
+}
+
+/// The light an eye always has in it (`Material.flags & 8u`, glTF extras
+/// `somnium_eye`).
+///
+/// A cornea is a wet, nearly perfect mirror, and a face reads as alive by the
+/// one small bright reflection in each eye. Under the lamps a room actually
+/// has, which are overhead, that reflection falls on the upper lid or nowhere,
+/// and the eyes go dead: which is why a film keeps a small lamp by the lens
+/// for nothing but this. So does this: a lamp that is not in the scene, up
+/// and to the side of the viewer, seen only as its reflection in an eye, and
+/// as bright as the eye's own surroundings (`surround`, the ambient light
+/// leaving it) so that it is a glint in a lit room and nearly nothing in a
+/// dark one.
+fn eye_glint(surface: Surface, surround: vec3<f32>) -> vec3<f32> {
+    let side = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), surface.view_dir) + vec3<f32>(1.0e-4, 0.0, 0.0));
+    // A little above and beside the line of sight: higher, and its reflection falls under the upper lid.
+    let lamp = normalize(surface.view_dir * 0.92 + vec3<f32>(0.0, 0.16, 0.0) + side * 0.30);
+    let h = normalize(lamp + surface.view_dir);
+    let n_dot_h = saturate(dot(surface.normal, h));
+    let level = dot(surround, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(1.0, 0.98, 0.95) * pow(n_dot_h, 350.0) * (level * 40.0 + 0.01);
+}
+
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
 ///
 /// Ambient occlusion describes hemispherical visibility, so applying it
@@ -3133,10 +3180,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
                 transmitted += skin_scatter(surface, light_dir, skin) * light_color * through;
             }
+            if (material.flags & 16u) != 0u {
+                transmitted += hair_strand(surface, bitangent, light_dir) * light_color * shadow_factor;
+            }
         }
 
         let gi_texel = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
         var ambient = evaluate_ibl(surface, gi_texel);
+        if (material.flags & 8u) != 0u {
+            ambient += eye_glint(surface, ambient);
+        }
         let extra_flags = bitcast<u32>(lighting_extra.x);
         let vol_uvw = world_volume_uvw(hit_point);
         let vol_sample = textureSampleLevel(world_volume, volumetric_sampler, vol_uvw, 0.0);
@@ -3276,7 +3329,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if atten_val <= 0.0 || (facing <= 0.0 && skin <= 0.0) { continue; }
                 var reaches = 0.0;
                 if facing > 0.0 {
-                    let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                    var lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                    if (material.flags & 16u) != 0u {
+                        lit_p += hair_strand(surface, bitangent, L) * ll.color * atten_val;
+                    }
                     reaches = practical_visibility(hit_point, shadow_normal, ll.position_ws);
                     local_light_contrib += lit_p * reaches;
                 }

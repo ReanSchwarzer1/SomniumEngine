@@ -101,6 +101,15 @@ pub const MATERIAL_FLAG_FOLIAGE: u32 = 1 << 1;
 /// The shader tests `(flags & 4u)`.
 pub const MATERIAL_FLAG_FOLIAGE_CARD: u32 = 1 << 2;
 
+/// `GpuMaterial::flags` bit 3 — an eyeball (glTF extras `somnium_eye`). The
+/// shader tests `(flags & 8u)`; see `shading.wgsl` `eye_glint`.
+pub const MATERIAL_FLAG_EYE: u32 = 1 << 3;
+
+/// `GpuMaterial::flags` bit 4 — hair cards with the strand along `uv.y` (glTF
+/// extras `somnium_hair`). The shader tests `(flags & 16u)`; see
+/// `shading.wgsl` `hair_strand`.
+pub const MATERIAL_FLAG_HAIR: u32 = 1 << 4;
+
 impl GpuMaterial {
     /// Rebuild the frozen 80-byte runtime payload from an authored material.
     /// Texture asset ids are resolved by the caller because only the runtime

@@ -4,6 +4,8 @@
 // Reads an Rgba16Float HDR texture and writes tone-mapped LDR to the swapchain.
 // Applied after the shading pass and grid overlay, before the UI overlay.
 
+//!include "dream_lens.wgsl"
+
 struct PostParams {
     /// Linear multiplier from scene luminance (cd/m²) to display range.
     /// Derived from EV100, not an arbitrary gain — see `light_units.rs`.
@@ -251,20 +253,12 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let periphery = smoothstep(0.18, 0.66, length(centre));
     let amount = pp.dream.y * periphery;
     let t = pp.time * pp.dream.z;
-    var scene_uv = in.uv;
-    if pp.dream.x > 0.5 && pp.dream.x < 1.5 {
-        // Two slow incommensurate waves suggest heat without shaking the aim.
-        scene_uv += vec2(sin(in.uv.y * 17.0 + t * 0.8), cos(in.uv.x * 13.0 - t * 0.53)) * amount * 0.005;
-    }
-    if pp.dream.x > 2.5 {
-        // Local vertical shear follows broad facade bands, rather than strobing.
-        scene_uv.y += sin(in.uv.x * 24.0 + sin(t * 0.31)) * sin(t * 0.47) * amount * 0.009;
-    }
-    if pp.dream.x > 0.5 && pp.dream.y > 0.0 {
-        scene_uv = clamp(scene_uv, vec2(0.002), vec2(0.998));
-    }
+    let mapped = dream_coordinates(in.uv, pp.dream, pp.time, vec2<f32>(textureDimensions(hdr_tex)));
+    let scene_uv = mapped.uv;
+    let fracture = mapped.fracture;
+    let crack = mapped.crack;
     let ca_dir = scene_uv - vec2(0.5);
-    let ca_off = ca_dir * pp.ca_strength;
+    let ca_off = ca_dir * (pp.ca_strength + 0.012 * fracture);
     var hdr = vec3(
         textureSample(hdr_tex, hdr_samp, scene_uv - ca_off).r,
         textureSample(hdr_tex, hdr_samp, scene_uv).g,
@@ -276,6 +270,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let echo_uv = clamp(scene_uv - centre * 0.022 * (0.65 + 0.35 * sin(t * 0.37)), vec2(0.002), vec2(0.998));
         let echo = textureSampleLevel(hdr_tex, hdr_samp, echo_uv, 0.0).rgb;
         hdr = mix(hdr, echo, amount * 0.22);
+    }
+
+    if fracture > 0.0 {
+        // Double vision: the same picture again, a little to one side, drifting in and out of register; and the
+        // cracks catch the light.
+        let apart = vec2(0.020 * (0.55 + 0.45 * sin(t * 0.61)), 0.005 * sin(t * 0.43)) * fracture;
+        let ghost = textureSampleLevel(hdr_tex, hdr_samp, clamp(scene_uv + apart, vec2(0.002), vec2(0.998)), 0.0).rgb;
+        hdr = mix(hdr, max(hdr, ghost), min(fracture * 0.55, 0.6));
+        hdr = hdr * (1.0 + 1.6 * crack) + vec3(0.012) * crack;
     }
 
     // Phase 24T: bloom added *before* exposure and tone mapping, because it is

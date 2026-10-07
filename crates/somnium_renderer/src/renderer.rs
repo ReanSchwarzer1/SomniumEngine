@@ -263,6 +263,8 @@ pub struct SomniumRenderer {
     pub velocity_pass: crate::pass::velocity::VelocityPass,
     /// Phase 24Z: motion blur, which waited on 24AD for its velocity.
     pub motion_blur_pass: crate::pass::motion_blur::MotionBlurPass,
+    /// Gathers the light on skin after the shading pass. See its module.
+    pub skin_scatter_pass: crate::pass::skin_scatter::SkinScatterPass,
     /// Phase 24AE: minimum projected screen radius for a shadow caster.
     ///
     /// Unreal ships 0.01 as `r.Shadow.RadiusThreshold`. Zero disables the test,
@@ -342,6 +344,9 @@ pub struct SomniumRenderer {
     /// Mesh data for the currently selected entity (vertex_offset, index_offset,
     /// index_count, model matrix). None when no entity with a mesh is selected.
     outline_entity: Option<(u32, u32, u32, glam::Mat4)>,
+    game_highlight_pass: crate::pass::game_highlight::GameHighlightPass,
+    game_highlight_style: Option<crate::pass::game_highlight::HighlightStyle>,
+    game_highlight_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
 
     /// Phase 11.5J: GPU particle billboard pass.
     particle_pass: ParticlePass,
@@ -734,6 +739,14 @@ impl SomniumRenderer {
             crate::pass::census::CensusPass::new(&ctx.device, &shaders, &global_pool.layout);
         let classify_pass =
             crate::pass::classify::ClassifyPass::new(&ctx.device, &shaders, &global_pool.layout);
+        let skin_scatter_pass = crate::pass::skin_scatter::SkinScatterPass::new(
+            &ctx.device,
+            &shaders,
+            &global_pool.layout,
+            HDR_FORMAT,
+            ctx.config.width,
+            ctx.config.height,
+        );
 
         // Phase 11.5H: Editor infinite-grid overlay (renders to HDR target).
         let grid_pass = GridPass::new(
@@ -873,6 +886,10 @@ impl SomniumRenderer {
             &geometry.index_buffer,
             ctx.config.width,
             ctx.config.height,
+        );
+        let game_highlight_pass = crate::pass::game_highlight::GameHighlightPass::new(
+            &ctx.device, &shaders, &global_pool.layout, ctx.config.format,
+            ctx.config.width, ctx.config.height,
         );
 
         // Phase 11B: Shadow atlas and comparison sampler.
@@ -1081,6 +1098,7 @@ impl SomniumRenderer {
                 ctx.config.width,
                 ctx.config.height,
             ),
+            skin_scatter_pass,
             cas_pass: crate::pass::cas::CasPass::new(
                 &ctx.device,
                 &shaders,
@@ -1159,6 +1177,9 @@ impl SomniumRenderer {
             game_ui_empty_warned: false,
             outline_pass,
             outline_entity: None,
+            game_highlight_pass,
+            game_highlight_style: None,
+            game_highlight_draws: std::collections::HashSet::new(),
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
@@ -1552,6 +1573,14 @@ impl SomniumRenderer {
                             crate::material::pool::MATERIAL_FLAG_FOLIAGE_CARD
                         } else {
                             0
+                        } | if mat.eye {
+                            crate::material::pool::MATERIAL_FLAG_EYE
+                        } else {
+                            0
+                        } | if mat.hair {
+                            crate::material::pool::MATERIAL_FLAG_HAIR
+                        } else {
+                            0
                         },
                         // Linear, not colour: listed with the data maps above.
                         height_map: resolve_tex(mat.height_map),
@@ -1566,6 +1595,8 @@ impl SomniumRenderer {
                 // Phase 17D: remember double-sidedness so the visibility pass can
                 // draw those instances with back-face culling switched off.
                 self.set_material_double_sided(id, mat.double_sided);
+                // Skin is in the scene from here on: its light is gathered.
+                self.skin_scatter_pass.enabled |= mat.subsurface > 0.0;
                 // Phase 21: remember which materials are blended so `submit` can
                 // route their draws to the forward transparent pass.
                 self.set_material_blend(id, mat.alpha_mode == somnium_asset::AlphaMode::Blend);
@@ -2158,6 +2189,21 @@ impl SomniumRenderer {
         self.outline_entity = None;
     }
 
+    /// Select game feedback independently of the editor's selected entity.
+    /// The style and marked draws live for one frame, including early render exits.
+    pub fn set_game_highlight(&mut self, style: Option<crate::pass::game_highlight::HighlightStyle>) {
+        self.game_highlight_style = style.and_then(|s| s.validated());
+        self.game_highlight_draws.clear();
+    }
+
+    /// Mark the exact command that will be submitted, after its current pose is known.
+    /// Frame-local matching survives sorting without highlighting other mesh instances.
+    pub fn mark_game_highlight(&mut self, command: &DrawCommand) {
+        if self.game_highlight_style.is_some() {
+            self.game_highlight_draws.insert(crate::pass::taa::ReactiveDrawKey::of(command));
+        }
+    }
+
     /// Replace this frame's particle list (Phase 11.5J).
     ///
     /// Called once per frame from `app.rs` after CPU simulation; the renderer
@@ -2534,7 +2580,9 @@ impl SomniumRenderer {
                 &self.vis_pass.view,
             );
             self.motion_blur_pass.resize(&ctx.device, width, height);
+            self.skin_scatter_pass.resize(&ctx.device, width, height);
             self.outline_pass.resize(&ctx.device, width, height);
+            self.game_highlight_pass.resize(width, height);
             // Must follow vis_pass: the level-0 bind group references its depth view.
             self.hiz_pass.resize(
                 &ctx.device,
@@ -2930,6 +2978,8 @@ impl SomniumRenderer {
 
     /// Drop GPU terrains, clipmaps, and water so a map load does not leak slots.
     pub fn reset_scene_gpu(&mut self, ctx: &RenderContext) {
+        self.game_highlight_draws.clear();
+        self.game_highlight_style = None;
         // Clearing TerrainData alone leaves its texture arrays alive through
         // both bindless view owners and the bind group. Release all three before
         // importing the next scene, while keeping reusable asset slots stable.
@@ -3328,6 +3378,7 @@ impl SomniumRenderer {
                 view,
                 index == 0,
                 index as u64,
+                [present_size.0, present_size.1],
             );
         }
         self.restore_primary_view(&views);
@@ -3757,6 +3808,7 @@ impl SomniumRenderer {
         view: &crate::view::SceneView,
         primary: bool,
         slot: u64,
+        output_extent: [u32; 2],
     ) -> bool {
         // Rebound by value so the body below reads exactly as it did when it
         // was inline — `&mut encoder` throughout, rather than a thousand lines
@@ -4221,6 +4273,13 @@ impl SomniumRenderer {
         self.instances.upload(&ctx.queue);
         self.upload_vertex_paint(ctx);
         self.profiler.cpu_end();
+        let highlight_frame = self.game_highlight_style.map(|style| {
+            let (members, transparent) = crate::pass::game_highlight::frame_members(
+                &self.draw_queue, self.shadow_only_queue.len(), &self.transparent_queue,
+                &self.game_highlight_draws,
+            );
+            (style, members, transparent)
+        }).filter(|(_, members, transparent)| members.iter().any(|m| *m != 0) || !transparent.is_empty());
 
         self.profiler.cpu_begin("Indirect args");
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
@@ -5274,6 +5333,25 @@ impl SomniumRenderer {
         }
         self.profiler.end(&mut encoder);
 
+        // ── 7.2 Skin: gather the light the shading pass left on it ───────────
+        // Straight after shading, while the HDR target holds nothing else and
+        // the visibility buffer still says whose pixel each one is.
+        if self.skin_scatter_pass.active() {
+            self.profiler.begin(&mut encoder, "Skin Scatter");
+            self.skin_scatter_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                &self.postprocess_pass.hdr_view,
+                &self.vis_pass.depth_view,
+                &self.vis_pass.view,
+                self.proj_matrix.y_axis.y,
+                self.render_height,
+            );
+            self.profiler.end(&mut encoder);
+        }
+
         // ── 7.35 Frame capture, if one was asked for ─────────────────────────
         //
         // Here rather than at the end of the frame: this is the last point at
@@ -5881,6 +5959,25 @@ impl SomniumRenderer {
                 .record_into(&mut encoder, &surface_view, view.rect);
         }
 
+        if let Some((style, members, transparent)) = &highlight_frame {
+            self.profiler.begin(&mut encoder, "Game highlight");
+            self.game_highlight_pass.resize(self.render_width, self.render_height);
+            self.game_highlight_pass.record_mask(
+                &ctx.device, &ctx.queue, &mut encoder, &self.global_pool.bind_group,
+                &self.vis_pass.view, &self.vis_pass.depth_view, members, transparent, slot as usize,
+            );
+            // The existing view-buffer policy above renders the unjittered camera
+            // (the single-view overlay write replaces its earlier queued write).
+            // Keep mask UVs in that effective frame; applying TAA jitter again swims.
+            self.game_highlight_pass.composite(
+                &ctx.device, &ctx.queue, &mut encoder, &surface_view, output_extent, view.rect,
+                *style, if debugging { Default::default() } else { self.grading },
+                if fsr_ok { [self.ldr_width, self.ldr_height] } else { [self.render_width, self.render_height] },
+                [0.0; 2], slot as usize,
+            );
+            self.profiler.end(&mut encoder);
+        }
+
         // DOOM-A: `Post + present` closes here. Everything below is editor
         // chrome, and chrome that is billed to the post chain is chrome nobody
         // ever looks at — the whole reason to separate them is that the scene
@@ -5934,6 +6031,8 @@ impl SomniumRenderer {
     fn clear_frame_queues(&mut self) {
         self.draw_queue.clear();
         self.reactive_draws.clear();
+        self.game_highlight_draws.clear();
+        self.game_highlight_style = None;
         self.shadow_only_queue.clear();
         self.water_queue.clear();
         self.terrain_queue.clear();

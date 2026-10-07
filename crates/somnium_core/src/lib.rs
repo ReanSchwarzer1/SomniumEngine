@@ -1110,7 +1110,7 @@ pub struct PostProcessComponent {
     pub gamma: f32,
     /// Film grain strength (Phase 24Z). 0 = off.
     pub grain: f32,
-    /// Optional peripheral dream lens: 0 off, 1 heat drift, 2 echo, 3 shear.
+    /// Optional dream lens: 0 off, 1 heat drift, 2 echo, 3 shear (all three peripheral), 4 fracture (whole picture).
     pub dream_mode: u32,
     pub dream_strength: f32,
     pub dream_speed: f32,

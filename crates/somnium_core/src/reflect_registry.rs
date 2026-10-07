@@ -823,7 +823,7 @@ fn post_process_schema() -> ComponentSchema {
             saturation { min: 0.0, step: 0.01, group: "Color Grading" }, gain { min: 0.0, step: 0.01, group: "Color Grading" },
             lift { step: 0.01, group: "Color Grading" }, gamma { min: 0.0, step: 0.01, group: "Color Grading" },
             grain { min: 0.0, step: 0.01, group: "Lens" },
-            dream_mode { min: 0, max: 3, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear. The central interaction region stays clear." },
+            dream_mode { min: 0, max: 4, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear; 4 Fracture (the whole picture breaks into slipping shards, doubles and breathes). 1 to 3 leave the central interaction region clear; 4 only eases there." },
             dream_strength { min: 0.0, max: 1.0, step: 0.01, group: "Dream Lens", doc: "Zero disables distortion. Use modest values; this effect should suggest unstable surroundings." },
             dream_speed { min: 0.0, max: 3.0, step: 0.05, group: "Dream Lens" },
             response_curve { group: "Color Grading", display_name: "Response Curve",
@@ -878,7 +878,7 @@ fn post_process_schema() -> ComponentSchema {
         }
     };
     if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "dream_mode") {
-        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Heat drift", "Peripheral echo", "Architectural shear"]);
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Heat drift", "Peripheral echo", "Architectural shear", "Fracture"]);
     }
     schema
 }

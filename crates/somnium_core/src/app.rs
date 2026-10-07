@@ -8296,7 +8296,7 @@ impl<G: GameApp> Engine<G> {
                 gamma: pp.gamma,
                 grain: pp.grain,
                 dream: [
-                    pp.dream_mode.min(3) as f32,
+                    pp.dream_mode.min(4) as f32,
                     pp.dream_strength.clamp(0.0, 1.0),
                     pp.dream_speed.clamp(0.0, 3.0),
                     0.0,
