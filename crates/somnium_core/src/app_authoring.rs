@@ -10,7 +10,7 @@ use crate::authoring::{
     project::ProjectPaths,
     transport::LocalBridge,
 };
-use crate::{InputState, KeyCode};
+use crate::{InputState, KeyCode, MouseButton};
 use serde_json::{Value, json};
 use somnium_ui::authoring_panel::{
     AuthoringAction, AuthoringEntry, AuthoringField, AuthoringState,
@@ -189,6 +189,74 @@ fn authoring_key(name: &str) -> Result<KeyCode, String> {
         .ok_or_else(|| {
             "Unknown key; query authoring.discover input_keys for the supported names".into()
         })
+}
+
+const MAX_INPUT_LOOK: f32 = 3600.0;
+const MAX_INPUT_WHEEL: f64 = 120.0;
+
+/// Validate one event completely before input or focus is dispatched to a game.
+fn parse_authoring_input(params: &Value) -> Result<EngineEvent, String> {
+    let object = params.as_object().ok_or("input must be an object")?;
+    let selectors: Vec<_> = ["key", "look", "mouse", "wheel"]
+        .into_iter().filter(|name| object.contains_key(*name)).collect();
+    if selectors.len() != 1 {
+        return Err("input requires exactly one of key, look, mouse or wheel".into());
+    }
+    let selector = selectors[0];
+    let button_event = matches!(selector, "key" | "mouse");
+    if object.keys().any(|name| name != "action" && name != selector && !(button_event && name == "pressed")) {
+        return Err("input contains fields that do not belong to the selected event".into());
+    }
+    if let Some(action) = object.get("action") && action.as_str() != Some("input") {
+        return Err("input action must be input".into());
+    }
+    match selector {
+        "look" => {
+            let value: [f32; 2] = serde_json::from_value(params["look"].clone())
+                .map_err(|_| "look needs [dx, dy] finite numbers")?;
+            if value.iter().any(|number| !number.is_finite() || number.abs() > MAX_INPUT_LOOK) {
+                return Err("look delta must be finite and within +/-3600".into());
+            }
+            Ok(EngineEvent::MouseMotion { delta_x: value[0], delta_y: value[1] })
+        }
+        "wheel" => {
+            let delta_y = params["wheel"].as_f64().filter(|value| value.is_finite() && value.abs() <= MAX_INPUT_WHEEL)
+                .ok_or("wheel must be finite and within +/-120 logical lines")?;
+            Ok(EngineEvent::MouseWheel { delta_y })
+        }
+        _ => {
+            let state = if params["pressed"].as_bool().ok_or("pressed must be boolean")? {
+                InputState::Pressed
+            } else { InputState::Released };
+            if selector == "key" {
+                Ok(EngineEvent::KeyInput { key: authoring_key(required(params, "key")?)?, state })
+            } else {
+                let button = match required(params, "mouse")?.to_ascii_lowercase().as_str() {
+                    "left" => MouseButton::Left,
+                    "right" => MouseButton::Right,
+                    "middle" => MouseButton::Middle,
+                    _ => return Err("mouse must be left, right or middle".into()),
+                };
+                Ok(EngineEvent::MouseButton { button, state })
+            }
+        }
+    }
+}
+
+fn authoring_input_schema() -> Value {
+    let action = json!({"const":"input"});
+    json!({"oneOf":[
+        {"type":"object","required":["action","key","pressed"],"additionalProperties":false,
+            "properties":{"action":action,"key":{"type":"string","enum":INPUT_KEYS.iter().map(|(name,_)|*name).collect::<Vec<_>>()},"pressed":{"type":"boolean"}}},
+        {"type":"object","required":["action","look"],"additionalProperties":false,
+            "properties":{"action":action,"look":{"type":"array","minItems":2,"maxItems":2,
+                "items":{"type":"number","minimum":-MAX_INPUT_LOOK,"maximum":MAX_INPUT_LOOK}}}},
+        {"type":"object","required":["action","mouse","pressed"],"additionalProperties":false,
+            "properties":{"action":action,"mouse":{"type":"string","enum":["left","right","middle"]},"pressed":{"type":"boolean"}}},
+        {"type":"object","required":["action","wheel"],"additionalProperties":false,
+            "properties":{"action":action,"wheel":{"type":"number","minimum":-MAX_INPUT_WHEEL,"maximum":MAX_INPUT_WHEEL,
+                "description":"Vertical logical wheel lines; positive scrolls up."}}}
+    ]})
 }
 fn action(label: &str, method: &str, params: Value) -> AuthoringAction {
     AuthoringAction {
@@ -397,6 +465,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 result["input_keys"] =
                     json!(INPUT_KEYS.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+                result["input_schema"] = authoring_input_schema();
                 result["capture_schema"] = json!({
                     "type":"object","required":["action","request_id"],
                     "properties":{
@@ -781,20 +850,12 @@ impl<G: GameApp> Engine<G> {
                 Ok(json!({"ok":true,"status":"queued","steps":count}))
             }
             "input"=> {
-                let event=if let Some(look)=params.get("look") {
-                    let v:[f32;2]=serde_json::from_value(look.clone()).map_err(|_|"look needs [dx,dy]")?;
-                    if v.iter().any(|n|!n.is_finite()||n.abs()>3600.0){return Err("look delta is invalid".into());}
-                    EngineEvent::MouseMotion{delta_x:v[0],delta_y:v[1]}
-                }else{
-                let key=authoring_key(required(params,"key")?)?;
-                let state=if params["pressed"].as_bool().ok_or("pressed must be boolean")?{InputState::Pressed}else{InputState::Released};
-                if key==KeyCode::Escape && state==InputState::Pressed && self.play_session_active {
+                let event=parse_authoring_input(params)?;
+                if matches!(event,EngineEvent::KeyInput{key:KeyCode::Escape,state:InputState::Pressed}) && self.play_session_active {
                     self.release_play_cursor();
                     if let Some(ui)=&mut self.ui_manager {ui.set_immersive(false);}
                     return Ok(json!({"ok":true,"frame":self.time.frame_count(),"cursor_released":true}));
                 }
-                EngineEvent::KeyInput{key,state}
-                };
                 let mut ctx=EngineContext::new(&self.time,&self.config,&mut self.world,
                     self.physics.as_mut().ok_or("physics unavailable")?,self.audio.as_mut().ok_or("audio unavailable")?,
                     &mut self.jobs,&mut self.navigation_editor,self.render_ctx.as_ref(),self.renderer.as_mut(),
@@ -1237,5 +1298,66 @@ fn document_entries(
             },
             actions,
         });
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn parses_keys_look_mouse_buttons_and_wheel_without_dispatch() {
+        assert!(matches!(parse_authoring_input(&json!({"action":"input","key":"e","pressed":true})).unwrap(),
+            EngineEvent::KeyInput {key:KeyCode::KeyE,state:InputState::Pressed}));
+        assert!(matches!(parse_authoring_input(&json!({"action":"input","key":"Esc","pressed":false})).unwrap(),
+            EngineEvent::KeyInput {key:KeyCode::Escape,state:InputState::Released}));
+        assert!(matches!(parse_authoring_input(&json!({"action":"input","look":[-3600,3600]})).unwrap(),
+            EngineEvent::MouseMotion {delta_x,delta_y} if delta_x == -3600.0 && delta_y == 3600.0));
+        for (name,button) in [("left",MouseButton::Left),("RIGHT",MouseButton::Right),("middle",MouseButton::Middle)] {
+            for pressed in [true,false] {
+                assert!(matches!(parse_authoring_input(&json!({"action":"input","mouse":name,"pressed":pressed})).unwrap(),
+                    EngineEvent::MouseButton {button:actual,state} if actual == button
+                        && state == if pressed {InputState::Pressed}else{InputState::Released}));
+            }
+        }
+        assert!(matches!(parse_authoring_input(&json!({"action":"input","wheel":-0.25})).unwrap(),
+            EngineEvent::MouseWheel {delta_y} if delta_y == -0.25));
+    }
+
+    #[test]
+    fn rejects_ambiguous_malformed_and_unbounded_events_before_dispatch() {
+        for value in [
+            json!({"action":"input"}),
+            json!({"action":"input","key":"E","look":[0,0],"pressed":true}),
+            json!({"action":"input","mouse":"left","wheel":1,"pressed":true}),
+            json!({"action":"input","look":[0,0],"pressed":false}),
+            json!({"action":"input","mouse":"other","pressed":true}),
+            json!({"action":"input","mouse":"left"}),
+            json!({"action":"input","key":"not-a-key","pressed":true}),
+            json!({"action":"input","key":"E","pressed":1}),
+            json!({"action":"input","look":[1]}),
+            json!({"action":"input","look":[1,2,3]}),
+            json!({"action":"input","look":[3600.1,0]}),
+            json!({"action":"input","look":[null,0]}),
+            json!({"action":"input","wheel":"1"}),
+            json!({"action":"input","wheel":null}),
+            json!({"action":"input","wheel":120.01}),
+            json!({"action":"input","wheel":-121}),
+            json!({"action":"input","wheel":1,"extra":true}),
+            json!({"action":"wrong","wheel":1}),
+        ] {
+            assert!(parse_authoring_input(&value).is_err(),"accepted {value}");
+        }
+    }
+
+    #[test]
+    fn discovery_declares_all_four_exclusive_input_shapes_and_limits() {
+        let schema=authoring_input_schema();
+        let shapes=schema["oneOf"].as_array().unwrap();
+        assert_eq!(shapes.len(),4);
+        assert_eq!(shapes[1]["properties"]["look"]["items"]["maximum"],json!(MAX_INPUT_LOOK));
+        assert_eq!(shapes[2]["properties"]["mouse"]["enum"],json!(["left","right","middle"]));
+        assert_eq!(shapes[3]["properties"]["wheel"]["minimum"],json!(-MAX_INPUT_WHEEL));
+        assert!(shapes.iter().all(|shape|shape["additionalProperties"]==false));
     }
 }
