@@ -874,6 +874,10 @@ fn post_process_schema() -> ComponentSchema {
             analytic_grad { group: "Advanced", advanced: true }, shaft_intensity { min: 0.0, step: 0.01, group: "Volumetrics" },
             fog_sky_occlusion { min: 0.0, max: 1.0, step: 0.01, group: "Volumetrics", display_name: "Fog Sky Occlusion",
                 doc: "How far the sun's shadow also hides skylight from the fog; stops roofed interiors glowing with haze." },
+            paint_fade { min: 0.0, max: 1.0, step: 0.01, group: "Weathering", display_name: "Paint Fade",
+                doc: "Takes every vertex-painted layer and every material's authored weathering back toward the bare material: 0 as authored, 1 none. The whole level before it decayed." },
+            foliage_green { min: 0.0, max: 1.0, step: 0.01, group: "Weathering", display_name: "Foliage Green",
+                doc: "Pulls foliage to a living green at each leaf's own brightness: 0 as textured, 1 fully." },
              fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
         }
     };

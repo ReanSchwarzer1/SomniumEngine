@@ -50,6 +50,8 @@ pub struct UiCanvas {
     /// the mitigation for resampled text, and a global would make that a
     /// whole-project trade.
     world_pixels_per_unit: f32,
+    /// A game's own pictures the GPU has not had yet: slot, width, height, sRGB RGBA8 rows.
+    images: Vec<(u32, u32, u32, Vec<u8>)>,
 }
 
 impl UiCanvas {
@@ -68,7 +70,25 @@ impl UiCanvas {
             canvas: Canvas::screen(),
             world_pixels_per_unit: 100.0,
             last_frame_at: None,
+            images: Vec::new(),
         }
+    }
+
+    /// Hand this canvas a picture to draw with
+    /// [`crate::draw::DrawingContext::push_textured_rect`]: row-major sRGB
+    /// RGBA8, straight alpha.
+    ///
+    /// Returns the texture slot to draw with. The pixels reach the GPU on the
+    /// next [`Self::render`], which is the first place a canvas has a device.
+    /// `None` when the pixels do not fit the size or the canvas has no slot
+    /// left; nothing is kept in either case.
+    pub fn add_image(&mut self, width: u32, height: u32, rgba: Vec<u8>) -> Option<u32> {
+        if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+            return None;
+        }
+        let slot = self.ui.draw_ctx.register_texture()?;
+        self.images.push((slot, width, height, rgba));
+        Some(slot)
     }
 
     /// Build a canvas in an explicit mode.
@@ -274,6 +294,46 @@ impl UiCanvas {
         let pass = self
             .pass
             .get_or_insert_with(|| UiPass::new(device, queue, output_format));
+        // A game's own pictures. The shader multiplies a sample in as it comes,
+        // so an sRGB target needs the texture to decode itself; a plain one
+        // must be left alone or the transfer would be applied twice.
+        for (slot, width, height, rgba) in self.images.drain(..) {
+            let size = wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("UiCanvas image"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: if output_format.is_srgb() {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                size,
+            );
+            pass.set_texture(slot, texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        }
         pass.prepare(
             device,
             queue,
@@ -437,6 +497,18 @@ impl<F: FnMut(&mut GameUiFrame)> GameUi for F {
 mod tests {
     use super::*;
     use crate::widgets::{border::BorderBuilder, text::TextBuilder};
+
+    #[test]
+    fn a_game_picture_takes_a_slot_only_when_its_pixels_fit_its_size() {
+        let mut canvas = UiCanvas::new(64.0, 64.0);
+        assert_eq!(canvas.add_image(2, 2, vec![0; 15]), None);
+        assert_eq!(canvas.add_image(0, 2, Vec::new()), None);
+        assert_eq!(
+            canvas.add_image(2, 2, vec![0; 16]),
+            Some(crate::shaped::RESERVED_TEXTURE_SLOTS),
+            "a refused picture must not have used up a slot"
+        );
+    }
 
     #[test]
     fn canvas_builds_a_widget_tree_without_editor_chrome() {

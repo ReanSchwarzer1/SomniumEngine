@@ -2170,7 +2170,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if material.terrain_index < 0 {
         paint_slot = vertex_paint_slot(instance_id);
         if paint_slot != 0u {
-            paint_mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary);
+            // Header word 6 fades all paint toward the bare material (`VertexPaintPool::fade`).
+            paint_mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary)
+                * (1.0 - saturate(bitcast<f32>(vertex_paint[6])));
         }
     }
 
@@ -2395,6 +2397,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     surface.albedo *= interior_shade;
+    // Foliage remembered alive (`VertexPaintPool::green`, header word 7): withered leaf colour is
+    // pulled to a living green at the leaf's own brightness.
+    if (material.flags & 2u) != 0u {
+        let living = saturate(bitcast<f32>(vertex_paint[7]));
+        if living > 0.0 {
+            let luma = dot(surface.albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
+            surface.albedo = mix(surface.albedo, vec3<f32>(0.36, 0.86, 0.19) * (luma * 1.6), living);
+        }
+    }
 
     surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
@@ -2476,8 +2487,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let up_axis = instance.model[1].xyz;
         let local_height = dot(hit_point - instance.model[3].xyz, up_axis)
             / max(dot(up_axis, up_axis), 1.0e-6);
-        apply_weathering(&surface, material.weathering, hit_point, geo_normal, local_height,
-            micro_occlusion);
+        // The same fade that takes paint back takes the authored weathering back with it.
+        apply_weathering(&surface, material.weathering * (1.0 - saturate(bitcast<f32>(vertex_paint[6]))),
+            hit_point, geo_normal, local_height, micro_occlusion);
     }
 
     // ── Foliage: curved card normals (Phase 17E, re-gated in TSUSHIMA-J) ─────

@@ -1122,7 +1122,11 @@ fn vertex_paint_reaches_the_surface_before_decals_and_f0() {
     let pass = include_str!("../src/pass/shading.rs");
     assert!(shading.contains("@group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;"));
     assert!(pass.contains("binding: 30,"));
-    assert_eq!(somnium_renderer::vertex_paint::HEADER_WORDS, 6);
+    assert_eq!(somnium_renderer::vertex_paint::HEADER_WORDS, 8);
+    // Words 6 and 7: the level-wide fade of paint and weathering, and the green of living foliage.
+    assert!(shading.contains("* (1.0 - saturate(bitcast<f32>(vertex_paint[6])));"));
+    assert!(shading.contains("apply_weathering(&surface, material.weathering * (1.0 - saturate(bitcast<f32>(vertex_paint[6]))),"));
+    assert!(shading.contains("let living = saturate(bitcast<f32>(vertex_paint[7]));"));
     assert!(shading.contains("let ring_radius = bitcast<f32>(vertex_paint[5]);"));
     let paint = shading.find("let layered = apply_vertex_layers(&surface, paint_slot, paint_mask, hit_point,").unwrap();
     let decals = shading.find("apply_decals(&surface, hit_point, decal_froxel);").unwrap();

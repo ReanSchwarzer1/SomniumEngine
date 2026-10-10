@@ -8251,6 +8251,8 @@ impl<G: GameApp> Engine<G> {
             r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
             r.volumetric_pass.fog.sky_occlusion = pp.fog_sky_occlusion;
+            r.vertex_paint.fade = pp.paint_fade;
+            r.vertex_paint.green = pp.foliage_green;
             {
                 use somnium_renderer::pass::lighting_extra::{
                     FLAG_CACHE, FLAG_PATH, FLAG_PROBES, FLAG_SDF, FLAG_SPECULAR,

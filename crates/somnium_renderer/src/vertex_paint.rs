@@ -9,7 +9,12 @@
 //! - word 1: preview mode (0 off, 1 all channels, 2..=5 one channel);
 //! - words 2..=5: the editor brush as f32 bits (centre xyz, radius; radius 0
 //!   hides it), drawn as a ring where the brush sphere meets a surface;
-//! - words 6..: each painted entity's slot: [`SLOT_HEADER_WORDS`] of layer
+//! - word 6: `fade` as f32 bits: how far every painted layer and every
+//!   material's authored weathering is taken back toward the bare material,
+//!   0 (as painted) to 1 (none). A whole level seen before it decayed;
+//! - word 7: `green` as f32 bits: how far foliage albedo is pulled to a
+//!   living green, 0 (as textured) to 1;
+//! - words 8..: each painted entity's slot: [`SLOT_HEADER_WORDS`] of layer
 //!   settings ([`PaintLayers::words`]), then its masks, one word per vertex,
 //!   in the mesh's own vertex order;
 //! - from word 0's value: one word per opaque instance, the handle of its
@@ -22,7 +27,7 @@
 use std::collections::HashMap;
 
 /// First word available to slots.
-pub const HEADER_WORDS: u32 = 6;
+pub const HEADER_WORDS: u32 = 8;
 /// Words of layer settings at the start of every slot. `shading.wgsl` reads
 /// the same number as `PAINT_SLOT_HEADER`.
 pub const SLOT_HEADER_WORDS: u32 = 20;
@@ -111,6 +116,10 @@ pub struct VertexPaintPool {
     /// Whether the GPU header currently says "painted", so turning paint off
     /// writes the zero header once instead of every frame.
     pub header_live: bool,
+    /// 0 paints and weathers as authored; 1 shows every surface bare.
+    pub fade: f32,
+    /// 0 leaves foliage as textured; 1 pulls it to a living green.
+    pub green: f32,
 }
 
 impl VertexPaintPool {
@@ -169,14 +178,14 @@ impl VertexPaintPool {
     /// Whether the shader needs a live header this frame.
     #[must_use]
     pub fn wants_header(&self) -> bool {
-        !self.is_empty() || self.preview != 0 || self.brush[3] > 0.0
+        !self.is_empty() || self.preview != 0 || self.brush[3] > 0.0 || self.fade > 0.0 || self.green > 0.0
     }
 
     /// The header words for an instance table at `table` (0 = none).
     #[must_use]
     pub fn header(&self, table: u32) -> [u32; HEADER_WORDS as usize] {
         let [x, y, z, r] = self.brush.map(f32::to_bits);
-        [table, self.preview, x, y, z, r]
+        [table, self.preview, x, y, z, r, self.fade.clamp(0.0, 1.0).to_bits(), self.green.clamp(0.0, 1.0).to_bits()]
     }
 
     /// Words the GPU buffer needs for the vertex region plus `instances`.
