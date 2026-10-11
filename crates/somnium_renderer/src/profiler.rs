@@ -443,6 +443,10 @@ pub struct GpuProfiler {
     /// Queue submit through present, one frame late (after the frame's
     /// profiler scope closes); the rest of `Frame CPU` outside the zones.
     pub submit_present_ms: f32,
+    /// `submit_present_ms` in parts: encoder finish (wgpu validates and tracks
+    /// every resource the frame's passes bound), queue submit, the work after
+    /// it (device poll, readbacks, timing, capture), present.
+    pub submit_parts_ms: [f32; 4],
     /// The frame most recently collected, for the "is this stale" question the
     /// overlay would otherwise have to guess at.
     collected: u64,
@@ -557,6 +561,7 @@ impl GpuProfiler {
             frame_cpu_ms: 0.0,
             surface_acquire_ms: 0.0,
             submit_present_ms: 0.0,
+            submit_parts_ms: [0.0; 4],
             collected: 0,
             frame_index: 0,
             counters: FrameCounters::default(),

@@ -5629,6 +5629,13 @@ impl UiManager {
         self.float_panel_at(drag.kind, cursor);
     }
 
+    /// Whether an asset (or an external file) is being dragged: the only time
+    /// the viewport's drop target is read (`refresh_drop_acceptance`).
+    #[must_use]
+    pub fn asset_drag_in_progress(&self) -> bool {
+        self.native_ui.drag_payload().is_some()
+    }
+
     /// Whether a header drag is far enough along to be showing feedback.
     #[must_use]
     pub fn panel_drag_armed(&self) -> bool {

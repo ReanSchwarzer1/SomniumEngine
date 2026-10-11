@@ -485,6 +485,7 @@ pub struct TimingRun {
     /// Of which, blocked acquiring the swap-chain texture (PORTAL-0-B).
     surface_acquire: Accum,
     submit_present: Accum,
+    submit_parts: [Accum; 4],
     last_tick_at: Option<Instant>,
     counters: FrameCounters,
     stats: Vec<StatsResult>,
@@ -529,6 +530,7 @@ impl TimingRun {
             frame_cpu: Accum::default(),
             surface_acquire: Accum::default(),
             submit_present: Accum::default(),
+            submit_parts: Default::default(),
             // Seeded, not `None`. `from_env` runs while the renderer is being
             // built, so this makes the *first* recorded interval cover device
             // and pipeline creation, map load and the first present — the
@@ -597,6 +599,9 @@ impl TimingRun {
         }
         self.surface_acquire.push(profiler.surface_acquire_ms);
         self.submit_present.push(profiler.submit_present_ms);
+        for (part, ms) in self.submit_parts.iter_mut().zip(profiler.submit_parts_ms) {
+            part.push(ms);
+        }
 
         // DOOM-J. Sampled every measured frame rather than only at the ends,
         // because a resource created on one frame and released on the next
@@ -841,6 +846,13 @@ impl TimingRun {
                 a.max,
                 a.n
             );
+        }
+        // Inside `Submit + present`, one level down.
+        for (name, a) in ["Encoder finish", "Queue submit", "After submit", "Present"].into_iter().zip(&self.submit_parts) {
+            if a.n == 0 {
+                continue;
+            }
+            let _ = writeln!(s, "cpu	{name}	1	{:.4}	{:.4}	{:.4}	{:.4}	{}", a.mean(), a.stddev(), a.min, a.max, a.n);
         }
 
         // DOOM-I. A separate kind rather than more `count` rows, for the same

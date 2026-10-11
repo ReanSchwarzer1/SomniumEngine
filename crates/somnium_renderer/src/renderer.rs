@@ -40,6 +40,18 @@ use winit::window::Window;
 /// per-cluster culling can ever recover.
 const MAX_INSTANCES_FOR_CLUSTERING: u32 = 8;
 
+/// Imported texture uploads since the counters were last read: BC7 chains read
+/// from the cache, encoded during the upload (slow: a level not warmed with
+/// `examples/warm_texture_cache.rs`), kept RGBA8, and the time the upload took.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextureUploadStats {
+    pub cached: u32,
+    pub encoded: u32,
+    pub uncompressed: u32,
+    pub encode_ms: f64,
+    pub upload_ms: f64,
+}
+
 /// Everything the ECS layer needs to spawn one entity from an uploaded scene node.
 #[derive(Debug, Clone)]
 pub struct UploadedNode {
@@ -151,6 +163,8 @@ pub struct SomniumRenderer {
     /// Terrain descriptors are scene-owned; imported asset descriptors are not.
     terrain_texture_slots: Vec<u32>,
     imported_texture_slots: std::collections::HashMap<[u8; 32], i32>,
+    /// What imported texture uploads cost, for the scene-load log line.
+    pub texture_upload_stats: TextureUploadStats,
     /// How many live imported materials sample each imported slot. Identical
     /// images are shared across sources, so a slot is freed only at zero.
     imported_texture_refs: std::collections::HashMap<i32, u32>,
@@ -1053,6 +1067,7 @@ impl SomniumRenderer {
             texture_pool,
             terrain_texture_slots: Vec::new(),
             imported_texture_slots: Default::default(),
+            texture_upload_stats: Default::default(),
             imported_texture_refs: Default::default(),
             material_texture_refs: Default::default(),
             instances,
@@ -1280,9 +1295,13 @@ impl SomniumRenderer {
     pub fn add_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
         let index = self.texture_pool.add_texture(view.clone());
         if index == crate::texture_pool::FALLBACK_SLOT {
+            if self.global_pool.bound_len() != crate::bindless::MAX_BINDLESS_TEXTURES as usize {
+                self.global_pool.bind_every_slot();
+                self.global_pool.update_textures(&ctx.device);
+            }
             return index;
         }
-        self.global_pool.texture_views[index as usize] = view;
+        self.global_pool.set_slot(index as usize, view);
         self.global_pool.update_textures(&ctx.device);
         index
     }
@@ -1644,8 +1663,7 @@ impl SomniumRenderer {
                 self.imported_texture_refs.remove(&slot);
                 self.imported_texture_slots.retain(|_, live| *live != slot);
                 if self.texture_pool.release(slot as u32) {
-                    self.global_pool.texture_views[slot as usize] =
-                        self.texture_pool.dummy_view.clone();
+                    self.global_pool.clear_slot(slot as usize);
                     textures += 1;
                 }
             }
@@ -1686,19 +1704,30 @@ impl SomniumRenderer {
         if let Some(&slot) = self.imported_texture_slots.get(&key) {
             return slot;
         }
+        let started = std::time::Instant::now();
         let compressed = crate::imported_bc::enabled(ctx.device.features())
             && crate::imported_bc::compressible(tex.width, tex.height);
         // (width, height, bytes) per level: BC7 blocks, or RGBA8 texels.
         let levels: Vec<(u32, u32, Vec<u8>)> = if compressed {
             let alpha = crate::imported_bc::has_alpha(&tex.data);
-            let blocks = crate::imported_bc::load(&key, tex.width, tex.height, alpha).unwrap_or_else(|| {
-                // Full mip chain. Without it, minified textures alias badly —
-                // the sampler asks for trilinear filtering but a single level
-                // leaves nothing to filter between.
-                let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
-                crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
-                blocks
-            });
+            let cached = crate::imported_bc::load(&key, tex.width, tex.height, alpha);
+            let blocks = match cached {
+                Some(blocks) => {
+                    self.texture_upload_stats.cached += 1;
+                    blocks
+                }
+                None => {
+                    // Full mip chain. Without it, minified textures alias badly —
+                    // the sampler asks for trilinear filtering but a single level
+                    // leaves nothing to filter between.
+                    let encoding = std::time::Instant::now();
+                    let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
+                    crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
+                    self.texture_upload_stats.encoded += 1;
+                    self.texture_upload_stats.encode_ms += encoding.elapsed().as_secs_f64() * 1000.0;
+                    blocks
+                }
+            };
             let (mut w, mut h) = (tex.width, tex.height);
             blocks
                 .into_iter()
@@ -1709,6 +1738,7 @@ impl SomniumRenderer {
                 })
                 .collect()
         } else {
+            self.texture_upload_stats.uncompressed += 1;
             build_mip_chain(&tex.data, tex.width, tex.height)
         };
         let format = match (compressed, colour) {
@@ -1770,6 +1800,7 @@ impl SomniumRenderer {
         let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let slot = self.add_texture(ctx, view) as i32;
         self.imported_texture_slots.insert(key, slot);
+        self.texture_upload_stats.upload_ms += started.elapsed().as_secs_f64() * 1000.0;
         slot
     }
 
@@ -3131,8 +3162,7 @@ impl SomniumRenderer {
         // importing the next scene, while keeping reusable asset slots stable.
         for slot in self.terrain_texture_slots.drain(..) {
             if self.texture_pool.release(slot) {
-                self.global_pool.texture_views[slot as usize] =
-                    self.texture_pool.dummy_view.clone();
+                self.global_pool.clear_slot(slot as usize);
             }
         }
         self.global_pool.update_textures(&ctx.device);
@@ -3677,7 +3707,10 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder); // Frame
         self.profiler.end_frame(&mut encoder);
         let submit_started = std::time::Instant::now();
-        ctx.queue.submit(std::iter::once(encoder.finish()));
+        let command_buffer = encoder.finish();
+        let finished = std::time::Instant::now();
+        ctx.queue.submit(std::iter::once(command_buffer));
+        let submitted = std::time::Instant::now();
         // Must follow the submit: the map would otherwise race the copy that
         // fills the buffer it is reading.
         self.profiler.after_submit(&ctx.device);
@@ -3822,8 +3855,16 @@ impl SomniumRenderer {
         // wgpu 30 moved presentation from the surface texture to the queue,
         // so the present is ordered against submitted work explicitly rather
         // than implicitly by the texture's lifetime.
+        let presenting = std::time::Instant::now();
         ctx.queue.present(output);
         self.profiler.submit_present_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
+        let ms = |from: std::time::Instant, to: std::time::Instant| (to - from).as_secs_f32() * 1000.0;
+        self.profiler.submit_parts_ms = [
+            ms(submit_started, finished),
+            ms(finished, submitted),
+            ms(submitted, presenting),
+            presenting.elapsed().as_secs_f32() * 1000.0,
+        ];
 
         self.clear_frame_queues();
     }
@@ -4931,7 +4972,7 @@ impl SomniumRenderer {
         self.velocity_pass.record(
             &ctx.queue,
             &mut encoder,
-            &self.global_pool.bind_group,
+            &self.global_pool.lean_bind_group,
             self.view_proj_unjittered,
             self.render_width,
             self.render_height,
@@ -5146,7 +5187,7 @@ impl SomniumRenderer {
         );
         self.profiler.begin(&mut encoder, "Census");
         self.census_pass
-            .record(&mut encoder, &ctx.queue, &self.global_pool.bind_group);
+            .record(&mut encoder, &ctx.queue, &self.global_pool.lean_bind_group);
         self.profiler.end(&mut encoder);
 
         // ── 6.99 Tile classification (Phase DOOM-C) ──────────────────────────
@@ -5178,7 +5219,7 @@ impl SomniumRenderer {
             );
             self.profiler.begin(&mut encoder, "Classify");
             self.classify_pass
-                .record(&mut encoder, &ctx.queue, &self.global_pool.bind_group);
+                .record(&mut encoder, &ctx.queue, &self.global_pool.lean_bind_group);
             self.profiler.end(&mut encoder);
         }
 
@@ -5488,7 +5529,7 @@ impl SomniumRenderer {
                 &ctx.device,
                 &ctx.queue,
                 &mut encoder,
-                &self.global_pool.bind_group,
+                &self.global_pool.lean_bind_group,
                 &self.postprocess_pass.hdr_view,
                 &self.vis_pass.depth_view,
                 &self.vis_pass.view,

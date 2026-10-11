@@ -347,6 +347,10 @@ impl ShadowPass {
             occlusion_query_set: None,
         });
 
+        // Group 0 once for the pass: wgpu re-tracks every view of a bound group
+        // on each `set_bind_group`, even the same group again (`bindless.rs`
+        // `bound_len`), and bound groups survive pipeline changes.
+        rpass.set_bind_group(0, global_bind_group, &[]);
         for cascade in 0..NUM_CASCADES {
             if !dirty[cascade] {
                 continue;
@@ -362,7 +366,6 @@ impl ShadowPass {
             rpass.draw(0..3, 0..1);
 
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, global_bind_group, &[]);
             rpass.set_bind_group(1, &self.cascade_bind_groups[cascade], &[0]);
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
@@ -430,6 +433,8 @@ impl ShadowPass {
             multiview_mask: None,
         });
 
+        // Once for the pass, as in `record` above.
+        pass.set_bind_group(0, global_bind_group, &[]);
         for (i, page) in work[..count].iter().enumerate() {
             let (x, y, width, height) = gpu.page_viewport(page.physical_page);
             pass.set_viewport(x, y, width, height, 0.0, 1.0);
@@ -438,7 +443,6 @@ impl ShadowPass {
             pass.draw(0..3, 0..1);
 
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, global_bind_group, &[]);
             pass.set_bind_group(
                 1,
                 &self.virtual_view_bind_group,
