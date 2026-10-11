@@ -22,6 +22,7 @@ pub mod command;
 pub mod context;
 pub mod culling;
 pub mod geometry;
+pub mod imported_bc;
 pub mod indirect;
 pub mod instance;
 pub mod jobs;

@@ -145,6 +145,9 @@ fn decode_uri(uri: &str) -> Option<String> {
 struct Entry {
     stamp: SourceStamp,
     nodes: Vec<UploadedNode>,
+    /// The parts (uploaded-node ordinals) whose materials have their textures;
+    /// `None` is every part. A level uploads textures only for what it uses.
+    textured: Option<std::collections::HashSet<usize>>,
 }
 
 /// Uploads are owned by the open scene: an entry lives until a scene switch
@@ -167,7 +170,12 @@ impl ImportedUploadCache {
         (entry.stamp == *stamp).then(|| entry.nodes.clone())
     }
 
-    pub(super) fn insert(&mut self, stamp: SourceStamp, nodes: &[UploadedNode]) {
+    pub(super) fn insert(
+        &mut self,
+        stamp: SourceStamp,
+        nodes: &[UploadedNode],
+        textured: Option<std::collections::HashSet<usize>>,
+    ) {
         if nodes.is_empty() || !stamp.is_current() {
             return;
         }
@@ -176,8 +184,32 @@ impl ImportedUploadCache {
             Entry {
                 stamp,
                 nodes: nodes.to_vec(),
+                textured,
             },
         );
+    }
+
+    /// Of `parts`, those whose textures were not uploaded with this source.
+    pub(super) fn untextured(
+        &self,
+        stamp: &SourceStamp,
+        parts: &std::collections::HashSet<usize>,
+    ) -> std::collections::HashSet<usize> {
+        match self.sources.get(&stamp.source) {
+            Some(Entry { stamp: current, textured: Some(done), .. }) if current == stamp => {
+                parts.difference(done).copied().collect()
+            }
+            _ => Default::default(),
+        }
+    }
+
+    /// Record that `parts` now have their textures.
+    pub(super) fn mark_textured(&mut self, stamp: &SourceStamp, parts: &std::collections::HashSet<usize>) {
+        if let Some(Entry { stamp: current, textured: Some(done), .. }) = self.sources.get_mut(&stamp.source)
+            && current == stamp
+        {
+            done.extend(parts.iter().copied());
+        }
     }
 
     /// Drop every entry whose canonical source is not in `keep` or whose files
@@ -277,7 +309,7 @@ mod tests {
             transform: glam::Mat4::IDENTITY,
         };
         let mut cache = ImportedUploadCache::default();
-        cache.insert(stamp.clone(), &[node]);
+        cache.insert(stamp.clone(), &[node], None);
         let hit = cache.get(&fixture.stamp()).unwrap();
         assert_eq!(
             (
@@ -289,6 +321,29 @@ mod tests {
         );
         cache.clear();
         assert!(cache.get(&stamp).is_none());
+    }
+
+    #[test]
+    fn a_source_uploaded_for_some_parts_names_the_parts_still_without_textures() {
+        let fixture = Fixture::new();
+        let stamp = fixture.stamp();
+        let node = UploadedNode {
+            entity_name: "bank part".into(),
+            vertex_offset: 1,
+            index_offset: 2,
+            index_count: 3,
+            material_id: 4,
+            material_index: 0,
+            transform: glam::Mat4::IDENTITY,
+        };
+        let set = |parts: &[usize]| parts.iter().copied().collect::<std::collections::HashSet<_>>();
+        let mut cache = ImportedUploadCache::default();
+        cache.insert(stamp.clone(), &[node.clone(), node.clone(), node.clone()], Some(set(&[0])));
+        assert_eq!(cache.untextured(&stamp, &set(&[0, 2])), set(&[2]));
+        cache.mark_textured(&stamp, &set(&[2]));
+        assert!(cache.untextured(&stamp, &set(&[0, 2])).is_empty());
+        cache.insert(stamp.clone(), &[node], None);
+        assert!(cache.untextured(&stamp, &set(&[0, 1, 2])).is_empty(), "uploaded whole, every part has its textures");
     }
 
     #[test]
@@ -305,7 +360,7 @@ mod tests {
             transform: glam::Mat4::IDENTITY,
         };
         let mut cache = ImportedUploadCache::default();
-        cache.insert(stamp.clone(), &[node(10), node(20)]);
+        cache.insert(stamp.clone(), &[node(10), node(20)], None);
 
         let keep: std::collections::HashSet<_> = [stamp.source.clone()].into();
         assert!(cache.retain_sources(&keep).is_empty(), "shared source stays resident");
@@ -315,7 +370,7 @@ mod tests {
         assert_eq!(released.iter().map(|n| n.vertex_offset).collect::<Vec<_>>(), [10, 20]);
         assert!(cache.get(&stamp).is_none() && cache.vertex_offsets().is_empty());
 
-        cache.insert(stamp.clone(), &[node(30)]);
+        cache.insert(stamp.clone(), &[node(30)], None);
         std::fs::write(fixture.0.join("mesh.bin"), b"edited on disk").unwrap();
         assert_eq!(cache.retain_sources(&keep).len(), 1, "a stale upload is released too");
     }

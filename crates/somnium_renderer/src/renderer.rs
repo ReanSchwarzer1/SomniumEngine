@@ -1373,7 +1373,27 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         scene: &somnium_asset::LoadedScene,
     ) -> Vec<u32> {
-        // 1. Textures --------------------------------------------------------
+        self.upload_scene_materials_for(ctx, scene, None)
+    }
+
+    /// The uploaded-node ordinal of each node that becomes an [`UploadedNode`]
+    /// (the number an imported mesh names its part by), with its scene node.
+    fn uploaded_ordinals(
+        scene: &somnium_asset::LoadedScene,
+    ) -> impl Iterator<Item = (usize, &somnium_asset::SceneNode)> {
+        scene
+            .nodes
+            .iter()
+            .filter(|node| node.mesh_index.is_some_and(|mesh| mesh < scene.meshes.len()))
+            .enumerate()
+    }
+
+    /// Which of `scene`'s textures the materials of the `textured` parts (every
+    /// part for `None`) use, which of those are colour maps, and those materials.
+    fn texture_usage(
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+    ) -> (Vec<bool>, Vec<bool>, std::collections::HashSet<usize>) {
         //
         // **Only colour maps are sRGB** (Phase 17E remainder). Every imported
         // texture used to be uploaded as `Rgba8UnormSrgb`, including normal,
@@ -1388,11 +1408,13 @@ impl SomniumRenderer {
         // is the only thing that says what it means.
         let mut is_colour = vec![false; scene.textures.len()];
         let mut used_textures = vec![false; scene.textures.len()];
-        let used_materials: std::collections::HashSet<_> = scene
-            .nodes
-            .iter()
-            .filter_map(|node| node.material_index)
-            .collect();
+        let used_materials: std::collections::HashSet<_> = match textured {
+            None => scene.nodes.iter().filter_map(|node| node.material_index).collect(),
+            Some(parts) => Self::uploaded_ordinals(scene)
+                .filter(|(ordinal, _)| parts.contains(ordinal))
+                .filter_map(|(_, node)| node.material_index)
+                .collect(),
+        };
         for (index, m) in scene.materials.iter().enumerate() {
             if !used_materials.contains(&index) {
                 continue;
@@ -1420,105 +1442,60 @@ impl SomniumRenderer {
                 }
             }
         }
+        (used_textures, is_colour, used_materials)
+    }
+
+    /// Encode into `imported_bc`'s cache every texture that uploading `scene`
+    /// (for the `textured` parts) would compress, with no device: what
+    /// `examples/warm_texture_cache.rs` runs so a level's first load does not
+    /// spend minutes encoding. Returns (encoded now, already cached).
+    pub fn warm_texture_cache(
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+    ) -> (usize, usize) {
+        let (used, colour, _) = Self::texture_usage(scene, textured);
+        let (mut encoded, mut cached) = (0, 0);
+        for (index, tex) in scene.textures.iter().enumerate() {
+            if !used[index] || !crate::imported_bc::compressible(tex.width, tex.height) {
+                continue;
+            }
+            let key = imported_texture_key(tex, colour[index]);
+            let alpha = crate::imported_bc::has_alpha(&tex.data);
+            if crate::imported_bc::is_cached(&key, alpha) {
+                cached += 1;
+                continue;
+            }
+            let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
+            crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
+            encoded += 1;
+        }
+        (encoded, cached)
+    }
+
+    /// As [`Self::upload_scene_materials`], but textures are uploaded only for
+    /// the materials of the parts in `textured` (uploaded-node ordinals); the
+    /// other materials exist untextured until [`Self::texture_scene_nodes`].
+    /// A level that uses five parts of a 172-part bank no longer pays for the
+    /// other 167 parts' maps (TSF Town: 10.9 → 9.1 GB before compression).
+    fn upload_scene_materials_for(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+    ) -> Vec<u32> {
+        // 1. Textures --------------------------------------------------------
+        let (used_textures, is_colour, used_materials) = Self::texture_usage(scene, textured);
 
         // `write_texture` stages a CPU copy until the next submit. A scene load
         // uploads every source before any frame submits, so unflushed staging
         // grew with the whole level (6 GB for Town) and ran the device out of
         // memory. Flushing every 256 MB bounds it.
         let mut staged = 0_u64;
-        let texture_indices: Vec<Option<i32>> = scene
-            .textures
-            .iter()
-            .enumerate()
-            .map(|(tex_index, tex)| {
-                if !used_textures[tex_index] {
-                    return None;
-                }
-                let colour = is_colour[tex_index];
-                let key = imported_texture_key(tex, colour);
-                if let Some(&slot) = self.imported_texture_slots.get(&key) {
-                    return Some(slot);
-                }
-                // Full mip chain. Without it, minified textures alias badly — the
-                // sampler asks for trilinear filtering but a single level leaves
-                // nothing to filter between, so detailed materials shimmer at
-                // distance and read as noise.
-                let levels = build_mip_chain(&tex.data, tex.width, tex.height);
-                let mip_level_count = levels.len() as u32;
-
-                let wgpu_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Scene Texture"),
-                    size: wgpu::Extent3d {
-                        width: tex.width,
-                        height: tex.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: if is_colour.get(tex_index).copied().unwrap_or(true) {
-                        wgpu::TextureFormat::Rgba8UnormSrgb
-                    } else {
-                        wgpu::TextureFormat::Rgba8Unorm
-                    },
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-
-                for (level, (lw, lh, data)) in levels.iter().enumerate() {
-                    // write_texture requires rows padded to COPY_BYTES_PER_ROW_ALIGNMENT.
-                    let row_bytes = lw * 4;
-                    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-                    let padded_row = row_bytes.div_ceil(align) * align;
-
-                    let upload: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
-                        std::borrow::Cow::Borrowed(data)
-                    } else {
-                        let mut buf = vec![0u8; padded_row as usize * *lh as usize];
-                        for row in 0..*lh as usize {
-                            let src = row * row_bytes as usize;
-                            let dst = row * padded_row as usize;
-                            buf[dst..dst + row_bytes as usize]
-                                .copy_from_slice(&data[src..src + row_bytes as usize]);
-                        }
-                        std::borrow::Cow::Owned(buf)
-                    };
-
-                    ctx.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &wgpu_tex,
-                            mip_level: level as u32,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &upload,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(padded_row),
-                            rows_per_image: Some(*lh),
-                        },
-                        wgpu::Extent3d {
-                            width: *lw,
-                            height: *lh,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
-
-                staged += levels
-                    .iter()
-                    .map(|(_, _, data)| data.len() as u64)
-                    .sum::<u64>();
-                if staged >= STAGING_FLUSH_BYTES {
-                    ctx.queue.submit(std::iter::empty());
-                    self.wait_gpu(ctx);
-                    staged = 0;
-                }
-
-                let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let slot = self.add_texture(ctx, view) as i32;
-                self.imported_texture_slots.insert(key, slot);
-                Some(slot)
+        let texture_indices: Vec<Option<i32>> = (0..scene.textures.len())
+            .map(|tex_index| {
+                used_textures[tex_index].then(|| {
+                    self.upload_imported_texture(ctx, &scene.textures[tex_index], is_colour[tex_index], &mut staged)
+                })
             })
             .collect();
 
@@ -1688,12 +1665,181 @@ impl SomniumRenderer {
         (meshes, textures)
     }
 
+    /// One imported texture into the bindless pool, deduplicated by content.
+    ///
+    /// With `TEXTURE_COMPRESSION_BC` its mip chain goes up as BC7 (a quarter of
+    /// RGBA8), encoded once and kept in `imported_bc`'s cache; a size that is
+    /// not whole 4×4 blocks, or a device without BC, keeps RGBA8.
+    ///
+    /// `write_texture` stages a CPU copy until the next submit. A scene load
+    /// uploads every source before any frame submits, so unflushed staging
+    /// grew with the whole level (6 GB for Town) and ran the device out of
+    /// memory. Flushing every 256 MB (`staged`, carried across calls) bounds it.
+    fn upload_imported_texture(
+        &mut self,
+        ctx: &RenderContext,
+        tex: &somnium_asset::LoadedTexture,
+        colour: bool,
+        staged: &mut u64,
+    ) -> i32 {
+        let key = imported_texture_key(tex, colour);
+        if let Some(&slot) = self.imported_texture_slots.get(&key) {
+            return slot;
+        }
+        let compressed = crate::imported_bc::enabled(ctx.device.features())
+            && crate::imported_bc::compressible(tex.width, tex.height);
+        // (width, height, bytes) per level: BC7 blocks, or RGBA8 texels.
+        let levels: Vec<(u32, u32, Vec<u8>)> = if compressed {
+            let alpha = crate::imported_bc::has_alpha(&tex.data);
+            let blocks = crate::imported_bc::load(&key, tex.width, tex.height, alpha).unwrap_or_else(|| {
+                // Full mip chain. Without it, minified textures alias badly —
+                // the sampler asks for trilinear filtering but a single level
+                // leaves nothing to filter between.
+                let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
+                crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
+                blocks
+            });
+            let (mut w, mut h) = (tex.width, tex.height);
+            blocks
+                .into_iter()
+                .map(|bytes| {
+                    let level = (w, h, bytes);
+                    (w, h) = ((w / 2).max(1), (h / 2).max(1));
+                    level
+                })
+                .collect()
+        } else {
+            build_mip_chain(&tex.data, tex.width, tex.height)
+        };
+        let format = match (compressed, colour) {
+            (true, true) => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+            (true, false) => wgpu::TextureFormat::Bc7RgbaUnorm,
+            (false, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (false, false) => wgpu::TextureFormat::Rgba8Unorm,
+        };
+        let wgpu_tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(if compressed { "Scene Texture (BC7)" } else { "Scene Texture" }),
+            size: wgpu::Extent3d { width: tex.width, height: tex.height, depth_or_array_layers: 1 },
+            mip_level_count: levels.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (level, (lw, lh, data)) in levels.iter().enumerate() {
+            // A row is a row of texels, or of 4×4 blocks (16 bytes each); small
+            // compressed levels are copied as whole blocks, as wgpu requires.
+            let (row_bytes, rows, extent) = if compressed {
+                (lw.div_ceil(4) * 16, lh.div_ceil(4), (lw.div_ceil(4) * 4, lh.div_ceil(4) * 4))
+            } else {
+                (lw * 4, *lh, (*lw, *lh))
+            };
+            // write_texture requires rows padded to COPY_BYTES_PER_ROW_ALIGNMENT.
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_row = row_bytes.div_ceil(align) * align;
+            let upload: std::borrow::Cow<[u8]> = if padded_row == row_bytes {
+                std::borrow::Cow::Borrowed(data)
+            } else {
+                let mut buf = vec![0u8; padded_row as usize * rows as usize];
+                for row in 0..rows as usize {
+                    let src = row * row_bytes as usize;
+                    let dst = row * padded_row as usize;
+                    buf[dst..dst + row_bytes as usize].copy_from_slice(&data[src..src + row_bytes as usize]);
+                }
+                std::borrow::Cow::Owned(buf)
+            };
+            ctx.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &wgpu_tex,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &upload,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row), rows_per_image: Some(rows) },
+                wgpu::Extent3d { width: extent.0, height: extent.1, depth_or_array_layers: 1 },
+            );
+        }
+        *staged += levels.iter().map(|(_, _, data)| data.len() as u64).sum::<u64>();
+        if *staged >= STAGING_FLUSH_BYTES {
+            ctx.queue.submit(std::iter::empty());
+            self.wait_gpu(ctx);
+            *staged = 0;
+        }
+        let view = wgpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let slot = self.add_texture(ctx, view) as i32;
+        self.imported_texture_slots.insert(key, slot);
+        slot
+    }
+
+    /// Give the materials of more parts of an already uploaded scene their
+    /// textures (parts named by uploaded-node ordinal, `uploaded` as
+    /// [`Self::upload_scene_for`] returned it). For the editor: a part a level
+    /// starts using after its source was uploaded for other parts.
+    pub fn texture_scene_nodes(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        uploaded: &[UploadedNode],
+        parts: &std::collections::HashSet<usize>,
+    ) {
+        let (_, is_colour, _) = Self::texture_usage(scene, Some(parts));
+        let mut staged = 0_u64;
+        let mut done = std::collections::HashSet::new();
+        let nodes: Vec<(usize, usize)> = Self::uploaded_ordinals(scene)
+            .filter(|(ordinal, _)| parts.contains(ordinal))
+            .filter_map(|(ordinal, node)| Some((ordinal, node.material_index?)))
+            .collect();
+        for (ordinal, material_index) in nodes {
+            let (Some(node), Some(mat)) = (uploaded.get(ordinal), scene.materials.get(material_index)) else { continue };
+            if !done.insert(node.material_id) {
+                continue;
+            }
+            let Some(mut gpu) = self.materials_pool.get(node.material_id) else { continue };
+            let mut texture = |slot: Option<usize>, current: i32| -> i32 {
+                match slot.and_then(|i| scene.textures.get(i).map(|tex| (i, tex))) {
+                    Some((i, tex)) if current < 0 => self.upload_imported_texture(ctx, tex, is_colour[i], &mut staged),
+                    _ => current,
+                }
+            };
+            gpu.albedo_map = texture(mat.albedo_map, gpu.albedo_map);
+            gpu.normal_map = texture(mat.normal_map, gpu.normal_map);
+            gpu.metallic_roughness_map = texture(mat.metallic_roughness_map, gpu.metallic_roughness_map);
+            gpu.occlusion_map = texture(mat.occlusion_map, gpu.occlusion_map);
+            gpu.emissive_map = texture(mat.emissive_map, gpu.emissive_map);
+            gpu.height_map = texture(mat.height_map, gpu.height_map);
+            self.materials_pool.set_material(&ctx.queue, node.material_id, gpu);
+            // Hold what it now uses, as an upload does, so `release_uploads`
+            // hands each slot back exactly once.
+            let held = self.material_texture_refs.entry(node.material_id).or_default();
+            for slot in [gpu.albedo_map, gpu.emissive_map, gpu.normal_map, gpu.metallic_roughness_map, gpu.occlusion_map, gpu.height_map] {
+                if slot >= 0 && !held.contains(&slot) {
+                    held.push(slot);
+                    *self.imported_texture_refs.entry(slot).or_default() += 1;
+                }
+            }
+        }
+    }
+
     pub fn upload_scene(
         &mut self,
         ctx: &RenderContext,
         scene: &somnium_asset::LoadedScene,
     ) -> Vec<UploadedNode> {
-        let material_ids = self.upload_scene_materials(ctx, scene);
+        self.upload_scene_for(ctx, scene, None)
+    }
+
+    /// [`Self::upload_scene`] with textures only for the parts in `textured`
+    /// (uploaded-node ordinals; `None` is every part). Geometry is uploaded
+    /// for every part either way, so ordinals stay valid.
+    pub fn upload_scene_for(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+    ) -> Vec<UploadedNode> {
+        let material_ids = self.upload_scene_materials_for(ctx, scene, textured);
         // 3. Meshes ----------------------------------------------------------
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
             .meshes

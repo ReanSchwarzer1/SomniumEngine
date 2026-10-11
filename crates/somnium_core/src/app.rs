@@ -2622,8 +2622,29 @@ impl<G: GameApp> Engine<G> {
             let cached = stamp
                 .as_ref()
                 .and_then(|stamp| self.imported_uploads.get(stamp));
+            // Only the parts this level uses get their materials' textures: a
+            // bank of 172 parts of which a level draws five no longer uploads
+            // all 172 parts' maps.
+            let parts: std::collections::HashSet<usize> =
+                entities.iter().map(|(_, ordinal)| *ordinal as usize).collect();
             if let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
                 let uploaded = if let Some(nodes) = cached {
+                    // Uploaded earlier for other parts: give the new ones theirs.
+                    let missing = stamp
+                        .as_ref()
+                        .map(|stamp| self.imported_uploads.untextured(stamp, &parts))
+                        .unwrap_or_default();
+                    if !missing.is_empty() {
+                        match somnium_asset::load_gltf(&resolved) {
+                            Ok(scene) => {
+                                renderer.texture_scene_nodes(ctx, &scene, &nodes, &missing);
+                                if let Some(stamp) = stamp.as_ref() {
+                                    self.imported_uploads.mark_textured(stamp, &missing);
+                                }
+                            }
+                            Err(error) => warn!(%error,%source,"Imported mesh textures could not be added"),
+                        }
+                    }
                     nodes
                 } else {
                     let scene = match somnium_asset::load_gltf(&resolved) {
@@ -2633,9 +2654,9 @@ impl<G: GameApp> Engine<G> {
                             continue;
                         }
                     };
-                    let nodes = renderer.upload_scene(ctx, &scene);
+                    let nodes = renderer.upload_scene_for(ctx, &scene, Some(&parts));
                     if let Some(stamp) = stamp {
-                        self.imported_uploads.insert(stamp, &nodes);
+                        self.imported_uploads.insert(stamp, &nodes, Some(parts));
                     }
                     nodes
                 };
@@ -7536,11 +7557,20 @@ impl<G: GameApp> Engine<G> {
             .as_ref()
             .and_then(|stamp| self.imported_uploads.get(stamp))
         {
+            // Every part is placed, so every part needs its textures.
+            if let Some(stamp) = stamp.as_ref() {
+                let all: std::collections::HashSet<usize> = (0..nodes.len()).collect();
+                let missing = self.imported_uploads.untextured(stamp, &all);
+                if !missing.is_empty() {
+                    renderer.texture_scene_nodes(render_ctx, &scene, &nodes, &missing);
+                    self.imported_uploads.mark_textured(stamp, &missing);
+                }
+            }
             nodes
         } else {
             let nodes = renderer.upload_scene(render_ctx, &scene);
             if let Some(stamp) = stamp {
-                self.imported_uploads.insert(stamp, &nodes);
+                self.imported_uploads.insert(stamp, &nodes, None);
             }
             nodes
         };
