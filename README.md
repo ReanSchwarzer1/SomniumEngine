@@ -46,11 +46,19 @@ The engine is organized around three deliberate commitments:
 > **Status:** actively developed, single-author hobby/research project. Expect
 > rough edges and churn.
 >
-> **Current phase:** [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse),
-> covering runtime UI, animation, asset cooking, world partition, input, audio,
-> localisation, and remaining rendering gaps. All nine tracks contain implementation work; the phase is not complete.
-> This session adds O/P/P2/W/W2/X/Y/AF with native designer controls; see
-> [acceptance evidence](dev%20records/phase%20MORROWIND/MORROWIND-2026-09-09.md).
+> **Current work (October 2026):** the engine is being driven by a first-person
+> horror game built on it, *The Somnus Fracture*. It lives outside this repository.
+> The game needs have brought:
+> - a real-time path tracer and ray-traced reflections;
+> - spot-light cookies and a lens flare;
+> - skinned characters in the ray-traced scene;
+> - cached shadow cascades and BC7 texture memory;
+> - FSR 3 upscaling and frame generation, with runtime frame pacing;
+> - binaural audio and room acoustics;
+> - a PS2-style picture mode.
+>
+> See [what landed](context.md#engine-work-driven-by-the-somnus-fracture-septemberoctober-2026).
+> [MORROWIND](dev%20records/phase_MORROWIND.md) (NetImmerse) remains the open phase for the engine's non-renderer half.
 >
 > **Architecture reference:** [`context.md`](context.md) — living, continuously
 > updated, and the file to read before the source.
@@ -98,6 +106,7 @@ flowchart TB
     UI --> SHADER
     ASSET --> JOBS
 
+    FFX["third_party:<br/>wgpu-ffx (FSR 3 upscale),<br/>wgpu-ffx-fg (frame generation, WGSL)"] --> RENDER
     CORE --> GAMES["examples:<br/>hello_engine, vvardenfell"]
     TOOLS["tools: census, ghostfence,<br/>shadercook, reachability, assetcook"] -.->|"gate the tree"| CORE
 ```
@@ -127,6 +136,14 @@ captures live in [`media/`](media/).
 - **Weather** — coverage → precipitation → wetness on Lagarde's two time constants, porosity as a material channel, rain ripples on water
 - HDR pipeline: `Rgba16Float`, AgX/ACES tone mapping, GTAO, bloom, DoF, motion blur, deferred decals
 - **Anti-aliasing as one authored choice** — Off / FXAA / SMAA 1x / SMAA T2x / TAA / FSR 3, plus SMAA quality presets. (It was three independent booleans until MORROWIND-AC, where the default configuration was measured to run *no* AA pass while showing a checked box.)
+- **FSR 3 frame generation** — AMD's FidelityFX 1.1.4 frame interpolation and optical flow translated to WGSL (`third_party/wgpu-ffx-fg`, 18 passes). It is paced by split submits, and the game UI is drawn fresh over real and generated frames alike. In the debug build, 42 fps becomes 77 presented
+- **Real-time path tracer** — one path a pixel, starting from the raster's own visibility-buffer surface. Next-event estimation for the sun, the moon and resampled lamps; GGX visible-normal sampling; a reprojected temporal pass and an edge-stopping à-trous denoiser. A second mode traces **reflections on glossy surfaces only**, lit by the same lamps, in place of the environment specular
+- **Spot-light cookies** — every spot cone in every lighting path (shading, glass, fog, GI, the path tracer, scene capture) goes through one procedural pattern function: a torch reflector, blinds, window panes, a caged lamp, a grimy fixture
+- **Skinned characters in ray tracing** — posed meshes get their own BLAS, rebuilt within a reach, so characters cast traced lamp shadows and appear in reflections
+- **Cached shadow cascades** — revisions per cascade; a caster's movement under four of a cascade's texels leaves it cached, and posed casters reach only the cascades their shadow can land in
+- **Lens flare** from the threshold-free bloom chain; **scene capture** (a cheap second view for mirrors and screens); a **PS2-style picture** and animated picture shifts
+- **A game's own graphics budget** — per-feature choices laid over every scene in place of a quality tier, plus requests for what no scene authors (path tracing, traced reflections, lens flare) and runtime V-sync and frame-cap changes
+- **Imported textures as BC7**, only for the materials a level draws, with a content-keyed cache outside the repository; scene restore decodes in parallel and pipelines decode with upload
 - **Order-independent transparency** — weighted-blended, authored per scene, with the sorted path retained
 - Water: three-cascade 1024² inverse-FFT ocean spectrum with Jacobian whitecaps, temporal foam, Beer's-law transport, a shoreline SDF and a depth-faded shore. Reflections blend screen-space tracing, half-res hardware ray tracing, and the environment cube
 - **Terrain** — 32-layer material with strongest-four blending, triplanar cliffs, hex tiling and parallax occlusion; nested material **clipmaps**; **virtual texturing** streaming BC7 source pages into a fixed 64 MiB atlas
@@ -146,6 +163,7 @@ captures live in [`media/`](media/).
 - **Animation** — skeletons, four-weight skinning, clips, `Blend1D`/`Blend2D`, masked layers, typed parameters and triggers, sync tracks, state machines with a bounded pose cache
 - **Jobs** — declared priorities and deadlines, cancellation, a budgeted main-thread completion drain, and profiler telemetry. A job whose deadline passed while queued is dropped rather than run
 - Jolt physics integration; Kira audio with buses, attenuation curves, cones, occlusion and Doppler
+- **Binaural audio** through the MIT KEMAR head responses (368 directions), and **room acoustics**: a reverb send that follows how enclosed the listener is, and a muffled track for occluded sounds
 - CPU particle system with GPU billboard instancing
 
 **Editor**
@@ -236,6 +254,10 @@ crates/
 examples/
   hello_engine/         Runnable editor demo
   vvardenfell/          Public-API-only sample — exercises the engine boundary
+third_party/
+  wgpu-ffx/             FSR 3 upscaler binding (AMD SPIR-V)
+  wgpu-ffx-fg/          FSR 3 frame interpolation + optical flow, translated to WGSL
+games/                  Game projects built on the engine — NOT committed
 tools/
   census/               Generates the engine census (GHOSTFENCE row)
   ghostfence/           The gate: seven rows, and a standard-library PNG codec
@@ -334,13 +356,21 @@ flowchart LR
     ECS["ECS draw queue"] --> CULL["cull<br/>CPU frustum, GPU compute,<br/>meshlets, Hi-Z"]
     CULL --> VIS["visibility buffer<br/>instance + triangle id"]
     VIS --> SHADE["fullscreen shading<br/>one invocation per pixel"]
-    SHADOW["shadows<br/>CSM or virtual"] --> SHADE
-    GI["GI<br/>ReSTIR or DDGI"] --> SHADE
-    SHADE --> HDR["HDR"]
+    CULL --> AS["acceleration structures<br/>incl. skinned characters"]
+    SHADOW["shadows<br/>CSM (cached) or virtual"] --> SHADE
+    AS --> GI["GI<br/>ReSTIR or DDGI"]
+    GI --> SHADE
+    AS --> PT["path tracer<br/>full light or reflections"]
+    VIS --> VEL["velocity"]
+    VEL --> PT
+    PT --> SHADE
+    SHADE --> HDR["HDR + fog"]
     HDR --> WATER["water and transparency"]
-    WATER --> POST["post, AA, tone map"]
+    WATER --> AA["TAA or FSR 3"]
+    AA --> POST["bloom, lens flare,<br/>tone map, grade"]
     POST --> UIP["game UI, then editor shell"]
-    UIP --> OUT["present"]
+    UIP --> FG["FSR 3 frame generation<br/>(optional)"]
+    FG --> OUT["present"]
 ```
 
 Measured on the default Coastal view at 1920x1032, the shading pass reports
