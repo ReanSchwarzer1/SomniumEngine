@@ -962,6 +962,12 @@ pub struct UiManager {
     inspector_handles: ToolHandles,
     // Editor event queue drained by app.rs each frame
     editor_events: VecDeque<EditorEvent>,
+    /// A game's own menu is up and wants the pointer free during play (a title screen); and whether that changed
+    /// since the app last looked.
+    game_cursor_free: bool,
+    game_cursor_changed: bool,
+    /// The game draws its own pointer over its menus: the OS one is hidden whenever it is free.
+    game_cursor_drawn: bool,
     selected_entity: Option<somnium_ecs::Entity>,
     next_property_gesture: u64,
     // Viewport area handle — mouse events here pass through to the game
@@ -1787,6 +1793,9 @@ impl UiManager {
             command_history: crate::commands::CommandHistory::load(),
             inspector_handles: layout.inspector_handles,
             editor_events: VecDeque::new(),
+            game_cursor_free: false,
+            game_cursor_changed: false,
+            game_cursor_drawn: false,
             selected_entity: None,
             next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
@@ -5629,6 +5638,13 @@ impl UiManager {
         self.float_panel_at(drag.kind, cursor);
     }
 
+    /// Whether an asset (or an external file) is being dragged: the only time
+    /// the viewport's drop target is read (`refresh_drop_acceptance`).
+    #[must_use]
+    pub fn asset_drag_in_progress(&self) -> bool {
+        self.native_ui.drag_payload().is_some()
+    }
+
     /// Whether a header drag is far enough along to be showing feedback.
     #[must_use]
     pub fn panel_drag_armed(&self) -> bool {
@@ -6536,6 +6552,39 @@ impl UiManager {
     /// Drain one EditorEvent per call; returns None when queue is empty.
     pub fn poll_editor_event(&mut self) -> Option<EditorEvent> {
         self.editor_events.pop_front()
+    }
+
+    /// A game's menu is up during play and wants the pointer free and visible (a live title screen); false hands it
+    /// back to the game's view. Set every frame or on change; the app re-syncs the capture when it changes.
+    pub fn set_game_cursor_free(&mut self, free: bool) {
+        if self.game_cursor_free != free {
+            self.game_cursor_free = free;
+            self.game_cursor_changed = true;
+        }
+    }
+
+    /// Whether a game's menu wants the pointer free.
+    pub fn game_cursor_free(&self) -> bool {
+        self.game_cursor_free
+    }
+
+    /// The game draws its own pointer over its menus (true): the OS pointer is hidden whenever it is not captured,
+    /// so only one is seen. Set every frame or on change; the app re-syncs when it changes.
+    pub fn set_game_cursor_drawn(&mut self, drawn: bool) {
+        if self.game_cursor_drawn != drawn {
+            self.game_cursor_drawn = drawn;
+            self.game_cursor_changed = true;
+        }
+    }
+
+    /// Whether the game draws its own pointer.
+    pub fn game_cursor_drawn(&self) -> bool {
+        self.game_cursor_drawn
+    }
+
+    /// Whether that changed since the last call (the app's cue to re-sync the capture).
+    pub fn take_game_cursor_changed(&mut self) -> bool {
+        std::mem::take(&mut self.game_cursor_changed)
     }
 
     /// Queue a game-owned scene load through the same loader as File/Open.

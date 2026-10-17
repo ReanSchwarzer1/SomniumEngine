@@ -35,6 +35,13 @@ exr          = { workspace = true }
 # AMD FSR 3 temporal upscaler (MIT). Shaders are precompiled SPIR-V in
 # wgpu-ffx-shaders-spv — no glslc at build time.
 wgpu-ffx     = { path = "../../third_party/wgpu-ffx" }
+# AMD FSR 3 frame interpolation and optical flow (MIT), translated to WGSL
+# (17 Oct 2026): no shader compiler needed, validated by naga like ours.
+wgpu-ffx-fg  = { path = "../../third_party/wgpu-ffx-fg" }
+# BC7 encoder: precompiled ISPC kernels (Traverse Research fork of Graham
+# Wihlidal's intel_tex). Imported glTF textures are compressed at first load and
+# cached (`imported_bc.rs`); `examples/encode_terrain_bc7.rs` uses it offline.
+intel_tex_2 = "0.5.0"
 
 [dev-dependencies]
 # `tests/shaders_validate.rs` uses the `naga` above, which MORROWIND-C promoted
@@ -42,8 +49,3 @@ wgpu-ffx     = { path = "../../third_party/wgpu-ffx" }
 # how the test ends up validating with a different front end from the one that
 # compiles the shaders — which is exactly what happened between MORROWIND-A2 and
 # MORROWIND-C, and it hid a real wgpu 30 incompatibility for a whole sub-phase.
-#
-# Offline BC7 encoder for `examples/encode_terrain_bc7.rs`. Precompiled ISPC
-# kernels (Traverse Research fork of Graham Wihlidal's intel_tex). Not linked
-# into the engine binary.
-intel_tex_2 = "0.5.0"

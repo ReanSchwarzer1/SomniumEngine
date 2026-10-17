@@ -189,6 +189,33 @@ pub fn aimed_anchor(eye: Vec3, forward: Vec3, at: Vec3) -> Option<Vec3> {
     ((at - eye).normalize_or_zero().dot(forward) > 0.9).then_some(at)
 }
 
+/// A physical hand contact resolved on an authored work surface.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkContact {
+    /// Actual world-space contact, never a shortened proxy for a remote surface.
+    pub position: Vec3,
+    /// Outward world-space surface normal.
+    pub normal: Vec3,
+    /// Optional hand/shoulder origin whose path to the surface must also be clear.
+    pub probe_origin: Option<Vec3>,
+    /// Clearance for the surface's own collision thickness, in metres.
+    pub occlusion_tolerance: f32,
+}
+impl WorkContact {
+    /// Preserve the existing authored anchor and collision tolerance.
+    pub fn authored(work: &WorkTarget, matrix: Mat4) -> Option<Self> {
+        if !matrix.is_finite() || matrix.determinant().abs() < 1e-8 {
+            return None;
+        }
+        Some(Self {
+            position: matrix.transform_point3(work.anchor),
+            normal: matrix.inverse().transpose().transform_vector3(Vec3::Z).try_normalize()?,
+            probe_origin: None,
+            occlusion_tolerance: 0.12,
+        })
+    }
+}
+
 /// Select a visible work surface separately from the hand contact. Both points
 /// must remain within authored reach and unobstructed; rig eligibility still
 /// tests the actual anchor. Existing callers retain the default anchor cone.
@@ -199,7 +226,24 @@ pub fn update_with_contact_and_aim(
     held: bool,
     flame: bool,
     hands_free: bool,
+    contact_eligible: impl FnMut(u32, Vec3, Vec3) -> bool,
+    aim: impl FnMut(&World, Entity, &WorkTarget, Mat4, Vec3, Vec3) -> Option<Vec3>,
+) -> WorkFrame {
+    update_with_resolved_contact_and_aim(ctx, eye, forward, held, flame, hands_free,
+        contact_eligible, |_, _, work, matrix| WorkContact::authored(work, matrix), aim)
+}
+
+/// Resolve a contact on a large surface while retaining physical reach, occlusion,
+/// contact timing and completion ownership. Older callers keep their fixed anchor.
+pub fn update_with_resolved_contact_and_aim(
+    ctx: &mut EngineContext,
+    eye: Vec3,
+    forward: Vec3,
+    held: bool,
+    flame: bool,
+    hands_free: bool,
     mut contact_eligible: impl FnMut(u32, Vec3, Vec3) -> bool,
+    mut contact: impl FnMut(&World, Entity, &WorkTarget, Mat4) -> Option<WorkContact>,
     mut aim: impl FnMut(&World, Entity, &WorkTarget, Mat4, Vec3, Vec3) -> Option<Vec3>,
 ) -> WorkFrame {
     let targets: Vec<_> = ctx
@@ -215,30 +259,36 @@ pub fn update_with_contact_and_aim(
             if !matrix.is_finite() || matrix.determinant() == 0.0 {
                 return None;
             }
-            let normal = matrix
-                .inverse()
-                .transpose()
-                .transform_vector3(Vec3::Z)
-                .try_normalize()?;
+            let contact = contact(ctx.world, e, w, matrix)?;
+            if !contact.position.is_finite() || !contact.occlusion_tolerance.is_finite()
+                || !(0.0..=0.18).contains(&contact.occlusion_tolerance)
+                || contact.probe_origin.is_some_and(|origin| !origin.is_finite())
+            {
+                return None;
+            }
+            let normal = contact.normal.try_normalize()?;
             Some((
                 e,
                 w.clone(),
-                matrix.transform_point3(w.anchor),
+                contact.position,
                 normal,
                 aim(ctx.world, e, w, matrix, eye, forward),
+                contact.occlusion_tolerance,
+                contact.probe_origin,
             ))
         })
         .collect();
     let selected = targets
         .iter()
-        .filter(|(_, w, at, normal, aimed)| {
+        .filter(|(_, w, at, normal, aimed, tolerance, probe_origin)| {
             in_contact_reach(w, eye, *at, *normal, &mut contact_eligible)
                 && aimed.is_some_and(|point| {
                     point.is_finite()
                         && point.distance(eye) <= w.reach
-                        && (point.distance_squared(*at) < 1e-10 || visible(ctx, eye, point))
+                        && (point.distance_squared(*at) < 1e-10 || contact_visible(ctx, eye, point, *tolerance))
                 })
-                && visible(ctx, eye, *at)
+                && contact_visible(ctx, eye, *at, *tolerance)
+                && probe_origin.is_none_or(|origin| contact_visible(ctx, origin, *at, *tolerance))
         })
         .min_by(|a, b| {
             a.2.distance_squared(eye)
@@ -247,12 +297,12 @@ pub fn update_with_contact_and_aim(
         .map(|v| v.0);
     let returning = targets
         .iter()
-        .any(|(e, w, _, _, _)| Some(*e) != selected && w.contact > 0.0);
+        .any(|(e, w, _, _, _, _, _)| Some(*e) != selected && w.contact > 0.0);
     let mut frame = WorkFrame {
         target: selected,
         ..Default::default()
     };
-    for (entity, config, at, normal, _) in targets {
+    for (entity, config, at, normal, _, _, _) in targets {
         let selected = selected == Some(entity);
         let tool = config.kind != 0 || flame;
         let ready = ready_to_work(&config, selected, returning, hands_free, flame);
@@ -310,13 +360,22 @@ fn in_contact_reach(
         && delta.length() <= work.reach
         && contact_eligible(work.kind, at, normal)
 }
-fn visible(ctx: &EngineContext, eye: Vec3, at: Vec3) -> bool {
+/// Physical line of sight to a contact, allowing only the surface's collision skin.
+pub fn contact_visible(ctx: &EngineContext, eye: Vec3, at: Vec3, tolerance: f32) -> bool {
+    contact_visible_in(ctx.physics, eye, at, tolerance)
+}
+/// The same contact probe for physics owners without an editor/game context.
+pub fn contact_visible_in(physics: &somnium_physics::world::PhysicsWorld,
+    eye: Vec3, at: Vec3, tolerance: f32) -> bool
+{
     use somnium_physics::animation::CapsuleSweep;
+    if !eye.is_finite() || !at.is_finite() || !tolerance.is_finite() || !(0.0..=0.18).contains(&tolerance) {
+        return false;
+    }
     let displacement = at - eye;
     let distance = displacement.length();
     distance < 0.03
-        || ctx
-            .physics
+        || physics
             .cast_capsule(CapsuleSweep {
                 position: eye,
                 rotation: Quat::IDENTITY,
@@ -325,11 +384,23 @@ fn visible(ctx: &EngineContext, eye: Vec3, at: Vec3) -> bool {
                 radius: 0.008,
                 ignore_body: None,
             })
-            .is_ok_and(|h| h.is_none_or(|h| h.fraction * distance >= distance - 0.12))
+            .is_ok_and(|h| h.is_none_or(|h| h.fraction * distance >= distance - tolerance))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authored_contact_keeps_anchor_and_inverse_transpose_normal() {
+        let work = WorkTarget { anchor: Vec3::new(0.2, 0.5, 0.12), ..Default::default() };
+        let matrix = Mat4::from_scale_rotation_translation(Vec3::new(2.0, 0.7, 0.4),
+            Quat::from_rotation_y(0.8), Vec3::new(3.0, 1.0, -4.0));
+        let contact = WorkContact::authored(&work, matrix).unwrap();
+        assert_eq!(contact.position, matrix.transform_point3(work.anchor));
+        assert!((contact.normal.length() - 1.0).abs() < 1e-5);
+        assert!(contact.normal.abs_diff_eq(Quat::from_rotation_y(0.8) * Vec3::Z, 1e-5));
+        assert_eq!(contact.occlusion_tolerance, 0.12);
+        assert!(WorkContact::authored(&work, Mat4::ZERO).is_none());
+    }
     #[test]
     fn contextual_readiness_requires_the_tool_and_a_free_hand() {
         let burn = WorkTarget {

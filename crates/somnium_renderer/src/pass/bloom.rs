@@ -11,6 +11,10 @@
 /// and mostly cost bandwidth for a contribution nobody can see.
 const BLOOM_MIPS: u32 = 6;
 
+/// How much of the light reaching the lens comes back as flare at strength 1: a coated lens reflects a fraction of a
+/// percent at each surface, and the ghosts are the light that went through two such reflections.
+const FLARE_SHARE: f32 = 0.012;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BloomParams {
@@ -22,6 +26,7 @@ struct BloomParams {
 pub struct BloomPass {
     downsample: wgpu::RenderPipeline,
     upsample: wgpu::RenderPipeline,
+    flare: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// One uniform per level; they differ in texel size, and a single buffer
@@ -33,6 +38,9 @@ pub struct BloomPass {
     format: wgpu::TextureFormat,
     pub enabled: bool,
     pub intensity: f32,
+    /// The lens flare's strength (`bloom.wgsl` `fs_flare`): ghosts and a halo from bright lights. 0 is none, the
+    /// engine's default; a game's setting turns it on.
+    pub lens_flare: f32,
 }
 
 impl BloomPass {
@@ -128,6 +136,7 @@ impl BloomPass {
         let mut pass = Self {
             downsample: make("fs_downsample", "Bloom downsample", None),
             upsample: make("fs_upsample", "Bloom upsample", Some(additive)),
+            flare: make("fs_flare", "Lens flare", Some(additive)),
             layout,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("Bloom sampler"),
@@ -146,6 +155,7 @@ impl BloomPass {
             format,
             enabled: true,
             intensity: 0.04,
+            lens_flare: 0.0,
         };
         pass.resize(device, width, height);
         pass
@@ -314,6 +324,31 @@ impl BloomPass {
             });
             rpass.set_pipeline(&self.upsample);
             rpass.set_bind_group(0, bind, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+
+        // ── Lens flare ──────────────────────────────────────────────────────
+        // Read from the quarter-size level (already summed with everything coarser, so its ghosts come out soft) and
+        // added onto the top one, which the post pass scales by `intensity`: the strength is divided by it here.
+        if self.lens_flare > 0.0 && self.intensity > 0.0 && self.views.len() > 1 {
+            let (w, h) = self.sizes[1];
+            let (buf, bind) = make_bind(&self.views[1], [1.0 / w as f32, 1.0 / h as f32], FLARE_SHARE * self.lens_flare / self.intensity);
+            self.params.push(buf);
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Lens flare"),
+                multiview_mask: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.views[0],
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.flare);
+            rpass.set_bind_group(0, &bind, &[]);
             rpass.draw(0..3, 0..1);
         }
 

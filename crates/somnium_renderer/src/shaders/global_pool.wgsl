@@ -75,8 +75,9 @@ struct Material {
     // Foliage wind response (`pool.rs` `wind`): bend, flutter; see `wind.wgsl`.
     wind_bend: f32,
     wind_flutter: f32,
-    _wind_pad0: f32,
-    _wind_pad1: f32,
+    // Light under the surface, 0..1 (`pool.rs` `subsurface`): skin; see `shading.wgsl` `skin_scatter`.
+    subsurface: f32,
+    _reserved: f32,
 }
 
 // Phase 11D: view matrix added at offset 128 (Option A — buffer expanded to 208 bytes).

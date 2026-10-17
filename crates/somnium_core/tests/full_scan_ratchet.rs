@@ -22,7 +22,10 @@ const BASELINE: &[(&str, usize)] = &[
     ("crates/somnium_core/src/ai_editor.rs", 4),
     ("crates/somnium_core/src/ai_script.rs", 1),
     ("crates/somnium_core/src/animation_authoring.rs", 1),
-    ("crates/somnium_core/src/app.rs", 30),
+    // 12 Oct 2026: the light, audio and spline gizmos ran a full scan every
+    // frame (now component queries), and the viewport drop probe, which still
+    // walks every entity, now runs only while an asset is being dragged.
+    ("crates/somnium_core/src/app.rs", 28),
     ("crates/somnium_core/src/app_authoring.rs", 1),
     ("crates/somnium_core/src/app_authoring_specialized.rs", 1),
     ("crates/somnium_core/src/app_designer.rs", 1),

@@ -3982,6 +3982,7 @@ dependencies = [
  "tracing",
  "wgpu",
  "wgpu-ffx",
+ "wgpu-ffx-fg",
  "winit",
 ]
 
@@ -5047,6 +5048,16 @@ dependencies = [
  "thiserror 2.0.18",
  "wgpu",
  "wgpu-ffx-shaders-spv",
+]
+
+[[package]]
+name = "wgpu-ffx-fg"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "pollster 0.3.0",
+ "wgpu",
 ]
 
 [[package]]

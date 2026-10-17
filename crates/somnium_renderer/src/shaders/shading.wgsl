@@ -1,3 +1,4 @@
+//!include "spot_cookie.wgsl"
 // MORROWIND-C: composition is declared here rather than assembled by a
 // `format!` of `include_str!` calls at this pass's construction site. The
 // resolver (`somnium_shader`) emits each module once, in this order, and
@@ -17,9 +18,8 @@ enable wgpu_ray_query;
 //!endif
 
 /// Direct practical shadows use the same built scene as indirect transport.
-/// Stable centre visibility uses one ray per contributing light. Reactive
-/// surfaces (including hands) bypass TAA, so per-frame random emitter samples
-/// cannot be denoised there. Finite-source penumbrae need a dedicated filter.
+/// One ray to the lamp's centre, for every lamp whose light here can be seen
+/// (`shadowed_lamp`). Finite-source penumbrae need a dedicated filter.
 fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3<f32>) -> f32 {
     //!if LOCAL_SHADOWS
     if (cluster_params.shading_mode & 16u) != 0u {
@@ -39,6 +39,126 @@ fn practical_visibility(p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3
     }
     //!endif
     return 1.0;
+}
+
+/// A lamp's light at `p`, shadowed, with no ray for light too faint to see. NaN light is dropped too. 1e-7 is 2e-5
+/// on screen at the darkest exposure (EV100 -8), far under one 8-bit step.
+fn shadowed_lamp(lit: vec3<f32>, p: vec3<f32>, geometric_normal: vec3<f32>, emitter: vec3<f32>) -> vec3<f32> {
+    if !(dot(lit, vec3<f32>(0.2126, 0.7152, 0.0722)) > 1.0e-7) {
+        return vec3<f32>(0.0);
+    }
+    return lit * practical_visibility(p, geometric_normal, emitter);
+}
+
+/// One lamp's unshadowed light at `p`, and the point its shadow ray aims at. Zero where it cannot reach: out of
+/// range, outside its cone, behind the surface (a zero BRDF must not pay for a shadow ray). Point and spot lamps on
+/// skin are not here: their ray also answers the skin's scattering, so they keep their own path in the light loop.
+///
+/// A1, 16 October 2026: the light loop used to trace inside each lamp type's own branch (tube, rect, disc, point).
+/// Working out every type's light here and tracing once, after, took the Town's shading from 21.1 to 16.1 ms
+/// (measured, the picture the same; the same rays are traced). A bounded many-light pick (two exact rays and one
+/// reservoir ray) was tried on top and measured no faster: no level has more than four lamps that matter on any
+/// spot. If one ever does, that is the next step (`dev records`, A1).
+struct LampLight {
+    lit: vec3<f32>,
+    at: vec3<f32>,
+}
+
+fn lamp_light(ll: GpuLocalLight, surface: Surface, p: vec3<f32>, strand: vec3<f32>, hair: bool) -> LampLight {
+    var out: LampLight;
+    out.at = ll.position_ws;
+    if ll.light_type == 4u {
+        let axis = normalize(ll.direction_ws);
+        let half_len = max(ll._pad1, 0.05);
+        let q = closest_on_segment(p, ll.position_ws - axis * half_len, ll.position_ws + axis * half_len);
+        let to_l = q - p;
+        let dist_t = length(to_l);
+        let Lt = to_l / max(dist_t, 1e-4);
+        if dist_t > ll.range || dot(surface.normal, Lt) <= 0.0 {
+            return out;
+        }
+        let angular = atan(max(ll.radius, 0.01) / max(dist_t, 1e-3));
+        let facing = max(length(cross(Lt, axis)), 0.15);
+        out.lit = evaluate_brdf_area(surface, Lt, angular) * ll.color * facing
+            * smooth_distance_attenuation(dist_t, ll.range, ll.radius);
+        out.at = q;
+        return out;
+    }
+
+    let light_vec = ll.position_ws - p;
+    let dist = length(light_vec);
+    if dist > ll.range {
+        return out;
+    }
+    let L = light_vec / dist;
+    if ll.light_type == 2u {
+        let half_x = max(ll._pad1, 0.05);
+        let half_y = max(ll._pad2, 0.05);
+        let irr = ltc_quad_diffuse(p, surface.normal, ll.position_ws, normalize(ll.direction_ws), half_x, half_y);
+        if irr <= 0.0 {
+            return out;
+        }
+        let area = 4.0 * half_x * half_y;
+        let angular = atan(sqrt(area / 3.14159265) / max(dist, 1e-3));
+        out.lit = evaluate_brdf_area_lobe(surface, L, angular) * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+        return out;
+    }
+    if ll.light_type == 3u {
+        let r = max(ll.radius, 0.05);
+        let irr = ltc_disc_diffuse(p, surface.normal, ll.position_ws, normalize(ll.direction_ws), r);
+        if irr <= 0.0 {
+            return out;
+        }
+        let angular = atan(r / max(dist, 1e-3));
+        // Match the area of the inscribed eight-sided integration
+        // polygon so the authored flux stays constant with radius.
+        let area = 2.82842712 * r * r;
+        out.lit = evaluate_brdf_area_lobe(surface, L, angular) * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
+        return out;
+    }
+    var atten_val = smooth_distance_attenuation(dist, ll.range, ll.radius);
+    if ll.light_type == 1u {
+        atten_val *= spot_shape(ll.direction_ws, -L, ll.spot_cos_outer, ll.spot_cos_inner, ll._pad2);
+    }
+    if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 {
+        return out;
+    }
+    // Phase 24V: the light's angular radius as seen from here. A 5 cm bulb
+    // one metre away subtends far more than a point, and that is what stops
+    // its highlight being a single pixel on anything polished.
+    let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
+    out.lit = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+    if hair {
+        out.lit += hair_strand(surface, strand, L) * ll.color * atten_val;
+    }
+    return out;
+}
+
+/// Whether light from `emitter` reaches `p` once whatever lies within `reach`
+/// metres of `p` on the way is taken as passed through (skin, `skin_scatter`).
+///
+/// Light enters skin and comes out a centimetre or two away, so the part of a
+/// face just past the shadow edge is lit by what went in on the lit side, and
+/// an ear is lit through. The same ray that shadows a practical answers both
+/// if it starts `reach` along: where the head between `p` and the light is
+/// thinner than that, nothing is left to hit; behind a whole skull there is.
+/// Without ray tracing nothing is known about thickness and the answer is no.
+fn skin_visibility(p: vec3<f32>, emitter: vec3<f32>, reach: f32) -> f32 {
+    //!if LOCAL_SHADOWS
+    if (cluster_params.shading_mode & 16u) != 0u {
+        let delta = emitter - p;
+        let distance = length(delta);
+        if distance > reach + 0.07 {
+            var rq: ray_query;
+            rayQueryInitialize(&rq, local_shadow_accel,
+                RayDesc(0x4u, 0x1u, reach, distance - 0.06, p, delta / distance));
+            rayQueryProceed(&rq);
+            return select(0.0, 1.0, rayQueryGetCommittedIntersection(&rq).kind == RAY_QUERY_INTERSECTION_NONE);
+        }
+        return 1.0;
+    }
+    //!endif
+    return 0.0;
 }
 
 // Somnium Engine — Visibility Buffer Shading Pass
@@ -228,13 +348,14 @@ const PAINT_ROT = mat3x3<f32>(
 const PAINT_SLOT_HEADER: u32 = 20u;
 const PAINT_NO_LAYER: u32 = 0xffffffffu;
 
-/// This instance's paint slot, or 0 when it is unpainted.
+/// This instance's paint slot, or 0 when it is unpainted. The top bit of the word is not the slot's: it keeps the draw
+/// out of the retro picture (`vertex_paint.rs` `OUTSIDE_RETRO`, read by the post-process).
 fn vertex_paint_slot(instance_id: u32) -> u32 {
     let table = vertex_paint[0];
     if table == 0u {
         return 0u;
     }
-    return vertex_paint[table + instance_id];
+    return vertex_paint[table + instance_id] & 0x7fffffffu;
 }
 
 /// The interpolated vertex-paint mask of this pixel's triangle.
@@ -858,6 +979,30 @@ fn vis_barycentric(
     return bary / (bary.x + bary.y + bary.z);
 }
 
+/// Barycentrics of where the camera ray through `sample_ndc` meets the plane of the triangle `p0 p1 p2` (world
+/// space). For gradients: `vis_barycentric` divides each vertex by its w, and a long triangle with a vertex near or
+/// behind the eye (a 7.9 m corridor wall panel reaching past the player, 16 Oct) puts that vertex at an enormous NDC,
+/// so the difference between two neighbouring pixels' barycentrics was rounding noise: a mip chosen afresh per row
+/// and column, a plaid on the Office's entry wall. The ray form has no such division. `None` when the ray runs
+/// along the plane.
+fn ray_barycentric(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, sample_ndc: vec2<f32>) -> vec4<f32> {
+    let near = view.inv_view_proj * vec4<f32>(sample_ndc, 0.0, 1.0);
+    let far = view.inv_view_proj * vec4<f32>(sample_ndc, 1.0, 1.0);
+    let origin = near.xyz / near.w;
+    let dir = far.xyz / far.w - origin;
+    let e1 = p1 - p0;
+    let e2 = p2 - p0;
+    let pv = cross(dir, e2);
+    let det = dot(e1, pv);
+    if abs(det) < 1e-20 {
+        return vec4<f32>(0.0);
+    }
+    let tv = origin - p0;
+    let u = dot(tv, pv) / det;
+    let v = dot(dir, cross(tv, e1)) / det;
+    return vec4<f32>(1.0 - u - v, u, v, 1.0);
+}
+
 /// Analytic fit to the split-sum BRDF integration term (Karis' mobile
 /// approximation, via Lazarov). Avoids shipping and binding a 2-D LUT for what
 /// is a smooth two-parameter function.
@@ -902,6 +1047,72 @@ fn transmitted_light(
     let scatter = mix(0.35, 1.0, view_scatter);
 
     return light_color * surface.albedo * transmission * back_wrap * scatter;
+}
+
+/// What scattering under skin adds to a direct light's diffuse term
+/// (`Material.subsurface`, glTF extras `somnium_subsurface`).
+///
+/// A real subsurface solve gathers light over an area of the surface; this
+/// pass shades one point. What that solve looks like at one point is known,
+/// though (Penner's pre-integrated skin): the light does not stop at the
+/// shadow edge but runs past it, red furthest, because red travels furthest
+/// through flesh. So the diffuse term is wrapped round the terminator by a
+/// different amount for each colour, and this returns the wrapped term less
+/// the plain one: nothing where the surface faces the light, a reddening band
+/// at and past the edge. Unshadowed; the caller asks `skin_visibility`.
+fn skin_scatter(surface: Surface, light_dir: vec3<f32>, scatter: f32) -> vec3<f32> {
+    let n_dot_l = dot(surface.normal, light_dir);
+    let wrap = vec3<f32>(0.60, 0.24, 0.12) * scatter;
+    let wrapped = saturate((vec3<f32>(n_dot_l) + wrap) / (vec3<f32>(1.0) + wrap));
+    let kd = (vec3<f32>(1.0) - surface.f0) * (1.0 - surface.metallic);
+    return surface.albedo * kd * (wrapped - vec3<f32>(saturate(n_dot_l))) * (0.8 / 3.14159265);
+}
+
+/// The highlight that runs across hair (`Material.flags & 16u`, glTF extras
+/// `somnium_hair`).
+///
+/// Hair is drawn as cards, and a card's normal says nothing of the thousand
+/// cylinders painted on it. What a head of hair is known by is the band of
+/// light that lies across the strands, and that depends on the strand's
+/// direction, not on a surface normal (Kajiya and Kay). `strand` is that
+/// direction: the card's `uv.y`, root to tip. Two bands, as hair has
+/// (Marschner): a narrow white one off the strand's surface, shifted toward
+/// the tip, and a wider one in the hair's own colour from light that went
+/// through the strand, shifted toward the root. Added to the card's ordinary
+/// shading; unshadowed, like every lobe here.
+fn hair_strand(surface: Surface, strand: vec3<f32>, light_dir: vec3<f32>) -> vec3<f32> {
+    let h = normalize(light_dir + surface.view_dir);
+    let off_surface = normalize(strand + surface.normal * 0.10);
+    let through = normalize(strand - surface.normal * 0.22);
+    let a = dot(off_surface, h);
+    let b = dot(through, h);
+    let white = pow(sqrt(max(1.0 - a * a, 0.0)), 110.0);
+    let coloured = pow(sqrt(max(1.0 - b * b, 0.0)), 40.0);
+    // Hair is lit further round than a wall is: light gets in between strands.
+    let lit = saturate(dot(surface.normal, light_dir) * 0.65 + 0.35);
+    return (vec3<f32>(0.020) * white + surface.albedo * 0.45 * coloured) * lit;
+}
+
+/// The light an eye always has in it (`Material.flags & 8u`, glTF extras
+/// `somnium_eye`).
+///
+/// A cornea is a wet, nearly perfect mirror, and a face reads as alive by the
+/// one small bright reflection in each eye. Under the lamps a room actually
+/// has, which are overhead, that reflection falls on the upper lid or nowhere,
+/// and the eyes go dead: which is why a film keeps a small lamp by the lens
+/// for nothing but this. So does this: a lamp that is not in the scene, up
+/// and to the side of the viewer, seen only as its reflection in an eye, and
+/// as bright as the eye's own surroundings (`surround`, the ambient light
+/// leaving it) so that it is a glint in a lit room and nearly nothing in a
+/// dark one.
+fn eye_glint(surface: Surface, surround: vec3<f32>) -> vec3<f32> {
+    let side = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), surface.view_dir) + vec3<f32>(1.0e-4, 0.0, 0.0));
+    // A little above and beside the line of sight: higher, and its reflection falls under the upper lid.
+    let lamp = normalize(surface.view_dir * 0.92 + vec3<f32>(0.0, 0.16, 0.0) + side * 0.30);
+    let h = normalize(lamp + surface.view_dir);
+    let n_dot_h = saturate(dot(surface.normal, h));
+    let level = dot(surround, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(1.0, 0.98, 0.95) * pow(n_dot_h, 350.0) * (level * 40.0 + 0.01);
 }
 
 /// Specular occlusion from baked AO (Lagarde & de Rousiers).
@@ -2067,6 +2278,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let target_ndc = (screen_uv * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
     var bary = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc);
+    // In world space where screen space loses it: a vertex within a metre of the eye's plane, or behind it
+    // (`ray_barycentric`). Its neighbours below follow.
+    let near_eye = min(c0.w, min(c1.w, c2.w)) < 1.0;
+    if near_eye {
+        let rc = ray_barycentric(p0, p1, p2, target_ndc);
+        if rc.w > 0.0 {
+            bary = rc.xyz;
+        }
+    }
 
     let uv0 = vec2<f32>(v0.u, v0.v);
     let uv1 = vec2<f32>(v1.u, v1.v);
@@ -2074,10 +2294,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
     var paint_slot = 0u;
     var paint_mask = vec4<f32>(0.0);
+    // A slot whose masks are the surface's light, baked into its vertices as a PS2 game baked it
+    // (`VertexPaintComponent::baked_light`, slot word 16 bit 16): 0.5 is the texture as painted, 1 twice as bright.
+    var baked = false;
+    var baked_light = vec3<f32>(0.0);
     if material.terrain_index < 0 {
         paint_slot = vertex_paint_slot(instance_id);
         if paint_slot != 0u {
-            paint_mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary);
+            baked = ((vertex_paint[paint_slot + 16u] >> 16u) & 1u) != 0u;
+            let mask = vertex_paint_mask(paint_slot, i0, i1, i2, bary);
+            if baked {
+                baked_light = mask.rgb * 2.0;
+            } else {
+                // Header word 6 fades all paint toward the bare material (`VertexPaintPool::fade`).
+                paint_mask = mask * (1.0 - saturate(bitcast<f32>(vertex_paint[6])));
+            }
         }
     }
 
@@ -2095,8 +2326,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let analytic_grad = (cluster_params.shading_mode & 8u) != 0u;
     if analytic_grad {
         let pixel = 1.0 / vec2<f32>(textureDimensions(vis_buffer));
-        let bary_x = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
-        let bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
+        var bary_x = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
+        var bary_y = vis_barycentric(ndc0, ndc1, ndc2, c0.w, c1.w, c2.w, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
+        if near_eye {
+            let rx = ray_barycentric(p0, p1, p2, target_ndc + vec2<f32>(2.0 * pixel.x, 0.0));
+            let ry = ray_barycentric(p0, p1, p2, target_ndc + vec2<f32>(0.0, -2.0 * pixel.y));
+            if rx.w > 0.0 && ry.w > 0.0 {
+                bary_x = rx.xyz;
+                bary_y = ry.xyz;
+            }
+        }
         uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
         uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
         // World-position gradients for the world-projected paint layers,
@@ -2105,6 +2344,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let here = p0 * bary.x + p1 * bary.y + p2 * bary.z;
             paint_pos_ddx = (p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here;
             paint_pos_ddy = (p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here;
+        }
+        // The PS2 picture (`retro`, bit 512): textures two mip levels coarser than the screen asks for (its 128 to 256
+        // texel maps), a whole level with no blend to the next (the bands show, as they did: it filtered within one
+        // level), the same along both screen axes (no anisotropic filtering then). Sized by the albedo map.
+        // On the way there (bits 16 to 23: how far in) they coarsen gradually and only snap to whole levels at the end.
+        // A surface with baked light is a PS2 level's own (its maps already 64 to 256 texels): whole levels, not coarser.
+        if (cluster_params.shading_mode & 512u) != 0u && material.albedo_map >= 0 {
+            let amount = f32((cluster_params.shading_mode >> 16u) & 255u) / 255.0;
+            let coarser = select(2.0, 0.0, baked);
+            let size = vec2<f32>(textureDimensions(textures[material.albedo_map], 0));
+            let along_x = length(uv_ddx * size);
+            let along_y = length(uv_ddy * size);
+            let footprint = max(along_x, along_y);
+            if footprint > 0.0 && min(along_x, along_y) > 0.0 {
+                var level = log2(footprint) + coarser * amount;
+                if amount > 0.99 {
+                    level = round(log2(footprint)) + coarser;
+                }
+                let texels = exp2(max(level, 0.0));
+                uv_ddx *= mix(along_x, texels, amount) / along_x;
+                uv_ddy *= mix(along_y, texels, amount) / along_y;
+            }
         }
     }
 
@@ -2281,6 +2542,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // region's offset and would pick the finest mip along the seams.
     let detiled = material.detile > 0.5 && analytic_grad;
     var dt = detile_uv(uv);
+    // Skin's scatter, 0 for everything else. The albedo texture's alpha
+    // scales it per texel (an ear more than a brow).
+    var skin = material.subsurface;
     if material.albedo_map >= 0 {
         if detiled {
             let a = textureSampleGrad(textures[material.albedo_map], default_sampler, dt.a, uv_ddx, uv_ddy).rgb;
@@ -2288,13 +2552,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             dt.t = smoothstep(0.2, 0.8, dt.f - 0.1 * dot(a - b, vec3<f32>(1.0)));
             surface.albedo *= mix(a, b, dt.t);
         } else if analytic_grad {
-            surface.albedo *= textureSampleGrad(
-                textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy).rgb;
+            let texel = textureSampleGrad(
+                textures[material.albedo_map], default_sampler, uv, uv_ddx, uv_ddy);
+            surface.albedo *= texel.rgb;
+            skin *= texel.a;
         } else {
-            surface.albedo *= textureSample(textures[material.albedo_map], default_sampler, uv).rgb;
+            let texel = textureSample(textures[material.albedo_map], default_sampler, uv);
+            surface.albedo *= texel.rgb;
+            skin *= texel.a;
         }
     }
     surface.albedo *= interior_shade;
+    // Foliage remembered alive (`VertexPaintPool::green`, header word 7): withered leaf colour is
+    // pulled to a living green at the leaf's own brightness.
+    if (material.flags & 2u) != 0u {
+        let living = saturate(bitcast<f32>(vertex_paint[7]));
+        if living > 0.0 {
+            let luma = dot(surface.albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
+            surface.albedo = mix(surface.albedo, vec3<f32>(0.36, 0.86, 0.19) * (luma * 1.6), living);
+        }
+    }
 
     surface.occlusion = 1.0;
     surface.roughness = max(material.roughness, 0.05);
@@ -2343,7 +2620,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var normal_variance = 0.0;
-    if material.normal_map >= 0 && tbn_valid {
+    // The PS2 picture has no per-pixel normal mapping: its surfaces are their geometry and their texture.
+    if material.normal_map >= 0 && tbn_valid && ((cluster_params.shading_mode >> 16u) & 255u) < 128u {
         let nm_sample = sample_material_map(material.normal_map, uv, dt, detiled, uv_ddx, uv_ddy,
             analytic_grad).rgb;
         let source_normal = nm_sample * 2.0 - vec3<f32>(1.0);
@@ -2376,8 +2654,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let up_axis = instance.model[1].xyz;
         let local_height = dot(hit_point - instance.model[3].xyz, up_axis)
             / max(dot(up_axis, up_axis), 1.0e-6);
-        apply_weathering(&surface, material.weathering, hit_point, geo_normal, local_height,
-            micro_occlusion);
+        // The same fade that takes paint back takes the authored weathering back with it.
+        apply_weathering(&surface, material.weathering * (1.0 - saturate(bitcast<f32>(vertex_paint[6]))),
+            hit_point, geo_normal, local_height, micro_occlusion);
     }
 
     // ── Foliage: curved card normals (Phase 17E, re-gated in TSUSHIMA-J) ─────
@@ -3008,8 +3287,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let Ll = lv / d;
                 var atten = smooth_distance_attenuation(d, ll.range, ll.radius);
                 if ll.light_type == 1u {
-                    let ca = dot(-Ll, normalize(ll.direction_ws));
-                    atten *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, ca);
+                    atten *= spot_shape(ll.direction_ws, -Ll, ll.spot_cos_outer, ll.spot_cos_inner, ll._pad2);
                 }
 
                 let local_NdotL = max(dot(surface.normal, Ll), 0.0);
@@ -3070,10 +3348,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if sun_illuminance > 1.0e-6 {
             transmitted = transmitted_light(
                 surface, light_dir, light_color, material.transmission) * shadow_factor;
+            if skin > 0.0 {
+                // Facing the sun the ordinary shadow term stands; at and past
+                // the edge the surface shadows itself, and how much of itself
+                // is in the way is the question.
+                var through = shadow_factor;
+                if dot(surface.normal, light_dir) < 0.2 {
+                    through = skin_visibility(hit_point, hit_point + light_dir * 400.0, 0.02 * skin);
+                }
+                transmitted += skin_scatter(surface, light_dir, skin) * light_color * through;
+            }
+            if (material.flags & 16u) != 0u {
+                transmitted += hair_strand(surface, bitangent, light_dir) * light_color * shadow_factor;
+            }
         }
 
         let gi_texel = gi_upsample(in.clip_pos.xy, length(hit_point - view.camera_pos));
         var ambient = evaluate_ibl(surface, gi_texel);
+        if (material.flags & 8u) != 0u {
+            ambient += eye_glint(surface, ambient);
+        }
         let extra_flags = bitcast<u32>(lighting_extra.x);
         let vol_uvw = world_volume_uvw(hit_point);
         let vol_sample = textureSampleLevel(world_volume, volumetric_sampler, vol_uvw, 0.0);
@@ -3134,84 +3428,47 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let froxel_idx = tile.x + tile.y * grid_w + depth_slice_pbr * grid_w * grid_h;
 
             let cluster_data = cluster_offsets[froxel_idx];
+            let hair = (material.flags & 16u) != 0u;
             for (var i = 0u; i < cluster_data.count; i++) {
                 let light_idx = light_index_list[cluster_data.offset + i];
                 let ll = local_lights[light_idx];
                 if max(ll.color.x, max(ll.color.y, ll.color.z)) <= 0.0 { continue; }
 
-                if ll.light_type == 4u {
-                    let axis = normalize(ll.direction_ws);
-                    let half_len = max(ll._pad1, 0.05);
-                    let a = ll.position_ws - axis * half_len;
-                    let b = ll.position_ws + axis * half_len;
-                    let q = closest_on_segment(hit_point, a, b);
-                    let to_l = q - hit_point;
-                    let dist_t = length(to_l);
-                    if dist_t > ll.range { continue; }
-                    let Lt = to_l / max(dist_t, 1e-4);
-                    if dot(surface.normal, Lt) <= 0.0 { continue; } // zero BRDF: no shadow ray
-                    let r = max(ll.radius, 0.01);
-                    let angular = atan(r / max(dist_t, 1e-3));
-                    let facing = max(length(cross(Lt, axis)), 0.15);
-                    let lit_t = evaluate_brdf_area(surface, Lt, angular) * ll.color * facing
-                        * smooth_distance_attenuation(dist_t, ll.range, ll.radius);
-                    local_light_contrib += lit_t * practical_visibility(hit_point, shadow_normal, q);
+                if skin > 0.0 && ll.light_type != 2u && ll.light_type != 3u && ll.light_type != 4u {
+                    // Skin keeps an exact ray per point or spot lamp: the same ray answers its scattering.
+                    let light_vec = ll.position_ws - hit_point;
+                    let dist = length(light_vec);
+                    if dist > ll.range { continue; }
+                    let L = light_vec / dist;
+                    var atten_val = smooth_distance_attenuation(dist, ll.range, ll.radius);
+                    if ll.light_type == 1u {
+                        atten_val *= spot_shape(ll.direction_ws, -L, ll.spot_cos_outer, ll.spot_cos_inner, ll._pad2);
+                    }
+                    if atten_val <= 0.0 { continue; }
+                    let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
+                    let facing = dot(surface.normal, L);
+                    var reaches = 0.0;
+                    if facing > 0.0 {
+                        var lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
+                        if hair {
+                            lit_p += hair_strand(surface, bitangent, L) * ll.color * atten_val;
+                        }
+                        reaches = practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                        local_light_contrib += lit_p * reaches;
+                    }
+                    if facing > -0.6 * skin {
+                        // Skin: the light runs on past the shadow edge. See
+                        // `skin_scatter`; rect, disc and tube lights do not have it.
+                        if facing < 0.2 {
+                            reaches = skin_visibility(hit_point, ll.position_ws, 0.02 * skin);
+                        }
+                        local_light_contrib += skin_scatter(surface, L, skin) * ll.color * atten_val * reaches;
+                    }
                     continue;
                 }
 
-                let light_vec = ll.position_ws - hit_point;
-                let dist = length(light_vec);
-                if dist > ll.range { continue; }
-
-                let L = light_vec / dist;
-                var atten_val = smooth_distance_attenuation(dist, ll.range, ll.radius);
-                if ll.light_type == 2u {
-                    let half_x = max(ll._pad1, 0.05);
-                    let half_y = max(ll._pad2, 0.05);
-                    let ln = normalize(ll.direction_ws);
-                    let irr = ltc_quad_diffuse(
-                        hit_point, surface.normal, ll.position_ws, ln, half_x, half_y);
-                    if irr <= 0.0 { continue; }
-                    let area = 4.0 * half_x * half_y;
-                    let eq_r = sqrt(area / 3.14159265);
-                    let angular = atan(eq_r / max(dist, 1e-3));
-                    let lit_q = evaluate_brdf_area_lobe(surface, L, angular)
-                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
-                    local_light_contrib += lit_q * practical_visibility(hit_point, shadow_normal, ll.position_ws);
-                    continue;
-                }
-                if ll.light_type == 3u {
-                    let r = max(ll.radius, 0.05);
-                    let ln = normalize(ll.direction_ws);
-                    let irr = ltc_disc_diffuse(
-                        hit_point, surface.normal, ll.position_ws, ln, r);
-                    if irr <= 0.0 { continue; }
-                    let angular = atan(r / max(dist, 1e-3));
-                    // Match the area of the inscribed eight-sided integration
-                    // polygon so the authored flux stays constant with radius.
-                    let area = 2.82842712 * r * r;
-                    let lit_d = evaluate_brdf_area_lobe(surface, L, angular)
-                        * ll.color * area_irradiance_scale(irr, area, dist, ll.range);
-                    local_light_contrib += lit_d * practical_visibility(hit_point, shadow_normal, ll.position_ws);
-                    continue;
-                }
-                if ll.light_type == 1u {
-                    let cos_angle = dot(-L, normalize(ll.direction_ws));
-                    atten_val *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, cos_angle);
-                }
-
-                // Phase 24V: the light's angular radius as seen from here.
-                // A 5 cm bulb one metre away subtends far more than a point,
-                // and that is what stops its highlight being a single pixel on
-                // anything polished.
-                let angular = atan(max(ll.radius, 0.0) / max(dist, 1e-3));
-                // evaluate_brdf_area carries saturate(n.l): a light behind the
-                // surface, or outside its cone, adds exactly nothing, so it must
-                // not pay for a shadow ray. With dozens of practicals in reach
-                // (the lit interiors) those rays were most of the shading pass.
-                if atten_val <= 0.0 || dot(surface.normal, L) <= 0.0 { continue; }
-                let lit_p = evaluate_brdf_area(surface, L, angular) * ll.color * atten_val;
-                local_light_contrib += lit_p * practical_visibility(hit_point, shadow_normal, ll.position_ws);
+                let lamp = lamp_light(ll, surface, hit_point, bitangent, hair);
+                local_light_contrib += shadowed_lamp(lamp.lit, hit_point, shadow_normal, lamp.at);
             }
         }
 
@@ -3230,6 +3487,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         emissive *= interior_shade;
 
         result = direct_light + transmitted + local_light_contrib + ambient + emissive;
+        if baked {
+            // The PS2's way: the light baked into the vertices, the lamps that move (a lighter), what glows; no sun,
+            // sky, bounce or traced light. Then its fog: linear with distance toward one colour (header words 8 to 10,
+            // `VertexPaintPool::fog`), the end of the drawn world.
+            result = surface.albedo * baked_light + local_light_contrib + emissive;
+            let fog_start = bitcast<f32>(vertex_paint[8]);
+            let fog_end = bitcast<f32>(vertex_paint[9]);
+            if fog_end > fog_start {
+                let packed = vertex_paint[10];
+                let fog_colour = vec3<f32>(f32(packed & 1023u), f32((packed >> 10u) & 1023u), f32((packed >> 20u) & 1023u)) / 1023.0;
+                let far = saturate((distance(hit_point, view.camera_pos) - fog_start) / (fog_end - fog_start));
+                // What glows (lamp glass, a lit window: baked at twice as painted) carries through the fog as a light
+                // does, faint at the end of the drawn world, so a lamp's halo has its lamp.
+                let glow = saturate(max(baked_light.r, max(baked_light.g, baked_light.b)) - 1.0);
+                result = mix(result, fog_colour, far * (1.0 - 0.75 * glow));
+            }
+        }
 
         // 7 = which term actually lights this fragment, in hue.
         //   green = sun dominates, red = ambient dominates
@@ -3281,6 +3555,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The sky is not touched: it returned far above, and its radiance already
     // came from a full march through the same atmosphere. Applying this to it
     // as well would count the air twice.
+    // The path tracer's picture (pass/path_tracer.rs) in place of the raster's light, before the fog, so the fog
+    // still lies over it (17 Oct: composited after, it wiped the fog out of every traced frame).
+    if (bitcast<u32>(lighting_extra.x) & 4u) != 0u {
+        let traced = textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0);
+        if traced.a > 0.01 {
+            result = traced.rgb;
+        }
+    }
+
     if volumetric_range.x > 0.0 {
         let dist = length(hit_point - view.camera_pos);
         let slices = f32(textureDimensions(volumetrics).z);
@@ -3342,16 +3625,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0).rgb, 1.0);
     }
 
-    if (bitcast<u32>(lighting_extra.x) & 4u) != 0u {
-        let traced = textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0);
-        if traced.a > 0.01 {
-            result = traced.rgb;
-        }
-    }
-
     // Clamp below Rgba16Float's finite limit of 65 504. A GGX highlight on a
     // near-mirror surface under a 100 000 lux sun overshoots it, and the
     // resulting Inf poisons anything downstream that divides — TAA's tone-map
     // step turns it into NaN. Prevented here as well as guarded there.
-    return vec4<f32>(min(result, vec3<f32>(60000.0)), 1.0);
+    // A NaN must be dropped before the clamp, as bloom does: GPUs give `min`'s
+    // other operand for NaN, so `min(NaN, 60000)` left as the brightest value the
+    // format holds, and bloom spread it (16 Oct: the likely cause of an
+    // intermittent white glow on the Town's far ridge at the player start).
+    let finite = select(vec3<f32>(0.0), result, result == result);
+    return vec4<f32>(min(finite, vec3<f32>(60000.0)), 1.0);
 }

@@ -659,6 +659,16 @@ impl RenderContext {
             self.surface.configure(&self.device, &self.config);
         }
     }
+
+    /// Wait for the display's refresh, or present at once (tearing, uncapped). Reconfigures the surface only on a
+    /// change.
+    pub fn set_vsync(&mut self, on: bool) {
+        let mode = if on { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
 }
 
 #[cfg(test)]

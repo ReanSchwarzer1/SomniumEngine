@@ -38,6 +38,12 @@ pub const MAX_BINDLESS_TEXTURES: u32 = 2048;
 pub struct GlobalResourcePool {
     pub layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
+    /// The same layout and buffers with a one-view texture array, for passes
+    /// whose shaders never index `textures` (census, classify, velocity, skin
+    /// scatter). wgpu tracks every view of a bound group for each pass (each
+    /// dispatch, in compute) at `finish`; this one costs one view, not the
+    /// level's 1,500-odd. Its buffers never change, so it is built once.
+    pub lean_bind_group: wgpu::BindGroup,
 
     // Keep the buffers alive
     pub vertex_buffer: wgpu::Buffer,
@@ -56,6 +62,10 @@ pub struct GlobalResourcePool {
     // Storage for views to recreate bind group
     pub texture_views: Vec<wgpu::TextureView>,
     dummy_view: wgpu::TextureView,
+    /// Which slots hold a real texture ([`Self::set_slot`] / [`Self::clear_slot`]).
+    live: Vec<bool>,
+    /// A texture was given the pool's fallback slot (the top one): bind them all.
+    bind_all: bool,
 }
 
 impl GlobalResourcePool {
@@ -297,8 +307,9 @@ impl GlobalResourcePool {
             ],
         });
 
-        Self {
+        let mut pool = Self {
             layout,
+            lean_bind_group: bind_group.clone(),
             bind_group,
             vertex_buffer: vertex_buffer.clone(),
             index_buffer: index_buffer.clone(),
@@ -312,7 +323,52 @@ impl GlobalResourcePool {
             texture_views: (0..MAX_BINDLESS_TEXTURES)
                 .map(|_| dummy_view.clone())
                 .collect(),
+            live: vec![false; MAX_BINDLESS_TEXTURES as usize],
+            bind_all: false,
+        };
+        let dummy = pool.dummy_view.clone();
+        pool.lean_bind_group = pool.rebuild_bind_group(device, &[&dummy]);
+        // Nothing is live yet: bind the one slot rather than all of them.
+        pool.update_textures(device);
+        pool
+    }
+
+    /// Put a texture in a slot (the bind group follows at [`Self::update_textures`]).
+    pub fn set_slot(&mut self, slot: usize, view: wgpu::TextureView) {
+        if let Some(entry) = self.texture_views.get_mut(slot) {
+            *entry = view;
+            self.live[slot] = true;
         }
+    }
+
+    /// Return a slot to the dummy image.
+    pub fn clear_slot(&mut self, slot: usize) {
+        if let Some(entry) = self.texture_views.get_mut(slot) {
+            *entry = self.dummy_view.clone();
+            self.live[slot] = false;
+        }
+    }
+
+    /// A texture now samples the pool's fallback slot, which sits at the top of
+    /// the array: from here on every slot is bound.
+    pub fn bind_every_slot(&mut self) {
+        self.bind_all = true;
+    }
+
+    /// How many slots the bind group carries: up to the highest live one.
+    ///
+    /// wgpu tracks every view of a bound group each time a pass binds it, at
+    /// `CommandEncoder::finish`: about 80 ns a view a bind on this machine. All
+    /// 2,048 slots bound about 40 times a frame cost 6.5-6.9 ms of CPU even in
+    /// a small level (`tests/bindless_finish_cost.rs`). Slots past the highest
+    /// live one are never indexed (materials of released textures are reset to
+    /// -1), and `PARTIALLY_BOUND_BINDING_ARRAY`, a required feature, allows a
+    /// shorter array than the layout's.
+    pub fn bound_len(&self) -> usize {
+        if self.bind_all {
+            return self.texture_views.len();
+        }
+        self.live.iter().rposition(|live| *live).map_or(1, |slot| slot + 1)
     }
 
     fn rebuild_bind_group(
@@ -377,14 +433,14 @@ impl GlobalResourcePool {
     }
 
     pub fn update_textures(&mut self, device: &wgpu::Device) {
-        let views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
+        let views: Vec<&wgpu::TextureView> = self.texture_views[..self.bound_len()].iter().collect();
         self.bind_group = self.rebuild_bind_group(device, &views);
     }
 
     /// Bind group whose listed slots are the dummy view, so a compute dispatch
     /// can write those GPU images as storage without a sampled+storage clash.
     pub fn bind_group_hiding_slots(&self, device: &wgpu::Device, hide: &[u32]) -> wgpu::BindGroup {
-        let mut views: Vec<&wgpu::TextureView> = self.texture_views.iter().collect();
+        let mut views: Vec<&wgpu::TextureView> = self.texture_views[..self.bound_len()].iter().collect();
         for &id in hide {
             let slot = id as usize;
             if slot < views.len() {

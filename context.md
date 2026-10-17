@@ -1,6 +1,7 @@
 # Somnium Engine context
 
-Last verified: 2026-09-09 against the current working tree.
+Last verified: 2026-10-17 against the current working tree (the TSF section and the open issues). Older chapters were
+verified on 2026-09-09.
 
 Somnium is a from-scratch Rust game engine with a native editor. Its renderer
 uses `wgpu` and a visibility buffer. The engine also owns its ECS, UI, asset
@@ -16,14 +17,14 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 
 | Item | Current state |
 |---|---|
-| Active phase | PERSONA expansion: Nocturne 0.5 surface finish, H motion and QoL in tree; remaining H–L and G acceptance open. TALOS remains scoped to accepted scalability/rendering cleanups. |
-| Most recent work | [PERSONA QoL](<dev records/phase PERSONA/PERSONA-QoL.md>): compact shared pickers, scrolling, asset-overlay and popup lifecycle repairs; Nocturne 0.5 retained, 2026-09-09 |
+| Active work | Engine work led by The Somnus Fracture (see [the TSF section](#engine-work-driven-by-the-somnus-fracture-septemberoctober-2026)). PERSONA expansion and TALOS cleanups are paused, not closed. |
+| Most recent work | 17 Oct 2026: real-time path tracer and traced reflections, spot cookies, lens flare, skinned characters in ray tracing, shadow cache, frame pacing, a game's own graphics budget, FSR 3 frame generation ([record](<dev records/FRAME_GENERATION_2026-10-17.md>)) |
 | Latest completed phase | PORTAL-0, a focused measurement and cleanup pass |
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
-| Workspace | 16 engine crates, 2 examples, 1 workspace tool |
-| Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests |
+| Workspace | 17 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
+| Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests. Not regenerated since: the generator now also counts `.claude/worktrees/` copies and must exclude them first |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
 | Full workspace tests, 2026-08-30 | Passed with zero failures using `cargo test --workspace -j 1` |
@@ -46,6 +47,135 @@ The top-level phase status is:
 Dated phase audits still describe systems that were absent when their plans
 were written. Those statements are historical. The table above, current
 source, generated evidence, and completed sub-phase records take precedence.
+
+## Engine work driven by The Somnus Fracture (September–October 2026)
+
+From mid-September the engine's work has been led by a game, *The Somnus Fracture* (TSF): a first-person horror game
+built on Somnium. It lives in `games/TheSomnusFracture/`, which this repository ignores. Its records live there too,
+under `dev records/`, beside the game. The game took the engine places no example had:
+- dressed interiors that filled a 16 GB card;
+- lamp-lit night scenes;
+- skinned characters that have to cast shadows and show in mirrors;
+- headphone audio;
+- PS2-style dream levels;
+- a release package.
+
+This section maps what the engine gained in that time and where each piece lives. The subsystem chapters below
+describe the older systems these build on.
+
+### What landed, by subsystem
+
+| Area | What it does | Where | Record |
+|---|---|---|---|
+| Texture memory | Imported textures are BC7 (Intel ISPC). Only the materials a level draws get textures. An encoded-texture cache lives outside the repo (`SOMNIUM_TEXTURE_CACHE`), with a `warm_texture_cache` tool | `somnium_renderer/src/imported_bc.rs`, `app_import_cache.rs` | [`texture_memory_2026-10-12.md`](<dev records/texture_memory_2026-10-12.md>) |
+| Scene load time | Images decoded in parallel, only those a level's parts use. Decode pipelined with upload. Meshlets, SDF bricks and texture keys built on rayon. Town restore 47.5 s → 9.7 s | `somnium_asset::load_gltf_for`, `app.rs` restore loop, `geometry::prepare_mesh` | [`load_time_2026-10-15.md`](<dev records/load_time_2026-10-15.md>) |
+| Motion vectors | Per-instance previous transforms and skinned previous poses reach the velocity pass, so TAA, FSR and frame generation follow hands, doors and characters | `renderer.rs` `record_motion`, `pass/velocity.rs`, `animated_geometry.rs` | features record C2 |
+| Shadow cascade cache | The material revision counts only shadow-shaping fields; casters are masked per cascade; the first-person rig stays in the near cascade; posed (skinned) casters dirty only the cascades their shadow can reach; a caster's transform is fingerprinted on a grid of four of each cascade's texels, so pulsing props stop redrawing far cascades | `renderer.rs` `rebuild_shadow_casters`, `CasterKind`, `mix_shadow_caster_moved`; `shadow/cache.rs` | game record `ENGINE_AND_GRAPHICS_2026-10-17.md` |
+| Skinned characters in ray tracing | Posed meshes get their own BLAS over the posed vertices and the rest mesh's triangles. Only those within 30 m, built for build speed, refreshed every second frame (wgpu 30 has no refit). The first-person rig is left out | `renderer.rs` `rt_posed`, `pass/raytrace.rs` `register_posed_mesh` | same |
+| Real-time path tracer | Replaces the old accumulating 24O tracer. Mode 0 traces the whole light; mode 1 traces reflections on glossy surfaces only. Both use the raster's own primary surface | `pass/path_tracer.rs`, `shaders/path_tracer.wgsl`, `path_denoise.wgsl` | same |
+| Spot cookies | Every spot cone goes through one `spot_shape`, in shading, glass, fog, ReSTIR GI, the path tracer and scene capture. The cookie id is a negative `GpuLocalLight::_pad[1]`. Ids: torch, venetian blinds, window panes, caged lamp, grimy fixture | `shaders/spot_cookie.wgsl`, `cluster.rs` `with_cookie` | same; game `LIGHTING_PASS_2026-10-17.md` |
+| Lens flare | Ghosts and a halo from the bloom chain's quarter level, threshold-free like the bloom | `bloom.wgsl` `fs_flare`, `BloomPass::lens_flare` | same |
+| Scene capture | A second, cheap forward view (384²) into a bindless slot, for mirrors and screens; own frustum, sun, lamps, fog | `pass/scene_capture.rs`, `shaders/scene_capture.wgsl` | features record D2 |
+| FSR 3 | The upscaler (wgpu-ffx, AMD's SPIR-V) plus frame generation: AMD's FidelityFX 1.1.4 frame interpolation and optical flow translated to WGSL (`third_party/wgpu-ffx-fg`). Paced by split submits, the game UI drawn fresh over both frames | `pass/fsr.rs`, `pass/frame_gen.rs`, `renderer_frame_gen.rs` | [`FRAME_GENERATION_2026-10-17.md`](<dev records/FRAME_GENERATION_2026-10-17.md>) |
+| Frame pacing | A game asks for V-sync on/off and a frame cap. The request is applied between frames (`PresentMode` AutoVsync/AutoNoVsync) | `somnium_core/src/time.rs` `request_frame_pacing`, `context.rs` `set_vsync` | game record |
+| A game's own graphics budget | `set_graphics_budget(Some(budget))` lays a game's per-feature choices over the scene in place of a tier. Requests switch on what no scene authors: `path_tracing_requested`, `traced_reflections_requested`, `bloom_pass.lens_flare` | `renderer.rs`, `quality.rs`, `app.rs` settings push | game record |
+| PS2 picture | `PostProcess.retro` (a PS2-style picture: low resolution, no temporal smoothing, no traced light) and `PictureShift` (through a screen, eyes closing, a wave of decay) | `pass/postprocess.rs`, `postprocess.wgsl` | game record `CLAUDE_SESSION_2026-10-15B_…` |
+| Characters | Skin scattering past the shadow edge and through thin parts; hair cards; eye glint; game silhouettes and interaction highlights | `skin_scatter.wgsl`, `shading.wgsl`, `pass/game_highlight.rs` | game records `GAME_SILHOUETTE_HIGHLIGHT_2026-10-07.md`, `HAIR_RENDERING_NOTES.md` |
+| Vertex paint | Painted PBR layers or stains, de-tiled per layer, baked per level | `somnium_core/src/vertex_paint.rs`, `somnium_renderer/src/vertex_paint.rs` | game memory `vertex-paint-pipeline` |
+| ReSTIR GI | The bounce light picks from every lamp that reaches the hit, not four at random (the fireflies in dressed interiors) | `restir_gi.wgsl` | commit `fed2290` |
+| Spatial audio | Room reverb by enclosure, a muffled track for occluded sounds, binaural voices through the MIT KEMAR head responses | `somnium_audio/src/acoustics.rs`, `hrtf.rs` | game record `CLAUDE_SESSION_2026-10-15B_…` |
+| Editor automation | A semantic MCP authoring bridge, project launch, mouse and wheel input validated end to end; the standalone player | `somnium_core` authoring, `app_play_input.rs` | game `ENGINE_AND_MCP.md`, `MCP_PERFORMANCE_FIX_2026-09-25.md` |
+
+### A frame now
+
+The visibility-buffer core is unchanged: rasterise identity once, shade each pixel once. Around it, the game's
+choices arrive as one budget, and the traced, captured and generated work hangs off fixed points in the frame.
+
+```mermaid
+flowchart TB
+    subgraph Host["Host and game, CPU"]
+        GAME["GameApp update<br/>(TSF: options, hunts, story)"] -->|"set_graphics_budget<br/>path/reflection requests<br/>lens flare, frame generation"| REN
+        GAME -->|"time::request_frame_pacing"| PACE["V-sync / cap,<br/>applied between frames"]
+        PUSH["app.rs settings push<br/>authored PostProcess x budget"] --> REN["SomniumRenderer"]
+    end
+
+    subgraph Frame["One frame, GPU"]
+        CULL["cull + visibility buffer"] --> VEL["velocity<br/>instances + skinned poses"]
+        CULL --> AS["acceleration structures<br/>TLAS; skinned BLAS within 30 m"]
+        CULL --> SHADOW["shadow cascades<br/>cached per cascade"]
+        AS --> RESTIR["ReSTIR DI and GI"]
+        AS --> PT["path tracer<br/>mode 0 light, mode 1 reflections"]
+        VEL --> PT
+        CAP["scene capture<br/>mirrors and screens"] --> SHADE
+        RESTIR --> SHADE["shading, one pass per pixel<br/>spot cookies on every lamp"]
+        SHADOW --> SHADE
+        PT -->|"lighting aux"| SHADE
+        SHADE --> FOG["froxel fog over the traced light"]
+        FOG --> TAA["TAA, or FSR 3 below full scale"]
+        TAA --> BLOOM["bloom + lens flare"]
+        BLOOM --> POST["tone map, grade,<br/>PictureShift, PS2 retro"]
+        POST --> UI["game UI, then editor shell"]
+        UI --> FG["FSR 3 frame generation<br/>(when on)"]
+        FG --> PRESENT["present"]
+    end
+    REN --> Frame
+```
+
+Frame generation splits the frame's work into submits: up to five split points, from culling to FSR. The scene and
+post go to an offscreen picture. The generated frame is presented at the end of the frame, the real one at a split
+point in the next frame's work, and the UI is drawn fresh over both, so HUD text is never interpolated.
+
+### The path tracer's two modes
+
+```mermaid
+flowchart LR
+    VIS["visibility buffer<br/>instance + triangle"] --> PRIM["primary surface<br/>exactly the raster's"]
+    PRIM -->|"mode 0"| PATH["full path<br/>NEE: sun, moon, RIS lamp<br/>GGX VNDF + cosine lobes"]
+    PRIM -->|"mode 1, roughness ≤ 0.5"| REF["one GGX reflection ray<br/>its hit lit by the same NEE"]
+    PATH --> TEMP["temporal, reprojected by velocity<br/>48 frames"]
+    REF --> TEMP2["temporal, 8 frames<br/>a-trous skipped on smooth surfaces"]
+    TEMP --> ATR["a-trous 1, 2, 4<br/>demodulated light"]
+    TEMP2 --> ATR
+    ATR --> REMOD["remodulate<br/>albedo, glow"]
+    REMOD -->|"bit 4: replaces the light, before the fog"| SH["shading"]
+    REMOD -->|"bit 2: replaces environment specular"| SH
+```
+
+- Mode 0 is the Experimental "Path tracing" setting: Town +3.7 ms of GPU, the pass alone 8.7 ms.
+- Mode 1 is "Ray-traced reflections": about +1 ms in the Town.
+- Both run under FSR or TAA, the fog and the camera effects. Neither runs under the PS2 picture.
+- Review switches:
+  - `SOMNIUM_PATH_TRACER=0/1` overrides the scene;
+  - `SOMNIUM_RT_REFLECTIONS=1` turns reflections on;
+  - `SOMNIUM_RT_REFLECT_ROUGH` raises the roughness limit;
+  - `SOMNIUM_PATH_DEBUG` picks a debug view. Mode 1 paints magenta wherever a reflection lands; never leave it on in a
+    real run.
+
+### Audio routing
+
+```mermaid
+flowchart LR
+    SPATIAL["play_spatial(sound, position)"] -->|"binaural on (headphones)"| BIN["binaural voice<br/>MIT KEMAR, 368 directions,<br/>direction checked every 64 frames"]
+    SPATIAL -->|"speakers"| PAN["Kira panned voice"]
+    BIN --> WORLD["world track"]
+    PAN --> WORLD
+    WORLD -->|"send 0.06 to 0.40 by enclosure"| REVERB["room reverb"]
+    WORLD -->|"occlusion gain under 0.6 at start"| MUFFLED["muffled copy<br/>900 Hz low-pass"]
+    MUSIC["music and interface"] --> DRY["dry buses"]
+```
+
+`kira` and `somnium_audio` are built optimised even in the dev profile: per-sample audio left unoptimised underruns.
+
+### Measured, debug build, the TSF Town unless named
+
+| Change | Before → after |
+|---|---|
+| FSR at 67% by default (the game's setting) | 29.6 → 17.9 ms frame |
+| Shadow cascade cache | → 14.2 ms frame, checked against a full redraw |
+| Abyss shadows (texel-grid fingerprints, posed reach) | 4.75 → 2.03 ms shadows; frame 24.5 → 20.5 ms |
+| Skinned BLAS limits | TLAS build 1.87 → 0.75 ms |
+| Scene restore | 47.5 → 9.7 s |
+| Frame generation | 42.3 fps → 76.7 presented, 2.0–2.5 ms GPU per generated frame |
 
 ## How to use this file
 
@@ -868,6 +998,62 @@ In tree:
 - Volumetric clouds, cloud shadows, precipitation, wetness, wind, and water
   ripples.
 - Clustered local lights and decals using the same volume-binning seam.
+- Traced shadows for every local light (ray-query hardware): one ray to the
+  lamp's centre for each lamp whose light at the pixel can be seen.
+
+**Local light shadows** (16 October 2026, A1 of the engine features record).
+`shading.wgsl` works out each lamp's unshadowed light and aim point in one
+function (`lamp_light`, every type: tube, rect, disc, point, spot) and traces
+once after it (`shadowed_lamp`), skipping lamps whose light there is below 1e-7
+(2e-5 on screen at the darkest exposure). Tracing inside each type's own branch,
+as before, cost 4.7 ms more in the Town (shading 21.1 to 16.4 ms, the same
+rays). Skin keeps its own path for point and spot lamps: its ray also answers
+its scattering. A bounded many-light pick (two exact rays and one reservoir ray
+per pixel) was built and measured no faster in the Town or the Office: no
+campaign level has more than four lamps that matter on any spot. The shading
+output drops NaN before its 60 000 clamp (as bloom does), since `min(NaN, x)` is
+`x` on GPUs.
+
+**Barycentrics near the eye** (16 October 2026). The shading pass rebuilds a
+pixel's barycentrics, and its neighbours' for the analytic UV gradients, from
+the triangle's vertices divided by their clip w (`vis_barycentric`). A long
+triangle with a vertex within a metre of the eye's plane, or behind it, puts
+that vertex at an enormous screen position and the result is rounding noise
+(a plaid of mips on a 7.9 m corridor wall in the Office). Such triangles take
+`ray_barycentric` instead: where the camera ray through the pixel meets the
+triangle's plane in world space.
+
+**A PS2 picture** (16 October 2026, The Somnus Fracture's sub-phase 11).
+`somnium.PostProcess.retro` 1: the post pass reads one scene pixel per cell of a
+448-line grid, blends each line a quarter with its neighbours (the console's
+flicker filter) and writes 15-bit colour through a 4x4 ordered dither (carried
+in the dream lens's spare uniform slot); the app turns TAA, FSR, motion blur,
+DOF, GTAO and ReSTIR DI/GI off and sets shading bit 512, under which textures
+sample two whole mip levels coarser, isotropic, and normal maps are skipped.
+
+**Scene capture** (16 October 2026, D2 of the engine features record). One
+small extra view a frame, for a mirror, a monitor or a screen:
+`renderer.request_capture(ctx, CaptureRequest { view, proj, eye, reach,
+sun_scale, ambient_scale, hide })` returns a bindless slot for a material's
+map, which shows the picture from the next frame. `pass/scene_capture.rs` is a
+forward pass into its own 384 x 384 half-float target over the frame's opaque
+instances. Each mesh box is tested against the capture's own frustum, so it
+sees behind the main camera, and terrain chunks only it sees are kept. Its
+lighting: albedo, the environment as ambient, the sun scaled by `sun_scale` (no
+shadows), lamps in range, emissive, and the level's height fog lit from the
+atmosphere tables as `volumetric.wgsl` lights its fog. `hide` drops draws by
+vertex offset. It is not a second deferred frame: 0.84 ms in the Town for The
+Somnus Fracture's pocket mirror.
+
+**Baked light, PS2 style** (16 October 2026). `somnium.VertexPaint.baked_light`
+makes an entity's paint masks its light, baked per vertex as PS2 games did (RGB
+0.5 = the texture as painted, 1 = twice as bright): shading draws it as albedo
+x light x 2 plus moving local lamps and emissive, with no sun, sky, bounce or
+traced light, and under `retro` its (already small) textures keep their own mip
+levels. `somnium.PostProcess.retro_fog` [start, end] and `retro_fog_color` fog
+such surfaces linearly by distance toward one colour (vertex paint header words
+8 to 10). The Somnus Fracture's PS2 street (`scenes/ps2_street.scene.json`) is
+built this way.
 
 There is no authored local reflection/irradiance environment asset. STALKER
 plans that capability; describing it as current would be incorrect.
@@ -1274,6 +1460,40 @@ default, and a device without the features falls back to TAA rather than
 silently producing nothing. Everything else follows from there being a single
 value.
 
+**Motion vectors** (16 October 2026, C2 of the engine features record). The
+velocity pass reprojects each pixel's depth with the previous camera (and
+foliage wind) as before, and now also gives a surface that moved on its own
+its own motion: per opaque instance a `GpuMotion` record (the previous model
+matrix and, for a skinned mesh, where last frame's deformed vertices are kept),
+and the pixel's point on its triangle (the visibility buffer's instance and
+primitive) is rebuilt from last frame's pose and projected with the previous
+camera. Last transforms are matched by queue slot, or by mesh key and order
+where the queue shifted; a jump of more than a metre is a mismatch, not motion.
+`AnimatedGeometry` copies each posed mesh aside before skinning (after, the
+frame it is new). TAA follows the buffer where it differs from the camera's
+motion by more than half a pixel, and reactive pixels (first-person hands and
+tools) now take history from where they were rather than the same pixel. FSR
+reads the same buffer.
+
+**Frame generation** (17 October 2026, C7 of the engine features record; the
+record is `dev records/FRAME_GENERATION_2026-10-17.md`). AMD's FSR 3 frame
+interpolation and optical flow, translated to WGSL in `third_party/wgpu-ffx-fg`
+(no SPIR-V compiler on the machine, and naga validates WGSL), make a frame half
+way between each two the scene draws. `pass/frame_gen.rs` and
+`renderer_frame_gen.rs` run it: while generating, the scene and its
+post-processing land in one of two offscreen pictures instead of the swap chain;
+the generated frame is presented at the end of the frame and the real one
+partway through the next frame's work, each with the UI drawn over it, so text
+is never interpolated. wgpu has one queue and no present timing, so the split
+point is the pacing: a controller moves the real frame between seven points in
+the frame (start, five inside the scene, after it) from GPU timestamps until the
+two halves are as even as they get. (A per-frame CPU-time gate was tried and was
+worse: the last frame's GPU work is often still running.) Camera cuts
+(2 m or 50 degrees in a frame) and AMD's scene change detection reset it. Off
+unless asked: `Renderer::set_frame_generation` (TSF's "Frame generation (FSR 3)"
+option) or `SOMNIUM_FG=1`. About 2 to 2.5 ms of GPU at 1440p; the Town in the
+debug build, 42.3 fps off, 76.7 presented on.
+
 This replaced three booleans that could display an enabled mode while no pass
 ran. SMAA S2x and 4x remain refused because the visibility buffer has no MSAA
 subsamples to resolve. The current analytic SMAA path does not vendor the
@@ -1659,6 +1879,17 @@ raycast, and the audio crate deliberately does not depend on the physics one:
 a sound system that cannot be tested without a physics world is a sound system
 nobody tests. The caller does the trace and passes a number.
 
+**Rooms and heads are Kira tracks and a custom voice, not a mixer of our own.**
+Positioned sounds play on a world track whose send into a Kira reverb follows
+`Acoustics::set_enclosure` (the game says how enclosed the ears are); a sound
+starting with an occlusion gain under 0.6 plays on a low-passed copy, so it is
+heard through the wall. With `AudioEngine::binaural` on, positioned sounds are
+`hrtf` voices: a mono source convolved with the MIT KEMAR head responses for its
+direction, moved by `update_spatial`, crossfaded per block. Music and interface
+sounds stay dry. `kira` and `somnium_audio` build optimised even in the dev
+profile, because a per-sample voice unoptimised can underrun the audio thread
+([TSF 15 October record](<games/TheSomnusFracture/dev records/CLAUDE_SESSION_2026-10-15B_LOAD_AUDIT_POSTURE_PHOTO.md>)).
+
 The Coastal and Island acceptance maps ship overlapping spatial surf and splash
 emitters, while the first-person controller drives four distance-based footstep
 one-shots through `ctx:playAudio`. Their cadence is a property of the character,
@@ -1886,7 +2117,7 @@ that sentence is obsolete.
 | HLAALU | None | Prefabs, splines/blockout, rule-driven scattering |
 | SILT STRIDER | Cook, residency, world partition, HLOD/impostors/floating origin | None |
 | DWEMER | GPU skinning, clips, blend trees, state machines | Root motion, IK/events, compression, pose task graph |
-| SIXTH HOUSE | None | Navmesh/pathfinding, behavior trees, perception |
+| SIXTH HOUSE | `somnium_ai` (X/Y): navmesh cell tiles, A* with funnel, steering, behavior trees, perception, Luau tasks | Not used by a game yet |
 | RED MOUNTAIN | VSM, DDGI, terrain VT, weighted OIT, SMAA and unified AA setting | GPU particles and VFX graph |
 | ALMSIVI | Input actions, audio, localisation | Save games, video, playable slice |
 
@@ -2194,6 +2425,22 @@ does not overlap. STALKER waits for both relevant outputs.
   horizontal hierarchy. Redesign it only after those tool options are backed by
   assets; otherwise a new shell would merely decorate the same missing model.
 
+- **The Somnus Fracture's open engine items (17 Oct).**
+  - FSR at 67% shimmers on dark fine detail and thin moving shapes. That is the wgpu-ffx backend's low-light weakness,
+    recorded at `fsr_safe_for_lighting` in `app.rs`. DLSS (features record C1) or a newer FSR backend is the fix.
+  - wgpu 30 rebuilds acceleration structures and never refits them: `PreferUpdate` still does a full build. That
+    bounds how many characters can be traced each frame.
+  - Local fog volumes are not possible on the froxel grid as it is (32 slices over 1,200 m).
+  - HDR output (wgpu 30's `SurfaceColorSpace`) is unbuilt; it can't be checked on the development machine.
+  - The pipeline cache would touch 69 sites in 56 files; left, since the NVIDIA driver caches.
+  - The frame generation pacing controller's seven-point version is untimed.
+  - Release-build timings are still owed for most of the numbers above.
+  - A game's own menu with the pointer free now gets the window's input before any play session
+    (`app_play_input.rs`). Before this, a standalone live title heard no keys. Harness input (the editor bridge)
+    cannot show this class of bug; check with real key presses.
+  - Pacing: `SOMNIUM_PACING_LOG=1` logs how evenly frames come; `SOMNIUM_FRAME_CAP` and `SOMNIUM_VSYNC` override a
+    game's choice. Uncapped frames were 13 to 22 ms apart and recordings stuttered; a 60 cap holds a 1 ms spread.
+
 ### Missing systems
 
 - Prefab authoring/instancing and rule-driven scattering. Splines are now in
@@ -2217,10 +2464,9 @@ does not overlap. STALKER waits for both relevant outputs.
   dragged back goes to the slot it came from, but it cannot yet be dropped into
   a *different* slot.
 - Root motion, IK/events, and animation compression/task graph.
-- Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
-- Save games, video playback, and a playable acceptance slice.
-- Standalone player, release packages, updater, rollback, and mod layers.
+- Video playback. (Save games and a standalone player now exist, built for TSF; a playable acceptance slice is the game.)
+- A general release package, updater, rollback, and mod layers. TSF has its own packager (`games/TheSomnusFracture/tools/package_game.py`).
 - STALKER's local lighting environments, sprite workflow, living-world
   simulation, and game-domain modules.
 
@@ -2631,6 +2877,12 @@ streaming DTO.** A second representation would have to be kept in step with the
 first forever, and the first thing to break would be a component the streaming
 path had never heard of. Despawn happens only after persistence succeeds.
 ([MORROWIND-S](<dev records/phase MORROWIND/MORROWIND-S.md>))
+
+**An imported scene decodes only the images its materials read, off the main
+thread.** `load_gltf_for` decodes the parts' images in parallel while the
+previous source uploads, and meshlets and SDF bricks are built in parallel before
+upload. The Town's restore went from 48.5 s to 9.7 s in the debug build
+([load time](<dev records/load_time_2026-10-15.md>)).
 
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade

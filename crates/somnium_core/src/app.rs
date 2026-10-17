@@ -1327,6 +1327,26 @@ fn apply_brand_icon(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+/// A game's own icon on its main window, as [`apply_brand_icon`] sets the engine's; the mark if a file will not load.
+fn apply_game_icon(attrs: WindowAttributes, small: &std::path::Path, large: &std::path::Path) -> WindowAttributes {
+    let icon = |path: &std::path::Path| {
+        let image = somnium_asset::material::load_material_texture(path).ok()?;
+        winit::window::Icon::from_rgba(image.data, image.width, image.height).ok()
+    };
+    let Some(small) = icon(small) else { return apply_brand_icon(attrs) };
+    info!("window icon: the game's own");
+    #[allow(unused_mut)]
+    let mut attrs = attrs.with_window_icon(Some(small));
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs = attrs.with_taskbar_icon(icon(large));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = large;
+    attrs
+}
+
 /// Make a window belong to the editor's, where the platform has the notion.
 ///
 /// MORROWIND-J step 2. Without this a floating panel is an unrelated top-level
@@ -2601,6 +2621,10 @@ impl<G: GameApp> Engine<G> {
         }
 
         // Imported nodes retain a durable source instead of saving GPU offsets.
+        let imported_started = std::time::Instant::now();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.texture_upload_stats = Default::default();
+        }
         let mut imported = std::collections::BTreeMap::<String, Vec<(Entity, u32)>>::new();
         for entity in self.world.entities() {
             if let Some(source) = self.world.get::<crate::ImportedMesh>(entity) {
@@ -2610,6 +2634,13 @@ impl<G: GameApp> Engine<G> {
                     .push((entity, source.node));
             }
         }
+        // What each bank needs, decided first: nothing (uploaded before, every
+        // part textured), textures for parts uploaded before without them, or
+        // a first upload. Only the parts this level uses get their materials'
+        // textures: a bank of 172 parts of which a level draws five no longer
+        // uploads, or decodes, all 172 parts' maps.
+        let drawing = self.renderer.is_some() && self.render_ctx.is_some();
+        let mut restores = Vec::new();
         for (source, entities) in imported {
             let resolved = match self.imported_source_path(&source) {
                 Ok(path) => path,
@@ -2622,20 +2653,83 @@ impl<G: GameApp> Engine<G> {
             let cached = stamp
                 .as_ref()
                 .and_then(|stamp| self.imported_uploads.get(stamp));
-            if let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) {
+            let parts: std::collections::HashSet<usize> =
+                entities.iter().map(|(_, ordinal)| *ordinal as usize).collect();
+            let load = match (&cached, &stamp) {
+                (Some(_), Some(stamp)) => {
+                    let missing = self.imported_uploads.untextured(stamp, &parts);
+                    (!missing.is_empty()).then_some(missing)
+                }
+                (Some(_), None) => None,
+                (None, _) => Some(parts.clone()),
+            };
+            let load = load.filter(|_| drawing).map(|parts| (resolved, parts));
+            restores.push((source, entities, stamp, cached, load, parts));
+        }
+        // Each bank is read and decoded on a loader thread (its images on
+        // every core, `load_gltf_for`) while this one uploads the bank before
+        // it, in the same order. Two loaders take every other bank: a bank of
+        // one or two images leaves most cores idle while it decodes, so the
+        // next one decodes beside it (TSF Town, 17 Oct 2026). Each holds at
+        // most one decoded bank waiting, so memory holds four banks' images,
+        // not a level's.
+        const LOADERS: usize = 2;
+        let jobs: Vec<_> = restores.iter().filter_map(|r| r.4.clone()).collect();
+        // Where the open goes: waiting for the loader (decode-bound) or uploading (this thread).
+        let (mut decode_wait, mut upload_time) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        std::thread::scope(|scope| {
+            let receivers: Vec<_> = (0..LOADERS)
+                .map(|k| {
+                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                    let mine: Vec<_> = jobs.iter().skip(k).step_by(LOADERS).cloned().collect();
+                    scope.spawn(move || {
+                        for (path, parts) in mine {
+                            if send.send(somnium_asset::load_gltf_for(&path, Some(&parts))).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    receive
+                })
+                .collect();
+            let mut next = 0;
+            for (source, entities, stamp, cached, load, parts) in restores {
+                let waited = std::time::Instant::now();
+                let loaded = load.as_ref().map(|_| {
+                    next += 1;
+                    receivers[(next - 1) % LOADERS].recv().unwrap_or_else(|_| Err("glTF loader thread stopped".into()))
+                });
+                decode_wait += waited.elapsed();
+                let uploading = std::time::Instant::now();
+                let Some((renderer, ctx)) = self.renderer.as_mut().zip(self.render_ctx.as_ref()) else {
+                    continue;
+                };
                 let uploaded = if let Some(nodes) = cached {
+                    // Uploaded earlier for other parts: give the new ones theirs.
+                    if let Some(((_, missing), loaded)) = load.as_ref().zip(loaded) {
+                        match loaded {
+                            Ok(scene) => {
+                                renderer.texture_scene_nodes(ctx, &scene, &nodes, missing);
+                                if let Some(stamp) = stamp.as_ref() {
+                                    self.imported_uploads.mark_textured(stamp, missing);
+                                }
+                            }
+                            Err(error) => warn!(%error,%source,"Imported mesh textures could not be added"),
+                        }
+                    }
                     nodes
                 } else {
-                    let scene = match somnium_asset::load_gltf(&resolved) {
-                        Ok(scene) => scene,
-                        Err(error) => {
+                    let scene = match loaded {
+                        Some(Ok(scene)) => scene,
+                        Some(Err(error)) => {
                             warn!(%error,%source,"Imported mesh could not be restored");
                             continue;
                         }
+                        None => continue,
                     };
-                    let nodes = renderer.upload_scene(ctx, &scene);
+                    let nodes = renderer.upload_scene_for(ctx, &scene, Some(&parts));
                     if let Some(stamp) = stamp {
-                        self.imported_uploads.insert(stamp, &nodes);
+                        self.imported_uploads.insert(stamp, &nodes, Some(parts));
                     }
                     nodes
                 };
@@ -2656,7 +2750,27 @@ impl<G: GameApp> Engine<G> {
                         warn!(%source,ordinal,"Imported mesh node no longer exists");
                     }
                 }
+                upload_time += uploading.elapsed();
             }
+        });
+
+        if let Some(renderer) = self.renderer.as_ref() {
+            // One line per load, so a slow open says whether textures were
+            // encoded (a level not warmed into the BC7 cache) or not.
+            let stats = renderer.texture_upload_stats;
+            info!(
+                seconds = format!("{:.1}", imported_started.elapsed().as_secs_f64()),
+                textures_cached = stats.cached,
+                textures_encoded = stats.encoded,
+                encode_seconds = format!("{:.1}", stats.encode_ms / 1000.0),
+                textures_rgba8 = stats.uncompressed,
+                texture_upload_seconds = format!("{:.1}", stats.upload_ms / 1000.0),
+                waited_for_decode_seconds = format!("{:.1}", decode_wait.as_secs_f64()),
+                upload_seconds = format!("{:.1}", upload_time.as_secs_f64()),
+                key_seconds = format!("{:.1}", stats.key_ms / 1000.0),
+                mesh_seconds = format!("{:.1}", stats.mesh_ms / 1000.0),
+                "Imported meshes restored"
+            );
         }
 
         // ── terrain sidecars ────────────────────────────────────────────────
@@ -3631,7 +3745,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // painting.
             .with_visible(false)
             .with_decorations(false);
-        attrs = apply_brand_icon(attrs);
+        attrs = match &self.config.window_icon {
+            Some((small, large)) => apply_game_icon(attrs, small, large),
+            None => apply_brand_icon(attrs),
+        };
         #[cfg(target_os = "windows")]
         {
             attrs = attrs.with_undecorated_shadow(true);
@@ -4319,8 +4436,11 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             .entities_with::<PostProcessComponent>()
             .find_map(|entity| self.world.get::<PostProcessComponent>(entity))
             .is_some_and(|post| post.path_tracer);
+        // The real-time path tracer (17 Oct 2026, renderer `path_tracer`) reprojects its history, so the
+        // simulation runs on under it; only the old accumulating tracer needed the world held still.
+        let _ = path_tracer_active;
         synchronize_path_trace_pause(
-            path_tracer_active,
+            false,
             &mut self.simulation_clock,
             &mut self.simulation_accumulator,
             &mut self.path_trace_previous_simulation_state,
@@ -4549,6 +4669,10 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             ctx.orbit_selection = orbit_selection;
             ctx.orbit_pivot = orbit_pivot;
             self.game.on_update(&mut ctx);
+        }
+        // A game's menu asked for the pointer, or gave it back: capture follows (`UiManager::set_game_cursor_free`).
+        if self.ui_manager.as_mut().is_some_and(|ui| ui.take_game_cursor_changed()) {
+            self.sync_play_cursor();
         }
         // Phase 16-C: the variable-rate script phase, and the one place
         // script output reaches the editor's Output Log.
@@ -4789,6 +4913,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.ensure_material_session();
             self.zone_end();
             self.zone_begin("Panel build");
+            self.zone_begin("Panel: details");
             let mut generated_panels = self
                 .selection.primary
                 .map(|entity| {
@@ -4874,10 +4999,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     generated_panels.push(panel);
                 }
             }
+            self.zone_end();
             // Settings are properties, so their panel is generated by exactly
             // the same call the entity inspector uses — against the settings
             // store's private world instead of the scene's.
+            self.zone_begin("Panel: settings");
             let (settings_panels, settings_overrides) = self.settings_panels();
+            self.zone_end();
             // Named after what changed, so a history of twenty rows is not
             // twenty rows reading "Change".
             let (history_entries, history_position) = {
@@ -4937,8 +5065,19 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     },
                 )
             });
-            let drop_probe_entity = self.viewport_entity_drop_pick();
-            let drop_probe_hit = self.viewport_terrain_drop_hit();
+            // The drop target under the cursor is read only while something is
+            // being dragged, and finding it walks every entity and raycasts the
+            // terrain: 2.4 ms a frame in the Town (16k entities) when it ran
+            // every frame, which held the editor CPU-bound below the GPU.
+            self.zone_begin("Panel: drop probes");
+            let dragging = self.ui_manager.as_ref().is_some_and(|ui| ui.asset_drag_in_progress());
+            let (drop_probe_entity, drop_probe_hit) = if dragging {
+                (self.viewport_entity_drop_pick(), self.viewport_terrain_drop_hit())
+            } else {
+                (None, None)
+            };
+            self.zone_end();
+            self.zone_begin("Panel: hand to UI");
             if let Some(ui) = &mut self.ui_manager {
                 if refresh {
                     ui.update_outliner_tree(tree, selected_idx);
@@ -5021,6 +5160,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.refresh_modified_dots();
                 ui.refresh_inspector_filter();
             }
+            self.zone_end();
             self.zone_end();
             self.outliner_hierarchy = hierarchy;
         }
@@ -5611,6 +5751,17 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        // Frame pacing asked for by the game's options (vsync, a cap or none): applied between frames.
+        if let Some(pacing) = crate::time::take_frame_pacing_request() {
+            // `SOMNIUM_FRAME_CAP=60` (0 uncapped) and `SOMNIUM_VSYNC=0/1` override a game's choice, for pacing runs.
+            let cap = std::env::var("SOMNIUM_FRAME_CAP").ok().and_then(|v| v.parse::<u32>().ok())
+                .map_or(pacing.cap, |c| (c > 0).then_some(c));
+            let vsync = std::env::var("SOMNIUM_VSYNC").map_or(pacing.vsync, |v| v != "0");
+            self.time.set_target_fps(cap);
+            if let Some(render_ctx) = self.render_ctx.as_mut() {
+                render_ctx.set_vsync(vsync);
+            }
+        }
         self.time.wait_for_frame_budget();
 
         if let Some(window) = &self.window {
@@ -7536,11 +7687,20 @@ impl<G: GameApp> Engine<G> {
             .as_ref()
             .and_then(|stamp| self.imported_uploads.get(stamp))
         {
+            // Every part is placed, so every part needs its textures.
+            if let Some(stamp) = stamp.as_ref() {
+                let all: std::collections::HashSet<usize> = (0..nodes.len()).collect();
+                let missing = self.imported_uploads.untextured(stamp, &all);
+                if !missing.is_empty() {
+                    renderer.texture_scene_nodes(render_ctx, &scene, &nodes, &missing);
+                    self.imported_uploads.mark_textured(stamp, &missing);
+                }
+            }
             nodes
         } else {
             let nodes = renderer.upload_scene(render_ctx, &scene);
             if let Some(stamp) = stamp {
-                self.imported_uploads.insert(stamp, &nodes);
+                self.imported_uploads.insert(stamp, &nodes, None);
             }
             nodes
         };
@@ -8141,6 +8301,16 @@ impl<G: GameApp> Engine<G> {
                 self.world
                     .entities_with::<PostProcessComponent>()
                     .find_map(|e| self.world.get::<PostProcessComponent>(e).cloned())
+            })
+            .map(|mut pp| {
+                pp.aa = crate::AntiAliasing::env_override().unwrap_or(pp.aa);
+                // `SOMNIUM_PATH_TRACER=1` (or 0) overrides the scene's own choice too, for timing runs.
+                match std::env::var("SOMNIUM_PATH_TRACER").as_deref() {
+                    Ok("1") => pp.path_tracer = true,
+                    Ok("0") => pp.path_tracer = false,
+                    _ => {}
+                }
+                pp
             });
         if let (Some(pp), Some(r)) = (settings, self.renderer.as_mut()) {
             // The player's graphics tier: gates and scales what the scene
@@ -8171,39 +8341,52 @@ impl<G: GameApp> Engine<G> {
                 } else {
                     0
                 }
-                | if pp.analytic_grad { 8 } else { 0 };
-            let path_active = pp.path_tracer && r.raytrace_pass.supported();
-            // The path tracer already owns temporal accumulation. Feeding that
-            // result through FSR/TAA (and then motion blur) accumulates history
-            // a second time and is the source of the reported afterimages.
+                | if pp.analytic_grad || pp.retro != 0 { 8 } else { 0 }
+                // The PS2 picture's textures and surfaces (`shading.wgsl`, bit 512, how far in at bits 16 to 23);
+                // they need the analytic gradients.
+                | if pp.retro != 0 && pp.retro_amount > 0.0 {
+                    512 | ((pp.retro_amount.clamp(0.0, 1.0) * 255.0).round() as u32) << 16
+                } else {
+                    0
+                };
+            // A retro picture has no temporal smoothing and no traced light: hard, crawling edges are part of it,
+            // and without TAA the traced passes' per-frame samples would show as noise.
+            let retro = pp.retro != 0 && pp.retro_amount >= 0.5;
+            // The real-time path tracer (17 Oct 2026) replaces only the light: its history is reprojected, so FSR or
+            // TAA, the fog and the camera's effects run over it as over the raster (the old accumulating tracer had
+            // to switch them all off). Never under the PS2 picture.
+            let path_active = (pp.path_tracer || r.path_tracing_requested) && r.raytrace_pass.supported() && !retro;
             // The current experimental wgpu-ffx backend corrupts low-luminance
             // geometry once the directional sun is below the horizon (stars
             // survive while the rest collapses into a broad black band). Keep
             // the authored FSR request, but contain that backend defect with
             // the stable temporal fallback until the embedded FSR shaders are
             // updated. Daylight FSR and real-resolution upscaling remain live.
-            let fsr_safe_for_lighting = r.light_direction.y > 0.0;
+            // SOMNIUM_FSR_NIGHT=1 lifts the gate to test a fix (C3 in the engine features record).
+            let fsr_safe_for_lighting =
+                r.light_direction.y > 0.0 || std::env::var("SOMNIUM_FSR_NIGHT").as_deref() == Ok("1");
             r.fsr_pass
-                .set_enabled(pp.fsr_enabled() && !path_active && fsr_safe_for_lighting);
+                .set_enabled(pp.fsr_enabled() && fsr_safe_for_lighting && !retro);
             r.fsr_pass.sharpness = pp.fsr_sharpness;
             // Use the pass's effective state, not the authored request: on a
             // device without FSR features, `aa` may be `Fsr` while the pass
             // correctly declined it. TAA/CAS must still be allowed.
             let fsr_active = r.fsr_pass.enabled;
-            let fsr_fallback = pp.fsr_enabled() && !path_active && !fsr_active;
+            let fsr_fallback = pp.fsr_enabled() && !fsr_active;
             r.taa_pass
-                .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !path_active);
-            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active;
+                .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !retro);
+            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active && !retro;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
-            r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !path_active;
+            r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !retro;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
-            r.restir_pass.enabled = pp.restir_enabled && budget.traced_direct && !path_active;
+            r.restir_pass.enabled = pp.restir_enabled && budget.traced_direct && !path_active && !retro;
             let restir_gi_active = pp.restir_gi_enabled
                 && budget.traced_gi
                 && r.restir_gi_pass.supported()
-                && !path_active;
+                && !path_active
+                && !retro;
             // A tier without traced GI keeps the scene lit indirectly with
             // probes rather than dropping bounce light altogether.
             let gi_stand_in = pp.restir_gi_enabled && !budget.traced_gi && budget.probes;
@@ -8235,13 +8418,13 @@ impl<G: GameApp> Engine<G> {
             r.cas_pass.sharpness = pp.cas_sharpness;
             r.cas_pass.strength = pp.cas_strength;
             r.motion_blur_pass.enabled =
-                pp.motion_blur_enabled && budget.camera_effects && !path_active;
+                pp.motion_blur_enabled && budget.camera_effects && !retro;
             r.motion_blur_pass.shutter = pp.motion_blur_shutter;
             r.restir_gi_pass.intensity = pp.restir_gi_intensity;
             r.restir_gi_pass.max_distance = pp.restir_gi_distance;
             r.gtao_pass.radius = pp.gtao_radius;
             r.gtao_pass.intensity = pp.gtao_intensity;
-            r.volumetric_pass.enabled = pp.volumetrics_enabled && !path_active;
+            r.volumetric_pass.enabled = pp.volumetrics_enabled;
             r.volumetric_pass.fog.density = self
                 .day_state
                 .and_then(|state| state.fog_density)
@@ -8251,22 +8434,29 @@ impl<G: GameApp> Engine<G> {
             r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
             r.volumetric_pass.fog.sky_occlusion = pp.fog_sky_occlusion;
+            r.vertex_paint.fade = pp.paint_fade;
+            r.vertex_paint.green = pp.foliage_green;
+            r.vertex_paint.fog = [pp.retro_fog[0], pp.retro_fog[1], pp.retro_fog_color[0], pp.retro_fog_color[1], pp.retro_fog_color[2]];
             {
                 use somnium_renderer::pass::lighting_extra::{
                     FLAG_CACHE, FLAG_PATH, FLAG_PROBES, FLAG_SDF, FLAG_SPECULAR,
                 };
                 let rt = r.raytrace_pass.supported();
                 let mut flags = 0u32;
+                let _ = FLAG_PATH;
+                r.path_tracer_pass.enabled = path_active;
+                r.path_tracer_pass.bounces = pp.path_bounces;
+                let traced_reflections = r.traced_reflections_requested && rt && !path_active && !retro;
+                r.path_tracer_pass.reflections = traced_reflections;
                 if path_active {
-                    // Path tracing replaces the frame. Baking caches/probes or
-                    // tracing the separate specular buffer underneath it only
-                    // wastes work and risks cross-mode history contamination.
-                    flags = FLAG_PATH;
+                    // Path tracing replaces the frame (renderer `path_tracer`, which sets shading's path-mode bit).
+                    // Baking caches/probes or tracing the separate specular buffer underneath it only wastes work.
+                    flags = 0;
                 } else {
                     if pp.world_cache && budget.traced_gi && rt && !ddgi_active {
                         flags |= FLAG_CACHE;
                     }
-                    if pp.specular_gi && budget.traced_gi && rt {
+                    if pp.specular_gi && budget.traced_gi && rt && !traced_reflections {
                         flags |= FLAG_SPECULAR;
                     }
                     if ddgi_active || (pp.mesh_sdf && !pp.world_cache) {
@@ -8296,10 +8486,10 @@ impl<G: GameApp> Engine<G> {
                 gamma: pp.gamma,
                 grain: pp.grain,
                 dream: [
-                    pp.dream_mode.min(3) as f32,
+                    pp.dream_mode.min(4) as f32,
                     pp.dream_strength.clamp(0.0, 1.0),
                     pp.dream_speed.clamp(0.0, 3.0),
-                    0.0,
+                    if pp.retro != 0 { pp.retro_amount.clamp(0.0, 1.0) } else { 0.0 },
                 ],
                 time: self.time.elapsed().as_secs_f32(),
                 // CONTROL-K: the authored curve is sampled here, once per
@@ -9030,9 +9220,10 @@ impl<G: GameApp> Engine<G> {
         use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
 
         let selected_idx = self.selection.primary.map(|e| e.index());
+        // Every frame: lights only, not every entity (16k in the Town).
         let gizmos: Vec<LightGizmoDesc> = self
             .world
-            .entities()
+            .entities_with::<LightComponent>()
             .filter_map(|e| {
                 if crate::is_hidden(&self.world, e) {
                     return None;
@@ -9082,7 +9273,8 @@ impl<G: GameApp> Engine<G> {
         const DIM: [f32; 3] = [0.13, 0.38, 0.36];
 
         let mut lines: Vec<LineVertex> = Vec::new();
-        let entities: Vec<_> = self.world.entities().collect();
+        // Every frame: splines only, not every entity.
+        let entities: Vec<_> = self.world.entities_with::<crate::SplineComponent>().collect();
         for entity in entities {
             let Some(spline) = self.world.get::<crate::SplineComponent>(entity) else {
                 continue;
@@ -9157,9 +9349,10 @@ impl<G: GameApp> Engine<G> {
         use somnium_renderer::pass::light_gizmo::{LightGizmoDesc, LightGizmoKind};
 
         let selected_idx = self.selection.primary.map(|entity| entity.index());
+        // Every frame: emitters only, not every entity.
         let gizmos: Vec<_> = self
             .world
-            .entities()
+            .entities_with::<crate::AudioEmitterComponent>()
             .filter_map(|entity| {
                 if crate::is_hidden(&self.world, entity) {
                     return None;
@@ -10802,7 +10995,9 @@ impl<G: GameApp> Engine<G> {
                                     height_depth: 0.0,
                                     weathering: 0.0,
                                     detile: 0.0,
-                                    wind: [0.0; 4],
+                                    wind: [0.0; 2],
+                                    subsurface: 0.0,
+                                    reserved: 0.0,
                                 },
                             );
                             self.default_material_id = Some(id);
@@ -12022,7 +12217,9 @@ impl<G: GameApp> Engine<G> {
                     r.set_editor_overlays_enabled(true);
                 }
                 if let Some(ui) = &mut self.ui_manager {
-                    ui.set_immersive(false);
+                    // A shipped player has no editor to come back to: a game that stops its session to load the
+                    // next scene (TSF's title and level changes) stays full-screen in between.
+                    ui.set_immersive(self.config.player_mode);
                     ui.update_simulation_controls(0);
                     ui.set_play_overlays_hidden(false);
                 }

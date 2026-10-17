@@ -32,6 +32,32 @@ const FPS_SMOOTHING: f64 = 0.1;
 /// to a spin-wait, in milliseconds.
 const SPIN_WAIT_THRESHOLD: Duration = Duration::from_millis(1);
 
+/// `SOMNIUM_PACING_LOG=1`: every 300 frames, how evenly frames came. A recording samples at a fixed rate, so uneven
+/// spacing shows as stutter in a video even when the game feels smooth: the median interval, its spread, the slowest,
+/// and how many frames took over one and a half times the median (17 Oct 2026, choppy OBS and ShadowPlay captures).
+fn log_pacing(delta: Duration) {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("SOMNIUM_PACING_LOG").as_deref() == Ok("1"));
+    if !*ON {
+        return;
+    }
+    static SAMPLES: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut samples) = SAMPLES.lock() else { return };
+    samples.push(delta.as_secs_f32() * 1000.0);
+    if samples.len() < 300 {
+        return;
+    }
+    let mut sorted = samples.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+    let spread = (samples.iter().map(|d| (d - mean) * (d - mean)).sum::<f32>() / samples.len() as f32).sqrt();
+    let hitches = samples.iter().filter(|d| **d > median * 1.5).count();
+    tracing::info!(median_ms = median, mean_ms = mean, spread_ms = spread, p95_ms = sorted[sorted.len() * 95 / 100],
+        max_ms = sorted[sorted.len() - 1], hitches, frames = samples.len(), "frame pacing");
+    samples.clear();
+}
+
 /// Per-frame timing data and frame-rate limiter state.
 ///
 /// This struct is **not** `Clone` or `Copy` by design — it contains
@@ -99,6 +125,7 @@ impl TimeState {
         self.elapsed = now.duration_since(self.startup);
         self.last_frame = now;
         self.frame_count += 1;
+        log_pacing(self.delta_time);
 
         // Exponential moving average of FPS.
         let instantaneous_fps = if self.delta_time.as_secs_f64() > 0.0 {
@@ -155,6 +182,13 @@ impl TimeState {
         while Instant::now() < deadline {
             std::hint::spin_loop();
         }
+    }
+
+    /// Change the frame cap while running (`None` or 0: uncapped). See [`request_frame_pacing`].
+    pub fn set_target_fps(&mut self, target_fps: Option<u32>) {
+        self.target_frame_time = target_fps
+            .filter(|fps| *fps > 0)
+            .map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)));
     }
 
     // ── Public accessors ────────────────────────────────────────────
@@ -234,4 +268,30 @@ mod tests {
         ts.wait_for_frame_budget();
         assert!(before.elapsed() < Duration::from_millis(1));
     }
+}
+
+/// Frame pacing asked for by game code (an options menu): vertical sync, and a frame cap (`None`: uncapped). The app
+/// applies the latest request between frames ([`take_frame_pacing_request`]), changing the swap chain's present mode
+/// and the frame limiter. A process-wide slot, since the request comes from inside game callbacks that only borrow
+/// the timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramePacing {
+    /// Wait for the display's refresh (no tearing); off presents at once (`AutoNoVsync`).
+    pub vsync: bool,
+    /// Frames a second at most; `None` runs as fast as the GPU allows.
+    pub cap: Option<u32>,
+}
+
+static FRAME_PACING_REQUEST: std::sync::Mutex<Option<FramePacing>> = std::sync::Mutex::new(None);
+
+/// Ask for new frame pacing; applied before the next frame.
+pub fn request_frame_pacing(pacing: FramePacing) {
+    if let Ok(mut slot) = FRAME_PACING_REQUEST.lock() {
+        *slot = Some(pacing);
+    }
+}
+
+/// The pending request, once.
+pub fn take_frame_pacing_request() -> Option<FramePacing> {
+    FRAME_PACING_REQUEST.lock().ok().and_then(|mut slot| slot.take())
 }
