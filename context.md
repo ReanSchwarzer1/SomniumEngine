@@ -2435,6 +2435,11 @@ does not overlap. STALKER waits for both relevant outputs.
   - The pipeline cache would touch 69 sites in 56 files; left, since the NVIDIA driver caches.
   - The frame generation pacing controller's seven-point version is untimed.
   - Release-build timings are still owed for most of the numbers above.
+  - A game's own menu with the pointer free now gets the window's input before any play session
+    (`app_play_input.rs`). Before this, a standalone live title heard no keys. Harness input (the editor bridge)
+    cannot show this class of bug; check with real key presses.
+  - Pacing: `SOMNIUM_PACING_LOG=1` logs how evenly frames come; `SOMNIUM_FRAME_CAP` and `SOMNIUM_VSYNC` override a
+    game's choice. Uncapped frames were 13 to 22 ms apart and recordings stuttered; a 60 cap holds a 1 ms spread.
 
 ### Missing systems
 

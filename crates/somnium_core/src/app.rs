@@ -5753,9 +5753,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
         // Frame pacing asked for by the game's options (vsync, a cap or none): applied between frames.
         if let Some(pacing) = crate::time::take_frame_pacing_request() {
-            self.time.set_target_fps(pacing.cap);
+            // `SOMNIUM_FRAME_CAP=60` (0 uncapped) and `SOMNIUM_VSYNC=0/1` override a game's choice, for pacing runs.
+            let cap = std::env::var("SOMNIUM_FRAME_CAP").ok().and_then(|v| v.parse::<u32>().ok())
+                .map_or(pacing.cap, |c| (c > 0).then_some(c));
+            let vsync = std::env::var("SOMNIUM_VSYNC").map_or(pacing.vsync, |v| v != "0");
+            self.time.set_target_fps(cap);
             if let Some(render_ctx) = self.render_ctx.as_mut() {
-                render_ctx.set_vsync(pacing.vsync);
+                render_ctx.set_vsync(vsync);
             }
         }
         self.time.wait_for_frame_budget();

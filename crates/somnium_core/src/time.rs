@@ -32,6 +32,32 @@ const FPS_SMOOTHING: f64 = 0.1;
 /// to a spin-wait, in milliseconds.
 const SPIN_WAIT_THRESHOLD: Duration = Duration::from_millis(1);
 
+/// `SOMNIUM_PACING_LOG=1`: every 300 frames, how evenly frames came. A recording samples at a fixed rate, so uneven
+/// spacing shows as stutter in a video even when the game feels smooth: the median interval, its spread, the slowest,
+/// and how many frames took over one and a half times the median (17 Oct 2026, choppy OBS and ShadowPlay captures).
+fn log_pacing(delta: Duration) {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("SOMNIUM_PACING_LOG").as_deref() == Ok("1"));
+    if !*ON {
+        return;
+    }
+    static SAMPLES: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut samples) = SAMPLES.lock() else { return };
+    samples.push(delta.as_secs_f32() * 1000.0);
+    if samples.len() < 300 {
+        return;
+    }
+    let mut sorted = samples.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+    let spread = (samples.iter().map(|d| (d - mean) * (d - mean)).sum::<f32>() / samples.len() as f32).sqrt();
+    let hitches = samples.iter().filter(|d| **d > median * 1.5).count();
+    tracing::info!(median_ms = median, mean_ms = mean, spread_ms = spread, p95_ms = sorted[sorted.len() * 95 / 100],
+        max_ms = sorted[sorted.len() - 1], hitches, frames = samples.len(), "frame pacing");
+    samples.clear();
+}
+
 /// Per-frame timing data and frame-rate limiter state.
 ///
 /// This struct is **not** `Clone` or `Copy` by design — it contains
@@ -99,6 +125,7 @@ impl TimeState {
         self.elapsed = now.duration_since(self.startup);
         self.last_frame = now;
         self.frame_count += 1;
+        log_pacing(self.delta_time);
 
         // Exponential moving average of FPS.
         let instantaneous_fps = if self.delta_time.as_secs_f64() > 0.0 {

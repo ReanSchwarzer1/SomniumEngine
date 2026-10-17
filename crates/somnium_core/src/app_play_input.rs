@@ -38,8 +38,14 @@ fn capture_allowed(requested: bool, state: SimulationState, focused: bool) -> bo
     requested && state == SimulationState::Playing && focused
 }
 
-fn owns_game_input(captured: bool, player_mode: bool, state: SimulationState) -> bool {
-    captured || (player_mode && state == SimulationState::Paused)
+/// Whether a play window's input goes to the game: its captured cursor; a standalone player's pause menu; or a game's
+/// own menu holding the pointer free during play (a live title, its splash and brightness screen). Without the last,
+/// a free pointer meant no capture and no route, so a live title heard no keys and its drawn pointer never moved
+/// (17 Oct 2026: the release build's title, splash and brightness screen ignored every key).
+fn owns_game_input(captured: bool, player_mode: bool, state: SimulationState, menu_up: bool) -> bool {
+    captured
+        || (player_mode && state == SimulationState::Paused)
+        || (menu_up && state != SimulationState::Editing)
 }
 
 // Some means the player owns this event, including release and autorepeat.
@@ -60,10 +66,19 @@ mod tests {
 
     #[test]
     fn standalone_pause_menu_owns_input_without_a_captured_cursor() {
-        assert!(owns_game_input(false, true, SimulationState::Paused));
-        assert!(!owns_game_input(false, false, SimulationState::Paused));
-        assert!(!owns_game_input(false, true, SimulationState::Playing));
-        assert!(owns_game_input(true, false, SimulationState::Playing));
+        assert!(owns_game_input(false, true, SimulationState::Paused, false));
+        assert!(!owns_game_input(false, false, SimulationState::Paused, false));
+        assert!(!owns_game_input(false, true, SimulationState::Playing, false));
+        assert!(owns_game_input(true, false, SimulationState::Playing, false));
+    }
+
+    #[test]
+    fn a_game_menu_with_the_pointer_free_owns_input_during_play() {
+        // The live title: pointer free, nothing captured, the session playing (player or editor Play).
+        assert!(owns_game_input(false, true, SimulationState::Playing, true));
+        assert!(owns_game_input(false, false, SimulationState::Playing, true));
+        // Editing never hands the editor's input to a game.
+        assert!(!owns_game_input(false, false, SimulationState::Editing, true));
     }
 
     #[test]
@@ -214,6 +229,20 @@ impl<G: GameApp> Engine<G> {
         }
         let scene_window = self.play_window().is_some_and(|w| w.id() == id);
         if !self.play_session_active || !scene_window {
+            // A standalone game's own menu with its pointer free (the live title, its splash and brightness screen)
+            // runs before any play session has begun. Its keys must not fall through to the editor's path, where the
+            // native UI's focus navigation took the arrows, WASD and Enter (17 Oct 2026: the release build's title
+            // answered the mouse and no key).
+            let menu_up = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_free());
+            if menu_up && self.config.player_mode && scene_window && is_game_input(event) {
+                self.input.handle_window_event(event);
+                if !self.dispatch_game_os_event(event)
+                    && let Some(event) = translate_window_event(event)
+                {
+                    self.forward_engine_event(event_loop, event);
+                }
+                return true;
+            }
             return false;
         }
         if matches!(event, WindowEvent::Focused(true)) {
@@ -249,10 +278,12 @@ impl<G: GameApp> Engine<G> {
                 return true;
             }
         }
+        let menu_up = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_free());
         if owns_game_input(
             self.play_cursor.window == Some(id),
             self.config.player_mode,
             self.simulation_clock.state,
+            menu_up,
         ) && is_game_input(event)
         {
             self.input.handle_window_event(event);
