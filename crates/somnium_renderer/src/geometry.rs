@@ -204,12 +204,22 @@ impl GeometryPool {
         indices: &[u32],
         material_id: u32,
     ) -> MeshAllocation {
-        debug_assert_indices_in_range(vertices.len(), indices);
+        let prepared = prepare_mesh(vertices, indices);
+        self.upload_prepared(queue, vertices, indices, material_id, prepared)
+    }
 
-        // Phase 15D: cluster the mesh and upload the permuted index buffer, so
-        // each meshlet is a contiguous range that 15F can draw directly.
-        // Triangle order within a draw does not affect the image.
-        let build = crate::meshlet::build_meshlets(vertices, indices);
+    /// [`Self::upload_mesh`] with its CPU half ([`prepare_mesh`]) already done,
+    /// so a scene's meshes can be prepared on every core and uploaded in turn.
+    pub fn upload_prepared(
+        &mut self,
+        queue: &wgpu::Queue,
+        vertices: &[Vertex],
+        indices: &[u32],
+        material_id: u32,
+        prepared: PreparedMesh,
+    ) -> MeshAllocation {
+        debug_assert_indices_in_range(vertices.len(), indices);
+        let PreparedMesh { build, sdf } = prepared;
         let indices: &[u32] = if build.meshlets.is_empty() {
             indices
         } else {
@@ -261,7 +271,7 @@ impl GeometryPool {
             self.meshlets.insert(v_offset, build.meshlets);
             self.bounds_revision += 1;
         }
-        if let Some(brick) = bake_mesh_sdf(vertices, indices) {
+        if let Some(brick) = sdf {
             self.sdf_bricks.insert(v_offset, std::sync::Arc::new(brick));
         }
         alloc
@@ -722,6 +732,25 @@ fn span_accepts(
         return false;
     }
     true
+}
+
+/// The CPU half of a static mesh upload: its clusters and its SDF brick. Both
+/// are pure functions of the mesh, and in an unoptimised build they were most
+/// of a level's open (TSF Town 14 of 22 s, 15 October 2026), one mesh at a time.
+pub struct PreparedMesh {
+    build: crate::meshlet::MeshletBuild,
+    sdf: Option<MeshSdfBrick>,
+}
+
+/// Cluster the mesh (Phase 15D: the uploaded index buffer is permuted so each
+/// meshlet is a contiguous range that 15F can draw directly; triangle order
+/// within a draw does not affect the image) and bake its SDF brick.
+pub fn prepare_mesh(vertices: &[Vertex], indices: &[u32]) -> PreparedMesh {
+    let build = crate::meshlet::build_meshlets(vertices, indices);
+    // The brick is baked from the permuted indices, as it was when this was
+    // one function: the same triangles in another order.
+    let sdf = bake_mesh_sdf(vertices, if build.meshlets.is_empty() { indices } else { &build.indices });
+    PreparedMesh { build, sdf }
 }
 
 fn bake_mesh_sdf(vertices: &[Vertex], indices: &[u32]) -> Option<MeshSdfBrick> {

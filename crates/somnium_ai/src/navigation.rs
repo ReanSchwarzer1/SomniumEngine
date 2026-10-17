@@ -193,6 +193,27 @@ fn sample_height(tri: Triangle, p: Vec2) -> Option<f32> {
         .then_some(a.y + u * (b.y - a.y) + v * (c.y - a.y))
 }
 
+/// Whether a triangle's footprint on the ground (its XZ projection) overlaps the square of half side `half` centred on
+/// `centre`: separating axes X, Z and the triangle's edge normals. A vertical wall projects to a segment; that works too.
+fn overlaps_square(tri: Triangle, centre: Vec2, half: f32) -> bool {
+    let p = tri.map(|v| Vec2::new(v[0], v[2]) - centre);
+    let mut axes = [Vec2::X, Vec2::Y, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO];
+    for i in 0..3 {
+        let edge = p[(i + 1) % 3] - p[i];
+        if edge.length_squared() > EPS * EPS {
+            axes[2 + i] = edge.perp().normalize();
+        }
+    }
+    axes.iter().filter(|axis| **axis != Vec2::ZERO).all(|axis| {
+        let (lo, hi) = p.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+            let d = v.dot(*axis);
+            (lo.min(d), hi.max(d))
+        });
+        let reach = half * (axis.x.abs() + axis.y.abs());
+        hi >= -reach && lo <= reach
+    })
+}
+
 /// Bake synchronously for command-line cook tools and deterministic tests.
 pub fn bake(input: &BakeInput) -> Result<NavTile, String> {
     bake_checked(input, || Ok(()))
@@ -236,9 +257,10 @@ fn bake_checked(
         })
         .collect();
     // Steep geometry, including vertical triangles with zero XZ projected
-    // area, occupies body space. Its conservative bounds prevent thin walls
-    // from vanishing from the heightfield merely because they miss a sample.
-    let walls: Vec<Bounds> = input
+    // area, occupies body space. Its bounds are a quick reject; a column is
+    // blocked only where the triangle's own footprint reaches it, so a wall
+    // standing at an angle does not close the open ground in its bounding box.
+    let walls: Vec<(Bounds, Triangle)> = input
         .triangles
         .iter()
         .filter_map(|t| {
@@ -246,10 +268,10 @@ fn bake_checked(
             if (b - a).cross(c - a).normalize_or_zero().y.abs() >= slope {
                 return None;
             }
-            Some(Bounds {
+            Some((Bounds {
                 min: (a.min(b).min(c) - Vec3::splat(EPS)).to_array(),
                 max: (a.max(b).max(c) + Vec3::splat(EPS)).to_array(),
-            })
+            }, *t))
         })
         .collect();
     let mut spans: BTreeMap<(i32, i32), Vec<f32>> = BTreeMap::new();
@@ -287,23 +309,31 @@ fn bake_checked(
                     else {
                         return false;
                     };
+                    // A surface no higher than a step is stepped onto, not walked into.
                     if input
                         .triangles
                         .iter()
                         .filter_map(|&t| sample_height(t, p))
-                        .any(|h| h > floor + EPS && h < floor + s.agent_height)
+                        .any(|h| h > floor + s.max_step + EPS && h < floor + s.agent_height)
                     {
                         return false;
                     }
                 }
-                !input.obstacles.iter().chain(walls.iter()).any(|b| {
+                let near = |b: &Bounds| {
                     px + size * 0.5 + s.agent_radius > b.min[0]
                         && px - size * 0.5 - s.agent_radius < b.max[0]
                         && pz + size * 0.5 + s.agent_radius > b.min[2]
                         && pz - size * 0.5 - s.agent_radius < b.max[2]
                         && y + s.agent_height > b.min[1]
                         && y < b.max[1]
-                })
+                };
+                // Steep faces no taller than a step (kerbs, stair risers) are climbed.
+                !input.obstacles.iter().any(near)
+                    && !walls.iter().any(|(b, t)| {
+                        near(b)
+                            && b.max[1] > y + s.max_step + EPS
+                            && overlaps_square(*t, Vec2::new(px, pz), size * 0.5 + s.agent_radius)
+                    })
             });
             spans.insert((x, z), heights);
         }

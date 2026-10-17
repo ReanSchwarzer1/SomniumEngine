@@ -14,7 +14,9 @@
 //!   0 (as painted) to 1 (none). A whole level seen before it decayed;
 //! - word 7: `green` as f32 bits: how far foliage albedo is pulled to a
 //!   living green, 0 (as textured) to 1;
-//! - words 8..: each painted entity's slot: [`SLOT_HEADER_WORDS`] of layer
+//! - words 8..=11: the retro fog for baked-light slots: start and end in
+//!   metres (f32 bits), the colour as 10 bits a channel (R low), a spare;
+//! - words 12..: each painted entity's slot: [`SLOT_HEADER_WORDS`] of layer
 //!   settings ([`PaintLayers::words`]), then its masks, one word per vertex,
 //!   in the mesh's own vertex order;
 //! - from word 0's value: one word per opaque instance, the handle of its
@@ -27,12 +29,16 @@
 use std::collections::HashMap;
 
 /// First word available to slots.
-pub const HEADER_WORDS: u32 = 8;
+pub const HEADER_WORDS: u32 = 12;
 /// Words of layer settings at the start of every slot. `shading.wgsl` reads
 /// the same number as `PAINT_SLOT_HEADER`.
 pub const SLOT_HEADER_WORDS: u32 = 20;
 /// "This channel has no layer material": the built-in weathering applies.
 pub const NO_LAYER: u32 = u32::MAX;
+/// Set on a draw's paint word (`DrawCommand::paint`): the draw is kept out of the retro picture (the post-process's
+/// coarse grid, flicker filter and 15-bit dither) and shown by a look of its own. A paint handle never reaches this
+/// bit; the shading pass masks it off. For a figure whose detail is its horror (TSF's Entity in a PS2 level).
+pub const OUTSIDE_RETRO: u32 = 1 << 31;
 
 /// What each of the four mask channels paints, as the shader reads it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +65,9 @@ pub struct PaintLayers {
     /// blended, which hides tiling in organic textures. Off for anything with
     /// courses or joints.
     pub detile: [f32; 4],
+    /// The masks are the surface's baked light (PS2 vertex colours), not
+    /// layer amounts: word 16's bit 16.
+    pub baked: bool,
 }
 
 impl Default for PaintLayers {
@@ -73,6 +82,7 @@ impl Default for PaintLayers {
             breakup_scale: [1.5; 4],
             stain: [0.0; 4],
             detile: [0.0; 4],
+            baked: false,
         }
     }
 }
@@ -95,6 +105,7 @@ impl PaintLayers {
             out[12 + i] = (1.0 / self.breakup_scale[i].max(0.01)).to_bits();
             out[16 + i] = byte(self.stain[i]) | (byte(self.detile[i]) << 8);
         }
+        out[16] |= u32::from(self.baked) << 16;
         out
     }
 }
@@ -120,6 +131,9 @@ pub struct VertexPaintPool {
     pub fade: f32,
     /// 0 leaves foliage as textured; 1 pulls it to a living green.
     pub green: f32,
+    /// The retro fog for baked-light slots: start, end (metres), then the
+    /// colour's linear RGB. An end at or below the start is no fog.
+    pub fog: [f32; 5],
 }
 
 impl VertexPaintPool {
@@ -185,7 +199,10 @@ impl VertexPaintPool {
     #[must_use]
     pub fn header(&self, table: u32) -> [u32; HEADER_WORDS as usize] {
         let [x, y, z, r] = self.brush.map(f32::to_bits);
-        [table, self.preview, x, y, z, r, self.fade.clamp(0.0, 1.0).to_bits(), self.green.clamp(0.0, 1.0).to_bits()]
+        let [start, end, red, green, blue] = self.fog;
+        let ten = |v: f32| (v.clamp(0.0, 1.0) * 1023.0).round() as u32;
+        [table, self.preview, x, y, z, r, self.fade.clamp(0.0, 1.0).to_bits(), self.green.clamp(0.0, 1.0).to_bits(),
+            start.to_bits(), end.to_bits(), ten(red) | (ten(green) << 10) | (ten(blue) << 20), 0]
     }
 
     /// Words the GPU buffer needs for the vertex region plus `instances`.
@@ -264,6 +281,7 @@ mod tests {
             breakup_scale: [2.0, 1.5, 1.5, 0.5],
             stain: [0.0, 1.0, 0.0, 0.0],
             detile: [1.0, 0.0, 0.0, 0.0],
+            baked: false,
         };
         let w = layers.words();
         assert_eq!((w[0], w[1], w[3]), (7, NO_LAYER, 3));
@@ -273,6 +291,17 @@ mod tests {
         assert_eq!(w[11] & 255, 0);
         assert_eq!(f32::from_bits(w[12]), 0.5, "noise frequency is 1 / blotch size");
         assert_eq!((w[16], w[17]), (255 << 8, 255), "de-tile in byte 1, stain in byte 0");
+        let baked = PaintLayers { baked: true, ..layers }.words();
+        assert_eq!(baked[16], (255 << 8) | (1 << 16), "baked light is word 16's bit 16");
+    }
+
+    #[test]
+    fn the_header_carries_the_retro_fog_for_baked_light() {
+        let pool = VertexPaintPool { fog: [6.0, 26.0, 1.0, 0.5, 0.0], ..Default::default() };
+        let h = pool.header(40);
+        assert_eq!(h.len(), HEADER_WORDS as usize);
+        assert_eq!((h[0], f32::from_bits(h[8]), f32::from_bits(h[9])), (40, 6.0, 26.0));
+        assert_eq!((h[10] & 1023, (h[10] >> 10) & 1023, h[10] >> 20), (1023, 512, 0), "10 bits a channel, red low");
     }
 
     #[test]

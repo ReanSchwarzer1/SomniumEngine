@@ -106,3 +106,47 @@ fn fs_upsample(in: VOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(result, 1.0);
 }
+
+/// One ghost or the halo: the blurred chain read at `at`, its colour split a little along `toward` the way a lens's
+/// glass splits it, faded toward the frame's edge.
+fn flare_tap(at: vec2<f32>, toward: vec2<f32>, edge_power: f32) -> vec3<f32> {
+    let fade = pow(saturate(1.0 - length(vec2<f32>(0.5) - at) / 0.7071), edge_power);
+    let split = toward * 0.012;
+    let rgb = vec3<f32>(
+        textureSampleLevel(src_tex, src_samp, at + split, 0.0).r,
+        textureSampleLevel(src_tex, src_samp, at, 0.0).g,
+        textureSampleLevel(src_tex, src_samp, at - split, 0.0).b);
+    return rgb * fade;
+}
+
+/// The lens's flare (17 Oct 2026; engine features record E3): ghosts of every bright thing mirrored through the frame's
+/// centre and a halo ring round it, as light bounces between a real lens's elements. Like the bloom, no threshold:
+/// the ghosts carry a small share of all light, so only a lamp, the moon or a torch shone at the eye shows one.
+/// Added onto the chain's top level, so `filter_radius` carries the flare's strength already divided by the bloom's
+/// intensity (the post pass multiplies the chain by that intensity again).
+@fragment
+fn fs_flare(in: VOut) -> @location(0) vec4<f32> {
+    let uv = vec2<f32>(1.0) - in.uv;
+    let toward = (vec2<f32>(0.5) - uv) * 0.34;
+    var result = vec3<f32>(0.0);
+    // Ghosts at falling sizes and strengths, each tinted as a coated element would tint it.
+    let tints = array<vec3<f32>, 4>(
+        vec3<f32>(1.0, 0.82, 0.62), vec3<f32>(0.55, 0.8, 1.0), vec3<f32>(0.9, 0.6, 1.0), vec3<f32>(0.7, 1.0, 0.75));
+    for (var i = 0u; i < 4u; i++) {
+        let at = uv + toward * f32(i + 1u);
+        if all(at >= vec2<f32>(0.0)) && all(at <= vec2<f32>(1.0)) {
+            result += flare_tap(at, toward, 8.0) * tints[i] * (0.8 / f32(i + 1u));
+        }
+    }
+    // The halo: a ring at a fixed distance from the centre.
+    let aspect = params.src_texel.y / max(params.src_texel.x, 1.0e-6);
+    var dir = vec2<f32>(0.5) - uv;
+    dir.x *= aspect;
+    let len = max(length(dir), 1.0e-4);
+    var halo_vec = dir / len * 0.42;
+    halo_vec.x /= aspect;
+    let halo_at = uv + halo_vec;
+    result += flare_tap(halo_at, toward, 4.0) * vec3<f32>(0.85, 0.9, 1.0) * 0.5;
+    let finite = select(vec3<f32>(0.0), result, result == result);
+    return vec4<f32>(min(finite * params.filter_radius, vec3<f32>(60000.0)), 1.0);
+}

@@ -1517,6 +1517,12 @@ impl ShadingPass {
         self.rebind(device);
     }
 
+    /// Read another target as the lighting aux (the path tracer's output while it runs, lighting_extra's otherwise).
+    pub fn set_lighting_aux(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+        self.lighting_aux_view = view.clone();
+        self.rebind(device);
+    }
+
     fn rebind(&mut self, device: &wgpu::Device) {
         self.bind_group = Self::make_bind_group(
             device,
@@ -1550,6 +1556,11 @@ impl ShadingPass {
             &self.paint_buffer,
             self.local_shadow_tlas.as_ref(),
         );
+    }
+
+    /// The vertex-paint words (the post-process reads the instance table's `OUTSIDE_RETRO` bits).
+    pub fn paint_buffer(&self) -> &wgpu::Buffer {
+        &self.paint_buffer
     }
 
     fn make_paint_buffer(device: &wgpu::Device, words: u64) -> wgpu::Buffer {

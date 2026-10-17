@@ -11,15 +11,13 @@
 //
 // Reconstructing the world position from *this* frame's depth and projecting it
 // with the previous frame's matrix gives the exact motion of a **static** point
-// under a **moving camera**. It does not give the motion of a point that moved
-// on its own — for that the previous frame's model matrix has to travel with
-// the instance, which Somnium has nowhere to put yet: the draw queue is sorted
-// afresh every frame, so instance `i` is not the same object it was last frame,
-// and there is no stable per-object id to key a history on. Nothing in the
-// engine currently moves independently of the camera (there is no skinning, no
-// wind, and rigid bodies do not yet write transforms), so the covered case is
-// presently the only case. Phase 27 is when that changes, and the note is here
-// so the gap is found by reading rather than by seeing a smear stay still.
+// under a **moving camera**. A point that moved on its own (C2, 16 October 2026:
+// held tools, a body walking, a skinned hand) comes from `motion`: per instance,
+// its previous model matrix (the renderer keys last frame's transforms by mesh
+// and order, since the draw queue is sorted afresh) and, for a skinned mesh,
+// where last frame's deformed vertices are kept. The pixel's point is found on
+// its own triangle (the visibility buffer says which), and the same point of
+// that triangle last frame is projected with the previous camera.
 //
 // # Reference
 //
@@ -54,6 +52,61 @@ struct VelocityParams {
 @group(1) @binding(1) var<uniform> vp: VelocityParams;
 // Which instance covers the pixel, for foliage that moves on its own.
 @group(1) @binding(2) var vis_tex: texture_2d<u32>;
+
+struct InstanceMotion {
+    prev_model: mat4x4<f32>,
+    /// Where last frame's pose of a skinned mesh starts in `previous_pose`, or 0xffffffff.
+    prev_vertex_base: u32,
+    /// 0: nothing of its own (the camera and wind cover it).
+    moving: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+@group(1) @binding(3) var<storage, read> motion: array<InstanceMotion>;
+@group(1) @binding(4) var<storage, read> previous_pose: array<Vertex>;
+
+fn vertex_position(v: Vertex) -> vec3<f32> {
+    return vec3<f32>(v.pos_x, v.pos_y, v.pos_z);
+}
+
+/// Where `world` was last frame, for a pixel of instance `id`'s triangle `prim` that moved on its own.
+fn previous_world(id: u32, prim: u32, world: vec3<f32>) -> vec3<f32> {
+    let inst = instances[id];
+    let mo = motion[id];
+    let base = inst.index_offset + prim * 3u;
+    let i0 = indices[base];
+    let i1 = indices[base + 1u];
+    let i2 = indices[base + 2u];
+    let a = (inst.model * vec4<f32>(vertex_position(vertices[inst.vertex_offset + i0]), 1.0)).xyz;
+    let b = (inst.model * vec4<f32>(vertex_position(vertices[inst.vertex_offset + i1]), 1.0)).xyz;
+    let c = (inst.model * vec4<f32>(vertex_position(vertices[inst.vertex_offset + i2]), 1.0)).xyz;
+    // The point's place on its triangle (barycentric), then the same place on last frame's triangle.
+    let e0 = b - a;
+    let e1 = c - a;
+    let e2 = world - a;
+    let d00 = dot(e0, e0);
+    let d01 = dot(e0, e1);
+    let d11 = dot(e1, e1);
+    let d20 = dot(e2, e0);
+    let d21 = dot(e2, e1);
+    let denom = d00 * d11 - d01 * d01;
+    var w = vec3<f32>(1.0 / 3.0);
+    if abs(denom) > 1e-12 {
+        let v = (d11 * d20 - d01 * d21) / denom;
+        let u = (d00 * d21 - d01 * d20) / denom;
+        w = vec3<f32>(1.0 - v - u, v, u);
+    }
+    var pa = vertex_position(vertices[inst.vertex_offset + i0]);
+    var pb = vertex_position(vertices[inst.vertex_offset + i1]);
+    var pc = vertex_position(vertices[inst.vertex_offset + i2]);
+    if mo.prev_vertex_base != 0xffffffffu {
+        pa = vertex_position(previous_pose[mo.prev_vertex_base + i0]);
+        pb = vertex_position(previous_pose[mo.prev_vertex_base + i1]);
+        pc = vertex_position(previous_pose[mo.prev_vertex_base + i2]);
+    }
+    let local = pa * w.x + pb * w.y + pc * w.z;
+    return (mo.prev_model * vec4<f32>(local, 1.0)).xyz;
+}
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -97,11 +150,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec2<f32> {
         world = world_from_ndc(vec3<f32>(ndc_xy, depth));
     }
 
+    // A point that moved on its own: where the same point of its triangle was last frame.
+    var moved = false;
+    if depth < 1.0 {
+        let vis = textureLoad(vis_tex, coord, 0).xy;
+        if vis.x != 0u && vis.x - 1u < arrayLength(&motion) && motion[vis.x - 1u].moving != 0u {
+            world = previous_world(vis.x - 1u, vis.y, world);
+            moved = true;
+        }
+    }
+
     // Foliage wind moves a point without the camera moving: take this frame's
     // swayed position back to its rest pose (two fixed-point steps; the sway
     // barely depends on where along it the point is) and forward to where the
     // wind had it last frame. Same `wind_offset` as every raster pass.
-    if depth < 1.0 {
+    if depth < 1.0 && !moved {
         let vis = textureLoad(vis_tex, coord, 0).xy;
         if vis.x != 0u {
             let inst = instances[vis.x - 1u];

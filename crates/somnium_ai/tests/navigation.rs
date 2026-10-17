@@ -196,3 +196,34 @@ fn agent_follows_detour_and_replans_after_tile_unload() {
     assert_eq!(movement.velocity, Vec3::ZERO);
     assert!(!movement.arrived);
 }
+#[test]
+fn a_wall_at_an_angle_blocks_only_its_own_footprint() {
+    // A wall on the diagonal from (1, 1) to (4, 4): its bounding box covers the ground either side of it.
+    let mut data = input();
+    data.triangles.extend([
+        [[1.0, 0.0, 1.0], [4.0, 0.0, 4.0], [4.0, 3.0, 4.0]],
+        [[1.0, 0.0, 1.0], [4.0, 3.0, 4.0], [1.0, 3.0, 1.0]],
+    ]);
+    data.settings.agent_radius = 0.2;
+    let mut nav = NavWorld::default();
+    nav.install(bake(&data).unwrap());
+    let (a, b) = (Vec3::new(1.5, 0.0, 3.5), Vec3::new(3.5, 0.0, 1.5));
+    let path = nav.path(a, b, 0.1).expect("both sides of the wall are open ground");
+    let length: f32 = path.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+    assert!(length > a.distance(b) + 1.0, "the way goes round the wall's end, not through it: {length}");
+}
+#[test]
+fn a_kerb_lower_than_a_step_is_walked_up() {
+    // A pavement 0.15 m high from x = 5: its riser is steep but lower than the step height.
+    let mut data = input();
+    data.triangles = plane(0.0, 0.0, 5.0, 10.0, 0.0);
+    data.triangles.extend(plane(5.0, 0.0, 5.0, 10.0, 0.15));
+    data.triangles.extend([
+        [[5.0, 0.0, 0.0], [5.0, 0.15, 0.0], [5.0, 0.15, 10.0]],
+        [[5.0, 0.0, 0.0], [5.0, 0.15, 10.0], [5.0, 0.0, 10.0]],
+    ]);
+    data.settings.agent_radius = 0.2;
+    let mut nav = NavWorld::default();
+    nav.install(bake(&data).unwrap());
+    assert!(nav.path(Vec3::new(2.0, 0.0, 5.0), Vec3::new(8.0, 0.15, 5.0), 0.1).is_some());
+}

@@ -57,6 +57,9 @@ struct GpuShadowView {
 pub struct ShadowCaster {
     pub instance_index: u32,
     pub index_count: u32,
+    /// Bit `i`: drawn into cascade `i` (the cascades whose volume it is in). Every caster used to be drawn into
+    /// every cascade redrawn, so the nearest, a few metres across, drew the whole level (17 Oct 2026).
+    pub cascades: u8,
     /// Current CPU material proves that `shadow.wgsl::fs_main` cannot discard.
     /// Missing or non-finite material data stays on the reference pipeline.
     pub opaque_depth_only: bool,
@@ -370,7 +373,7 @@ impl ShadowPass {
             rpass.set_bind_group(2, &self.cutout_bind_group, &[]);
 
             let mut opaque_bound = false;
-            for c in casters {
+            for c in casters.iter().filter(|c| c.cascades & (1 << cascade) != 0) {
                 let opaque = c.opaque_depth_only && self.opaque_pipeline.is_some();
                 if opaque != opaque_bound {
                     rpass.set_pipeline(if opaque {

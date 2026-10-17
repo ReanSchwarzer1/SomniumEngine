@@ -180,3 +180,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.zune-jpeg]
 opt-level = 3
+# Audio runs per sample on its own thread: unoptimised, a few voices and a reverb can underrun it (15 Oct 2026).
+[profile.dev.package.kira]
+opt-level = 3
+[profile.dev.package.somnium_audio]
+opt-level = 3
+[profile.dev.package.somnium_ai]
+opt-level = 3

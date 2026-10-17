@@ -157,6 +157,13 @@ impl TimeState {
         }
     }
 
+    /// Change the frame cap while running (`None` or 0: uncapped). See [`request_frame_pacing`].
+    pub fn set_target_fps(&mut self, target_fps: Option<u32>) {
+        self.target_frame_time = target_fps
+            .filter(|fps| *fps > 0)
+            .map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)));
+    }
+
     // ── Public accessors ────────────────────────────────────────────
 
     /// Duration of the last completed frame.
@@ -234,4 +241,30 @@ mod tests {
         ts.wait_for_frame_budget();
         assert!(before.elapsed() < Duration::from_millis(1));
     }
+}
+
+/// Frame pacing asked for by game code (an options menu): vertical sync, and a frame cap (`None`: uncapped). The app
+/// applies the latest request between frames ([`take_frame_pacing_request`]), changing the swap chain's present mode
+/// and the frame limiter. A process-wide slot, since the request comes from inside game callbacks that only borrow
+/// the timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramePacing {
+    /// Wait for the display's refresh (no tearing); off presents at once (`AutoNoVsync`).
+    pub vsync: bool,
+    /// Frames a second at most; `None` runs as fast as the GPU allows.
+    pub cap: Option<u32>,
+}
+
+static FRAME_PACING_REQUEST: std::sync::Mutex<Option<FramePacing>> = std::sync::Mutex::new(None);
+
+/// Ask for new frame pacing; applied before the next frame.
+pub fn request_frame_pacing(pacing: FramePacing) {
+    if let Ok(mut slot) = FRAME_PACING_REQUEST.lock() {
+        *slot = Some(pacing);
+    }
+}
+
+/// The pending request, once.
+pub fn take_frame_pacing_request() -> Option<FramePacing> {
+    FRAME_PACING_REQUEST.lock().ok().and_then(|mut slot| slot.take())
 }

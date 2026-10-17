@@ -66,6 +66,11 @@ pub struct VertexPaintComponent {
     /// Per layer: above 0.5, hide the layer texture's tiling (organic
     /// textures only; it ghosts courses and joints).
     pub detile: [f32; 4],
+    /// The masks are the surface's light, baked as a PS2 game baked it into
+    /// its vertex colours: RGB 0.5 is the texture as painted, 1 twice as
+    /// bright. The sun, sky, bounce and traced light pass it by; lamps that
+    /// move (a lighter) still add, and the retro fog applies.
+    pub baked_light: bool,
 }
 
 impl Component for VertexPaintComponent {}
@@ -88,6 +93,7 @@ impl Default for VertexPaintComponent {
             breakup_scale: layers.breakup_scale,
             stain: layers.stain,
             detile: layers.detile,
+            baked_light: false,
         }
     }
 }
@@ -130,6 +136,7 @@ impl VertexPaintComponent {
                 breakup_scale: self.breakup_scale,
                 stain: self.stain,
                 detile: self.detile,
+                baked: self.baked_light,
             },
             resolved,
         )

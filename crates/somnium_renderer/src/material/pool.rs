@@ -171,6 +171,8 @@ pub struct MaterialPool {
     max_buffer_bytes: u64,
     materials: Vec<GpuMaterial>,
     revision: u64,
+    /// Bumped only by edits that change what a shadow map draws (`GpuMaterial::shadow_shape`).
+    shadow_revision: u64,
 }
 
 impl MaterialPool {
@@ -192,6 +194,7 @@ impl MaterialPool {
             max_buffer_bytes,
             materials: Vec::new(),
             revision: 0,
+            shadow_revision: 0,
         }
     }
 
@@ -253,6 +256,9 @@ impl MaterialPool {
         if *slot == material {
             return;
         }
+        if slot.shadow_shape() != material.shadow_shape() {
+            self.shadow_revision = self.shadow_revision.wrapping_add(1);
+        }
         *slot = material;
         self.revision = self.revision.wrapping_add(1);
         queue.write_buffer(
@@ -265,6 +271,21 @@ impl MaterialPool {
     /// Changes whenever material data visible to raster/ray hit shading changes.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Changes only when a material edit changes a shadow map's depth (`GpuMaterial::shadow_shape`). A glow, a
+    /// colour or a roughness edit does not: the armband's screen is rewritten every frame, and with `revision` that
+    /// threw away all four cached cascades every frame (17 Oct 2026). New materials need no bump: a draw that uses
+    /// one is a new caster and changes its cascades' caster revision itself.
+    pub fn shadow_revision(&self) -> u64 {
+        self.shadow_revision
+    }
+}
+
+impl GpuMaterial {
+    /// What `shadow.wgsl` reads: the cut-out (threshold and the texture whose alpha it tests) and the wind sway.
+    fn shadow_shape(&self) -> (u32, i32, [u32; 2]) {
+        (self.alpha_cutoff.to_bits(), self.albedo_map, self.wind.map(f32::to_bits))
     }
 }
 
@@ -357,6 +378,20 @@ pub fn cutout_threshold(mode: somnium_asset::AlphaMode, cutoff: f32) -> f32 {
 mod material_flag_tests {
     use super::*;
     use somnium_asset::AlphaMode;
+
+    #[test]
+    fn only_a_cut_out_or_wind_edit_changes_what_a_shadow_map_draws() {
+        let base = GpuMaterial { albedo_map: 3, alpha_cutoff: 0.5, ..GpuMaterial::zeroed() };
+        let glow = GpuMaterial { emissive: [4.0, 2.0, 1.0], base_color: [0.2; 4], roughness: 0.1, ..base };
+        assert_eq!(base.shadow_shape(), glow.shadow_shape(), "a glow or a colour casts the same shadow");
+        for edited in [
+            GpuMaterial { alpha_cutoff: 0.3, ..base },
+            GpuMaterial { albedo_map: 4, ..base },
+            GpuMaterial { wind: [0.2, 0.0], ..base },
+        ] {
+            assert_ne!(base.shadow_shape(), edited.shadow_shape());
+        }
+    }
 
     #[test]
     fn polished_asset_reconstructs_the_gpu_payload_without_authored_pool_ids() {

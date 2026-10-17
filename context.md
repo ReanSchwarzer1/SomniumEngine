@@ -868,6 +868,62 @@ In tree:
 - Volumetric clouds, cloud shadows, precipitation, wetness, wind, and water
   ripples.
 - Clustered local lights and decals using the same volume-binning seam.
+- Traced shadows for every local light (ray-query hardware): one ray to the
+  lamp's centre for each lamp whose light at the pixel can be seen.
+
+**Local light shadows** (16 October 2026, A1 of the engine features record).
+`shading.wgsl` works out each lamp's unshadowed light and aim point in one
+function (`lamp_light`, every type: tube, rect, disc, point, spot) and traces
+once after it (`shadowed_lamp`), skipping lamps whose light there is below 1e-7
+(2e-5 on screen at the darkest exposure). Tracing inside each type's own branch,
+as before, cost 4.7 ms more in the Town (shading 21.1 to 16.4 ms, the same
+rays). Skin keeps its own path for point and spot lamps: its ray also answers
+its scattering. A bounded many-light pick (two exact rays and one reservoir ray
+per pixel) was built and measured no faster in the Town or the Office: no
+campaign level has more than four lamps that matter on any spot. The shading
+output drops NaN before its 60 000 clamp (as bloom does), since `min(NaN, x)` is
+`x` on GPUs.
+
+**Barycentrics near the eye** (16 October 2026). The shading pass rebuilds a
+pixel's barycentrics, and its neighbours' for the analytic UV gradients, from
+the triangle's vertices divided by their clip w (`vis_barycentric`). A long
+triangle with a vertex within a metre of the eye's plane, or behind it, puts
+that vertex at an enormous screen position and the result is rounding noise
+(a plaid of mips on a 7.9 m corridor wall in the Office). Such triangles take
+`ray_barycentric` instead: where the camera ray through the pixel meets the
+triangle's plane in world space.
+
+**A PS2 picture** (16 October 2026, The Somnus Fracture's sub-phase 11).
+`somnium.PostProcess.retro` 1: the post pass reads one scene pixel per cell of a
+448-line grid, blends each line a quarter with its neighbours (the console's
+flicker filter) and writes 15-bit colour through a 4x4 ordered dither (carried
+in the dream lens's spare uniform slot); the app turns TAA, FSR, motion blur,
+DOF, GTAO and ReSTIR DI/GI off and sets shading bit 512, under which textures
+sample two whole mip levels coarser, isotropic, and normal maps are skipped.
+
+**Scene capture** (16 October 2026, D2 of the engine features record). One
+small extra view a frame, for a mirror, a monitor or a screen:
+`renderer.request_capture(ctx, CaptureRequest { view, proj, eye, reach,
+sun_scale, ambient_scale, hide })` returns a bindless slot for a material's
+map, which shows the picture from the next frame. `pass/scene_capture.rs` is a
+forward pass into its own 384 x 384 half-float target over the frame's opaque
+instances. Each mesh box is tested against the capture's own frustum, so it
+sees behind the main camera, and terrain chunks only it sees are kept. Its
+lighting: albedo, the environment as ambient, the sun scaled by `sun_scale` (no
+shadows), lamps in range, emissive, and the level's height fog lit from the
+atmosphere tables as `volumetric.wgsl` lights its fog. `hide` drops draws by
+vertex offset. It is not a second deferred frame: 0.84 ms in the Town for The
+Somnus Fracture's pocket mirror.
+
+**Baked light, PS2 style** (16 October 2026). `somnium.VertexPaint.baked_light`
+makes an entity's paint masks its light, baked per vertex as PS2 games did (RGB
+0.5 = the texture as painted, 1 = twice as bright): shading draws it as albedo
+x light x 2 plus moving local lamps and emissive, with no sun, sky, bounce or
+traced light, and under `retro` its (already small) textures keep their own mip
+levels. `somnium.PostProcess.retro_fog` [start, end] and `retro_fog_color` fog
+such surfaces linearly by distance toward one colour (vertex paint header words
+8 to 10). The Somnus Fracture's PS2 street (`scenes/ps2_street.scene.json`) is
+built this way.
 
 There is no authored local reflection/irradiance environment asset. STALKER
 plans that capability; describing it as current would be incorrect.
@@ -1274,6 +1330,40 @@ default, and a device without the features falls back to TAA rather than
 silently producing nothing. Everything else follows from there being a single
 value.
 
+**Motion vectors** (16 October 2026, C2 of the engine features record). The
+velocity pass reprojects each pixel's depth with the previous camera (and
+foliage wind) as before, and now also gives a surface that moved on its own
+its own motion: per opaque instance a `GpuMotion` record (the previous model
+matrix and, for a skinned mesh, where last frame's deformed vertices are kept),
+and the pixel's point on its triangle (the visibility buffer's instance and
+primitive) is rebuilt from last frame's pose and projected with the previous
+camera. Last transforms are matched by queue slot, or by mesh key and order
+where the queue shifted; a jump of more than a metre is a mismatch, not motion.
+`AnimatedGeometry` copies each posed mesh aside before skinning (after, the
+frame it is new). TAA follows the buffer where it differs from the camera's
+motion by more than half a pixel, and reactive pixels (first-person hands and
+tools) now take history from where they were rather than the same pixel. FSR
+reads the same buffer.
+
+**Frame generation** (17 October 2026, C7 of the engine features record; the
+record is `dev records/FRAME_GENERATION_2026-10-17.md`). AMD's FSR 3 frame
+interpolation and optical flow, translated to WGSL in `third_party/wgpu-ffx-fg`
+(no SPIR-V compiler on the machine, and naga validates WGSL), make a frame half
+way between each two the scene draws. `pass/frame_gen.rs` and
+`renderer_frame_gen.rs` run it: while generating, the scene and its
+post-processing land in one of two offscreen pictures instead of the swap chain;
+the generated frame is presented at the end of the frame and the real one
+partway through the next frame's work, each with the UI drawn over it, so text
+is never interpolated. wgpu has one queue and no present timing, so the split
+point is the pacing: a controller moves the real frame between seven points in
+the frame (start, five inside the scene, after it) from GPU timestamps until the
+two halves are as even as they get. (A per-frame CPU-time gate was tried and was
+worse: the last frame's GPU work is often still running.) Camera cuts
+(2 m or 50 degrees in a frame) and AMD's scene change detection reset it. Off
+unless asked: `Renderer::set_frame_generation` (TSF's "Frame generation (FSR 3)"
+option) or `SOMNIUM_FG=1`. About 2 to 2.5 ms of GPU at 1440p; the Town in the
+debug build, 42.3 fps off, 76.7 presented on.
+
 This replaced three booleans that could display an enabled mode while no pass
 ran. SMAA S2x and 4x remain refused because the visibility buffer has no MSAA
 subsamples to resolve. The current analytic SMAA path does not vendor the
@@ -1659,6 +1749,17 @@ raycast, and the audio crate deliberately does not depend on the physics one:
 a sound system that cannot be tested without a physics world is a sound system
 nobody tests. The caller does the trace and passes a number.
 
+**Rooms and heads are Kira tracks and a custom voice, not a mixer of our own.**
+Positioned sounds play on a world track whose send into a Kira reverb follows
+`Acoustics::set_enclosure` (the game says how enclosed the ears are); a sound
+starting with an occlusion gain under 0.6 plays on a low-passed copy, so it is
+heard through the wall. With `AudioEngine::binaural` on, positioned sounds are
+`hrtf` voices: a mono source convolved with the MIT KEMAR head responses for its
+direction, moved by `update_spatial`, crossfaded per block. Music and interface
+sounds stay dry. `kira` and `somnium_audio` build optimised even in the dev
+profile, because a per-sample voice unoptimised can underrun the audio thread
+([TSF 15 October record](<games/TheSomnusFracture/dev records/CLAUDE_SESSION_2026-10-15B_LOAD_AUDIT_POSTURE_PHOTO.md>)).
+
 The Coastal and Island acceptance maps ship overlapping spatial surf and splash
 emitters, while the first-person controller drives four distance-based footstep
 one-shots through `ctx:playAudio`. Their cadence is a property of the character,
@@ -1886,7 +1987,7 @@ that sentence is obsolete.
 | HLAALU | None | Prefabs, splines/blockout, rule-driven scattering |
 | SILT STRIDER | Cook, residency, world partition, HLOD/impostors/floating origin | None |
 | DWEMER | GPU skinning, clips, blend trees, state machines | Root motion, IK/events, compression, pose task graph |
-| SIXTH HOUSE | None | Navmesh/pathfinding, behavior trees, perception |
+| SIXTH HOUSE | `somnium_ai` (X/Y): navmesh cell tiles, A* with funnel, steering, behavior trees, perception, Luau tasks | Not used by a game yet |
 | RED MOUNTAIN | VSM, DDGI, terrain VT, weighted OIT, SMAA and unified AA setting | GPU particles and VFX graph |
 | ALMSIVI | Input actions, audio, localisation | Save games, video, playable slice |
 
@@ -2217,7 +2318,6 @@ does not overlap. STALKER waits for both relevant outputs.
   dragged back goes to the slot it came from, but it cannot yet be dropped into
   a *different* slot.
 - Root motion, IK/events, and animation compression/task graph.
-- Navmesh, pathfinding, behavior trees, and perception.
 - GPU particles and the VFX graph.
 - Save games, video playback, and a playable acceptance slice.
 - Standalone player, release packages, updater, rollback, and mod layers.
@@ -2631,6 +2731,12 @@ streaming DTO.** A second representation would have to be kept in step with the
 first forever, and the first thing to break would be a component the streaming
 path had never heard of. Despawn happens only after persistence succeeds.
 ([MORROWIND-S](<dev records/phase MORROWIND/MORROWIND-S.md>))
+
+**An imported scene decodes only the images its materials read, off the main
+thread.** `load_gltf_for` decodes the parts' images in parallel while the
+previous source uploads, and meshlets and SDF bricks are built in parallel before
+upload. The Town's restore went from 48.5 s to 9.7 s in the debug build
+([load time](<dev records/load_time_2026-10-15.md>)).
 
 **Mesh LODs are independent residency keys.** Coarse geometry can stay resident
 while LOD 0 is absent, which is what makes a budget-exceeded eviction degrade

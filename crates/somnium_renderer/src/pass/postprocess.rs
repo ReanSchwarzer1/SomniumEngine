@@ -51,8 +51,24 @@ impl Default for Grading {
     }
 }
 
-/// 16 scalars, 32 response samples and one aligned dream-lens vector.
-const POST_PARAM_FLOATS: usize = 52;
+/// A transition drawn over the whole picture, set by the game each frame it runs (The Somnus Fracture's ways into
+/// and out of its PS2 chapters, `dream_shift.rs`). Kind 0 is none; 1 is pushing into a television, its phosphor
+/// stripes and scanlines growing until one stripe fills the view; 2 is the eyes closing, `progress` how far the lids
+/// are shut; 3 is a wave of the retro picture spreading through the world from `at`, its front `progress * reach`
+/// metres out, read from the depth buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PictureShift {
+    pub kind: u32,
+    pub progress: f32,
+    pub at: [f32; 3],
+    pub reach: f32,
+    /// Nothing in it flickers (a player's reduced flashing).
+    pub steady: bool,
+}
+
+/// 16 scalars, 32 response samples, the dream-lens vector, the picture shift (two vectors) and the inverse
+/// view-projection the wave reads the world through.
+const POST_PARAM_FLOATS: usize = 76;
 
 /// Post-processing pass: HDR texture → tone-mapped swapchain output.
 pub struct PostProcessPass {
@@ -72,6 +88,10 @@ pub struct PostProcessPass {
     /// Bloom chain, kept so the bind group survives a resize.
     bloom_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
+    /// Group 1: the visibility buffer and the paint words, from which a pixel is known to belong to a draw kept out
+    /// of the retro picture (`vertex_paint::OUTSIDE_RETRO`). Placeholders until `bind_mask`.
+    mask_layout: wgpu::BindGroupLayout,
+    mask_group: wgpu::BindGroup,
 }
 
 impl PostProcessPass {
@@ -209,9 +229,77 @@ impl PostProcessPass {
             source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("postprocess.wgsl").into()),
         });
 
+        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PostProcess Retro Mask Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The scene's depth, for the picture shift's wave (`PictureShift` kind 3).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        // Until the real ones are bound: nothing visible, no paint table.
+        let empty_vis = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("PostProcess Empty Visibility"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let empty_words = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PostProcess Empty Paint Words"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let empty_depth = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("PostProcess Empty Depth"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_group = Self::make_mask_group(device, &mask_layout, &empty_vis, &empty_words, &empty_depth);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PostProcess Pipeline Layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&mask_layout)],
             immediate_size: 0,
         });
 
@@ -257,7 +345,33 @@ impl PostProcessPass {
             scene_copy_view,
             params_buffer,
             sampler,
+            mask_layout,
+            mask_group,
         }
+    }
+
+    fn make_mask_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        vis: &wgpu::TextureView,
+        words: &wgpu::Buffer,
+        depth: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("PostProcess Retro Mask"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(vis) },
+                wgpu::BindGroupEntry { binding: 1, resource: words.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth) },
+            ],
+        })
+    }
+
+    /// The visibility buffer, the paint words and the scene's depth this frame (each can be remade: a resize, a grown
+    /// paint pool). ponytail: rebuilt each frame; one small bind group, cache by identity if it ever shows in a profile.
+    pub fn bind_mask(&mut self, device: &wgpu::Device, vis: &wgpu::TextureView, words: &wgpu::Buffer, depth: &wgpu::TextureView) {
+        self.mask_group = Self::make_mask_group(device, &self.mask_layout, vis, words, depth);
     }
 
     fn make_hdr_texture(
@@ -406,6 +520,8 @@ impl PostProcessPass {
         auto_exposure: bool,
         bloom_intensity: f32,
         grading: Grading,
+        shift: PictureShift,
+        inv_view_proj: [f32; 16],
     ) {
         // The uniform is three floats plus a u32; bytemuck cannot cast a mixed
         // array, so the index is bit-cast into the fourth float slot and read
@@ -436,6 +552,9 @@ impl PostProcessPass {
             data[16..48].copy_from_slice(&response);
         }
         data[48..52].copy_from_slice(&grading.dream);
+        data[52..56].copy_from_slice(&[shift.kind as f32, shift.progress, shift.reach, f32::from(u8::from(shift.steady))]);
+        data[56..60].copy_from_slice(&[shift.at[0], shift.at[1], shift.at[2], 0.0]);
+        data[60..76].copy_from_slice(&inv_view_proj);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 
@@ -485,6 +604,7 @@ impl PostProcessPass {
         });
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, &self.bind_group, &[]);
+        rpass.set_bind_group(1, &self.mask_group, &[]);
         rpass.draw(0..3, 0..1);
     }
 }

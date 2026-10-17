@@ -56,6 +56,10 @@ pub struct EngineConfig {
 
     /// Whether the user may resize the window at runtime.
     pub resizable: bool,
+
+    /// A game's own window icon: square PNGs for the title bar (small) and the taskbar (large). `None` keeps the
+    /// engine's mark.
+    pub window_icon: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 impl Default for EngineConfig {
@@ -82,6 +86,7 @@ impl Default for EngineConfig {
             target_fps: Some(60),
             vsync: true,
             resizable: true,
+            window_icon: None,
         }
     }
 }

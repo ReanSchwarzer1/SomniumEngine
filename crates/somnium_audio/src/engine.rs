@@ -181,15 +181,28 @@ pub struct AudioEngine {
     /// whose velocity nobody sets is a pitch wobble with no cause, and most
     /// sources in most games never move.
     pub doppler_scale: f32,
+    /// The room reverb and the muffled track positioned sounds play through
+    /// (`acoustics.rs`). `None` only if the backend refused the tracks; sounds
+    /// then play dry, as they did before.
+    pub acoustics: Option<crate::acoustics::Acoustics>,
+    /// Render positioned sounds through the head responses (`hrtf.rs`), for headphones. Sounds already playing keep
+    /// the way they started.
+    pub binaural: bool,
+    /// Decoded sounds folded to mono for binaural voices, by path.
+    mono: HashMap<String, (std::sync::Arc<[f32]>, u32)>,
 }
 
 impl AudioEngine {
     /// Start the audio backend.
     pub fn new() -> Result<Self, AudioError> {
-        let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
+        let mut manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
+        let acoustics = crate::acoustics::Acoustics::new(&mut manager).ok();
         Ok(Self {
             manager,
+            acoustics,
+            binaural: false,
+            mono: HashMap::new(),
             mixer: Mixer::default(),
             sounds: Sounds::new(),
             listener: Listener::default(),
@@ -218,7 +231,7 @@ impl AudioEngine {
             .manager
             .play(data.with_settings(kira_settings(&settings, gain)))
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
-        Ok(SoundHandle { handle })
+        Ok(SoundHandle::kira(handle))
     }
 
     /// Play a sound positioned in the world.
@@ -252,11 +265,23 @@ impl AudioEngine {
             return Ok(None);
         }
         let data = self.sounds.load(path)?;
+        let destination = self.acoustics.as_ref().map_or(kira::OutputDestination::MAIN_TRACK, |a| a.track(emitter.occlusion).into());
+        if self.binaural {
+            let (samples, rate) = self.mono.entry(path.to_owned()).or_insert_with(|| {
+                (data.frames.iter().map(|f| (f.left + f.right) * 0.5).collect(), data.sample_rate)
+            }).clone();
+            let (azimuth, elevation) = crate::hrtf::direction(&self.listener, emitter.position);
+            let voice = crate::hrtf::HrtfSoundData { samples, rate, looping: settings.looping, azimuth, elevation,
+                gain: (settings.volume * f64::from(gain) * f64::from(spatial.gain)) as f32, destination };
+            let handle = self.manager.play(voice).map_err(|_| AudioError::PlayError("binaural voice".into()))?;
+            return Ok(Some(SoundHandle::binaural(handle)));
+        }
+        let kira_settings = spatial_settings(&settings, gain, &spatial).output_destination(destination);
         let handle = self
             .manager
-            .play(data.with_settings(spatial_settings(&settings, gain, &spatial)))
+            .play(data.with_settings(kira_settings))
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
-        Ok(Some(SoundHandle { handle }))
+        Ok(Some(SoundHandle::kira(handle)))
     }
 
     /// Re-evaluate and apply a live voice after listener/emitter movement or
@@ -278,6 +303,8 @@ impl AudioEngine {
             f64::from(spatial.pan * 0.5 + 0.5),
             f64::from(spatial.doppler),
         );
+        let (azimuth, elevation) = crate::hrtf::direction(&self.listener, emitter.position);
+        handle.set_direction(azimuth, elevation);
         spatial
     }
 

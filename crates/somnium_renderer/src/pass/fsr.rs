@@ -299,8 +299,7 @@ impl FsrPass {
         let info = FsrDispatchInfo {
             color: gpu.sanitized.clone(),
             depth: gpu.depth_f32.clone(),
-            // sr_sanitize copies the velocity buffer, zeroing hand/tool pixels:
-            // they move with the camera, so their history is at the same pixel.
+            // fsr_sanitize copies the velocity buffer, which carries hands' and tools' own motion (C2).
             motion_vectors: gpu.motion.clone(),
             exposure: None,
             reactive_mask: Some(gpu.reactive_mask.clone()),
@@ -328,7 +327,10 @@ impl FsrPass {
             // `fsr_sanitize` writes linear HDR multiplied by this exposure.
             // FSR divides by pre_exposure when evaluating temporal luminance,
             // so the two values must match (AMD's HDR integration contract).
-            pre_exposure: exposure.max(1e-8),
+            // EXPERIMENT (C3, 16 Oct 2026): SOMNIUM_FSR_PRE_EXPOSURE_ONE=1 passes 1.0, as Godot does: the colour is already
+            // exposure-normalised, and at night the large exposure divides FSR's internal luminance into the range
+            // half floats flush to zero, which may be the low-light black band.
+            pre_exposure: if pre_exposure_one() { 1.0 } else { exposure.max(1e-8) },
             reset_history: reset_history || gpu.frame_index == 0,
             camera_near: CAMERA_NEAR,
             camera_far: CAMERA_FAR,
@@ -700,6 +702,11 @@ fn alloc_coverage(device: &wgpu::Device, size: [u32; 2]) -> [wgpu::Texture; 2] {
         alloc_r32(device, "FSR Dynamic Coverage A", size),
         alloc_r32(device, "FSR Dynamic Coverage B", size),
     ]
+}
+
+fn pre_exposure_one() -> bool {
+    static ONE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ONE.get_or_init(|| std::env::var("SOMNIUM_FSR_PRE_EXPOSURE_ONE").as_deref() == Ok("1"))
 }
 
 #[cfg(test)]

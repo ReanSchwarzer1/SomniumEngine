@@ -71,6 +71,9 @@ fn every_composed_root_validates() {
         "shading.wgsl",
         "restir_gi.wgsl",
         "lighting_extra.wgsl",
+        // 17 Oct 2026: the real-time path tracer and its denoiser.
+        "path_tracer.wgsl",
+        "path_denoise.wgsl",
         "water_reflection.wgsl",
         "census.wgsl",
         "skin_scatter.wgsl",
@@ -97,6 +100,8 @@ fn every_composed_root_validates() {
         // point: the posed vertices it writes have the same layout as every
         // other vertex in the pool, because they are in the same pool.
         "skinning.wgsl",
+        // D2: the small forward capture (a pocket mirror's picture).
+        "scene_capture.wgsl",
     ] {
         check(root, &shaders.source_or_panic(root));
     }
@@ -1122,7 +1127,16 @@ fn vertex_paint_reaches_the_surface_before_decals_and_f0() {
     let pass = include_str!("../src/pass/shading.rs");
     assert!(shading.contains("@group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;"));
     assert!(pass.contains("binding: 30,"));
-    assert_eq!(somnium_renderer::vertex_paint::HEADER_WORDS, 8);
+    assert_eq!(somnium_renderer::vertex_paint::HEADER_WORDS, 12);
+    // A baked-light slot (PS2 vertex colours): its masks are the light, 0.5 as painted; then the retro fog from
+    // header words 8 to 10, linear with distance.
+    assert!(shading.contains("baked = ((vertex_paint[paint_slot + 16u] >> 16u) & 1u) != 0u;"));
+    assert!(shading.contains("baked_light = mask.rgb * 2.0;"));
+    assert!(shading.contains("result = surface.albedo * baked_light + local_light_contrib + emissive;"));
+    assert!(shading.contains("let fog_start = bitcast<f32>(vertex_paint[8]);"));
+    assert!(shading.contains("let packed = vertex_paint[10];"));
+    // What glows (baked above 1, twice as painted at most) keeps a quarter of itself through the fog: lights in fog.
+    assert!(shading.contains("result = mix(result, fog_colour, far * (1.0 - 0.75 * glow));"));
     // Words 6 and 7: the level-wide fade of paint and weathering, and the green of living foliage.
     assert!(shading.contains("* (1.0 - saturate(bitcast<f32>(vertex_paint[6])));"));
     assert!(shading.contains("apply_weathering(&surface, material.weathering * (1.0 - saturate(bitcast<f32>(vertex_paint[6]))),"));

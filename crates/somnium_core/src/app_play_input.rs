@@ -147,14 +147,21 @@ impl<G: GameApp> Engine<G> {
     }
 
     pub(super) fn sync_play_cursor(&mut self) {
+        // A game's own menu up during play (a live title) keeps the pointer free until it hands it back.
+        let menu_up = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_free());
+        // A game that draws its own pointer over its menus keeps the OS one hidden while it is free.
+        let drawn = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_drawn());
         let target = self.play_window().filter(|w| {
             capture_allowed(
-                self.play_cursor.requested,
+                self.play_cursor.requested && !menu_up,
                 self.simulation_clock.state,
                 w.has_focus(),
             )
         });
         if self.play_cursor.window == target.as_ref().map(|w| w.id()) {
+            if target.is_none() && let Some(window) = self.play_window() {
+                window.set_cursor_visible(!drawn);
+            }
             return;
         }
         if let Some(id) = self.play_cursor.window.take() {
@@ -165,7 +172,7 @@ impl<G: GameApp> Engine<G> {
                 .find(|w| w.id() == id);
             if let Some(window) = previous {
                 let _ = window.set_cursor_grab(CursorGrabMode::None);
-                window.set_cursor_visible(true);
+                window.set_cursor_visible(!drawn);
             }
             self.play_cursor.mode = "released";
             self.notify_play_focus(false);

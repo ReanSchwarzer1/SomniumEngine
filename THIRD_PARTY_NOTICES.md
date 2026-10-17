@@ -91,3 +91,47 @@ generation is not enabled.
 - Licence: MIT
 - Luau incorporates portions of Lua 5.x, © 1994–2019 Lua.org, PUC-Rio,
   also under the MIT licence.
+
+## MIT KEMAR head-related impulse responses
+
+`crates/somnium_audio/assets/hrir_mit_kemar.bin`, packed by `tools/hrir_kemar_convert.py` from the compact set: the
+head responses `somnium_audio::hrtf` renders positioned sounds through on headphones.
+
+- Source: https://sound.media.mit.edu/resources/KEMAR.html (compact.zip)
+- Authors: Bill Gardner and Keith Martin, MIT Media Laboratory, 1994.
+- Terms: "This data is Copyright 1994 by the MIT Media Laboratory. It is provided free with no restrictions on use,
+  provided the authors are cited when the data is used in any research or commercial application."
+- Citation: W. G. Gardner and K. D. Martin, "HRTF measurements of a KEMAR", Journal of the Acoustical Society of
+  America 97 (6), 1995, pp. 3907-3908.
+
+## AMD FidelityFX SDK (FSR 3 upscaling and frame generation)
+
+`third_party/wgpu-ffx-fg` (17 Oct 2026) is a WGSL translation of the frame interpolation and optical flow effects of
+the FidelityFX SDK 1.1.4 (`gpu/frameinterpolation`, `gpu/opticalflow`), with wgpu host code written for Somnium:
+FSR 3 frame generation (`somnium_renderer::pass::frame_gen`). `third_party/wgpu-ffx` (the FSR 3 upscaler, a Rust port
+running AMD's precompiled SPIR-V, wgpu-ffx developers) comes from the same SDK under the same licence.
+
+- Upstream: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+- Licence: MIT
+
+```
+Copyright (C) 2024 Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```

@@ -1,3 +1,4 @@
+//!include "spot_cookie.wgsl"
 // MORROWIND-C: composition is declared here rather than assembled by a
 // `format!` of `include_str!` calls at this pass's construction site. The
 // resolver (`somnium_shader`) emits each module once, in this order, and
@@ -227,7 +228,7 @@ fn gi_sample_local(ll: GpuLocalLight, p: vec3<f32>, n: vec3<f32>, u: vec2<f32>) 
     if is_area {
         attenuation *= 4.0 * max(dot(axis, -l), 0.0);
     } else if ll.light_type == 1u {
-        attenuation *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, dot(axis, -l));
+        attenuation *= spot_shape(axis, -l, ll.spot_cos_outer, ll.spot_cos_inner, ll._pad2);
     } else if ll.light_type == 4u {
         attenuation *= max(length(cross(l, axis)), 0.15);
     }

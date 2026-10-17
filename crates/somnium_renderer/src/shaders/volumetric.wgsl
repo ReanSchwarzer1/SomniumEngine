@@ -1,3 +1,4 @@
+//!include "spot_cookie.wgsl"
 // MORROWIND-C: composition is declared here rather than assembled by a
 // `format!` of `include_str!` calls at this pass's construction site. The
 // resolver (`somnium_shader`) emits each module once, in this order, and
@@ -181,7 +182,7 @@ fn local_inscatter(world_pos: vec3<f32>, ray_dir: vec3<f32>, uv: vec2<f32>, view
         var atten = fade * fade / (d * d);
         let dir = to_l / max(dist, 1e-4);
         if l.light_type == 1u {
-            atten *= smoothstep(l.spot_cos_outer, l.spot_cos_inner, dot(-dir, normalize(l.direction_ws)));
+            atten *= spot_shape(l.direction_ws, -dir, l.spot_cos_outer, l.spot_cos_inner, l._pad2);
         }
         sum += l.color * atten * hg_phase(dot(ray_dir, dir), vol.fog_asymmetry);
     }

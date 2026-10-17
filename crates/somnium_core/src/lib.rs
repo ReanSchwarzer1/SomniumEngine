@@ -1114,6 +1114,17 @@ pub struct PostProcessComponent {
     pub dream_mode: u32,
     pub dream_strength: f32,
     pub dream_speed: f32,
+    /// The picture of an older console: 0 off, 1 PS2 (448 lines, the flicker filter, 15-bit colour through an
+    /// ordered dither; no temporal smoothing and no traced light, which that era did not have).
+    pub retro: u32,
+    /// How far into the retro picture, 0 to 1 (1 the whole of it): a transition animates this. The lines fall in
+    /// steps, the colour bits with them; temporal smoothing and traced light stop past halfway.
+    pub retro_amount: f32,
+    /// Linear fog for surfaces whose light is baked into their vertices (`VertexPaintComponent::baked_light`), as a
+    /// PS2 game drew it: start and end in metres; [0, 0] is none.
+    pub retro_fog: [f32; 2],
+    /// What that fog fades to, linear RGB.
+    pub retro_fog_color: [f32; 3],
     /// CONTROL-K: authored tone response, applied per channel after the fixed
     /// grade. An empty curve — the default — leaves grading exactly as Phase
     /// 24Y left it, so this field costs nothing until somebody uses it.
@@ -1311,21 +1322,9 @@ impl Default for PostProcessComponent {
         // an A/B across six modes from a timing harness must not require six
         // clicks in Details. It wins over `SOMNIUM_FSR` when both are set,
         // because it is the more specific statement.
-        let aa = match std::env::var("SOMNIUM_AA")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "off" | "none" => AntiAliasing::Off,
-            "fxaa" => AntiAliasing::Fxaa,
-            "smaa" | "smaa1x" => AntiAliasing::Smaa1x,
-            "smaa_t2x" | "smaat2x" | "t2x" => AntiAliasing::SmaaT2x,
-            "taa" => AntiAliasing::Taa,
-            "fsr" => AntiAliasing::Fsr,
-            _ if std::env::var("SOMNIUM_FSR").as_deref() == Ok("0") => AntiAliasing::Taa,
-            _ => AntiAliasing::Fsr,
-        };
+        let aa = AntiAliasing::env_override().unwrap_or_else(|| {
+            if std::env::var("SOMNIUM_FSR").as_deref() == Ok("0") { AntiAliasing::Taa } else { AntiAliasing::Fsr }
+        });
         let smaa_preset = match std::env::var("SOMNIUM_SMAA_PRESET")
             .unwrap_or_default()
             .trim()
@@ -1360,6 +1359,10 @@ impl Default for PostProcessComponent {
             dream_mode: 0,
             dream_strength: 0.0,
             dream_speed: 1.0,
+            retro: 0,
+            retro_amount: 1.0,
+            retro_fog: [0.0, 0.0],
+            retro_fog_color: [0.012, 0.014, 0.024],
             response_curve: somnium_ecs::curve::Curve::empty(),
             // Deterministic audit switch; the editor checkbox remains the
             // runtime source of truth after startup.
@@ -1510,6 +1513,21 @@ pub enum AntiAliasing {
 }
 
 impl AntiAliasing {
+    /// `SOMNIUM_AA` (off, fxaa, smaa, t2x, taa, fsr), when set: the default for a new component, and in a running app
+    /// it overrides the scene's authored value too, so a timing harness can A/B the modes on any level.
+    #[must_use]
+    pub fn env_override() -> Option<Self> {
+        match std::env::var("SOMNIUM_AA").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "fxaa" => Some(Self::Fxaa),
+            "smaa" | "smaa1x" => Some(Self::Smaa1x),
+            "smaa_t2x" | "smaat2x" | "t2x" => Some(Self::SmaaT2x),
+            "taa" => Some(Self::Taa),
+            "fsr" => Some(Self::Fsr),
+            _ => None,
+        }
+    }
+
     /// Stable index for serialization and the generated Details row.
     #[must_use]
     pub fn as_index(self) -> u32 {

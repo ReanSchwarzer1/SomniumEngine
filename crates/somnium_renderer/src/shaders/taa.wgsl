@@ -325,13 +325,22 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let water_coverage = textureLoad(water_surface_tex, coord, 0).a;
     let water_velocity = textureLoad(velocity_tex, coord, 0).xy;
     var prev_uv = select(depth_prev_uv, in.uv + water_velocity, water_coverage > 0.5);
-    // Reactive pixels are the first-person hands and tools. They ride with the
-    // camera, so world reprojection is wrong for them but the same screen pixel
-    // is (nearly) right. They used to skip history entirely, which showed every
-    // per-frame lighting sample raw: gold specks of practical-light GI on the
-    // hands, worst while running.
+    // A surface that moved on its own (C2: a body walking, a door, the Entity) carries
+    // its own motion in the velocity buffer; where that differs from the camera's by
+    // more than half a pixel at the dilated pixel, history follows the surface.
+    let object_velocity = textureLoad(velocity_tex, closest, 0).xy;
+    let camera_velocity = depth_prev_uv - closest_uv;
+    if water_coverage <= 0.5 && length((object_velocity - camera_velocity) * resolution) > 0.5 {
+        prev_uv = in.uv + object_velocity;
+    }
+    // Reactive pixels are the first-person hands and tools. World reprojection is
+    // wrong for them; until the velocity pass knew how they moved, the same screen
+    // pixel was the nearest guess. Now it does (skinned poses and held tools' last
+    // transforms), so their history comes from where they actually were. They used
+    // to skip history entirely, which showed every per-frame lighting sample raw:
+    // gold specks of practical-light GI on the hands, worst while running.
     if reactive > 0.5 {
-        prev_uv = in.uv;
+        prev_uv = in.uv + textureLoad(velocity_tex, coord, 0).xy;
     }
 
     // Off screen last frame: there is no history to reuse.

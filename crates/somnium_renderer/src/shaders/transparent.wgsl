@@ -1,3 +1,4 @@
+//!include "spot_cookie.wgsl"
 // Phase 21: forward pass for alpha-blended materials.
 //
 // The visibility buffer stores exactly one triangle per pixel, so it cannot
@@ -326,7 +327,7 @@ fn shade(in: VOut, front: bool) -> Glass {
             let window = saturate(1.0 - ratio * ratio * ratio * ratio);
             var atten = window * window / max(dist * dist, 0.0064);
             if ll.light_type == 1u {
-                atten *= smoothstep(ll.spot_cos_outer, ll.spot_cos_inner, dot(-l, normalize(ll.direction_ws)));
+                atten *= spot_shape(ll.direction_ws, -l, ll.spot_cos_outer, ll.spot_cos_inner, ll._pad2);
             } else if ll.light_type == 2u || ll.light_type == 3u {
                 // Panels and discs emit from one face.
                 atten *= saturate(dot(-l, normalize(ll.direction_ws)) * 4.0);

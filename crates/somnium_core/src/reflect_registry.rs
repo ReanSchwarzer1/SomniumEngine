@@ -685,6 +685,8 @@ pub fn component_registry() -> TypeRegistry {
                 doc: "Per layer: 0 replaces the surface with the layer material; 1 only stains it, keeping the surface's own pattern, normal and relief (grime on wood grain, soot on paint)." },
             detile { group: "Layers", min: 0.0, max: 1.0,
                 doc: "Per layer: 1 hides the layer texture's repetition by blending two offset reads. For organic textures (mould, dirt, rust, moss); leave 0 for bricks, tiles and setts." },
+            baked_light { group: "Vertex Paint", display_name: "Baked light",
+                doc: "The masks are this surface's light, baked into its vertices as a PS2 game baked it: RGB 0.5 is the texture as painted, 1 twice as bright. Sun, sky, bounce and traced light pass it by; moving lamps still add; the retro fog applies." },
         }
     });
     registry.register(editor_flags_schema());
@@ -826,6 +828,12 @@ fn post_process_schema() -> ComponentSchema {
             dream_mode { min: 0, max: 4, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear; 4 Fracture (the whole picture breaks into slipping shards, doubles and breathes). 1 to 3 leave the central interaction region clear; 4 only eases there." },
             dream_strength { min: 0.0, max: 1.0, step: 0.01, group: "Dream Lens", doc: "Zero disables distortion. Use modest values; this effect should suggest unstable surroundings." },
             dream_speed { min: 0.0, max: 3.0, step: 0.05, group: "Dream Lens" },
+            retro { min: 0, max: 1, group: "Retro", doc: "0 Off; 1 PS2: 448 lines of square pixels with the console's flicker filter, 15-bit colour through an ordered dither, and none of TAA, FSR, motion blur, depth of field, GTAO or traced light (the PS2 levels, sub-phase 11)." },
+            retro_fog { min: 0.0, step: 0.5, group: "Retro", display_name: "Retro fog",
+                doc: "Linear fog for surfaces with baked light, as the PS2 drew it: start and end in metres (0, 0 is none). Beyond the end, the fog colour." },
+            retro_fog_color { group: "Retro", display_name: "Retro fog colour",
+                doc: "What the retro fog fades to (linear RGB)." },
+            retro_amount { min: 0.0, max: 1.0, step: 0.01, group: "Retro", doc: "How far into the retro picture: 1 the whole of it. A transition animates it: the lines fall from the screen's own to 448 in four steps, colour from 8 bits to 5, textures coarsen, and past halfway the temporal and traced passes stop." },
             response_curve { group: "Color Grading", display_name: "Response Curve",
                 min: 0.0, max: 1.0, soft_min: 0.0, soft_max: 1.0 },
             bloom_enabled { group: "Bloom" }, bloom_intensity { min: 0.0, step: 0.01, group: "Bloom" },

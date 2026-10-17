@@ -46,6 +46,12 @@ struct PostParams {
     /// and would cost four times the space for the same table.
     response: array<vec4<f32>, 8>,
     dream: vec4<f32>,
+    /// A transition over the whole picture (`PictureShift`): kind, progress, the wave's reach in metres.
+    shift: vec4<f32>,
+    /// Where the wave spreads from, in the world.
+    shift_at: vec4<f32>,
+    /// The camera's, to read the world back out of the depth buffer for the wave.
+    inv_view_proj: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -55,6 +61,24 @@ struct PostParams {
 @group(0) @binding(3) var<storage, read> metered: array<f32, 2>;
 /// Blurred bloom chain (Phase 24T).
 @group(0) @binding(4) var bloom_tex: texture_2d<f32>;
+/// The visibility buffer and the paint words: a draw whose paint word carries `OUTSIDE_RETRO` (`vertex_paint.rs`) is
+/// kept out of the retro picture and shown by a look of its own.
+@group(1) @binding(0) var vis_buffer: texture_2d<u32>;
+@group(1) @binding(1) var<storage, read> paint_words: array<u32>;
+/// The scene's depth: the picture shift's wave finds each pixel's place in the world from it.
+@group(1) @binding(2) var scene_depth: texture_depth_2d;
+
+/// Whether the scene pixel under `uv` belongs to a draw kept out of the retro picture.
+fn outside_retro(uv: vec2<f32>) -> bool {
+    let dims = textureDimensions(vis_buffer);
+    let p = min(vec2<u32>(uv * vec2<f32>(dims)), dims - vec2<u32>(1u));
+    let visible = textureLoad(vis_buffer, p, 0).x;
+    let table = paint_words[0];
+    if visible == 0u || table == 0u {
+        return false;
+    }
+    return (paint_words[table + visible - 1u] & 0x80000000u) != 0u;
+}
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -231,6 +255,100 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(q.x * q.y);
 }
 
+/// The PS2's picture (`pp.dream.w` how far in, sub-phase 11): 448 lines, as its interlaced output had, of square
+/// pixels across this screen's width. On the way there (a transition) the lines fall from the screen's own in
+/// four steps, each a quarter of the octaves between.
+fn ps2_grid(amount: f32) -> vec2<f32> {
+    let dims = vec2<f32>(textureDimensions(hdr_tex));
+    let octaves = max(log2(dims.y / 448.0), 0.0);
+    let lines = 448.0 * exp2(octaves * floor((1.0 - amount) * 4.0 + 0.0001) / 4.0);
+    return vec2<f32>(round(lines * dims.x / max(dims.y, 1.0)), round(lines));
+}
+
+/// 4x4 ordered (Bayer) threshold for a cell of that grid, in -0.5..0.5.
+fn bayer4(cell: vec2<u32>) -> f32 {
+    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    return (m[(cell.y & 3u) * 4u + (cell.x & 3u)] + 0.5) / 16.0 - 0.5;
+}
+
+// ── The picture shift (`PictureShift`) ─────────────────────────────────────────────────────────────────────────────
+
+/// Pushing into a television (kind 1), zoomed this much at `p`: in the end one phosphor triad is wider than the view.
+fn screen_zoom(p: f32) -> f32 {
+    return exp2(p * p * 9.0);
+}
+
+/// Where the scene is read for a screen pixel while pushing into a television: the glass bulges a little, the scene is
+/// read once per phosphor triad (it is a picture made of them), and the view closes on the centre.
+fn screen_uv(uv: vec2<f32>, p: f32) -> vec2<f32> {
+    let dims = vec2<f32>(textureDimensions(hdr_tex));
+    let zoom = screen_zoom(p);
+    let c = uv - vec2(0.5);
+    let bulged = vec2(0.5) + c * (1.0 + 0.2 * dot(c, c) * smoothstep(0.0, 0.25, p));
+    let cell = 3.0 * zoom;
+    let snapped = mix(bulged, (floor(bulged * dims / cell) + 0.5) * cell / dims, smoothstep(0.02, 0.3, p));
+    return vec2(0.5) + (snapped - vec2(0.5)) / zoom;
+}
+
+/// The television's own picture over `colour`: three upright stripes to a triad, red, green and blue, each lit only by
+/// its channel and dark between; dark gaps between the scanlines; the tube's flicker and its rolling bar.
+fn screen_mask(colour: vec3<f32>, uv: vec2<f32>, p: f32) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(hdr_tex));
+    let f = fract(uv * dims / (3.0 * screen_zoom(p)));
+    let k = f.x * 3.0;
+    let stripe = floor(k);
+    var mask = vec3(0.12, 0.14, 1.0);
+    if stripe < 0.5 {
+        mask = vec3(1.0, 0.12, 0.08);
+    } else if stripe < 1.5 {
+        mask = vec3(0.1, 1.0, 0.12);
+    }
+    let edge = smoothstep(0.0, 0.16, fract(k)) * (1.0 - smoothstep(0.84, 1.0, fract(k)));
+    let line = smoothstep(0.0, 0.1, f.y) * (1.0 - smoothstep(0.8, 1.0, f.y));
+    let flicker = select(0.03 * sin(pp.time * 61.0), 0.0, pp.shift.w > 0.5);
+    let roll = 0.88 + 0.12 * sin((uv.y - pp.time * 0.4) * 6.2832) + flicker;
+    return mix(colour, colour * mask * (2.4 * edge * line * roll), smoothstep(0.02, 0.35, p));
+}
+
+/// The eyes closing (kind 2), shut `p` of the way: what the lids leave of the view. They meet a little below the
+/// middle, the upper lid doing most of the closing, curved as lids are; the light through them is a dark red.
+fn eyelids(colour: vec3<f32>, uv: vec2<f32>, p: f32) -> vec3<f32> {
+    let x = uv.x * 2.0 - 1.0;
+    let meet = 0.56;
+    let gap = (1.0 - p) * 1.9 - 0.15 * p;
+    let curve = 1.0 - 0.38 * x * x;
+    let top = meet - gap * 0.62 * curve - 0.02;
+    let bottom = meet + gap * 0.38 * curve + 0.02;
+    let soft = 0.03 + 0.08 * p;
+    let open = smoothstep(top - soft, top + soft, uv.y) * (1.0 - smoothstep(bottom - soft, bottom + soft, uv.y));
+    let luma = dot(colour, vec3(0.2126, 0.7152, 0.0722));
+    let lid = vec3(0.16, 0.025, 0.02) * (0.25 + luma) * (1.0 - 0.7 * p);
+    return mix(lid, colour * (1.0 - 0.45 * p), open);
+}
+
+/// A wave of the retro picture through the world (kind 3): (x) 1 where its front has passed this pixel's surface,
+/// (y) how near the front is, for its seam. The front is ragged in blocks, as the picture it brings is.
+fn picture_wave(uv: vec2<f32>, p: f32) -> vec2<f32> {
+    if p >= 0.999 {
+        return vec2(1.0, 0.0);
+    }
+    let dims = textureDimensions(scene_depth);
+    let texel = min(vec2<u32>(uv * vec2<f32>(dims)), dims - vec2<u32>(1u));
+    let z = textureLoad(scene_depth, texel, 0);
+    var d = 1.0e5;
+    if z < 0.99999 {
+        let h = pp.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+        d = distance(h.xyz / h.w, pp.shift_at.xyz);
+    }
+    let front = p * pp.shift.z;
+    let block = floor(uv * vec2<f32>(96.0, 64.0));
+    let tick = select(floor(pp.time * 10.0), 0.0, pp.shift.w > 0.5);
+    let ragged = d + (hash21(block + vec2(tick, 0.0)) - 0.5) * 0.7;
+    let inside = select(0.0, 1.0, ragged < front);
+    let seam = (1.0 - smoothstep(0.0, 0.6, abs(ragged - front))) * step(0.0005, p);
+    return vec2(inside, seam);
+}
+
 fn tonemap(hdr: vec3<f32>) -> vec3<f32> {
     switch pp.tonemapper {
         case 1u: { return aces_film(hdr); }
@@ -249,11 +367,40 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Written branch-free — at ca_strength = 0 all three taps land on the same
     // texel, which is exactly the un-aberrated result. (A branch around
     // textureSample would risk WGSL's uniform-control-flow rules.)
-    let centre = in.uv - vec2(0.5);
+    // A transition over the whole picture (`pp.shift`; none is kind 0). Pushing into a television reads the scene
+    // through its glass, closer and closer.
+    let shift_kind = u32(pp.shift.x + 0.5);
+    let shift_p = clamp(pp.shift.y, 0.0, 1.0);
+    var view_uv = in.uv;
+    if shift_kind == 1u {
+        view_uv = screen_uv(in.uv, shift_p);
+    }
+    let centre = view_uv - vec2(0.5);
     let periphery = smoothstep(0.18, 0.66, length(centre));
     let amount = pp.dream.y * periphery;
     let t = pp.time * pp.dream.z;
-    let mapped = dream_coordinates(in.uv, pp.dream, pp.time, vec2<f32>(textureDimensions(hdr_tex)));
+    // A retro picture reads one scene pixel per cell of its own coarse grid: what rendering at that resolution
+    // without antialiasing looks like, hard steps and all.
+    var retro_amount = clamp(pp.dream.w, 0.0, 1.0);
+    // The wave: where its front has passed, the retro picture already; at its front, a seam.
+    var seam = 0.0;
+    var waved = false;
+    if shift_kind == 3u {
+        let w = picture_wave(in.uv, shift_p);
+        retro_amount = max(retro_amount, w.x);
+        seam = w.y;
+        waved = w.x > 0.5;
+    }
+    let retro = retro_amount > 0.0;
+    // Behind the wave's front the machine can hold even less than a PS2's picture: half its lines.
+    let grid = ps2_grid(retro_amount) * select(1.0, 0.5, waved);
+    // What is kept out of the retro picture (`outside_retro`) is read at full resolution, every detail of it.
+    let apart = retro && outside_retro(view_uv);
+    var base_uv = view_uv;
+    if retro && !apart {
+        base_uv = (floor(view_uv * grid) + 0.5) / grid;
+    }
+    let mapped = dream_coordinates(base_uv, pp.dream, pp.time, vec2<f32>(textureDimensions(hdr_tex)));
     let scene_uv = mapped.uv;
     let fracture = mapped.fracture;
     let crack = mapped.crack;
@@ -264,6 +411,41 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         textureSample(hdr_tex, hdr_samp, scene_uv).g,
         textureSample(hdr_tex, hdr_samp, scene_uv + ca_off).b,
     );
+    if apart {
+        // Kept out of the retro picture, and shown wrong: its channels slip apart and back, and now and then a band of
+        // it tears sideways, a signal that does not belong in this picture.
+        let tick = floor(pp.time * 12.0);
+        let tear = step(0.8, hash21(vec2(tick, 3.7))) * (hash21(vec2(floor(in.uv.y * 90.0), tick)) - 0.5) * 0.014;
+        let slip = vec2(0.0016 + 0.0014 * sin(pp.time * 23.0), 0.0);
+        let at = scene_uv + vec2(tear, 0.0);
+        hdr = vec3(
+            textureSampleLevel(hdr_tex, hdr_samp, at - slip, 0.0).r,
+            textureSampleLevel(hdr_tex, hdr_samp, at, 0.0).g,
+            textureSampleLevel(hdr_tex, hdr_samp, at + slip, 0.0).b,
+        );
+    }
+    if shift_kind == 2u && shift_p > 0.02 {
+        // Eyes closing: the view swims out of focus as they go.
+        let r = vec2(0.014, 0.014 * f32(textureDimensions(hdr_tex).x) / f32(textureDimensions(hdr_tex).y)) * shift_p;
+        hdr = (hdr * 2.0 + textureSampleLevel(hdr_tex, hdr_samp, scene_uv + vec2(r.x, 0.0), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, scene_uv - vec2(r.x, 0.0), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, scene_uv + vec2(0.0, r.y), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, scene_uv - vec2(0.0, r.y), 0.0).rgb) / 6.0;
+    }
+    if seam > 0.0 {
+        // The wave's front tears the picture: its channels pulled apart along it.
+        let slip = vec2(0.008 * seam, 0.0);
+        hdr = mix(hdr, vec3(textureSampleLevel(hdr_tex, hdr_samp, scene_uv - slip, 0.0).r, hdr.g,
+            textureSampleLevel(hdr_tex, hdr_samp, scene_uv + slip, 0.0).b), seam);
+    }
+    if retro && !apart {
+        // The console's flicker filter: each line blended with the lines above and below it, which is what kept its
+        // interlaced picture from shimmering on a television, and what gives it that soft vertical smear.
+        let line = vec2<f32>(0.0, 1.0 / grid.y);
+        let flicker = 0.25 * retro_amount;
+        hdr = hdr * (1.0 - 2.0 * flicker) + flicker * (textureSampleLevel(hdr_tex, hdr_samp, scene_uv - line, 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, scene_uv + line, 0.0).rgb);
+    }
 
     // A spatial echo, deliberately bounded to the edge and never temporal history.
     if pp.dream.x > 1.5 && pp.dream.x < 2.5 && pp.dream.y > 0.0 {
@@ -284,7 +466,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Phase 24T: bloom added *before* exposure and tone mapping, because it is
     // scattering inside the lens — it happens to the light on its way to the
     // sensor, not to the picture afterwards.
-    let bloom = textureSample(bloom_tex, hdr_samp, in.uv).rgb;
+    let bloom = textureSample(bloom_tex, hdr_samp, view_uv).rgb;
     hdr += bloom * pp.bloom_intensity;
 
     // Exposure. Physical now, not an arbitrary gain: either the value the
@@ -302,6 +484,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let uv_c = in.uv - vec2(0.5);
     let vign  = 1.0 - smoothstep(0.35, 0.75, length(uv_c) * 1.4 * pp.vignette_strength);
     graded *= vign;
+    if shift_kind == 1u {
+        graded = screen_mask(graded, in.uv, shift_p);
+    } else if shift_kind == 2u {
+        graded = eyelids(graded, in.uv, shift_p);
+    }
+    if seam > 0.0 {
+        // The seam burns: a hot line of the old picture's light where the new one meets it.
+        graded = mix(graded, vec3(1.0, 0.86, 0.8), 0.55 * seam * seam);
+    }
 
     // Phase 24Z: film grain. Scaled by how dark the pixel is, because sensor
     // noise is most visible in shadows — applying it flat looks like dirt on
@@ -318,8 +509,32 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // night sky, a wall falling into shadow — quantises to visible bands at 8
     // bits, and the eye finds those bands far more objectionable than the noise
     // that hides them. Half a bit of noise is enough.
-    let dither = (hash21(in.uv * 2048.0) - 0.5) / 255.0;
-    graded += dither;
+    if apart {
+        // Drained to a cold near-grey, harder in its contrast than anything round it, crawling with fine noise.
+        let luma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+        // Half its colour kept: the Epilogue's infestation stays a dark wet red on it.
+        let cold = mix(vec3(luma), graded, 0.5) * vec3(0.9, 0.97, 1.08);
+        let n = hash21(in.uv * 2048.0 + fract(pp.time * 7.3) * 251.0) - 0.5;
+        graded = clamp((cold - 0.5) * 1.3 + 0.5, vec3(0.0), vec3(1.0)) + n * 0.09;
+    }
+    if retro && !apart {
+        // 15-bit colour, five bits a channel, through a 4x4 ordered dither on the coarse grid: the PS2's
+        // framebuffer, its banding broken into the familiar cross-hatch. (Blending three lines' quantisations, as its
+        // flicker filter did after the framebuffer, was tried: three rows of the matrix leave vertical stripes.)
+        // On the way there the colour falls a bit at a time, eight to five.
+        let threshold = bayer4(vec2<u32>(floor(in.uv * grid)));
+        var levels = exp2(round(mix(8.0, 5.0, retro_amount))) - 1.0;
+        if waved {
+            // Behind the wave: four bits a channel, and the colour draining out of it toward a sick grey-green.
+            levels = 15.0;
+            let luma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+            graded = mix(graded, vec3(luma) * vec3(0.92, 1.0, 0.9), 0.45);
+        }
+        graded = floor(clamp(graded, vec3(0.0), vec3(1.0)) * levels + 0.5 + threshold) / levels;
+    } else {
+        let dither = (hash21(in.uv * 2048.0) - 0.5) / 255.0;
+        graded += dither;
+    }
 
     return vec4(clamp(graded, vec3(0.0), vec3(1.0)), 1.0);
 }

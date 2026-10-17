@@ -78,8 +78,31 @@ pub struct GpuLocalLight {
     /// that size is what gives its highlight area and its shadow a penumbra.
     /// Rides in what was padding, so the struct stays 64 bytes.
     pub radius: f32,
-    /// Padding to 64 bytes.
+    /// Padding to 64 bytes. A game may keep an area lamp's width and height here (never negative); a spot lamp's
+    /// cookie rides in the second as a negative number (`with_cookie`, shaders/spot_cookie.wgsl).
     pub _pad: [f32; 2],
+}
+
+impl GpuLocalLight {
+    /// No cookie: the plain cone.
+    pub const COOKIE_NONE: u32 = 0;
+    /// A hand torch's beam: a hot centre, the reflector's ring, a dim spill and smudges on the lens.
+    pub const COOKIE_TORCH: u32 = 1;
+    /// A window's light through venetian blinds: slats, one crooked and one gone, the cords.
+    pub const COOKIE_BLINDS: u32 = 2;
+    /// A window's light through a sash window's frame and glazing bars, dirt on the glass.
+    pub const COOKIE_WINDOW: u32 = 3;
+    /// A work lamp behind its wire guard: six bars and two hoops round a hot bulb.
+    pub const COOKIE_CAGE: u32 = 4;
+    /// A grimy diffuser: dust blotches and dead insects in the light.
+    pub const COOKIE_GRIME: u32 = 5;
+
+    /// This spot lamp throwing a cookie's pattern (`spot_cookie.wgsl` `spot_shape`).
+    #[must_use]
+    pub fn with_cookie(mut self, cookie: u32) -> Self {
+        self._pad[1] = -(cookie as f32);
+        self
+    }
 }
 
 /// Cluster grid parameters uploaded as a uniform / storage buffer.

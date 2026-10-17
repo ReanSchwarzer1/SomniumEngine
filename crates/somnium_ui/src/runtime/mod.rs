@@ -238,6 +238,11 @@ impl UiCanvas {
         Ok(id)
     }
 
+    /// Load another face beside the default without making it the default (an italic next to the regular).
+    pub fn add_extra_font(&mut self, bytes: &[u8]) -> Result<u8, &'static str> {
+        self.ui.add_font(bytes)
+    }
+
     pub fn process_os_event(&mut self, event: &WindowEvent) -> bool {
         self.ui.process_os_event(event)
     }

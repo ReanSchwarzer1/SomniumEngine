@@ -19,7 +19,7 @@ pub mod virtual_texture;
 /// MORROWIND-T offline HLOD and octahedral-impostor baking.
 pub mod world_bake;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
@@ -245,22 +245,38 @@ pub struct LoadedScene {
 ///
 /// No `gltf::` types escape this function — callers only see Somnium types.
 pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
+    load_gltf_for(path, None)
+}
+
+/// [`load_gltf`] for a level that draws only `parts` of the file (uploaded-node
+/// ordinals, the order of [`LoadedScene::nodes`]): only the images their
+/// materials read are decoded. Every other image is a 1×1 magenta stand-in, so
+/// indices stay valid and a stand-in that is ever drawn is plain to see.
+/// Geometry, materials and nodes are complete either way. `None` decodes all.
+///
+/// Decoding was most of a level's open: the Town spent ~42 s of 46 decoding
+/// every image of every bank, one at a time, including banks it draws five of
+/// 172 parts from (dev record `texture_memory_2026-10-12.md`). Images now
+/// decode on every core, each by `gltf::image::Data::from_source`, the call
+/// `gltf::import` makes, so formats and errors are as before.
+pub fn load_gltf_for(path: impl AsRef<Path>, parts: Option<&HashSet<usize>>) -> Result<LoadedScene, String> {
     let path = path.as_ref();
     info!("Loading glTF: {:?}", path);
 
-    let (document, buffers, images) =
-        gltf::import(path).map_err(|e| format!("glTF import failed: {e}"))?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("./"));
+    let gltf::Gltf { document, blob } =
+        gltf::Gltf::open(path).map_err(|e| format!("glTF import failed: {e}"))?;
+    let buffers = gltf::import_buffers(&document, Some(base_dir), blob)
+        .map_err(|e| format!("glTF import failed: {e}"))?;
+    let wanted = parts.map(|parts| images_for_parts(&document, parts));
 
     let mut scene = LoadedScene::default();
 
     // 1. Textures → RGBA8 -----------------------------------------------
-    for img in &images {
-        scene.textures.push(decode_to_rgba8(img));
-    }
+    scene.textures = decode_images(&document, base_dir, &buffers, wanted.as_ref())?;
 
     // 1b. Sidecar alpha masks -------------------------------------------
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let masked = attach_sidecar_alpha(&document, base_dir, &mut scene.textures);
+    let masked = attach_sidecar_alpha(&document, base_dir, &mut scene.textures, wanted.as_ref());
 
     // Images whose filename marks them as ARM-packed (AO / Roughness / Metallic).
     let arm_packed: std::collections::HashSet<usize> = document
@@ -333,7 +349,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedScene, String> {
         }
     }
 
-    attach_sidecar_height(&document, base_dir, &mut scene);
+    attach_sidecar_height(&document, base_dir, &mut scene, wanted.as_ref());
 
     // A sidecar mask means the albedo is a cutout atlas, so the material has
     // to be alpha-tested even though the glTF called it opaque.
@@ -658,10 +674,14 @@ fn attach_sidecar_alpha(
     document: &gltf::Document,
     base_dir: &Path,
     textures: &mut [LoadedTexture],
+    wanted: Option<&HashSet<usize>>,
 ) -> std::collections::HashSet<usize> {
     let mut masked = std::collections::HashSet::new();
 
     for image in document.images() {
+        if wanted.is_some_and(|wanted| !wanted.contains(&image.index())) {
+            continue; // not decoded: its stand-in has no albedo to mask
+        }
         let gltf::image::Source::Uri { uri, .. } = image.source() else {
             continue; // embedded texture: no sidecar to find
         };
@@ -706,10 +726,15 @@ fn attach_sidecar_alpha(
 
 /// Give each material whose colour map is `<stem>_diff_*` the height map
 /// `<stem>_disp_*` beside it, decoded as linear grey into the red channel.
-fn attach_sidecar_height(document: &gltf::Document, base_dir: &Path, scene: &mut LoadedScene) {
+fn attach_sidecar_height(document: &gltf::Document, base_dir: &Path, scene: &mut LoadedScene,
+    wanted: Option<&HashSet<usize>>)
+{
     let mut loaded: HashMap<usize, (usize, f32)> = HashMap::new();
     for m in &mut scene.materials {
         let Some(albedo) = m.albedo_map else { continue };
+        if wanted.is_some_and(|wanted| !wanted.contains(&albedo)) {
+            continue; // a material no drawn part uses
+        }
         if m.height_depth < 0.0 {
             continue; // a window onto a room: its depth is the room's, not a relief
         }
@@ -775,6 +800,87 @@ fn sidecar_alpha_path(base_dir: &Path, uri: &str) -> Option<std::path::PathBuf> 
     let after = after.rsplit_once('.').map_or("", |(stem, _)| stem);
     let candidate = dir.join(format!("{before}_alpha{after}.png"));
     candidate.exists().then_some(candidate)
+}
+
+/// The images the materials of `parts` read. Ordinals count primitives in
+/// [`collect_nodes`]' walk (default scene, depth first), which is what
+/// `ImportedMesh.node` and [`LoadedScene::nodes`] number.
+fn images_for_parts(document: &gltf::Document, parts: &HashSet<usize>) -> HashSet<usize> {
+    fn walk(node: &gltf::Node, ordinal: &mut usize, parts: &HashSet<usize>, materials: &mut HashSet<usize>) {
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                if parts.contains(ordinal) {
+                    materials.extend(primitive.material().index());
+                }
+                *ordinal += 1;
+            }
+        }
+        for child in node.children() {
+            walk(&child, ordinal, parts, materials);
+        }
+    }
+    let mut materials = HashSet::new();
+    let mut ordinal = 0;
+    if let Some(scene) = document.default_scene().or_else(|| document.scenes().next()) {
+        for root in scene.nodes() {
+            walk(&root, &mut ordinal, parts, &mut materials);
+        }
+    }
+    let mut images = HashSet::new();
+    for material in document.materials().filter(|m| m.index().is_some_and(|i| materials.contains(&i))) {
+        let pbr = material.pbr_metallic_roughness();
+        let textures = [
+            pbr.base_color_texture().map(|t| t.texture()),
+            pbr.metallic_roughness_texture().map(|t| t.texture()),
+            material.normal_texture().map(|t| t.texture()),
+            material.occlusion_texture().map(|t| t.texture()),
+            material.emissive_texture().map(|t| t.texture()),
+        ];
+        images.extend(textures.into_iter().flatten().map(|t| t.source().index()));
+    }
+    images
+}
+
+/// Every image the document holds, decoded on all cores (only `wanted`, if
+/// given; the rest are 1×1 magenta stand-ins). The first failure fails the
+/// file, as `gltf::import` did.
+fn decode_images(
+    document: &gltf::Document,
+    base_dir: &Path,
+    buffers: &[gltf::buffer::Data],
+    wanted: Option<&HashSet<usize>>,
+) -> Result<Vec<LoadedTexture>, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let images: Vec<gltf::Image> = document.images().collect();
+    let todo: Vec<usize> = (0..images.len()).filter(|i| wanted.is_none_or(|w| w.contains(i))).collect();
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(todo.len()).max(1);
+    let decoded: Vec<(usize, Result<LoadedTexture, String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    while let Some(&index) = todo.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let texture = gltf::image::Data::from_source(images[index].source(), Some(base_dir), buffers)
+                            .map(|data| decode_to_rgba8(&data))
+                            .map_err(|e| format!("glTF import failed: image {index}: {e}"));
+                        done.push((index, texture));
+                    }
+                    done
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().expect("image decode thread panicked")).collect()
+    });
+    let mut decoded = decoded;
+    decoded.sort_by_key(|(index, _)| *index); // the same first error every time
+    let mut textures: Vec<LoadedTexture> = (0..images.len())
+        .map(|_| LoadedTexture { data: vec![255, 0, 255, 255], width: 1, height: 1 })
+        .collect();
+    for (index, texture) in decoded {
+        textures[index] = texture?;
+    }
+    Ok(textures)
 }
 
 /// Convert any gltf image format to tightly-packed RGBA8.
@@ -1186,6 +1292,33 @@ mod normal_scale_tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(root.join("normal.png")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn a_partial_load_decodes_only_the_images_its_parts_read_and_they_match_a_full_load() {
+        use std::collections::HashSet;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/foliage/fir_sapling/fir_sapling_2k.gltf");
+        let images = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap()).unwrap()["images"]
+            .as_array().unwrap().len();
+        let full = super::load_gltf(&path).unwrap();
+        let material = &full.materials[full.nodes[0].material_index.unwrap()];
+        let reads: HashSet<usize> = [material.albedo_map, material.normal_map, material.metallic_roughness_map,
+            material.occlusion_map, material.emissive_map].into_iter().flatten().collect();
+        assert!(!reads.is_empty() && reads.len() < images, "the fixture has images part 0 does not read");
+        let part = super::load_gltf_for(&path, Some(&HashSet::from([0]))).unwrap();
+        assert_eq!((part.nodes.len(), part.meshes.len(), part.materials.len()),
+                   (full.nodes.len(), full.meshes.len(), full.materials.len()));
+        for index in 0..images {
+            let (a, b) = (&full.textures[index], &part.textures[index]);
+            if reads.contains(&index) {
+                assert_eq!((a.width, a.height, &a.data), (b.width, b.height, &b.data), "image {index} as a full load has it");
+            } else {
+                assert_eq!((b.width, b.height), (1, 1), "image {index} is not read by part 0 and is not decoded");
+            }
+        }
+        let used = full.nodes[0].material_index.unwrap();
+        assert_eq!((part.materials[used].alpha_mode, part.materials[used].foliage),
+                   (full.materials[used].alpha_mode, full.materials[used].foliage), "the drawn material keeps its cutout");
     }
 
     #[test]

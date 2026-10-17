@@ -1,0 +1,17 @@
+[package]
+name = "wgpu-ffx-fg"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Somnium Engine Contributors", "Advanced Micro Devices, Inc."]
+description = "AMD FidelityFX FSR 3 frame interpolation and optical flow for wgpu, translated to WGSL"
+license = "MIT"
+publish = false
+
+[dependencies]
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+pollster = { workspace = true }

@@ -193,14 +193,15 @@ fn authoring_key(name: &str) -> Result<KeyCode, String> {
 
 const MAX_INPUT_LOOK: f32 = 3600.0;
 const MAX_INPUT_WHEEL: f64 = 120.0;
+const MAX_INPUT_CURSOR: f64 = 16384.0;
 
 /// Validate one event completely before input or focus is dispatched to a game.
 fn parse_authoring_input(params: &Value) -> Result<EngineEvent, String> {
     let object = params.as_object().ok_or("input must be an object")?;
-    let selectors: Vec<_> = ["key", "look", "mouse", "wheel"]
+    let selectors: Vec<_> = ["key", "look", "mouse", "wheel", "cursor"]
         .into_iter().filter(|name| object.contains_key(*name)).collect();
     if selectors.len() != 1 {
-        return Err("input requires exactly one of key, look, mouse or wheel".into());
+        return Err("input requires exactly one of key, look, mouse, wheel or cursor".into());
     }
     let selector = selectors[0];
     let button_event = matches!(selector, "key" | "mouse");
@@ -218,6 +219,15 @@ fn parse_authoring_input(params: &Value) -> Result<EngineEvent, String> {
                 return Err("look delta must be finite and within +/-3600".into());
             }
             Ok(EngineEvent::MouseMotion { delta_x: value[0], delta_y: value[1] })
+        }
+        // Where the pointer is, in the window's logical pixels: for a game's own menus (TSF's title and options).
+        "cursor" => {
+            let value: [f64; 2] = serde_json::from_value(params["cursor"].clone())
+                .map_err(|_| "cursor needs [x, y] finite numbers")?;
+            if value.iter().any(|number| !number.is_finite() || !(0.0..=MAX_INPUT_CURSOR).contains(number)) {
+                return Err("cursor must be finite and within 0..16384 logical pixels".into());
+            }
+            Ok(EngineEvent::CursorMoved { x: value[0], y: value[1] })
         }
         "wheel" => {
             let delta_y = params["wheel"].as_f64().filter(|value| value.is_finite() && value.abs() <= MAX_INPUT_WHEEL)
@@ -253,6 +263,10 @@ fn authoring_input_schema() -> Value {
                 "items":{"type":"number","minimum":-MAX_INPUT_LOOK,"maximum":MAX_INPUT_LOOK}}}},
         {"type":"object","required":["action","mouse","pressed"],"additionalProperties":false,
             "properties":{"action":action,"mouse":{"type":"string","enum":["left","right","middle"]},"pressed":{"type":"boolean"}}},
+        {"type":"object","required":["action","cursor"],"additionalProperties":false,
+            "properties":{"action":action,"cursor":{"type":"array","minItems":2,"maxItems":2,
+                "items":{"type":"number","minimum":0.0,"maximum":MAX_INPUT_CURSOR},
+                "description":"Pointer position in the window's logical pixels."}}},
         {"type":"object","required":["action","wheel"],"additionalProperties":false,
             "properties":{"action":action,"wheel":{"type":"number","minimum":-MAX_INPUT_WHEEL,"maximum":MAX_INPUT_WHEEL,
                 "description":"Vertical logical wheel lines; positive scrolls up."}}}
@@ -1322,6 +1336,8 @@ mod input_tests {
         }
         assert!(matches!(parse_authoring_input(&json!({"action":"input","wheel":-0.25})).unwrap(),
             EngineEvent::MouseWheel {delta_y} if delta_y == -0.25));
+        assert!(matches!(parse_authoring_input(&json!({"action":"input","cursor":[640.5,360]})).unwrap(),
+            EngineEvent::CursorMoved {x, y} if x == 640.5 && y == 360.0));
     }
 
     #[test]
@@ -1345,19 +1361,24 @@ mod input_tests {
             json!({"action":"input","wheel":-121}),
             json!({"action":"input","wheel":1,"extra":true}),
             json!({"action":"wrong","wheel":1}),
+            json!({"action":"input","cursor":[1]}),
+            json!({"action":"input","cursor":[-1,0]}),
+            json!({"action":"input","cursor":[0,16385]}),
+            json!({"action":"input","cursor":[0,0],"pressed":true}),
         ] {
             assert!(parse_authoring_input(&value).is_err(),"accepted {value}");
         }
     }
 
     #[test]
-    fn discovery_declares_all_four_exclusive_input_shapes_and_limits() {
+    fn discovery_declares_all_five_exclusive_input_shapes_and_limits() {
         let schema=authoring_input_schema();
         let shapes=schema["oneOf"].as_array().unwrap();
-        assert_eq!(shapes.len(),4);
+        assert_eq!(shapes.len(),5);
         assert_eq!(shapes[1]["properties"]["look"]["items"]["maximum"],json!(MAX_INPUT_LOOK));
         assert_eq!(shapes[2]["properties"]["mouse"]["enum"],json!(["left","right","middle"]));
-        assert_eq!(shapes[3]["properties"]["wheel"]["minimum"],json!(-MAX_INPUT_WHEEL));
+        assert_eq!(shapes[3]["properties"]["cursor"]["items"]["maximum"],json!(MAX_INPUT_CURSOR));
+        assert_eq!(shapes[4]["properties"]["wheel"]["minimum"],json!(-MAX_INPUT_WHEEL));
         assert!(shapes.iter().all(|shape|shape["additionalProperties"]==false));
     }
 }

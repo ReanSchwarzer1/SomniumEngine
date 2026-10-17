@@ -161,6 +161,31 @@ impl RaytracePass {
         index_offset: u32,
         index_count: u32,
     ) {
+        self.register(device, vertex_offset, vertex_count, index_offset, index_count, wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE);
+    }
+
+    /// A skinned mesh's bottom level, rebuilt from its pose again and again: built for a fast build rather than a
+    /// fast trace (wgpu 30 has no refit; `PreferUpdate` still rebuilds).
+    pub fn register_posed_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        vertex_offset: u32,
+        vertex_count: u32,
+        index_offset: u32,
+        index_count: u32,
+    ) {
+        self.register(device, vertex_offset, vertex_count, index_offset, index_count, wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD);
+    }
+
+    fn register(
+        &mut self,
+        device: &wgpu::Device,
+        vertex_offset: u32,
+        vertex_count: u32,
+        index_offset: u32,
+        index_count: u32,
+        flags: wgpu::AccelerationStructureFlags,
+    ) {
         if !self.supported || vertex_count == 0 || index_count == 0 {
             return;
         }
@@ -179,7 +204,7 @@ impl RaytracePass {
         let blas = device.create_blas(
             &wgpu::CreateBlasDescriptor {
                 label: Some("Mesh BLAS"),
-                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                flags,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
             wgpu::BlasGeometrySizeDescriptors::Triangles {

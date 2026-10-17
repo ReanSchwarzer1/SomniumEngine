@@ -18,11 +18,33 @@ struct VelocityParams {
     _pad: f32,
 }
 
+/// How one opaque instance moved since last frame (C2, object and skinned motion vectors), indexed like the
+/// instance buffer. `moving` 0: nothing of its own (the camera and wind cover it); 1: its last transform is
+/// `prev_model`, and if `prev_vertex_base` is not `NO_POSE` its vertices were deformed too, last frame's pose starting
+/// there in the previous-pose buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuMotion {
+    pub prev_model: [[f32; 4]; 4],
+    pub prev_vertex_base: u32,
+    pub moving: u32,
+    pub _pad: [u32; 2],
+}
+
+pub const NO_POSE: u32 = u32::MAX;
+
 pub struct VelocityPass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     params: wgpu::Buffer,
+    /// Per-instance motion, its capacity in records, and last frame's skinned poses (with their generation).
+    motion: wgpu::Buffer,
+    motion_capacity: usize,
+    previous_pose: wgpu::Buffer,
+    pose_generation: u64,
+    depth_view: wgpu::TextureView,
+    vis_view: wgpu::TextureView,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     prev_view_proj: glam::Mat4,
@@ -75,6 +97,9 @@ impl VelocityPass {
                     },
                     count: None,
                 },
+                // How each instance moved (`GpuMotion`), and last frame's skinned poses.
+                storage_entry(3),
+                storage_entry(4),
             ],
         });
 
@@ -86,7 +111,14 @@ impl VelocityPass {
         });
 
         let (texture, view) = Self::alloc(device, width, height);
-        let bind_group = Self::make_bind_group(device, &layout, depth_view, vis_view, &params);
+        let motion = motion_buffer(device, 1);
+        let previous_pose = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("No previous pose"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bind_group = Self::make_bind_group(device, &layout, depth_view, vis_view, &params, &motion, &previous_pose);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Velocity Shader"),
@@ -128,6 +160,12 @@ impl VelocityPass {
             layout,
             bind_group,
             params,
+            motion,
+            motion_capacity: 1,
+            previous_pose,
+            pose_generation: 0,
+            depth_view: depth_view.clone(),
+            vis_view: vis_view.clone(),
             texture,
             view,
             prev_view_proj: glam::Mat4::IDENTITY,
@@ -168,6 +206,8 @@ impl VelocityPass {
         depth_view: &wgpu::TextureView,
         vis_view: &wgpu::TextureView,
         params: &wgpu::Buffer,
+        motion: &wgpu::Buffer,
+        previous_pose: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Velocity BG"),
@@ -185,8 +225,58 @@ impl VelocityPass {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(vis_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: motion.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: previous_pose.as_entire_binding(),
+                },
             ],
         })
+    }
+
+    fn rebind(&mut self, device: &wgpu::Device) {
+        self.bind_group = Self::make_bind_group(
+            device,
+            &self.layout,
+            &self.depth_view,
+            &self.vis_view,
+            &self.params,
+            &self.motion,
+            &self.previous_pose,
+        );
+    }
+
+    /// This frame's per-instance motion (indexed like the opaque instances) and the buffer of last frame's skinned
+    /// poses with its generation (`AnimatedGeometry::previous_pose`).
+    pub fn set_motion(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        motion: &[GpuMotion],
+        previous_pose: Option<(&wgpu::Buffer, u64)>,
+    ) {
+        let mut rebind = false;
+        if motion.len() > self.motion_capacity {
+            self.motion_capacity = motion.len().next_power_of_two();
+            self.motion = motion_buffer(device, self.motion_capacity);
+            rebind = true;
+        }
+        if let Some((buffer, generation)) = previous_pose
+            && generation != self.pose_generation
+        {
+            self.previous_pose = buffer.clone();
+            self.pose_generation = generation;
+            rebind = true;
+        }
+        if rebind {
+            self.rebind(device);
+        }
+        if !motion.is_empty() {
+            queue.write_buffer(&self.motion, 0, bytemuck::cast_slice(motion));
+        }
     }
 
     pub fn resize(
@@ -200,8 +290,9 @@ impl VelocityPass {
         let (texture, view) = Self::alloc(device, width, height);
         self.texture = texture;
         self.view = view;
-        self.bind_group =
-            Self::make_bind_group(device, &self.layout, depth_view, vis_view, &self.params);
+        self.depth_view = depth_view.clone();
+        self.vis_view = vis_view.clone();
+        self.rebind(device);
         // The depth this reprojects from is a different image now.
         self.history_valid = false;
     }
@@ -257,9 +348,36 @@ impl VelocityPass {
     }
 }
 
+fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn motion_buffer(device: &wgpu::Device, records: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Instance motion"),
+        size: (records.max(1) * std::mem::size_of::<GpuMotion>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::VelocityParams;
+    use super::{GpuMotion, VelocityParams};
+
+    #[test]
+    fn a_motion_record_is_eighty_bytes_as_the_shader_reads_it() {
+        assert_eq!(std::mem::size_of::<GpuMotion>(), 80);
+    }
 
     #[test]
     fn the_params_struct_is_a_multiple_of_sixteen() {
