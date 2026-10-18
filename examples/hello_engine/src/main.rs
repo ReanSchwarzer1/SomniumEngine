@@ -610,7 +610,9 @@ impl VoxelTerrain {
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
-                wind: [0.0; 4],
+                wind: [0.0; 2],
+                subsurface: 0.0,
+                reserved: 0.0,
             },
         );
 
@@ -714,7 +716,15 @@ impl VoxelTerrain {
 // Game struct
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
-struct HelloGame {
+/// The editor shell: embed it in a game's own `GameApp` and forward each hook (see Rimeborn's `src/lib.rs`).
+pub struct HelloGame {
+    /// Spawn the scripted first-person character (and its camera, which wins the view) on Play. On by default; a game
+    /// with its own player and camera (Rimeborn's isometric rig) turns it off.
+    pub play_character: bool,
+    /// Roofs and upper floors opened for the camera while the viewer is inside (somnium_core::cutaway).
+    cutaways: somnium_core::cutaway::Cutaways,
+    /// Levels of detail not drawn this frame (somnium_core::lod_group).
+    lods: somnium_core::lod_group::Lods,
     interactions: authoring_demo::InteractionDemo,
     work_demo: fracture_demo::Demo,
     animated_previews: animated_preview::Previews,
@@ -817,10 +827,13 @@ impl HelloGame {
         ));
     }
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut runtime_ui = somnium_core::UiCanvas::new(640.0, 360.0);
         runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
         Self {
+            play_character: true,
+            cutaways: Default::default(),
+            lods: Default::default(),
             interactions: Default::default(),
             work_demo: Default::default(),
             animated_previews: Default::default(),
@@ -2040,7 +2053,9 @@ impl GameApp for HelloGame {
         if playing && !self.was_playing {
             self.interactions.begin_play(ctx.world);
             self.work_demo.reset(ctx.world);
-            spawn_player(self, ctx);
+            if self.play_character {
+                spawn_player(self, ctx);
+            }
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
             self.work_demo.reset(ctx.world);
@@ -2478,7 +2493,9 @@ impl GameApp for HelloGame {
                         height_depth: 0.0,
                         weathering: 0.0,
                         detile: 0.0,
-                        wind: [0.0; 4],
+                        wind: [0.0; 2],
+                        subsurface: 0.0,
+                        reserved: 0.0,
                     },
                 );
 
@@ -2537,6 +2554,13 @@ impl GameApp for HelloGame {
                 }
             }
 
+            // Cutaways: the viewer a game names (its player, its camera's focus), else the camera.
+            self.cutaways.update(
+                ctx.world,
+                somnium_core::cutaway::viewer(ctx.world).unwrap_or(renderer.camera_pos),
+            );
+            self.lods.update(ctx.world, renderer.camera_pos);
+
             // Phase 11.5A-2: Use WorldTransform for rendering instead of Transform::to_matrix().
             let required = ComponentSet::from_ids(vec![
                 ComponentId::of::<WorldTransform>(),
@@ -2588,7 +2612,7 @@ impl GameApp for HelloGame {
                     } else {
                         0
                     };
-                    renderer.submit(somnium_renderer::command::DrawCommand {
+                    let command = somnium_renderer::command::DrawCommand {
                         paint,
                         casts_shadow,
                         sort_key: somnium_renderer::command::SortKey::new(
@@ -2601,7 +2625,16 @@ impl GameApp for HelloGame {
                         index_count: mesh.index_count,
                         material_id: material.runtime_id,
                         transform: wt.0,
-                    });
+                    };
+                    if self.lods.is_hidden(entity) {
+                        continue;
+                    }
+                    // An opened roof keeps shading the room it covers.
+                    if self.cutaways.is_shadow_only(entity) {
+                        renderer.submit_shadow_only(command);
+                    } else {
+                        renderer.submit(command);
+                    }
                 }
             }
 
@@ -3213,7 +3246,9 @@ fn spawn_procedural_scene(
             height_depth: 0.0,
             weathering: 0.0,
             detile: 0.0,
-            wind: [0.0; 4],
+            wind: [0.0; 2],
+            subsurface: 0.0,
+            reserved: 0.0,
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -3238,7 +3273,9 @@ fn spawn_procedural_scene(
             height_depth: 0.0,
             weathering: 0.0,
             detile: 0.0,
-            wind: [0.0; 4],
+            wind: [0.0; 2],
+            subsurface: 0.0,
+            reserved: 0.0,
         },
     );
 
@@ -3328,7 +3365,9 @@ fn spawn_procedural_scene(
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
-                wind: [0.0; 4],
+                wind: [0.0; 2],
+                subsurface: 0.0,
+                reserved: 0.0,
             },
         )
     };

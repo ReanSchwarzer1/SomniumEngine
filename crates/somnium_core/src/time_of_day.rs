@@ -83,6 +83,35 @@ pub struct TimeOfDayComponent {
     /// Cloud coverage `0..1` across the day. Consumed by CONTROL-M's sky.
     /// Empty leaves the sky component's authored coverage alone.
     pub cloud_coverage: Curve,
+    /// A sun that does not cross the sky: a world locked to its star, a
+    /// stylised scene, a game that places the sun itself every frame. When on,
+    /// the sun stands at `fixed_azimuth`/`fixed_elevation` with
+    /// `fixed_illuminance` lux and a noon tint; the hour still drives the fog,
+    /// exposure and cloud tracks. Rimeborn writes these from its world frame.
+    pub fixed_sun: bool,
+    /// Degrees in [`sun_rotation`]'s convention (0 toward +Z, 90 toward +X);
+    /// [`azimuth_elevation_from_direction`] converts a direction.
+    pub fixed_azimuth: f32,
+    /// Degrees above the horizon. Below zero the sun has set and
+    /// `sun::transmittance` takes the light to nothing, as for the Earth model.
+    pub fixed_elevation: f32,
+    /// Illuminance of the fixed sun when nothing covers it, lux.
+    pub fixed_illuminance: f32,
+    /// How much of the sun is covered, `0..1`: an eclipse, or a shade passing
+    /// overhead. Scales the sun's illuminance, and the sky with it (the sky dome
+    /// is lit by the sun's own output), in either sun model.
+    pub eclipse: f32,
+    /// A moonless night sky's glow at the zenith, cd/m² (`NightSky`: drawn into the sky, the ambient light and the
+    /// reflections). 0 draws none. Rimeborn's Undersun uses about 0.03 under the Lid.
+    pub night_glow: f32,
+    /// The glow's colour (linear RGB).
+    pub night_tint: glam::Vec3,
+    /// Aurora low on the side away from the sun, 0..1.
+    pub night_aurora: f32,
+    /// The Halo Road (the Lid plates' lit edges), 0..1.
+    pub night_halo_road: f32,
+    /// The Thread (a line of light from the horizon below the sun toward it), 0..1.
+    pub night_thread: f32,
 }
 
 impl Component for TimeOfDayComponent {}
@@ -101,6 +130,16 @@ impl Default for TimeOfDayComponent {
             fog_density: Curve::empty(),
             exposure_compensation: Curve::empty(),
             cloud_coverage: Curve::empty(),
+            fixed_sun: false,
+            fixed_azimuth: 180.0,
+            fixed_elevation: 45.0,
+            fixed_illuminance: crate::light_units::lux::DIRECT_SUNLIGHT,
+            eclipse: 0.0,
+            night_glow: 0.0,
+            night_tint: glam::Vec3::new(0.55, 0.65, 1.0),
+            night_aurora: 0.0,
+            night_halo_road: 0.0,
+            night_thread: 0.0,
         }
     }
 }
@@ -241,6 +280,18 @@ pub fn sun_rotation(azimuth_deg: f32, elevation_deg: f32) -> glam::Quat {
     )
 }
 
+/// The `(azimuth, elevation)` in degrees of a direction *toward* the sun, in
+/// the convention [`sun_rotation`] uses: azimuth 0 puts the sun toward +Z and
+/// 90 toward +X (the toward-sun vector is `(sin az cos el, sin el, cos az cos
+/// el)`), elevation above the horizon. A game with its own idea of north
+/// passes its direction through this rather than reasoning about azimuths.
+#[must_use]
+pub fn azimuth_elevation_from_direction(toward_sun: glam::Vec3) -> (f32, f32) {
+    let d = toward_sun.normalize_or(glam::Vec3::Y);
+    let azimuth = d.x.atan2(d.z).to_degrees().rem_euclid(360.0);
+    (azimuth, d.y.clamp(-1.0, 1.0).asin().to_degrees())
+}
+
 /// Everything the day cycle produces for one instant.
 ///
 /// Returned as a value rather than applied in place so it can be tested
@@ -263,6 +314,8 @@ pub struct DayState {
     pub exposure_compensation: Option<f32>,
     /// Cloud coverage `0..1`, or `None` when unauthored.
     pub cloud_coverage: Option<f32>,
+    /// The moonless night sky (`TimeOfDayComponent::night_*`); all zero is none.
+    pub night: somnium_renderer::pass::ibl::NightSky,
 }
 
 impl TimeOfDayComponent {
@@ -277,20 +330,44 @@ impl TimeOfDayComponent {
     #[must_use]
     pub fn evaluate(&self) -> DayState {
         let hour = self.hour.rem_euclid(HOURS);
-        let (azimuth_deg, elevation_deg) =
-            solar_position(self.day_of_year, hour, self.latitude, self.longitude);
-        let tint = self.sun_color.evaluate(hour / HOURS);
+        let (azimuth_deg, elevation_deg) = if self.fixed_sun {
+            (self.fixed_azimuth.rem_euclid(360.0), self.fixed_elevation.clamp(-90.0, 90.0))
+        } else {
+            solar_position(self.day_of_year, hour, self.latitude, self.longitude)
+        };
+        // A fixed sun keeps the noon tint: its colour at a low elevation comes
+        // from the transmittance physics, not from a clock it does not have.
+        let tint = self
+            .sun_color
+            .evaluate(if self.fixed_sun { 0.5 } else { hour / HOURS });
+        let uncovered = 1.0 - self.eclipse.clamp(0.0, 1.0);
+        let night = somnium_renderer::pass::ibl::NightSky {
+            glow: self.night_glow.max(0.0),
+            aurora: self.night_aurora.clamp(0.0, 1.0),
+            halo_road: self.night_halo_road.clamp(0.0, 1.0),
+            thread: self.night_thread.clamp(0.0, 1.0),
+            tint: self.night_tint.to_array(),
+        };
         DayState {
+            night,
             azimuth_deg,
             elevation_deg,
             rotation: sun_rotation(azimuth_deg, elevation_deg),
             color: glam::Vec3::new(tint[0], tint[1], tint[2]),
             // An unauthored intensity track means "leave the authored
-            // illuminance alone", which a zero would not: zero is night.
-            intensity: if self.sun_intensity.is_empty() {
-                f32::NAN
+            // illuminance alone", which a zero would not: zero is night. An
+            // eclipse is the exception: covering the sun is a statement about
+            // its output, so it needs a value to scale.
+            intensity: if self.fixed_sun {
+                self.fixed_illuminance.max(0.0) * uncovered
+            } else if self.sun_intensity.is_empty() {
+                if uncovered < 1.0 {
+                    crate::light_units::lux::DIRECT_SUNLIGHT * uncovered
+                } else {
+                    f32::NAN
+                }
             } else {
-                self.sun_intensity.evaluate(hour).max(0.0)
+                self.sun_intensity.evaluate(hour).max(0.0) * uncovered
             },
             fog_density: (!self.fog_density.is_empty())
                 .then(|| self.fog_density.evaluate(hour).max(0.0)),
@@ -465,5 +542,73 @@ mod tests {
         assert!(state.elevation_deg > 40.0, "{}", state.elevation_deg);
         assert!(state.intensity > 50_000.0, "{}", state.intensity);
         assert!(state.color.min_element() > 0.5);
+    }
+
+    /// The direction helper and the light rotation agree about which way is
+    /// which: a light built from a direction shines back along it.
+    #[test]
+    fn a_direction_round_trips_through_the_light_rotation() {
+        for toward in [
+            glam::Vec3::new(1.0, 0.5, 0.0),
+            glam::Vec3::new(-0.3, 0.6, -0.7),
+            glam::Vec3::new(0.2, 0.1, 0.9),
+        ] {
+            let toward = toward.normalize();
+            let (az, el) = azimuth_elevation_from_direction(toward);
+            let forward = sun_rotation(az, el) * glam::Vec3::NEG_Z;
+            assert!(forward.dot(-toward) > 0.9999, "{toward} -> ({az}, {el}) -> {forward}");
+        }
+        // +X is 90 degrees and +Z is 0, as `sun_rotation` builds them.
+        assert!((azimuth_elevation_from_direction(glam::Vec3::X).0 - 90.0).abs() < 1e-4);
+        assert!(azimuth_elevation_from_direction(glam::Vec3::Z).0.abs() < 1e-4);
+    }
+
+    /// A fixed sun ignores the clock for its place and brightness; the hour
+    /// still drives the other tracks.
+    #[test]
+    fn a_fixed_sun_stands_still_through_the_day() {
+        let mut tod = TimeOfDayComponent {
+            fixed_sun: true,
+            fixed_azimuth: 300.0,
+            fixed_elevation: 35.0,
+            fixed_illuminance: 60_000.0,
+            fog_density: Curve::constant(0.001),
+            ..TimeOfDayComponent::default()
+        };
+        for hour in [0.0, 6.0, 12.0, 21.0] {
+            tod.hour = hour;
+            let state = tod.evaluate();
+            assert!((state.azimuth_deg - 300.0).abs() < 1e-4);
+            assert!((state.elevation_deg - 35.0).abs() < 1e-4);
+            assert!((state.intensity - 60_000.0).abs() < 1e-2);
+            assert_eq!(state.fog_density, Some(0.001));
+        }
+    }
+
+    /// Covering the sun scales its light in either model, and an Earth sun
+    /// with no authored intensity still gets a value an eclipse can scale.
+    #[test]
+    fn an_eclipse_covers_the_sun_in_either_model() {
+        let fixed = TimeOfDayComponent {
+            fixed_sun: true,
+            fixed_illuminance: 80_000.0,
+            eclipse: 0.75,
+            ..TimeOfDayComponent::default()
+        }
+        .evaluate();
+        assert!((fixed.intensity - 20_000.0).abs() < 1e-2);
+
+        let earth = TimeOfDayComponent { eclipse: 1.0, ..TimeOfDayComponent::default() }.evaluate();
+        assert!(earth.intensity.abs() < 1e-3);
+
+        let unauthored = TimeOfDayComponent {
+            sun_intensity: Curve::empty(),
+            eclipse: 0.5,
+            ..TimeOfDayComponent::default()
+        }
+        .evaluate();
+        assert!(unauthored.intensity.is_finite());
+        let clear = TimeOfDayComponent { sun_intensity: Curve::empty(), ..TimeOfDayComponent::default() }.evaluate();
+        assert!(clear.intensity.is_nan(), "no eclipse and no track still means: leave the light alone");
     }
 }

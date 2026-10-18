@@ -65,6 +65,7 @@ pub mod editor_commands;
 mod editor_gizmo;
 pub mod error;
 pub mod event;
+mod foliage_grid;
 mod foliage_palette;
 pub mod foliage_visibility;
 pub mod i18n;
@@ -113,6 +114,11 @@ pub mod time;
 pub mod vertex_paint;
 /// Phase CONTROL-L: the day cycle.
 pub mod time_of_day;
+/// An isometric camera rig for mouse-and-keyboard games (Rimeborn, 18 Oct 2026).
+pub mod isometric_camera;
+/// Roofs and upper floors that open for the camera while the viewer is inside (Rimeborn, 18 Oct 2026).
+pub mod cutaway;
+pub mod lod_group;
 /// Phase CONTROL-N: weather and the wetness it leaves.
 pub mod weather;
 /// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.
@@ -1374,6 +1380,15 @@ pub struct PostProcessComponent {
     pub picture_shift_origin: [f32; 3],
     /// How far the wave has gone at progress 1, in metres; kind 3 only.
     pub picture_shift_reach: f32,
+    /// Painterly filter, 0 off ..= 1 full: a Kuwahara filter over the finished picture flattens fine texture into
+    /// brush-like patches while keeping edges, for a look between photo-real and painted. 0 skips it entirely.
+    pub painterly: f32,
+    /// Ink lines, 0 off ..= 1 full: silhouettes and creases found in the depth buffer are darkened into soft lines
+    /// that fade with distance. 0 skips it entirely.
+    pub ink_lines: f32,
+    /// Light ramp, 0 off ..= 1 full: the sun's light on a surface follows a soft painterly ramp (lit faces come up
+    /// flat, the terminator is a narrow soft band) while GI, reflections and shadows stay physical. 0 skips it.
+    pub light_ramp: f32,
 }
 
 impl Default for PostProcessComponent {
@@ -1530,6 +1545,9 @@ impl Default for PostProcessComponent {
             picture_shift_progress: 0.0,
             picture_shift_origin: [0.0; 3],
             picture_shift_reach: 40.0,
+            painterly: 0.0,
+            ink_lines: 0.0,
+            light_ramp: 0.0,
         }
     }
 }

@@ -229,6 +229,8 @@ pub struct SomniumRenderer {
     /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
     /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
+    /// The light ramp, 0 off ..= 1 (`PostProcessComponent::light_ramp`): rides in `shading_mode`'s top byte.
+    pub light_ramp: f32,
     /// Phase TSUSHIMA-F: multiple-scattering compensation, direct and IBL.
     pub brdf_multiscatter: bool,
     /// Phase TSUSHIMA-F: Hammon's rough diffuse in place of Burley.
@@ -1225,6 +1227,7 @@ impl SomniumRenderer {
             moon_intensity: 0.010,
             cascade_debug: false,
             shading_mode: 2 | 4 | 8,
+            light_ramp: 0.0,
             local_lights: Vec::new(),
             grid_pass,
             grid_enabled: false,
@@ -2297,6 +2300,11 @@ impl SomniumRenderer {
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
     pub fn set_ibl_intensity(&mut self, intensity: f32) {
         self.ibl_intensity = intensity.max(0.0);
+    }
+
+    /// The moonless night sky drawn into the environment cubemap (`NightSky`; Rimeborn's Undersun). Zero is none.
+    pub fn set_night_sky(&mut self, night: crate::pass::ibl::NightSky) {
+        self.ibl_pass.night = night;
     }
 
     /// Directional moonlight illuminance in lux (Phase 25M-2).
@@ -4363,6 +4371,7 @@ impl SomniumRenderer {
         if self.brdf_micro_shadow {
             shading_mode |= 256;
         }
+        shading_mode |= ((self.light_ramp.clamp(0.0, 1.0) * 255.0).round() as u32) << 24;
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
             &self.local_lights,

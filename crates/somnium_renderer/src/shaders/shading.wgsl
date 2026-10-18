@@ -3342,6 +3342,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor + moonlight;
 
+        // The light ramp (`PostProcessComponent::light_ramp`, the top byte of `shading_mode`; 0 skips it): the sun's
+        // N.L times its shadow is replaced by a soft ramp of itself, so a lit face comes up fast and flat and the
+        // terminator is a narrow soft band, as a painter would place it. Only the sun's direct term changes; GI,
+        // reflections and every shadow stay physical, which keeps the look between photo-real and painted.
+        let ramp_amount = f32((cluster_params.shading_mode >> 24u) & 255u) / 255.0;
+        if ramp_amount > 0.0 {
+            let lit = saturate(dot(surface.normal, light_dir)) * shadow_factor;
+            let ramped = smoothstep(0.02, 0.35, lit);
+            let gain = mix(1.0, min(ramped / max(lit, 0.05), 4.0), ramp_amount);
+            direct_light = (direct_light - moonlight) * gain + moonlight;
+        }
+
         // Transmitted sunlight follows the same atmospheric fade as every
         // other direct term, with no independent elevation threshold.
         var transmitted = vec3<f32>(0.0);

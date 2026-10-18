@@ -56,6 +56,13 @@ pub(crate) struct ProjectEntry {
     /// Complete, simplified replacement; never delete individual leaf materials.
     #[serde(default)]
     pub lod: Option<ProjectLod>,
+    /// How far this kind draws, metres (horizontal from the camera). Unset: the terrain's
+    /// `FoliageComponent::cull_distance`, as before. Grass short, trees far.
+    #[serde(default)]
+    pub draw_distance: Option<f32>,
+    /// How far this kind casts shadows, metres; 0 never casts. Unset: `FoliageComponent::foliage_shadow_distance`.
+    #[serde(default)]
+    pub shadow_distance: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +79,12 @@ fn parse(bytes: &[u8]) -> Result<BTreeMap<u8, ProjectEntry>, String> {
     }
     let mut entries = BTreeMap::new();
     for entry in document.entries {
+        // A kind must draw somewhere; a shadow distance of 0 is a kind that never casts (grass, crops).
+        if entry.draw_distance.is_some_and(|d| !d.is_finite() || d <= 0.0)
+            || entry.shadow_distance.is_some_and(|d| !d.is_finite() || d < 0.0)
+        {
+            return Err(format!("invalid draw or shadow distance for kind {}", entry.kind));
+        }
         if let Some(lod) = &entry.lod {
             if !lod.distance.is_finite()
                 || lod.distance <= 0.0
@@ -182,6 +195,22 @@ mod tests {
         document["entries"][0]["lod"]["distance"] = serde_json::json!(16);
         document["entries"][0]["lod"]["primitives"] = serde_json::json!([2, 2]);
         assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+    #[test]
+    fn a_kind_can_carry_its_own_draw_and_shadow_distances() {
+        let mut document = serde_json::json!({"version":1,"entries":[{
+            "kind":130,"name":"grass","source":"grass.gltf","primitives":[0],"draw_distance":60.0,"shadow_distance":25.0}]});
+        let parsed = parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!((parsed[&130].draw_distance, parsed[&130].shadow_distance), (Some(60.0), Some(25.0)));
+        document["entries"][0]["draw_distance"] = serde_json::json!(0);
+        assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err(), "a kind must draw somewhere");
+        document["entries"][0]["draw_distance"] = serde_json::json!(60.0);
+        document["entries"][0]["shadow_distance"] = serde_json::json!(0);
+        assert_eq!(parse(&serde_json::to_vec(&document).unwrap()).unwrap()[&130].shadow_distance, Some(0.0), "0: never casts");
+        document["entries"][0]["shadow_distance"] = serde_json::json!(-1);
+        assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err());
+        let plain = parse(br#"{"version":1,"entries":[{"kind":131,"name":"tree","source":"t.gltf","primitives":[0]}]}"#).unwrap();
+        assert_eq!((plain[&131].draw_distance, plain[&131].shadow_distance), (None, None), "unset keeps the component's");
     }
     #[test]
     fn stable_project_ids_preserve_all_selected_material_parts_and_transform() {

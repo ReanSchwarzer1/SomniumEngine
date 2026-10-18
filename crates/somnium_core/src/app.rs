@@ -1200,6 +1200,9 @@ pub struct Engine<G: GameApp> {
     /// Scratch list for this frame's visible foliage, reused so a field of
     /// instances does not allocate a fresh vector every frame.
     foliage_batch: Vec<(FoliagePart, glam::Mat4, bool)>,
+    /// Each terrain's painted foliage binned by ground cell (`foliage_grid`), and this frame's visit list.
+    foliage_grids: std::collections::HashMap<u32, crate::foliage_grid::FoliageGrid>,
+    foliage_visit: Vec<usize>,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -1796,6 +1799,8 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_paint_active: false,
             foliage_erase: false,
             foliage_batch: Vec::new(),
+            foliage_grids: std::collections::HashMap::new(),
+            foliage_visit: Vec::new(),
             foliage_stroke_seed: 0,
             foliage_painting: false,
             foliage_refusal_reported: false,
@@ -8535,6 +8540,8 @@ impl<G: GameApp> Engine<G> {
                 .day_state
                 .and_then(|state| state.exposure_compensation)
                 .unwrap_or(pp.exposure_compensation);
+            r.light_ramp = pp.light_ramp;
+            r.set_night_sky(self.day_state.map_or_else(Default::default, |state| state.night));
             r.shading_mode = u32::from(pp.cel_shading)
                 | if pp.pcss_enabled && budget.soft_shadows {
                     2
@@ -8710,6 +8717,7 @@ impl<G: GameApp> Engine<G> {
                     pp.response_curve.sample_into(0.0, 1.0, &mut table);
                     table
                 }),
+                stylise: [pp.painterly.clamp(0.0, 1.0), pp.ink_lines.clamp(0.0, 1.0), 0.0, 0.0],
             };
             r.authored_picture_shift = somnium_renderer::pass::postprocess::PictureShift {
                 kind: if pp.picture_shift <= 3 { pp.picture_shift } else { 0 },
@@ -8917,15 +8925,15 @@ impl<G: GameApp> Engine<G> {
         ) in terrains
         {
             // Which palette entries this terrain actually uses, so nothing is
-            // loaded for a kind that has never been painted.
+            // loaded for a kind that has never been painted. Kept by the
+            // terrain's grid, which rebuilds only when its foliage changes.
             let kinds: Vec<u8> = {
                 let Some(t) = self.renderer.as_ref().and_then(|r| r.terrain(terrain_id)) else {
                     continue;
                 };
-                let mut k: Vec<u8> = t.painted_foliage.iter().map(|p| p.kind).collect();
-                k.sort_unstable();
-                k.dedup();
-                k
+                let grid = self.foliage_grids.entry(terrain_id).or_default();
+                grid.refresh(t.edit_revision, &t.painted_foliage);
+                grid.kinds.clone()
             };
             for kind in &kinds {
                 self.ensure_palette_mesh(*kind);
@@ -8946,13 +8954,42 @@ impl<G: GameApp> Engine<G> {
             } else {
                 f32::MAX
             };
+            // Per kind (WS1-6): a palette entry's own draw and shadow distances,
+            // else the component's; its LOD distance, looked up here once
+            // rather than per instance. A kind with no overrides is tested
+            // exactly as before.
+            let mut kind_cull = [cull_sq; 256];
+            let mut kind_shadow = [shadow_sq; 256];
+            let mut kind_lod = [f32::INFINITY; 256];
+            let mut kind_reach = [cull_distance; 256];
+            for (kind, entry) in &self.project_foliage {
+                let k = *kind as usize;
+                if let Some(d) = entry.draw_distance {
+                    (kind_cull[k], kind_reach[k]) = (d * d, d);
+                }
+                if let Some(s) = entry.shadow_distance {
+                    kind_shadow[k] = s * s;
+                }
+                if let Some(lod) = &entry.lod {
+                    kind_lod[k] = lod.distance * lod.distance;
+                }
+            }
+            // Only the ground cells within the farthest kind's reach are visited.
+            let reach_sq = kinds.iter().map(|k| kind_cull[*k as usize]).fold(0.0_f32, f32::max);
+            let reach = if reach_sq >= f32::MAX { f32::INFINITY } else { reach_sq.sqrt() };
+            self.foliage_visit.clear();
+            if let Some(grid) = self.foliage_grids.get(&terrain_id) {
+                grid.visit([camera_local.x, camera_local.z], reach, |i| self.foliage_visit.push(i));
+            }
             self.foliage_batch.clear();
-            for inst in &t.painted_foliage {
+            for &index in &self.foliage_visit {
+                let inst = &t.painted_foliage[index];
+                let k = inst.kind as usize;
                 counts.candidates = counts.candidates.saturating_add(1);
                 let d = inst.position - camera_local;
                 // Horizontal distance: flying up should not make ground cover
                 // vanish out from under you.
-                if d.x * d.x + d.z * d.z > cull_sq {
+                if d.x * d.x + d.z * d.z > kind_cull[k] {
                     counts.distance_culled = counts.distance_culled.saturating_add(1);
                     continue;
                 }
@@ -8960,12 +8997,11 @@ impl<G: GameApp> Engine<G> {
                     counts.unavailable_mesh = counts.unavailable_mesh.saturating_add(1);
                     continue;
                 };
-                let far_parts = self
-                    .project_foliage
-                    .get(&inst.kind)
-                    .and_then(|entry| entry.lod.as_ref())
-                    .filter(|lod| d.x * d.x + d.z * d.z > lod.distance * lod.distance)
-                    .and_then(|_| self.foliage_lod_meshes[inst.kind as usize].as_ref());
+                let far_parts = if d.x * d.x + d.z * d.z > kind_lod[k] {
+                    self.foliage_lod_meshes[k].as_ref()
+                } else {
+                    None
+                };
                 if far_parts.is_some() {
                     counts.lod_instances += 1;
                 }
@@ -8978,10 +9014,10 @@ impl<G: GameApp> Engine<G> {
                 // multiply by one, so an unauthored foliage component cannot
                 // change even by a rounding error.
                 let horizontal_sq = d.x * d.x + d.z * d.z;
-                let scale = if lod_falloff.is_empty() || cull_distance <= 0.0 {
+                let scale = if lod_falloff.is_empty() || kind_reach[k] <= 0.0 {
                     inst.scale
                 } else {
-                    inst.scale * lod_falloff.evaluate(horizontal_sq.sqrt() / cull_distance)
+                    inst.scale * lod_falloff.evaluate(horizontal_sq.sqrt() / kind_reach[k])
                 };
                 if scale <= 0.0 {
                     counts.scale_culled = counts.scale_culled.saturating_add(1);
@@ -9001,7 +9037,7 @@ impl<G: GameApp> Engine<G> {
                 // Horizontal, like the draw cull above and for the same
                 // reason: climbing a hill should not switch every shadow below
                 // you back on.
-                let casts = d.x * d.x + d.z * d.z <= shadow_sq;
+                let casts = d.x * d.x + d.z * d.z <= kind_shadow[k];
                 let dist = (d.x * d.x + d.z * d.z).sqrt();
                 // Three mesh LODs. The old "impostor" was an untextured ground
                 // plane rotated toward the camera — a black triangle that FSR

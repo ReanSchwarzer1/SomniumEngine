@@ -714,6 +714,9 @@ pub fn component_registry() -> TypeRegistry {
     crate::spline::register(&mut registry);
     crate::blockout::register(&mut registry);
     crate::scatter_scene::register(&mut registry);
+    crate::isometric_camera::register(&mut registry);
+    crate::cutaway::register(&mut registry);
+    crate::lod_group::register(&mut registry);
     registry.register(sky_schema());
     registry.register(sky_eye_schema());
     registry.register(terrain_schema());
@@ -907,6 +910,12 @@ fn post_process_schema() -> ComponentSchema {
                 doc: "Where the wave starts, in world metres. Wave only." },
             picture_shift_reach { min: 0.0, soft_max: 200.0, step: 1.0, unit: "m", group: "Picture Shift", display_name: "Wave Reach",
                 doc: "How far the wave has spread at progress 1. Wave only." },
+            painterly { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Stylization", display_name: "Painterly",
+                doc: "Flattens fine texture into brush-like patches while keeping edges (a Kuwahara filter over the finished picture). 0 is off and costs nothing." },
+            ink_lines { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Stylization", display_name: "Ink Lines",
+                doc: "Darkens silhouettes and creases found in the depth buffer into soft lines that fade with distance. 0 is off and costs nothing." },
+            light_ramp { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Stylization", display_name: "Light Ramp",
+                doc: "The sun's light follows a soft painterly ramp: lit faces come up flat, the terminator is a narrow soft band. GI, reflections and shadows stay physical. 0 is off." },
         }
     };
     if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "dream_mode") {
@@ -1143,6 +1152,16 @@ fn time_of_day_schema() -> ComponentSchema {
                 soft_min: 0.0, soft_max: 24.0, display_name: "Exposure Compensation" },
             cloud_coverage { group: "Tracks", min: 0.0, max: 1.0,
                 soft_min: 0.0, soft_max: 24.0, display_name: "Cloud Coverage" },
+            fixed_sun { group: "Fixed Sun", display_name: "Fixed Sun" },
+            fixed_azimuth { min: 0.0, max: 360.0, step: 0.5, precision: 1, unit: "\u{b0}", group: "Fixed Sun", display_name: "Azimuth" },
+            fixed_elevation { min: -90.0, max: 90.0, step: 0.5, precision: 1, unit: "\u{b0}", group: "Fixed Sun", display_name: "Elevation" },
+            fixed_illuminance { min: 0.0, max: 130000.0, step: 100.0, precision: 0, unit: "lx", group: "Fixed Sun", display_name: "Illuminance" },
+            eclipse { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Fixed Sun", display_name: "Eclipse" },
+            night_glow { min: 0.0, soft_max: 0.2, step: 0.001, precision: 3, unit: "cd/m\u{b2}", group: "Night Sky", display_name: "Glow" },
+            night_tint { group: "Night Sky", display_name: "Glow Colour" },
+            night_aurora { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Night Sky", display_name: "Aurora" },
+            night_halo_road { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Night Sky", display_name: "Halo Road" },
+            night_thread { min: 0.0, max: 1.0, step: 0.01, precision: 2, group: "Night Sky", display_name: "Thread" },
         }
     }
 }
@@ -1537,7 +1556,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 44);
+        assert_eq!(registry.len(), 48);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1549,13 +1568,17 @@ mod tests {
                 "somnium.Blockout",
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
+                "somnium.Cutaway",
+                "somnium.CutawayViewer",
                 "somnium.Decal",
                 "somnium.EditorFlags",
                 "somnium.Foliage",
                 "somnium.ImportedMesh",
                 "somnium.Interactable",
+                "somnium.IsometricCamera",
                 "somnium.Light",
                 "somnium.LightFlicker",
+                "somnium.LodGroup",
                 "somnium.Material",
                 "somnium.Mesh",
                 "somnium.MeshKind",

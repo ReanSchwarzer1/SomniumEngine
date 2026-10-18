@@ -35,6 +35,28 @@ struct GenParams {
     overcast: f32,
     sun_direction: [f32; 4],
     sun_color: [f32; 4],
+    /// `NightSky`: glow (cd/m²), aurora, Halo Road, Thread.
+    night: [f32; 4],
+    /// `NightSky::tint`, then padding.
+    night_tint: [f32; 4],
+}
+
+/// A night sky with no moon (Rimeborn's Undersun under the Lid), drawn into the environment cubemap so the background,
+/// the ambient light and the reflections all carry it: a glow over the whole dome, the Halo Road (a ring of arcs
+/// through the hidden sun), the Thread (a thin line from the horizon below the sun toward it) and aurora low on the
+/// side away from the sun. All zero (the default) draws nothing, which is every scene that does not ask for it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct NightSky {
+    /// The dome's glow at the zenith, cd/m² (a dark Earth night is about 0.0002; 0.03 reads, under auto-exposure).
+    pub glow: f32,
+    /// Aurora, 0..1 of a strong display.
+    pub aurora: f32,
+    /// The Halo Road's arcs, 0..1.
+    pub halo_road: f32,
+    /// The Thread, 0..1.
+    pub thread: f32,
+    /// The glow's colour (linear RGB).
+    pub tint: [f32; 3],
 }
 
 /// Owns the environment cubemap and the passes that fill it.
@@ -43,6 +65,8 @@ pub struct IblPass {
     cubemap: wgpu::Texture,
     /// Full cube view (all mips) — bound into the shading pass.
     pub cube_view: wgpu::TextureView,
+    /// The night sky drawn into the cubemap (`NightSky`); a change rebuilds it.
+    pub night: NightSky,
     /// Trilinear sampler for the environment map.
     pub sampler: wgpu::Sampler,
 
@@ -57,6 +81,8 @@ pub struct IblPass {
 
     /// Last sun the cubemap was built for, so we only regenerate on change.
     last_sun: Option<([f32; 3], [f32; 3], u32)>,
+    /// The night the cube was last built with.
+    last_night: Option<NightSky>,
 }
 
 /// Environment map format — HDR, since the sun disk is far brighter than 1.0.
@@ -299,6 +325,8 @@ impl IblPass {
             prefilter_bind_group,
             params_buffer,
             last_sun: None,
+            night: NightSky::default(),
+            last_night: None,
         }
     }
 
@@ -315,10 +343,11 @@ impl IblPass {
     ) -> bool {
         let overcast = overcast.clamp(0.0, 1.0);
         let key = (sun_direction.to_array(), sun_color.to_array(), overcast.to_bits());
-        if self.last_sun == Some(key) {
+        if self.last_sun == Some(key) && self.last_night == Some(self.night) {
             return false;
         }
         self.last_sun = Some(key);
+        self.last_night = Some(self.night);
 
         // One submission per face/mip. `queue.write_buffer` only lands once
         // before a submission executes, so a single command buffer would see
@@ -376,6 +405,8 @@ impl IblPass {
                 sun_color.z,
                 sun_luminance(sun_color),
             ],
+            night: [self.night.glow.max(0.0), self.night.aurora, self.night.halo_road, self.night.thread],
+            night_tint: [self.night.tint[0], self.night.tint[1], self.night.tint[2], 0.0],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&p));
     }

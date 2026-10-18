@@ -154,7 +154,8 @@ struct ClusterParams {
     near: f32,
     far: f32,
     // Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows, bit 3 = analytic UV grads,
-    // bit 4 = ReSTIR DI wrote sun visibility; bit 5 = DREAMS-B terrain STF.
+    // bit 4 = ReSTIR DI wrote sun visibility; bit 5 = DREAMS-B terrain STF; bits 6-8 the BRDF energy terms;
+    // bits 24-31 the light ramp's amount, 0..255 (0 off).
     shading_mode: u32,
     num_local_lights: u32,
 }

@@ -52,6 +52,8 @@ struct PostParams {
     shift_at: vec4<f32>,
     /// The camera's, to read the world back out of the depth buffer for the wave.
     inv_view_proj: mat4x4<f32>,
+    /// x painterly amount, y ink-line amount (0 skips each); zw unused.
+    stylise: vec4<f32>,
 }
 
 @group(0) @binding(0) var hdr_tex:  texture_2d<f32>;
@@ -349,6 +351,81 @@ fn picture_wave(uv: vec2<f32>, p: f32) -> vec2<f32> {
     return vec2(inside, seam);
 }
 
+/// A painterly picture (`pp.stylise.x`): the 4-sector Kuwahara filter. Each pixel takes the mean colour of whichever
+/// quarter of its neighbourhood varies least, so flat areas flatten into patches and edges stay hard. Variance is
+/// measured on a compressed copy (x / (1 + x)) so bright lights do not decide every pixel.
+fn kuwahara(uv: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<i32>(textureDimensions(hdr_tex));
+    let c = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
+    let r = clamp(i32(round(f32(dims.y) / 480.0)), 2, 3);
+    var best = vec3<f32>(0.0);
+    var least = 1.0e9;
+    for (var q = 0; q < 4; q++) {
+        let sx = select(-1, 1, (q & 1) != 0);
+        let sy = select(-1, 1, (q & 2) != 0);
+        var sum = vec3<f32>(0.0);
+        var sum_c = vec3<f32>(0.0);
+        var sq_c = vec3<f32>(0.0);
+        for (var j = 0; j <= r; j++) {
+            for (var i = 0; i <= r; i++) {
+                let p = clamp(c + vec2<i32>(i * sx, j * sy), vec2<i32>(0), dims - vec2<i32>(1));
+                let v = max(textureLoad(hdr_tex, p, 0).rgb, vec3<f32>(0.0));
+                let k = v / (vec3<f32>(1.0) + v);
+                sum += v;
+                sum_c += k;
+                sq_c += k * k;
+            }
+        }
+        let n = f32((r + 1) * (r + 1));
+        let mean_c = sum_c / n;
+        let variance = sq_c / n - mean_c * mean_c;
+        let score = variance.r + variance.g + variance.b;
+        if score < least {
+            least = score;
+            best = sum / n;
+        }
+    }
+    return best;
+}
+
+/// Ink lines (`pp.stylise.y`): how strongly this pixel sits on a silhouette. Read through the inverse view depth
+/// (`w` of the depth unprojected by `inv_view_proj`), which runs exactly straight across any flat surface on screen,
+/// so its second difference is zero on every plane, ground and wall alike, and jumps where one thing stands in front
+/// of another. Relative to the pixel's own depth, so a 1 m step reads the same near or far; sky counts as infinitely
+/// far, which outlines what stands against it. Fades out with distance.
+fn ink(uv: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(scene_depth));
+    let c = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(3), dims - vec2<i32>(4));
+    let w0 = nearest_inverse_depth(c, dims);
+    if w0 <= 0.0 {
+        return 0.0;
+    }
+    // Samples two texels out, each the nearest surface round it: the small holes of a leaf clump close up, so a
+    // canopy is inked round its outline and not speckled inside.
+    let h = abs(nearest_inverse_depth(c - vec2<i32>(2, 0), dims) + nearest_inverse_depth(c + vec2<i32>(2, 0), dims) - 2.0 * w0);
+    let v = abs(nearest_inverse_depth(c - vec2<i32>(0, 2), dims) + nearest_inverse_depth(c + vec2<i32>(0, 2), dims) - 2.0 * w0);
+    let edge = smoothstep(0.02, 0.08, max(h, v) / w0);
+    // Near lines are full, far ones fade (the isometric camera sits 10 to 120 m away).
+    return edge * (1.0 - smoothstep(60.0, 220.0, 1.0 / w0));
+}
+
+/// The nearest surface (largest 1 / view depth) at a texel and its four neighbours.
+fn nearest_inverse_depth(p: vec2<i32>, dims: vec2<i32>) -> f32 {
+    let q = clamp(p, vec2<i32>(1), dims - vec2<i32>(2));
+    return max(max(inverse_depth(q, dims), max(inverse_depth(q - vec2<i32>(1, 0), dims), inverse_depth(q + vec2<i32>(1, 0), dims))),
+        max(inverse_depth(q - vec2<i32>(0, 1), dims), inverse_depth(q + vec2<i32>(0, 1), dims)));
+}
+
+/// 1 / view depth at a depth texel (0 for the sky).
+fn inverse_depth(p: vec2<i32>, dims: vec2<i32>) -> f32 {
+    let z = textureLoad(scene_depth, p, 0);
+    if z >= 0.99999 {
+        return 0.0;
+    }
+    let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(dims);
+    return abs((pp.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0)).w);
+}
+
 fn tonemap(hdr: vec3<f32>) -> vec3<f32> {
     switch pp.tonemapper {
         case 1u: { return aces_film(hdr); }
@@ -463,6 +540,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         hdr = hdr * (1.0 + 1.6 * crack) + vec3(0.012) * crack;
     }
 
+    // The stylised look (Rimeborn): a painterly picture, before light and grading touch it. Off at zero.
+    if pp.stylise.x > 0.0 && !retro {
+        hdr = mix(hdr, kuwahara(scene_uv), clamp(pp.stylise.x, 0.0, 1.0));
+    }
+
     // Phase 24T: bloom added *before* exposure and tone mapping, because it is
     // scattering inside the lens — it happens to the light on its way to the
     // sensor, not to the picture afterwards.
@@ -479,6 +561,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
     // Phase 24Y: grading, in display space after the curve.
     var graded = apply_grading(ldr);
+
+    // Ink lines over the graded picture: a darkening, so they keep the hue of what they edge. Off at zero.
+    if pp.stylise.y > 0.0 && !retro {
+        graded *= 1.0 - 0.75 * clamp(pp.stylise.y, 0.0, 1.0) * ink(scene_uv);
+    }
 
     // Radial vignette: darkens screen edges.
     let uv_c = in.uv - vec2(0.5);
