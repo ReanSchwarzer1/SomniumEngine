@@ -49,6 +49,16 @@ The MCP authoring state's `life` entry reports the counts, the step and write ti
 
 Measured in a release build (the 150-home village, 344 agents): life costs about 0.1 ms of a 5 ms frame. A 400-home town over a whole day averages 0.035 ms a tick.
 
+## Skinned bodies
+
+**Create > Examples > Skinned Crowd** lays out a field of animated bodies; its **Count** sets how many.
+
+- **Skinned Body** draws a skinned glTF at its entity, playing a clip on the body's own clock. Its **Time** says where in the clip it starts, so a crowd is not in step.
+  - A file is read once however many bodies use it.
+  - Far bodies are posed less often. Past 160 m they are not drawn and cost the GPU nothing.
+  - **LOD 1** and **LOD 2** (lighter files with the same skeleton and clips) draw beyond their distances.
+- **Skinned Socket**, on an entity under a Skinned Body, makes that entity follow one of the body's joints (`weapon_r`, `sheath`, `back`). The entity's own Transform is its offset from the joint. Put a sword under it and the sword stays in the hand.
+
 ## For captures
 
 | Variable | Does |
@@ -56,3 +66,4 @@ Measured in a release build (the 150-home village, 344 agents): life costs about
 | `SOMNIUM_LIFE_VILLAGE=1` | Builds the village at the origin at startup |
 | `SOMNIUM_LIFE_HOMES=n` | Sets its size |
 | `SOMNIUM_LIFE_HOUR=h` | Starts the day at hour `h` |
+| `SOMNIUM_SKINNED_CROWD=n` | Lays out `n` skinned bodies at the origin |
