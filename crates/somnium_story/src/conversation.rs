@@ -173,6 +173,13 @@ impl Conversation {
         &self.dialogue
     }
 
+    /// `(dialogue, node)` the conversation stands at: the line on screen, the line a menu follows, the waiting
+    /// action. For an editor that follows a play-through on its graph.
+    #[must_use]
+    pub fn position(&self) -> (&str, &str) {
+        (&self.dialogue, &self.node)
+    }
+
     /// The result of the last choice's check, until the next choice.
     #[must_use]
     pub fn last_check(&self) -> Option<&CheckResult> {

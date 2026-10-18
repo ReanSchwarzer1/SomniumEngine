@@ -36,10 +36,10 @@ TOOL_SPECS = {
          "additionalProperties": True}, True),
     "authoring_query": ("authoring.query",
         "Read state. kind: scene (entities, bounded pages), settings, commands, diagnostics, log, game, documents, "
-        "document, editor, workspace, terrain. Use persistent ids and the returned revision.",
+        "document, editor, workspace, terrain, story. Use persistent ids and the returned revision.",
         {"type": "object", "properties": {"kind": {"type": "string", "enum": ["scene", "settings", "commands",
             "diagnostics", "log", "game", "documents", "document", "editor", "workspace", "terrain",
-            "terrain_settings", "foliage_settings"]}}, "required": ["kind"], "additionalProperties": True}, True),
+            "terrain_settings", "foliage_settings", "story"]}}, "required": ["kind"], "additionalProperties": True}, True),
     "authoring_plan": ("authoring.plan",
         "Dry-run a bounded edit batch against the current revision: validates fields and targets without changing "
         "the world, files or history. Returns a plan token for authoring_commit.", _OBJECT, True),
@@ -79,6 +79,23 @@ TOOL_SPECS = {
         "List the editor's commands (the same ones its menus, shortcuts and palette run), with whether each can run "
         "now and why not. contains filters by id, label or category.",
         {"type": "object", "properties": {"contains": {"type": "string"}}}, True),
+    "somnium_story": (None,
+        "The project's story (dialogue, quests, barks, journal notes) without changing anything. operation: overview "
+        "(cast, facts, every dialogue and quest), schema (every fact and command conditions and effects may use), "
+        "lint (every problem, by file), check (validate document_type dialogue|quest with content = the asset JSON "
+        "before writing it with a document plan), simulate (play dialogue from entry with scripted choices, 0-based, "
+        "after setup effects; returns the transcript and what changed), strings (the source string table), search "
+        "(text). Write story files with authoring_plan/commit kind document (.somdialogue, .somquest, .sombarks, "
+        ".somnotes, .somstory).",
+        {"type": "object", "properties": {
+            "operation": {"type": "string", "enum": ["overview", "schema", "lint", "check", "simulate", "strings", "search"]},
+            "document_type": {"type": "string", "enum": ["dialogue", "quest"]},
+            "content": {"type": "object"}, "path": {"type": "string"}, "file": {"type": "string"},
+            "dialogue": {"type": "string"}, "entry": {"type": "string"},
+            "choices": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+            "setup": {"type": "string"}, "seed": {"type": "integer", "minimum": 0},
+            "max_beats": {"type": "integer", "minimum": 1, "maximum": 2000}, "text": {"type": "string"}},
+         "additionalProperties": False}, True),
     "somnium_run_command": (None,
         "Run one editor command by id (from somnium_commands), exactly as its menu item would: e.g. "
         "editor.simulation.play, editor.view.focus_selection, editor.create.point_light.",
@@ -104,6 +121,13 @@ PROMPTS = {
         "Read somnium_log (min warn). Group the problems by cause. For each one you can fix through the editor, "
         "authoring_plan the change, show the plan, then authoring_commit it; read somnium_log after (pass after= "
         "the last id) to confirm it is gone. Leave anything that needs code or art, and say why."),
+    "write_dialogue": ("Write a dialogue scene as a story asset.", [{"name": "brief", "description": "Who speaks, where, what happens", "required": True}],
+        "Read somnium_story operation overview and schema first: the cast, their portrait expressions, the facts "
+        "and commands conditions and effects may use. Write the scene as a .somdialogue asset (lines with speaker, "
+        "expression and text; choices as options in a line's next list; checks, branches and effects as the schema "
+        "allows). Check it with somnium_story operation check, fix every problem, then save it with authoring_plan "
+        "and authoring_commit kind document under the story folder. Play it with somnium_story operation simulate "
+        "down each branch and report the transcripts.\n\nThe scene: {brief}"),
     "block_out_space": ("Block out a space with primitives and lights.", [{"name": "brief", "description": "What the space is", "required": True}],
         "Block out the space described below with editor commands and plans: floors and walls from cubes, a few "
         "lights, the camera framed on it. Check each step with somnium_screenshot. Keep everything in one undoable "
@@ -243,6 +267,10 @@ class Server:
             return self.screenshot(arguments)
         if name == "somnium_commands":
             return self.commands(arguments), None
+        if name == "somnium_story":
+            query = {"kind": "story"}
+            query.update(arguments)
+            return self.client.call("authoring.query", query), None
         if name == "somnium_run_command":
             command = arguments.get("id")
             if not isinstance(command, str) or not command:

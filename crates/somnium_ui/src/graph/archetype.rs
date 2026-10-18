@@ -137,6 +137,14 @@ pub struct PinArchetype {
     pub unit: Option<&'static str>,
     /// Context help shown while the literal row is hovered.
     pub tooltip: Option<&'static str>,
+    /// An input that takes many wires. Off by default: a value input takes one source. Flow inputs in a story
+    /// graph turn it on, so several lines can lead to the same one.
+    pub many: bool,
+    /// Edited as wrapped, multi-line text in the node inspector (a line of dialogue).
+    pub multiline: bool,
+    /// Shown and edited only in the node inspector: no row on the node body, so a node with many fields stays
+    /// readable on the canvas. Detail pins are literal-only and cannot be wired.
+    pub detail: bool,
 }
 
 /// One row in a node body.
@@ -186,7 +194,31 @@ impl PinArchetype {
             range: None,
             unit: None,
             tooltip: None,
+            many: false,
+            multiline: false,
+            detail: false,
         }
+    }
+
+    /// Accept many wires on this input.
+    #[must_use]
+    pub const fn many(mut self) -> Self {
+        self.many = true;
+        self
+    }
+
+    /// Edit as wrapped, multi-line text in the inspector.
+    #[must_use]
+    pub const fn multiline(mut self) -> Self {
+        self.multiline = true;
+        self
+    }
+
+    /// Inspector only: no row on the node body.
+    #[must_use]
+    pub const fn detail(mut self) -> Self {
+        self.detail = true;
+        self
     }
 
     #[must_use]
@@ -239,6 +271,8 @@ pub struct NodeArchetype {
     pub is_reroute: bool,
     /// At most one per catalogue: the node whose inputs are the graph's result.
     pub is_root: bool,
+    /// Node body width in graph units. `None`: the surface default.
+    pub width: Option<u16>,
 }
 
 impl NodeArchetype {
@@ -255,7 +289,41 @@ impl NodeArchetype {
             group: None,
             is_reroute: false,
             is_root: false,
+            width: None,
         }
+    }
+
+    /// A wider node body, for long literal text.
+    #[must_use]
+    pub fn with_width(mut self, width: u16) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// The body row an input pin sits on; `None` for an inspector-only pin.
+    #[must_use]
+    pub fn input_row(&self, pin: u16) -> Option<usize> {
+        let pin = usize::from(pin);
+        let input = self.inputs.get(pin)?;
+        (!input.detail).then(|| self.inputs[..pin].iter().filter(|p| !p.detail).count())
+    }
+
+    /// Rows the node body needs.
+    #[must_use]
+    pub fn body_rows(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter(|p| !p.detail)
+            .count()
+            .max(self.outputs.len())
+            .max(self.elements.len())
+            .max(1)
+    }
+
+    /// Whether the node inspector should open for this node: it has a field only the inspector shows well.
+    #[must_use]
+    pub fn wants_inspector(&self) -> bool {
+        self.inputs.iter().any(|p| p.detail || p.multiline)
     }
 
     #[must_use]

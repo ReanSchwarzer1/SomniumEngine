@@ -120,8 +120,34 @@ pub fn engine_documents() -> Vec<GameDocument> {
         let text = v["text"].as_str().ok_or("Luau document needs text")?;
         somnium_script_luau::validate_source(text)
     }
+    /// Story files check their own structure here; facts, the cast and other files are checked by the MCP story
+    /// query (`operation: check`) and the graph editor's Check, which see the whole project.
+    fn first_error(problems: Vec<somnium_story::Problem>) -> Result<(), String> {
+        match problems.into_iter().find(|p| !p.warning) {
+            Some(problem) => Err(problem.to_string()),
+            None => Ok(()),
+        }
+    }
+    fn story_manifest(v: &Value) -> Result<(), String> {
+        somnium_story::StoryManifest::from_json(&v.to_string())?
+            .compile()
+            .map(|_| ())
+            .map_err(|errors| errors.join("; "))
+    }
+    fn dialogue(v: &Value) -> Result<(), String> {
+        first_error(somnium_story::DialogueAsset::from_json(&v.to_string())?.structural_problems())
+    }
+    fn quest(v: &Value) -> Result<(), String> {
+        first_error(somnium_story::QuestAsset::from_json(&v.to_string())?.structural_problems())
+    }
+    fn barks(v: &Value) -> Result<(), String> {
+        first_error(somnium_story::barks::BarkSetAsset::from_json(&v.to_string())?.structural_problems())
+    }
+    fn notes(v: &Value) -> Result<(), String> {
+        first_error(somnium_story::journal::NotesAsset::from_json(&v.to_string())?.structural_problems())
+    }
 
-    let definitions: [(&str, &str, &str, fn(&Value) -> Result<(), String>); 6] = [
+    let definitions: [(&str, &str, &str, fn(&Value) -> Result<(), String>); 11] = [
         ("somnium.luau_source", "Luau script", "luau", luau),
         ("somnium.ui_document", "UI layout", "somui", ui),
         (
@@ -148,6 +174,11 @@ pub fn engine_documents() -> Vec<GameDocument> {
             "somtimeline",
             timeline,
         ),
+        ("somnium.story_manifest", "Story manifest", "somstory", story_manifest),
+        ("somnium.dialogue", "Dialogue", "somdialogue", dialogue),
+        ("somnium.quest", "Quest", "somquest", quest),
+        ("somnium.barks", "Barks and chatter", "sombarks", barks),
+        ("somnium.notes", "Journal notes", "somnotes", notes),
     ];
     definitions.into_iter().map(|(id,label,extension,validate)|GameDocument{id,label,extension,schema:serde_json::json!({"type":"object","description":"Validated by the native asset document schema"}),validate}).collect()
 }

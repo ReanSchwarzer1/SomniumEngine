@@ -39,8 +39,10 @@ pub mod animation;
 pub mod archetype;
 pub mod behavior;
 pub mod catalogues;
+pub mod dialogue;
 pub mod geometry;
 pub mod material;
+pub mod quest;
 pub mod scatter;
 pub mod serial;
 pub mod surface;
@@ -291,7 +293,15 @@ impl Graph {
                 to: in_pin.ty,
             });
         }
-        if self.connections.iter().any(|c| c.to == to) {
+        if in_pin.detail {
+            return Err(ConnectError::UnknownPin);
+        }
+        // A many-wire input still takes each source once.
+        if self
+            .connections
+            .iter()
+            .any(|c| c.to == to && (!in_pin.many || c.from == from))
+        {
             return Err(ConnectError::InputOccupied);
         }
         if self.reaches(to.node, from.node) {
@@ -341,6 +351,17 @@ impl Graph {
         } else {
             (to, from)
         };
+        // A many-wire input has nothing to displace: another wire is simply added.
+        let many = self
+            .node(in_pin.node)
+            .and_then(|node| catalogue.get(&node.archetype))
+            .and_then(|archetype| archetype.inputs.get(in_pin.index as usize))
+            .is_some_and(|pin| pin.many);
+        if many {
+            return self
+                .connect(catalogue, out_pin, in_pin)
+                .map(|connection| (connection, None));
+        }
         let displaced_index = self.connections.iter().position(|c| c.to == in_pin);
         // Take it out first, so the occupancy check in `can_connect` passes and
         // every *other* rule still applies.

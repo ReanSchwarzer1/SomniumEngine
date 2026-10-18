@@ -97,17 +97,12 @@ pub fn layout_nodes(graph: &Graph, catalogue: &Catalogue) -> Vec<NodeLayout> {
 #[must_use]
 pub fn layout_node(node: &Node, catalogue: &Catalogue) -> Option<NodeLayout> {
     let archetype = catalogue.get(&node.archetype)?;
-    let rows = archetype
-        .inputs
-        .len()
-        .max(archetype.outputs.len())
-        .max(archetype.elements.len())
-        .max(1);
+    let rows = archetype.body_rows();
     let default_size = if archetype.is_reroute {
         REROUTE_SIZE
     } else {
         Vec2::new(
-            NODE_WIDTH,
+            archetype.width.map_or(NODE_WIDTH, f32::from),
             NODE_HEADER + NODE_PADDING * 2.0 + rows as f32 * PIN_ROW,
         )
     };
@@ -120,9 +115,13 @@ pub fn layout_node(node: &Node, catalogue: &Catalogue) -> Option<NodeLayout> {
     };
     let mut pins = Vec::with_capacity(archetype.inputs.len() + archetype.outputs.len());
     for (index, pin) in archetype.inputs.iter().enumerate() {
+        // An inspector-only pin has no place on the body and cannot be wired.
+        let Some(row) = archetype.input_row(index as u16) else {
+            continue;
+        };
         pins.push(PinLayout {
             pin: PinRef::input(node.id, index as u16),
-            position: Vec2::new(node.position.x, first_y + index as f32 * PIN_ROW),
+            position: Vec2::new(node.position.x, first_y + row as f32 * PIN_ROW),
             ty: pin.ty,
         });
     }

@@ -11983,10 +11983,29 @@ impl UiManager {
                     "Behavior graph: edit tasks, then Save Authoring Graph"
                 });
             }
+            A::Dialogue | A::Quest => {
+                self.set_graph_only_layout(true);
+                let surface = if action == A::Dialogue {
+                    crate::graph::dialogue::default_surface()
+                } else {
+                    crate::graph::quest::default_surface()
+                };
+                self.native_ui.send(UiMessage::new(
+                    self.animation_graph_editor,
+                    MessageDirection::ToWidget,
+                    crate::graph::GraphEditorMessage::ActivateSurface(surface),
+                ));
+                self.set_workspace(Workspace::Animation);
+                self.push_toast(if action == A::Dialogue {
+                    "Dialogue graph: write lines and choices, then Check and Play"
+                } else {
+                    "Quest graph: wire stages, objectives and journal lines, then Check"
+                });
+            }
             A::Open => self
                 .editor_events
                 .push_back(EditorEvent::OpenAuthoringGraph),
-            A::Save | A::Preview | A::Apply => self.native_ui.send(UiMessage::new(
+            A::Save | A::Preview | A::Apply | A::Play => self.native_ui.send(UiMessage::new(
                 self.animation_graph_editor,
                 MessageDirection::ToWidget,
                 crate::graph::GraphEditorMessage::RequestDocument {
@@ -12059,6 +12078,50 @@ impl UiManager {
         ));
         self.set_workspace(Workspace::Animation);
         Ok(())
+    }
+
+    /// Open a story asset (`*.somdialogue`, `*.somquest`) on the graph control. The control keeps what the graph
+    /// does not draw (text keys, forms) so saving back is lossless.
+    pub fn open_story_document(&mut self, catalogue: &str, json: &str, source: Option<&str>) {
+        self.set_graph_only_layout(true);
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::OpenStory {
+                catalogue: catalogue.to_owned(),
+                json: json.to_owned(),
+                source: source.map(str::to_owned),
+            },
+        ));
+        self.set_workspace(Workspace::Animation);
+    }
+
+    /// Ask the graph control for its document (a story graph converts to its asset): Save, Preview/Check or
+    /// Apply/Play, the same as the toolbar.
+    pub fn request_graph_document(&mut self, apply: bool, preview: bool) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::RequestDocument { apply, preview },
+        ));
+    }
+
+    /// Mark the problems a project-wide story check found on the open graph.
+    pub fn set_story_problems(&mut self, problems: Vec<(String, String, bool)>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryProblems(problems),
+        ));
+    }
+
+    /// Play the open dialogue from its selected node over `database`.
+    pub fn start_story_preview(&mut self, database: std::sync::Arc<somnium_story::StoryDatabase>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryPreview(database),
+        ));
     }
 
     /// Retain the source file in the document owner after a successful open/save.

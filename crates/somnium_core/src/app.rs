@@ -10340,11 +10340,17 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::OpenAuthoringGraph => {
                 if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Graphs, dialogues and quests", &["somgraph", "somdialogue", "somquest"])
+                    .add_filter("Dialogue", &["somdialogue"])
+                    .add_filter("Quest", &["somquest"])
                     .add_filter("Authoring graph", &["somgraph"])
-                    .set_directory("assets")
+                    .set_directory(&self.config.content_root)
                     .pick_file()
                 {
                     let result = (|| -> Result<(), String> {
+                        if crate::story_authoring::catalogue_for(&path).is_some() {
+                            return self.open_story_file(&path);
+                        }
                         let bytes = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
                         let document: serde_json::Value =
                             serde_json::from_str(&bytes).map_err(|e| e.to_string())?;
@@ -13996,6 +14002,9 @@ impl<G: GameApp> Engine<G> {
         preview: bool,
         document_source: Option<&str>,
     ) -> Result<String, String> {
+        if crate::story_authoring::is_story_catalogue(catalogue) {
+            return self.apply_story_document(catalogue, json, apply, preview, document_source);
+        }
         if !apply {
             let catalogue_def = match catalogue {
                 "somnium.scatter" => somnium_ui::graph::scatter::catalogue(),
@@ -14182,5 +14191,8 @@ mod play_input;
 
 #[path = "app_material_studio.rs"]
 mod material_studio_host;
+
+#[path = "app_story.rs"]
+mod story_host;
 
 include!("app_project_foliage.rs");

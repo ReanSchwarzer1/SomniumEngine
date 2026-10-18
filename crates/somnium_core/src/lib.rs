@@ -84,6 +84,7 @@ pub mod save_game;
 pub mod scatter_scene;
 mod scene_delta;
 pub mod spline;
+pub mod story_authoring;
 pub mod staged_mirror;
 pub mod work;
 /// The `.somnium` container: a framed header the Content Drawer can read
