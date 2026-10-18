@@ -1628,8 +1628,18 @@ fn perceive(
         .filter(|wall| wall.blocks_movement())
         .map(|wall| wall.obb)
         .collect();
+    // Past sight, hearing and touch, someone it knows nothing of stays
+    // unknown: skip it before the costlier question of whose side it is on.
+    let beyond = p.sight.max(p.hearing) + 2.0;
     for other in view {
-        if other.id == me.id || !w.hostile(me.id, other.id) {
+        if other.id == me.id
+            || (flat(other.position - me.position).length() > beyond
+                && mind.target != Some(other.id)
+                && mind.aware.get(&other.id).is_none_or(|a| *a <= 0.0))
+            || !w
+                .relations
+                .hostile((me.id, me.team), (other.id, other.team))
+        {
             continue;
         }
         let observer = Observer {
@@ -1976,17 +1986,17 @@ pub(crate) fn think(
                 .map_or(c.weapon.reach, reach_of)
                 .max(c.weapon.reach);
             brain.mind.charges = c.weapon.charge.is_some();
-            // Morale follows health and company.
-            let friends = view
-                .iter()
-                .filter(|s| {
-                    s.id != id && w.allied(id, s.id) && s.position.distance(me.position) < 15.0
-                })
-                .count();
-            let foes = view
-                .iter()
-                .filter(|s| w.hostile(id, s.id) && s.position.distance(me.position) < 15.0)
-                .count();
+            // Morale follows health and company (the near first, and their
+            // sides from the snapshot: asking the world costs more).
+            let (mut friends, mut foes) = (0usize, 0usize);
+            let mine = (id, me.team);
+            for s in &view {
+                if s.position.distance(me.position) < 15.0 {
+                    let theirs = (s.id, s.team);
+                    friends += usize::from(s.id != id && w.relations.allied(mine, theirs));
+                    foes += usize::from(w.relations.hostile(mine, theirs));
+                }
+            }
             let pressure = (foes as f32 - friends as f32 - 1.0).max(0.0) * 0.1;
             let ceiling = (c.vitals.health.fraction() + 0.35 - pressure).clamp(0.0, 1.0);
             brain.mind.morale = (brain.mind.morale + 0.02 * dt)

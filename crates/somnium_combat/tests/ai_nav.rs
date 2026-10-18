@@ -290,3 +290,87 @@ fn a_brain_that_thinks_every_fourth_step_keeps_real_time() {
     assert!(a > 0.235, "two seconds of recovery: {a}");
     assert!((a - b).abs() < 0.002, "every step {a}, every fourth {b}");
 }
+
+/// What a step of brains costs as the crowd near the player grows: bands of
+/// ten raiders, half facing a party of ten, all within one fight. Run with
+/// `cargo test --release -p somnium_combat --test ai_nav brain_crowd -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn brain_crowd() {
+    for bands in [2, 5, 10, 20] {
+        let mut w = world();
+        for b in 0..bands {
+            let at = Vec3::new((b % 5) as f32 * 12.0, 0.0, (b / 5) as f32 * 12.0);
+            for i in 0..10 {
+                let kind = [Archetype::Spearman, Archetype::Archer, Archetype::Brute][i % 3];
+                let team = if i < 5 { RAIDERS } else { PARTY };
+                let wpn = if kind == Archetype::Archer {
+                    weapon::bow()
+                } else {
+                    weapon::spear()
+                };
+                let p = at + Vec3::new(i as f32 * 1.1, 0.0, if i < 5 { 0.0 } else { 6.0 });
+                brain(&mut w, "Crowd", team, p, wpn, kind);
+            }
+        }
+        for _ in 0..60 {
+            w.step(DT, &OpenField, None);
+        }
+        // The quickest of five runs: the machine is shared.
+        let steps = 60;
+        let per = (0..5)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for _ in 0..steps {
+                    w.step(DT, &OpenField, None);
+                }
+                start.elapsed().as_secs_f64() * 1e3 / f64::from(steps)
+            })
+            .fold(f64::INFINITY, f64::min);
+        println!(
+            "{:>4} bodies: {per:.3} ms a step, {:.1} us a body",
+            bands * 10,
+            per * 1e3 / (bands * 10) as f64
+        );
+    }
+}
+
+/// A hundred brains in ten bands across 160 m, fighting for ten seconds,
+/// hashed (every event, and where everyone ends and how hurt). A change meant
+/// only to make brains cheaper must print the same fingerprint before and
+/// after (`27e0c22a137897ac` on 18 Oct: 3750 events).
+#[test]
+#[ignore = "a fingerprint"]
+fn crowd_fingerprint() {
+    use std::hash::{Hash, Hasher};
+    let mut w = world();
+    for b in 0..10 {
+        let at = Vec3::new((b % 5) as f32 * 30.0, 0.0, (b / 5) as f32 * 40.0);
+        for i in 0..10 {
+            let kind = [Archetype::Spearman, Archetype::Archer, Archetype::Brute][i % 3];
+            let team = if i < 5 { RAIDERS } else { PARTY };
+            let wpn = if kind == Archetype::Archer {
+                weapon::bow()
+            } else {
+                weapon::spear()
+            };
+            let p = at + Vec3::new(i as f32 * 1.1, 0.0, if i < 5 { 0.0 } else { 14.0 });
+            brain(&mut w, "Crowd", team, p, wpn, kind);
+        }
+    }
+    let events = idle(&mut w, 10.0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{events:?}").hash(&mut h);
+    for c in w.combatants() {
+        format!(
+            "{:?} {:?} {}",
+            c.position, c.action, c.vitals.health.current
+        )
+        .hash(&mut h);
+    }
+    println!(
+        "fingerprint {:016x} over {} events",
+        h.finish(),
+        events.len()
+    );
+}
