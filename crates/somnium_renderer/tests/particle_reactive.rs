@@ -136,6 +136,19 @@ fn visible_sprite_coverage_respects_alpha_depth_empty_frames_and_viewports() {
         "transparent corners keep static history"
     );
     assert_eq!(pixel(&visible, 1, 1), 0, "outside sprite is not reactive");
+    let faint = frame(
+        0,
+        0.75,
+        &[GpuParticle {
+            color: [1.0, 1.0, 1.0, 0.05],
+            ..particle
+        }],
+    );
+    assert!(
+        (10..=16).contains(&pixel(&faint, 10, 8)),
+        "a faint sprite (mist) is only as reactive as it is visible, got {}",
+        pixel(&faint, 10, 8)
+    );
     let mirrored = frame(
         0,
         0.75,
@@ -165,10 +178,10 @@ fn visible_sprite_coverage_respects_alpha_depth_empty_frames_and_viewports() {
         visible, bent,
         "flutter must deform the actual textured silhouette"
     );
+    // Coverage follows alpha now, so a sampling step near the base may move it a hair; the silhouette must not.
     for x in 4..12 {
-        assert_eq!(
-            pixel(&visible, x, 11),
-            pixel(&bent, x, 11),
+        assert!(
+            pixel(&visible, x, 11).abs_diff(pixel(&bent, x, 11)) <= 4,
             "base stays pinned"
         );
     }

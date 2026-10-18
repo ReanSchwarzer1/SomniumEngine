@@ -28,13 +28,16 @@ struct Exposure {
 @group(0) @binding(11) var particle_coverage: texture_2d<f32>;
 @group(0) @binding(12) var motion_out: texture_storage_2d<rg16float, write>;
 
-/// How much FSR should trust this frame on a hand/tool pixel that was also a
-/// hand/tool pixel last frame. 1.0 (the old value) discarded all history, so
-/// every per-frame lighting sample on the hands showed raw — the gold specks
-/// from practical-light GI. Their motion is pinned to the screen below, so the
-/// history at the same pixel is the hand itself; the remainder leaves room for
-/// sway and animation, which camera-locked motion does not describe.
-const HELD_REACTIVE: f32 = 0.35;
+/// How much FSR should trust this frame inside a moving object (a body, a held tool, a swaying lamp, an animated
+/// plant) that was there last frame too. Since the velocity pass knows how these moved (C2, 16 Oct 2026) their
+/// history is good, and the less of the raw frame shows, the less of the jitter shows: 0.35, and 1.0 before it, made
+/// everything animated shimmer and pop under FSR while it held still with SMAA (the developer, 18 Oct 2026). A
+/// little stays for what motion vectors cannot describe (lighting that changes as a body turns).
+const MOVING_REACTIVE: f32 = 0.12;
+/// Round a moving object's edge, and where it was last frame: what it uncovers has no history of its own. Full
+/// rejection there (the old 1.0) made a ring round every swaying thing flicker with the jitter; FSR's own
+/// disocclusion test catches the rest.
+const EDGE_REACTIVE: f32 = 0.45;
 
 /// Is the visible surface at exactly this pixel a reactive (camera-held) draw?
 fn held(coord: vec2<i32>) -> bool {
@@ -48,6 +51,8 @@ fn inside(coord: vec2<i32>, dims: vec2<i32>) -> bool {
     return all(coord >= vec2<i32>(0)) && all(coord < dims);
 }
 
+/// What makes this pixel's history doubtful now: particles (no motion of their own, so full strength) and, at the
+/// edge strength, any moving object within the jitter's reach. Also what the next frame reads as "last frame".
 fn dynamic_coverage(coord: vec2<i32>, dims: vec2<i32>) -> f32 {
     var coverage = 0.0;
     // Cover subpixel jitter and the temporal reconstruction filter footprint.
@@ -58,16 +63,17 @@ fn dynamic_coverage(coord: vec2<i32>, dims: vec2<i32>) -> f32 {
             if inside(c, vec2<i32>(textureDimensions(particle_coverage))) {
                 coverage = max(coverage, textureLoad(particle_coverage, c, 0).r);
             }
-            let packed = textureLoad(visibility, c, 0).x;
-            // The visibility buffer reserves zero for sky, stores instance+1.
-            if packed == 0u { continue; }
-            let instance = packed - 1u;
-            if instance < arrayLength(&reactive_instances) {
-                coverage = max(coverage, select(0.0, 1.0, reactive_instances[instance] != 0u));
+            if held(c) {
+                coverage = max(coverage, EDGE_REACTIVE);
             }
         }
     }
     return coverage;
+}
+
+fn particles_here(coord: vec2<i32>) -> f32 {
+    if !inside(coord, vec2<i32>(textureDimensions(particle_coverage))) { return 0.0; }
+    return textureLoad(particle_coverage, coord, 0).r;
 }
 
 fn previous_dynamic(coord: vec2<i32>, dims: vec2<i32>) -> f32 {
@@ -108,9 +114,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // so a vanished silhouette cannot keep propagating its own rejection.
         reactive = max(reactive, previous_dynamic(previous_pixel, dims));
         reactive = max(reactive, previous_dynamic(coord, dims));
-        // Interior of a held hand/tool that was held here last frame too: its
-        // history is valid at the same pixel. Silhouette rims (the 3x3 dilation
-        // without a held centre) and uncovered background keep full rejection.
+        // Inside a moving object that was there last frame (where its own motion says it was): its history is
+        // the object itself. Silhouette rims (the 3x3 dilation without a moving centre) and uncovered background
+        // keep the edge strength.
         var interior = held_here;
         for (var y = -1; y <= 1; y++) {
             for (var x = -1; x <= 1; x++) {
@@ -118,8 +124,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 interior = interior && inside(c, dims) && held(c);
             }
         }
-        if interior && textureLoad(previous_coverage, coord, 0).r > 0.5 {
-            reactive = HELD_REACTIVE;
+        if interior && previous_dynamic(previous_pixel, dims) > 0.0 {
+            reactive = max(particles_here(coord), MOVING_REACTIVE);
         }
     }
     // Held pixels keep their motion: the velocity pass now knows how hands and tools moved (C2), where it used to

@@ -2222,7 +2222,7 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&self.camera_pos.to_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
-        view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        view_data.extend_from_slice(bytemuck::bytes_of(&[self.fsr_pass.lod_scale(), 0.0, 0.0]));
         let mut wind = self.foliage_wind;
         let budget = self.graphics_budget();
         if !budget.foliage_wind {

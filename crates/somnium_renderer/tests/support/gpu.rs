@@ -27,6 +27,20 @@ pub fn device() -> (wgpu::Device, wgpu::Queue) {
     let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
     block_on(adapter.request_device(&Default::default())).unwrap()
 }
+/// A device with `features` too, as far as the adapter has them (the FSR fixture's rg16float storage writes).
+#[allow(dead_code)]
+pub fn device_with(features: wgpu::Features) -> (wgpu::Device, wgpu::Queue) {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = block_on(instance.request_adapter(&Default::default())).unwrap();
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: features & adapter.features(),
+        // The renderer asks for the adapter's own limits; the defaults are WebGPU's minimum (4 storage textures a
+        // stage), which the FSR sanitize pass is past.
+        required_limits: adapter.limits(),
+        ..Default::default()
+    };
+    block_on(adapter.request_device(&descriptor)).unwrap()
+}
 pub fn texture(
     device: &wgpu::Device,
     size: u32,

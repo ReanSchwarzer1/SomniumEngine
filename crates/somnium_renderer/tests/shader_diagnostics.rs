@@ -34,6 +34,7 @@ const MODULES: &[&str] = &[
     // Shading re-sways the reconstructed triangle with the foliage wind.
     "wind.wgsl",
     "sky_eye.wgsl",
+    "spot_cookie.wgsl",
 ];
 
 fn shader_dir() -> std::path::PathBuf {

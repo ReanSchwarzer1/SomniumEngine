@@ -35,7 +35,7 @@ struct View {
     camera_pos:    vec3<f32>,
     _padding:      f32,
     time:          f32,
-    _time_pad0:    f32,
+    lod_scale:     f32,  // see global_pool.wgsl
     _time_pad1:    f32,
     _time_pad2:    f32,
     wind:          vec4<f32>,
@@ -194,8 +194,8 @@ fn fs_main(
     // fed to textureSampleGrad below. Sampling inside the branch directly would
     // break WGSL's uniformity rule, and dropping to LOD 0 instead would make
     // distant foliage crawl with aliasing.
-    let ddx_uv = dpdx(uv);
-    let ddy_uv = dpdy(uv);
+    let ddx_uv = dpdx(uv) * view.lod_scale;
+    let ddy_uv = dpdy(uv) * view.lod_scale;
 
     let material = materials[material_id];
     // Cutoff is 0 for OPAQUE and BLEND, so this costs one compare for

@@ -2336,14 +2336,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 bary_y = ry.xyz;
             }
         }
-        uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
-        uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+        uv_ddx = ((uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv) * view.lod_scale;
+        uv_ddy = ((uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv) * view.lod_scale;
         // World-position gradients for the world-projected paint layers,
         // only where a layer can show.
         if paint_slot != 0u {
             let here = p0 * bary.x + p1 * bary.y + p2 * bary.z;
-            paint_pos_ddx = (p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here;
-            paint_pos_ddy = (p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here;
+            paint_pos_ddx = ((p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here) * view.lod_scale;
+            paint_pos_ddy = ((p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here) * view.lod_scale;
         }
         // The PS2 picture (`retro`, bit 512): textures two mip levels coarser than the screen asks for (its 128 to 256
         // texel maps), a whole level with no blend to the next (the bands show, as they did: it filtered within one
