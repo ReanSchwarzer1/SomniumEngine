@@ -877,14 +877,32 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
 
 /// Build the sandbox at the origin outside the Create menu (the capture hook,
 /// `SOMNIUM_COMBAT_SANDBOX=1`); with `SOMNIUM_COMBAT_WILDS=1` as well, the
-/// Wilds instead.
+/// Wilds instead; with `SOMNIUM_COMBAT_ENCOUNTERS=1` too, a sleeping bandit
+/// camp beside it (woken at Play) and one 400 m off (asleep).
 pub fn spawn_at_startup(world: &mut World) -> Result<usize, String> {
-    let spawned = if std::env::var("SOMNIUM_COMBAT_WILDS").as_deref() == Ok("1") {
-        spawn_wilds(world, &json!({}))
+    let on = |name: &str| std::env::var(name).as_deref() == Ok("1");
+    let mut spawned = if on("SOMNIUM_COMBAT_WILDS") {
+        spawn_wilds(world, &json!({}))?
     } else {
-        spawn_sandbox(world, &json!({}))
+        spawn_sandbox(world, &json!({}))?
     };
-    spawned.map(|entities| entities.len())
+    if on("SOMNIUM_COMBAT_ENCOUNTERS") {
+        for (name, at) in [
+            ("Bandit camp (near)", Vec3::new(20.0, 0.05, 28.0)),
+            ("Bandit camp (far)", Vec3::new(400.0, 0.05, 0.0)),
+        ] {
+            spawned.push(world.spawn((
+                Name::new(name),
+                Transform::from_translation(at),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: "bandits".into(),
+                    ..CombatEncounterComponent::default()
+                },
+            )));
+        }
+    }
+    Ok(spawned.len())
 }
 
 /// Whether the scene has a player-controlled fighter, so Play is the
@@ -1167,6 +1185,12 @@ fn wake(
         solids = solid_bodies(physics, boxes);
         stand(physics, run, &members);
     }
+    tracing::info!(
+        "Combat Encounter {} ({}) woke at {at}: {} fighters",
+        id.0,
+        record.kind,
+        members.len()
+    );
     run.spawned.extend(made.iter().copied());
     run.colliders.extend(solids.iter().copied());
     if let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) {
@@ -1191,6 +1215,7 @@ fn sleep(
     let members = std::mem::take(&mut record.members);
     let solids = std::mem::take(&mut record.solids);
     let was_built = !members.is_empty();
+    tracing::info!("Combat Encounter {} fell asleep", id.0);
     let alive: Vec<(String, f32, Vec3)> = members
         .iter()
         .filter_map(|m| run.world.combatant(*m))
