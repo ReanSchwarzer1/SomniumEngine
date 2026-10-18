@@ -658,13 +658,17 @@ impl NavPath {
             .collect()
     }
 }
+/// 40 bytes: a link's id and ends live in [`NavWorld::crossings`], since most
+/// edges cross none.
 #[derive(Clone, Copy, Debug)]
 struct Edge {
-    to: usize,
+    to: u32,
     portal: [Vec3; 2],
     cost: f32,
-    link: Option<(u64, Vec3, Vec3)>,
+    /// Its place in `crossings`, when the edge is a link.
+    link: Option<u32>,
 }
+const _: () = assert!(std::mem::size_of::<Edge>() == 40);
 #[derive(Default)]
 pub struct NavWorld {
     tiles: BTreeMap<CellId, NavTile>,
@@ -686,6 +690,8 @@ pub struct NavWorld {
     steps: Vec<f32>,
     spans: BTreeMap<CellId, (usize, usize)>,
     linked: Vec<usize>,
+    /// Each link edge's link id and the ends it is crossed between.
+    crossings: Vec<(u64, Vec3, Vec3)>,
 }
 type EdgeKey = (i64, i64, i64, i64);
 /// The ground-plane key of a polygon's edge, the same either way round.
@@ -867,6 +873,7 @@ impl NavWorld {
         self.steps.clear();
         self.spans.clear();
         self.linked.clear();
+        self.crossings.clear();
         for tile in self.tiles.values() {
             let start = self.polygons.len();
             self.steps.extend(std::iter::repeat_n(
@@ -934,13 +941,13 @@ impl NavWorld {
                 let theirs = (0..4).find(|&f| after(j) && edge_key(side(f).0, side(f).1) == key);
                 let (a, b) = theirs.map_or((a, b), |f| (side(f).1, side(f).0));
                 self.adjacency[i].push(Edge {
-                    to: j,
+                    to: j as u32,
                     portal: [a, b],
                     cost,
                     link: None,
                 });
                 self.adjacency[j].push(Edge {
-                    to: i,
+                    to: i as u32,
                     portal: [b, a],
                     cost,
                     link: None,
@@ -961,19 +968,21 @@ impl NavWorld {
                     + start.distance(end)
                     + end.distance(self.polygons[b].center())
                     + l.cost;
+                self.crossings.push((l.id, start, end));
                 self.adjacency[a].push(Edge {
-                    to: b,
+                    to: b as u32,
                     portal: [start, start],
                     cost,
-                    link: Some((l.id, start, end)),
+                    link: Some(self.crossings.len() as u32 - 1),
                 });
                 self.linked.push(a);
                 if l.bidirectional {
+                    self.crossings.push((l.id, end, start));
                     self.adjacency[b].push(Edge {
-                        to: a,
+                        to: a as u32,
                         portal: [end, end],
                         cost,
-                        link: Some((l.id, end, start)),
+                        link: Some(self.crossings.len() as u32 - 1),
                     });
                     self.linked.push(b);
                 }
@@ -982,6 +991,7 @@ impl NavWorld {
     }
     /// Take every link edge away (they go back, last, after a stream).
     fn strip_links(&mut self) {
+        self.crossings.clear();
         for i in std::mem::take(&mut self.linked) {
             if let Some(list) = self.adjacency.get_mut(i) {
                 list.retain(|e| e.link.is_none());
@@ -1058,9 +1068,9 @@ impl NavWorld {
         self.steps.drain(gone.clone());
         self.adjacency.drain(gone.clone());
         for list in &mut self.adjacency {
-            list.retain(|x| !gone.contains(&x.to));
+            list.retain(|x| !gone.contains(&(x.to as usize)));
             for x in list.iter_mut() {
-                x.to = shift(x.to);
+                x.to = shift(x.to as usize) as u32;
             }
         }
         for span in self.spans.values_mut() {
@@ -1100,11 +1110,12 @@ impl NavWorld {
             }
             for (k, &edge) in self.adjacency[node].iter().enumerate() {
                 let cost = search.best(node) + edge.cost;
-                if cost < search.best(edge.to) {
-                    search.set(edge.to, cost, Some((node as u32, k as u32)));
+                let to = edge.to as usize;
+                if cost < search.best(to) {
+                    search.set(to, cost, Some((node as u32, k as u32)));
                     open.push(Open {
-                        node: edge.to,
-                        score: cost + self.polygons[edge.to].center().distance(target_center),
+                        node: to,
+                        score: cost + self.polygons[to].center().distance(target_center),
                     });
                 }
             }
@@ -1126,14 +1137,15 @@ impl NavWorld {
         let mut links = Vec::new();
         let mut section = start;
         for (from, edge) in corridor {
-            if let Some((id, a, b)) = edge.link {
+            if let Some((id, a, b)) = edge.link.map(|k| self.crossings[k as usize]) {
                 points.extend(funnel(section, a, &portals).into_iter().skip(1));
                 points.push(b);
                 links.push(id);
                 portals.clear();
                 section = b;
             } else {
-                let direction = self.polygons[edge.to].center() - self.polygons[from].center();
+                let direction =
+                    self.polygons[edge.to as usize].center() - self.polygons[from].center();
                 let mid = (edge.portal[0] + edge.portal[1]) * 0.5;
                 let a = edge.portal[0] - mid;
                 let left = direction.x * a.z - direction.z * a.x > 0.0;
@@ -1207,12 +1219,13 @@ impl NavWorld {
                 return None;
             }
             for edge in &self.adjacency[i] {
-                if edge.link.is_some() || visited.contains(&edge.to) {
+                let to = edge.to as usize;
+                if edge.link.is_some() || visited.contains(&to) {
                     continue;
                 }
-                if intervals[edge.to].is_some_and(|(a, b)| a <= high + EPS && b >= low - EPS) {
-                    visited.insert(edge.to);
-                    queue.push_back(edge.to);
+                if intervals[to].is_some_and(|(a, b)| a <= high + EPS && b >= low - EPS) {
+                    visited.insert(to);
+                    queue.push_back(to);
                 }
             }
         }
@@ -1508,10 +1521,10 @@ mod stream_tests {
                     format!(
                         "{} {} {:?} {} {:?}",
                         key(i),
-                        key(e.to),
+                        key(e.to as usize),
                         e.portal.map(|v| v.to_array().map(f32::to_bits)),
                         e.cost.to_bits(),
-                        e.link.map(|l| l.0)
+                        e.link.map(|k| nav.crossings[k as usize].0)
                     )
                 })
             })
