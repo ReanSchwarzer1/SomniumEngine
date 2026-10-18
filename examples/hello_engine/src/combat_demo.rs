@@ -30,6 +30,7 @@
 //! and impacts; decals for scorch and frost; a game-UI canvas for the HUD.
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::{Value, json};
+use somnium_ai::dormancy::{Change, Dormancy, DormancySettings, GroupId};
 use somnium_ai::navigation::{BakeInput, BakeSettings, Bounds, NavWorld, OffMeshLink};
 use somnium_asset::database::AssetId;
 use somnium_character::{
@@ -936,6 +937,256 @@ fn expand_encounters(world: &mut World) -> Vec<Entity> {
     made
 }
 
+/// How often sleeping encounters are looked at, seconds (the check costs
+/// only the grid cells around the protagonist, but there is no need to look
+/// sixty times a second).
+const TEND_EVERY: f32 = 0.5;
+/// How far a woken Wilds encounter spreads from its centre, metres.
+const ENCOUNTER_EXTENT: f32 = 25.0;
+
+/// A scene encounter while Play runs: what it is, who of it is left once it
+/// has woken and slept again, and while it is awake what it made.
+#[derive(Clone, Debug, Default)]
+struct Encounter {
+    kind: String,
+    floor: bool,
+    /// Survivors by name, with their health, after its first sleep; `None`
+    /// before it ever woke (everyone).
+    left: Option<Vec<(String, f32)>>,
+    /// Awake: its entities, fighters and colliders.
+    entities: Vec<Entity>,
+    members: Vec<CombatantId>,
+    solids: Vec<BodyId>,
+}
+
+/// Every enabled Combat Encounter as a sleeping record at its entity.
+fn encounters_asleep(world: &World) -> Dormancy<Encounter> {
+    let mut set = Dormancy::new(DormancySettings::default());
+    for (e, c) in world.iter_with::<CombatEncounterComponent>() {
+        if c.enabled {
+            let at = world_matrix(world, e).transform_point3(Vec3::ZERO);
+            set.add(
+                at,
+                ENCOUNTER_EXTENT,
+                Encounter {
+                    kind: c.kind.clone(),
+                    floor: c.floor,
+                    ..Encounter::default()
+                },
+            );
+        }
+    }
+    set
+}
+
+/// Wake the encounters the protagonist has come near and put back to sleep
+/// those it has left, every [`TEND_EVERY`] seconds (`dt` of infinity looks
+/// now, and keeps looking until nothing more wakes: Play's start). Without
+/// physics (headless) a woken group gets no colliders and is not stood on
+/// the ground.
+fn tend_encounters(
+    world: &mut World,
+    mut physics: Option<&mut somnium_physics::world::PhysicsWorld>,
+    run: &mut Run,
+    dt: f32,
+) {
+    if run.encounters.is_none() {
+        return;
+    }
+    run.tended += dt;
+    if run.tended < TEND_EVERY {
+        return;
+    }
+    run.tended = 0.0;
+    let watchers: Vec<Vec3> = run
+        .player
+        .and_then(|p| run.world.combatant(p))
+        .map(|c| c.position)
+        .into_iter()
+        .collect();
+    loop {
+        let changes = run
+            .encounters
+            .as_mut()
+            .map(|set| set.update(&watchers))
+            .unwrap_or_default();
+        let woke = changes.iter().any(|c| matches!(c, Change::Wake(_)));
+        for change in changes {
+            match change {
+                Change::Wake(id) => wake(world, physics.as_deref_mut(), run, id),
+                Change::Sleep(id) => sleep(world, physics.as_deref_mut(), run, id),
+            }
+        }
+        if !(woke && dt.is_infinite()) {
+            break;
+        }
+    }
+}
+
+/// Build a woken encounter at its record's place, with only its survivors
+/// (at their health), into the running fight.
+fn wake(
+    world: &mut World,
+    physics: Option<&mut somnium_physics::world::PhysicsWorld>,
+    run: &mut Run,
+    id: GroupId,
+) {
+    let Some(set) = &run.encounters else {
+        return;
+    };
+    let (Some(at), Some(record)) = (set.position(id), set.data(id).cloned()) else {
+        return;
+    };
+    if record.left.as_ref().is_some_and(Vec::is_empty) {
+        // Cleared: nobody left to wake.
+        return;
+    }
+    let args = json!({"position": [at.x, at.y, at.z], "floor": record.floor, "encounter": true});
+    let made = match record.kind.trim().to_ascii_lowercase().as_str() {
+        "wilds" => spawn_wilds(world, &args).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    somnium_core::propagate_transforms(world);
+    let mut left = record.left.clone();
+    let mut members = Vec::new();
+    let mut leaders = Vec::new();
+    let mut health = Vec::new();
+    let mut fallen = Vec::new();
+    for &e in &made {
+        let Some(c) = world
+            .get::<CombatantComponent>(e)
+            .filter(|c| c.enabled)
+            .cloned()
+        else {
+            continue;
+        };
+        let name = world
+            .get::<Name>(e)
+            .map_or_else(String::new, |n| n.as_str().to_string());
+        // One survivor of each name answers for one fighter of that name.
+        let kept = match &mut left {
+            None => Some(None),
+            Some(left) => left
+                .iter()
+                .position(|(n, _)| *n == name)
+                .map(|i| Some(left.remove(i).1)),
+        };
+        let Some(hp) = kept else {
+            fallen.push(e);
+            continue;
+        };
+        let (cid, feet, size) = enlist(&mut run.world, world, e, &c);
+        if c.leader {
+            leaders.push(cid);
+        }
+        if let Some(hp) = hp {
+            health.push((cid, hp));
+        }
+        run.bodies.insert(cid, e);
+        run.dims.insert(cid, size);
+        if let Some(body) = run.world.combatant(cid) {
+            let walker = Controller::new(walker_config(body), feet + Vec3::Y * 0.02);
+            run.walkers.insert(cid, walker);
+        }
+        members.push(cid);
+    }
+    for (cid, hp) in health {
+        if let Some(c) = run.world.combatant_mut(cid) {
+            c.vitals.health.current = hp.min(c.vitals.health.max);
+        }
+    }
+    // The fallen go with everything hung on them (a head, a blade).
+    let under_fallen = |world: &World, e: Entity| {
+        let mut at = Some(e);
+        while let Some(x) = at {
+            if fallen.contains(&x) {
+                return true;
+            }
+            at = world.get::<Parent>(x).map(|p| p.entity);
+        }
+        false
+    };
+    let (gone, made): (Vec<Entity>, Vec<Entity>) =
+        made.into_iter().partition(|e| under_fallen(world, *e));
+    for e in gone {
+        world.despawn(e);
+    }
+    organise(&mut run.world, &members, &leaders);
+    let mut solids = Vec::new();
+    if let Some(physics) = physics {
+        let boxes: Vec<Mat4> = made
+            .iter()
+            .filter(|e| {
+                world
+                    .get::<CombatSurfaceComponent>(**e)
+                    .is_some_and(|s| s.solid)
+            })
+            .map(|e| world_matrix(world, *e))
+            .collect();
+        solids = solid_bodies(physics, boxes);
+        stand(physics, run, &members);
+    }
+    run.spawned.extend(made.iter().copied());
+    run.colliders.extend(solids.iter().copied());
+    if let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) {
+        record.entities = made;
+        record.members = members;
+        record.solids = solids;
+    }
+}
+
+/// Save who of a group is left (and how hurt), move its record to where it
+/// went, and take it out of the fight and the scene.
+fn sleep(
+    world: &mut World,
+    mut physics: Option<&mut somnium_physics::world::PhysicsWorld>,
+    run: &mut Run,
+    id: GroupId,
+) {
+    let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) else {
+        return;
+    };
+    let entities = std::mem::take(&mut record.entities);
+    let members = std::mem::take(&mut record.members);
+    let solids = std::mem::take(&mut record.solids);
+    let was_built = !members.is_empty();
+    let alive: Vec<(String, f32, Vec3)> = members
+        .iter()
+        .filter_map(|m| run.world.combatant(*m))
+        .filter(|c| c.alive())
+        .map(|c| (c.name.clone(), c.vitals.health.current, c.position))
+        .collect();
+    if let Some(set) = run.encounters.as_mut() {
+        if was_built && let Some(record) = set.data_mut(id) {
+            record.left = Some(alive.iter().map(|a| (a.0.clone(), a.1)).collect());
+        }
+        if !alive.is_empty() {
+            let centre = alive.iter().map(|a| a.2).sum::<Vec3>() / alive.len() as f32;
+            set.move_to(id, centre);
+        }
+    }
+    for m in &members {
+        run.world.despawn(*m);
+        run.bodies.remove(m);
+        run.dims.remove(m);
+        run.walkers.remove(m);
+        run.marks.remove(m);
+        if let (Some(ragdoll), Some(physics)) = (run.ragdolls.remove(m), physics.as_deref_mut()) {
+            let _ = physics.destroy_ragdoll(ragdoll);
+        }
+    }
+    run.spawned.retain(|e| !entities.contains(e));
+    for e in entities {
+        world.despawn(e);
+    }
+    run.colliders.retain(|b| !solids.contains(b));
+    if let Some(physics) = physics {
+        for b in solids {
+            physics.destroy_body(b);
+        }
+    }
+}
+
 /// The physics world as combat sees it: a thin capsule swept through Jolt.
 struct JoltQuery<'a>(&'a somnium_physics::world::PhysicsWorld);
 
@@ -1086,6 +1337,11 @@ struct Run {
     /// Who has noticed the protagonist, how far (suspicious or alerted), and
     /// the seconds its mark has left.
     marks: BTreeMap<CombatantId, (somnium_combat::ai::Awareness, f32)>,
+    /// The scene's encounters, asleep until the protagonist nears
+    /// (`somnium_ai::dormancy`); `None` when everything was built at once.
+    encounters: Option<Dormancy<Encounter>>,
+    /// Seconds since the encounters were last tended.
+    tended: f32,
     readouts: HashMap<Entity, (i32, i32, i32, &'static str)>,
 }
 
@@ -1357,7 +1613,18 @@ impl CombatDemo {
     /// Build the fight from the scene's authored fighters, ground and wind.
     pub fn begin(&mut self, ctx: &mut EngineContext) {
         somnium_core::propagate_transforms(ctx.world);
-        let encounters = expand_encounters(ctx.world);
+        // With a protagonist to come near them, encounters sleep until it
+        // does; without one, everything is built at once.
+        let protagonist = ctx
+            .world
+            .iter_with::<CombatantComponent>()
+            .any(|(_, c)| c.enabled && c.player);
+        let asleep = protagonist.then(|| encounters_asleep(ctx.world));
+        let encounters = if protagonist {
+            Vec::new()
+        } else {
+            expand_encounters(ctx.world)
+        };
         somnium_core::propagate_transforms(ctx.world);
         let Some(run) = build(ctx.world) else {
             for e in encounters {
@@ -1370,10 +1637,13 @@ impl CombatDemo {
             let run = self.run.as_mut().expect("just built");
             // Stop takes the encounters away with everything else Play made.
             run.spawned.extend(encounters);
+            run.encounters = asleep;
             run.colliders = colliders(ctx);
             stand_on_ground(ctx, run);
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
+            // Those already near wake now, the rest as the protagonist comes.
+            tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
             run.log.push_back(
                 "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides a mount, H whistles it; run into walls to climb".into(),
             );
@@ -1486,6 +1756,7 @@ impl CombatDemo {
             *left -= dt;
             *left > 0.0
         });
+        tend_encounters(ctx.world, Some(&mut *ctx.physics), run, dt);
         write_scene(ctx, run);
     }
 
@@ -1574,16 +1845,6 @@ fn build(world: &World) -> Option<Run> {
         seed: 0x00C0_FFEE,
         ..CombatRules::default()
     });
-    let mut teams: Vec<u32> = fighters.iter().map(|(_, c)| c.team).collect();
-    teams.sort_unstable();
-    teams.dedup();
-    for &t in &teams {
-        if t != 0 {
-            combat
-                .relations
-                .set(TeamId(0), TeamId(t as u16), Attitude::Hostile);
-        }
-    }
     let mut bodies = BTreeMap::new();
     let mut dims = BTreeMap::new();
     let mut restore = Vec::new();
@@ -1591,18 +1852,19 @@ fn build(world: &World) -> Option<Run> {
     let mut min = Vec2::splat(f32::INFINITY);
     let mut max = Vec2::splat(f32::NEG_INFINITY);
     let mut floor = f32::NEG_INFINITY;
+    let mut ids = Vec::new();
+    let mut leaders = Vec::new();
     for (entity, c) in &fighters {
-        let m = world_matrix(world, *entity);
-        let feet = m.transform_point3(Vec3::new(0.0, -0.5, 0.0));
-        let facing = m.transform_vector3(Vec3::Z);
-        let name = world.get::<Name>(*entity).map_or("Fighter", |n| n.as_str());
-        let host = (u64::from(entity.generation()) << 32) | u64::from(entity.index());
-        let id = combat.spawn(c.desc(name, feet, facing, host));
+        let (id, feet, size) = enlist(&mut combat, world, *entity, c);
         if c.player && player.is_none() {
             player = Some(id);
         }
+        ids.push(id);
+        if c.leader {
+            leaders.push(id);
+        }
         bodies.insert(id, *entity);
-        dims.insert(id, m.to_scale_rotation_translation().0.abs());
+        dims.insert(id, size);
         if let Some(t) = world.get::<Transform>(*entity) {
             restore.push((*entity, *t));
         }
@@ -1626,57 +1888,7 @@ fn build(world: &World) -> Option<Run> {
             }
         }
     }
-    // Leaders (a pack's alpha, a band's chief): their side within 15 m
-    // follows them and breaks when they fall.
-    let leaders: Vec<(CombatantId, TeamId, Vec3)> = fighters
-        .iter()
-        .filter(|(_, c)| c.leader)
-        .filter_map(|(e, _)| {
-            let id = *bodies.iter().find(|(_, b)| *b == e)?.0;
-            let c = combat.combatant(id)?;
-            Some((id, c.team, c.position))
-        })
-        .collect();
-    let followers: Vec<(CombatantId, CombatantId)> = combat
-        .combatants()
-        .filter(|c| {
-            c.brain
-                .as_ref()
-                .is_some_and(|b| b.mind.archetype != Archetype::Companion)
-        })
-        .filter_map(|c| {
-            leaders
-                .iter()
-                .filter(|(l, team, at)| {
-                    *l != c.id && *team == c.team && flat_distance(*at, c.position) < 15.0
-                })
-                .min_by(|a, b| {
-                    flat_distance(a.2, c.position).total_cmp(&flat_distance(b.2, c.position))
-                })
-                .map(|(l, _, _)| (c.id, *l))
-        })
-        .collect();
-    for (id, leader) in followers {
-        if let Some(brain) = combat.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
-            brain.mind.leader = Some(leader);
-            brain.mind.profile.breaks_with_leader = true;
-        }
-    }
-    // Each raider band holds a formation: its melee in a line, its bows,
-    // rifles and mages behind (knives flank on their own).
-    for &t in teams.iter().filter(|t| **t != 0) {
-        let band: Vec<CombatantId> = combat
-            .combatants()
-            .filter(|c| c.team == TeamId(t as u16))
-            .filter(|c| {
-                c.brain
-                    .as_ref()
-                    .is_some_and(|b| b.mind.archetype != Archetype::Skirmisher)
-            })
-            .map(|c| c.id)
-            .collect();
-        ai::form_up(&mut combat, &band);
-    }
+    organise(&mut combat, &ids, &leaders);
     // The ground: every authored surface's footprint (axis-aligned), plus wind.
     let surfaces: Vec<(Mat4, CombatSurfaceComponent)> = world
         .iter_with::<CombatSurfaceComponent>()
@@ -1768,8 +1980,90 @@ fn build(world: &World) -> Option<Run> {
         spawned: Vec::new(),
         log: VecDeque::new(),
         marks: BTreeMap::new(),
+        encounters: None,
+        tended: 0.0,
         readouts: HashMap::new(),
     })
+}
+
+/// A fighter entity into a fight: its combatant (feet under the body,
+/// facing its Z, the entity as host), and its size as authored.
+fn enlist(
+    combat: &mut CombatWorld,
+    world: &World,
+    entity: Entity,
+    c: &CombatantComponent,
+) -> (CombatantId, Vec3, Vec3) {
+    let m = world_matrix(world, entity);
+    let feet = m.transform_point3(Vec3::new(0.0, -0.5, 0.0));
+    let facing = m.transform_vector3(Vec3::Z);
+    let name = world.get::<Name>(entity).map_or("Fighter", |n| n.as_str());
+    let host = (u64::from(entity.generation()) << 32) | u64::from(entity.index());
+    let id = combat.spawn(c.desc(name, feet, facing, host));
+    (id, feet, m.to_scale_rotation_translation().0.abs())
+}
+
+/// Newly enlisted fighters (`ids`, of whom `leaders` lead) organised: their
+/// teams hostile to the party, each side within 15 m of a leader following
+/// it (a pack's alpha, a band's chief) and breaking when it falls, and each
+/// raider band formed up, its melee in a line, its bows, rifles and mages
+/// behind (knives flank on their own).
+fn organise(combat: &mut CombatWorld, ids: &[CombatantId], leaders: &[CombatantId]) {
+    let mut teams: Vec<TeamId> = ids
+        .iter()
+        .filter_map(|id| combat.combatant(*id).map(|c| c.team))
+        .collect();
+    teams.sort_unstable();
+    teams.dedup();
+    for &t in &teams {
+        if t != TeamId(0) {
+            combat.relations.set(TeamId(0), t, Attitude::Hostile);
+        }
+    }
+    let leaders: Vec<(CombatantId, TeamId, Vec3)> = leaders
+        .iter()
+        .filter_map(|id| combat.combatant(*id).map(|c| (*id, c.team, c.position)))
+        .collect();
+    let followers: Vec<(CombatantId, CombatantId)> = ids
+        .iter()
+        .filter_map(|id| combat.combatant(*id))
+        .filter(|c| {
+            c.brain
+                .as_ref()
+                .is_some_and(|b| b.mind.archetype != Archetype::Companion)
+        })
+        .filter_map(|c| {
+            leaders
+                .iter()
+                .filter(|(l, team, at)| {
+                    *l != c.id && *team == c.team && flat_distance(*at, c.position) < 15.0
+                })
+                .min_by(|a, b| {
+                    flat_distance(a.2, c.position).total_cmp(&flat_distance(b.2, c.position))
+                })
+                .map(|(l, _, _)| (c.id, *l))
+        })
+        .collect();
+    for (id, leader) in followers {
+        if let Some(brain) = combat.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
+            brain.mind.leader = Some(leader);
+            brain.mind.profile.breaks_with_leader = true;
+        }
+    }
+    for &t in teams.iter().filter(|t| **t != TeamId(0)) {
+        let band: Vec<CombatantId> = ids
+            .iter()
+            .filter_map(|id| combat.combatant(*id))
+            .filter(|c| c.team == t)
+            .filter(|c| {
+                c.brain
+                    .as_ref()
+                    .is_some_and(|b| b.mind.archetype != Archetype::Skirmisher)
+            })
+            .map(|c| c.id)
+            .collect();
+        ai::form_up(combat, &band);
+    }
 }
 
 fn flat_distance(a: Vec3, b: Vec3) -> f32 {
@@ -1779,15 +2073,20 @@ fn flat_distance(a: Vec3, b: Vec3) -> f32 {
 /// Stand every fighter on the ground under it (or over it): a preset dropped
 /// on terrain, whose heightfield the engine has already given to Jolt.
 fn stand_on_ground(ctx: &mut EngineContext, run: &mut Run) {
-    let query = JoltQuery(ctx.physics);
+    let ids: Vec<CombatantId> = run.world.combatants().map(|c| c.id).collect();
+    stand(ctx.physics, run, &ids);
+}
+
+/// [`stand_on_ground`] for some of the fight (a group that has just woken).
+fn stand(physics: &somnium_physics::world::PhysicsWorld, run: &mut Run, ids: &[CombatantId]) {
+    let query = JoltQuery(physics);
     let radius = 0.2;
     let ground = |from: Vec3, to: Vec3| {
         query
             .sweep(from, to, radius)
             .map(|h| from.y + (to.y - from.y) * h.fraction - radius)
     };
-    let ids: Vec<CombatantId> = run.world.combatants().map(|c| c.id).collect();
-    for id in ids {
+    for &id in ids {
         let Some(p) = run.world.combatant(id).map(|c| c.position) else {
             continue;
         };
@@ -2011,23 +2310,32 @@ fn colliders(ctx: &mut EngineContext) -> Vec<BodyId> {
         .filter(|(_, s)| s.solid)
         .map(|(e, _)| world_matrix(ctx.world, e))
         .collect();
-    solids
-        .into_iter()
-        .map(|m| {
-            let (scale, rotation, translation) = m.to_scale_rotation_translation();
-            ctx.physics.create_body(RigidBodyDescriptor {
-                shape: ColliderShape::Box {
-                    half_extents: (scale.abs() * 0.5).max(Vec3::splat(0.01)),
-                },
-                position: translation,
-                rotation,
-                motion_type: MotionType::Static,
-                object_layer: somnium_physics::layer::LAYER_NON_MOVING,
-                ..RigidBodyDescriptor::default()
-            })
-        })
-        .filter(|b| b.is_valid())
-        .collect()
+    solid_bodies(ctx.physics, solids)
+}
+
+/// Static Jolt boxes for solid surfaces' matrices.
+fn solid_bodies(
+    physics: &mut somnium_physics::world::PhysicsWorld,
+    solids: Vec<Mat4>,
+) -> Vec<BodyId> {
+    let mut made = Vec::new();
+    for m in solids {
+        let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        let body = physics.create_body(RigidBodyDescriptor {
+            shape: ColliderShape::Box {
+                half_extents: (scale.abs() * 0.5).max(Vec3::splat(0.01)),
+            },
+            position: translation,
+            rotation,
+            motion_type: MotionType::Static,
+            object_layer: somnium_physics::layer::LAYER_NON_MOVING,
+            ..RigidBodyDescriptor::default()
+        });
+        if body.is_valid() {
+            made.push(body);
+        }
+    }
+    made
 }
 
 fn pooled(world: &mut World, run: &mut Run, name: String, kind: MeshKind, mat: &str) -> Entity {
@@ -3598,5 +3906,114 @@ mod tests {
         assert_eq!(wheel(&mut demo), 0.0, "Ctrl held");
         ctrl(&mut demo, InputState::Released);
         assert!(wheel(&mut demo) != 0.0, "the plain wheel");
+    }
+
+    /// A Combat Encounter 300 m off sleeps (no bodies, no brains) while the
+    /// protagonist is far; it wakes into the fight when the protagonist
+    /// comes near, sleeps again when it leaves, remembering who fell, and
+    /// wakes with only the survivors.
+    #[test]
+    fn a_far_camp_sleeps_until_the_protagonist_nears_and_remembers_its_dead() {
+        let mut world = World::new();
+        let root = world.spawn((
+            Name::new("Scene"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        fighter(
+            &mut world,
+            root,
+            "Protagonist",
+            Vec3::ZERO,
+            Vec3::X,
+            CombatantComponent::protagonist(),
+        );
+        world.spawn((
+            Name::new("Camp"),
+            Transform::from_translation(Vec3::new(300.0, 0.0, 0.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                floor: true,
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        let hero = run.player.expect("the protagonist");
+        let go = |run: &mut Run, world: &mut World, x: f32| {
+            run.world.combatant_mut(hero).unwrap().position = Vec3::new(x, 0.0, 0.0);
+            tend_encounters(world, None, run, f32::INFINITY);
+        };
+        let count = |run: &Run, prefix: &str| {
+            run.world
+                .combatants()
+                .filter(|c| c.name.starts_with(prefix))
+                .count()
+        };
+        let named = |world: &World, prefix: &str| {
+            world
+                .iter_with::<Name>()
+                .filter(|(_, n)| n.as_str().starts_with(prefix))
+                .count()
+        };
+        let bodies = |world: &World, prefix: &str| {
+            world
+                .iter_with::<CombatantComponent>()
+                .filter(|(e, _)| {
+                    world
+                        .get::<Name>(*e)
+                        .is_some_and(|n| n.as_str().starts_with(prefix))
+                })
+                .count()
+        };
+        go(&mut run, &mut world, 0.0);
+        assert_eq!(run.world.combatants().count(), 1, "asleep 300 m off");
+        assert_eq!(named(&world, "Rime wolf"), 0, "no bodies while it sleeps");
+        go(&mut run, &mut world, 200.0);
+        assert_eq!(count(&run, "Rime wolf"), 5, "woken 75 m from its edge");
+        assert!(count(&run, "Bandit") >= 3 && count(&run, "Horse") == 1);
+        assert_eq!(
+            run.walkers.len(),
+            run.world.combatants().count(),
+            "every body walks"
+        );
+        // Two wolves fall, one is hurt.
+        let wolves: Vec<CombatantId> = run
+            .world
+            .combatants()
+            .filter(|c| c.name.starts_with("Rime wolf "))
+            .map(|c| c.id)
+            .collect();
+        for &w in &wolves[..2] {
+            run.world.combatant_mut(w).unwrap().action = Action::Dead;
+        }
+        let hurt = run.world.combatant(wolves[2]).unwrap().name.clone();
+        run.world
+            .combatant_mut(wolves[2])
+            .unwrap()
+            .vitals
+            .health
+            .current = 7.0;
+        // Away: it sleeps, and every body and entity of it goes.
+        go(&mut run, &mut world, -200.0);
+        assert_eq!(run.world.combatants().count(), 1, "asleep again");
+        assert_eq!(named(&world, "Rime wolf"), 0);
+        assert_eq!(run.walkers.len(), 1);
+        // Back: only the survivors wake, the hurt one still hurt.
+        go(&mut run, &mut world, 200.0);
+        assert_eq!(count(&run, "Rime wolf"), 3, "the two that fell stay fallen");
+        let again = run
+            .world
+            .combatants()
+            .find(|c| c.name == hurt)
+            .expect("the hurt wolf");
+        assert!((again.vitals.health.current - 7.0).abs() < 1e-3);
+        assert_eq!(bodies(&world, "Rime wolf"), 3, "and only their bodies");
+        assert_eq!(
+            named(&world, "Rime wolf"),
+            2 * 3,
+            "each with its head, the fallen ones' heads gone too"
+        );
     }
 }

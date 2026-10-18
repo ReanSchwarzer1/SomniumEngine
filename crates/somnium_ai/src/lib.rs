@@ -7,6 +7,7 @@
 
 pub mod behavior;
 pub mod cover;
+pub mod dormancy;
 pub mod formation;
 pub mod navigation;
 pub mod perception;
