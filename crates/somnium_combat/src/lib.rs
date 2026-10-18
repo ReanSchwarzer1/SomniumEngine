@@ -28,6 +28,7 @@
 //! | [`input`] | the rebindable mouse-and-keyboard combat map and the cursor aim |
 //! | [`components`] | authored ECS components and their Details schemas |
 //! | [`mount`] | mounts, riders and mounted combat |
+//! | [`clips`] | move timings from the animators' clip table |
 //!
 //! Determinism: every collection iterates in id order, randomness comes from
 //! one seeded generator, and nothing reads the clock. Two worlds fed the same
@@ -35,6 +36,7 @@
 #![deny(missing_docs)]
 
 pub mod ai;
+pub mod clips;
 pub mod components;
 pub mod damage;
 pub mod environment;
