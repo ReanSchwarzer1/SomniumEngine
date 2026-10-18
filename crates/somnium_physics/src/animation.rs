@@ -118,6 +118,14 @@ impl PhysicsWorld {
         self.ragdolls.insert(id, NativeRagdoll { pointer, bodies });
         Ok(id)
     }
+    /// A ragdoll's bodies in part order, to push one (a killing blow's
+    /// impulse) or read one. The world still owns them.
+    pub fn ragdoll_bodies(&self, id: RagdollId) -> Result<&[BodyId], AnimationPhysicsError> {
+        self.ragdolls
+            .get(&id)
+            .map(|r| r.bodies.as_slice())
+            .ok_or(AnimationPhysicsError::UnknownRagdoll)
+    }
     pub fn ragdoll_pose(&self, id: RagdollId) -> Result<Vec<Mat4>, AnimationPhysicsError> {
         let ragdoll = self
             .ragdolls

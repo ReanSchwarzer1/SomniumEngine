@@ -1,0 +1,13 @@
+[package]
+name = "somnium_character"
+description = "Kinematic character locomotion: walk, run, step up, slopes, jump, fall, mantle and climb ledges, swim."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+# collide_and_slide, the engine's one bounded slide solver.
+somnium_anim = { workspace = true }

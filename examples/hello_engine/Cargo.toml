@@ -32,6 +32,11 @@ somnium_audio = { workspace = true }
 somnium_asset = { workspace = true }
 somnium_voxel = { workspace = true }
 somnium_ui = { workspace = true }
+# The combat sandbox (Create > Examples > Combat Sandbox).
+somnium_character = { workspace = true }
+somnium_combat = { workspace = true }
+somnium_input = { workspace = true }
+somnium_ai = { workspace = true }
 glam = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }

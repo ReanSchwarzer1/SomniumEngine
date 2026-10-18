@@ -535,6 +535,10 @@ impl NavWorld {
             self.rebuild();
         }
     }
+    /// An installed link, for a caller walking a [`NavPath`] that names it.
+    pub fn link(&self, id: u64) -> Option<&OffMeshLink> {
+        self.links.get(&id)
+    }
     fn nearest_index(&self, point: Vec3, max_distance: f32) -> Option<(usize, Vec3)> {
         if !point.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {
             return None;

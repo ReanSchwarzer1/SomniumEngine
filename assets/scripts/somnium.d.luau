@@ -29,7 +29,7 @@ export type Vec3 = vector
 --- Linear RGB.
 export type Color = vector
 
---- CONTROL-K. One key of an authored curve. Read-only from a script: the
+--- One key of an authored curve. Read-only from a script: the
 --- editor authors curves, and a script that assigned a table back would be
 --- rejected by the field's declared type rather than silently accepted.
 export type CurveKey = {
@@ -40,7 +40,7 @@ export type CurveKey = {
     interpolation: string,
 }
 
---- CONTROL-K. One stop of an authored colour ramp. Read-only, as above.
+--- One stop of an authored colour ramp. Read-only, as above.
 export type GradientStop = { t: number, color: Color, alpha: number }
 
 -- ── Components, generated from the type registry ──────────────
@@ -160,11 +160,45 @@ export type SomniumBuoyantVessel = {
 
 --- `somnium.CameraSettings` (schema version 1).
 export type SomniumCameraSettings = {
-	graphics_scalability: number --[[ Native (100%) | Balanced (75%) | Performance (67%) ]],
+	graphics_scalability: number --[[ Native (100%) | Balanced (75%) | Performance (67%) | Custom ]],
 	frustum_cull: boolean,
 	dynamic_resolution: boolean,
 	dynamic_target_ms: number,
 	dynamic_floor: number,
+	custom_scale: number,
+}
+
+--- `somnium.CombatSurface` (schema version 1).
+export type SomniumCombatSurface = {
+	surface: number --[[ Bare | Grass | Water | Ice | Snow | Burning | Ash | Stone ]],
+	round: boolean,
+	solid: boolean,
+}
+
+--- `somnium.Combatant` (schema version 1).
+export type SomniumCombatant = {
+	enabled: boolean,
+	player: boolean,
+	team: number,
+	archetype: number --[[ Duelist | Spearman | Brute | Skirmisher | Archer | Rifleman | Caster | Companion | Wolf ]],
+	weapon: number --[[ Sword | Lance-glaive | Spear | Axe | Knife | Bow | Lattice rifle | Unarmed | Fangs ]],
+	school: number --[[ None | Aetherlance | Meridian | Night Fang | Gale Edge ]],
+	forms: number,
+	rank: number --[[ Novice | Adept | Advanced | Saint | King | Emperor | Sovereign ]],
+	max_health: number,
+	max_stamina: number,
+	capacity: number,
+	poise: number,
+	armor: number,
+	speed: number,
+	spells: string,
+	numbers: boolean,
+	mount: number --[[ None | Horse | Frost-elk | Strider ]],
+	health: number, -- engine-owned; reading only
+	stamina: number, -- engine-owned; reading only
+	mana: number, -- engine-owned; reading only
+	state: string, -- engine-owned; reading only
+	leader: boolean,
 }
 
 --- `somnium.Decal` (schema version 1).
@@ -241,6 +275,7 @@ export type SomniumLight = {
 	moon_intensity: number,
 	area_width: number,
 	area_height: number,
+	cookie: number --[[ None | Torch | Blinds | Panes | Wire guard | Grime ]],
 }
 
 --- `somnium.LightFlicker` (schema version 1).
@@ -386,9 +421,13 @@ export type SomniumPostProcess = {
 	lift: number,
 	gamma: number,
 	grain: number,
-	dream_mode: number --[[ Off | Heat drift | Peripheral echo | Architectural shear ]],
+	dream_mode: number --[[ Off | Heat drift | Peripheral echo | Architectural shear | Fracture ]],
 	dream_strength: number,
 	dream_speed: number,
+	retro: number,
+	retro_fog: Vec2,
+	retro_fog_color: Vec3,
+	retro_amount: number,
 	response_curve: { CurveKey },
 	bloom_enabled: boolean,
 	bloom_intensity: number,
@@ -442,7 +481,16 @@ export type SomniumPostProcess = {
 	analytic_grad: boolean,
 	shaft_intensity: number,
 	fog_sky_occlusion: number,
+	paint_fade: number,
+	foliage_green: number,
 	fsr_sharpness: number,
+	lens_flare: number,
+	traced_reflections: boolean,
+	traced_reflection_roughness: number,
+	picture_shift: number --[[ Off | Screen | Eyelids | Wave ]],
+	picture_shift_progress: number,
+	picture_shift_origin: Vec3,
+	picture_shift_reach: number,
 }
 
 --- `somnium.RigidBody` (schema version 1).
@@ -585,6 +633,25 @@ export type SomniumUiCanvas = {
 	layer: number,
 }
 
+--- `somnium.VertexPaint` (schema version 1).
+export type SomniumVertexPaint = {
+	enabled: boolean,
+	data: string,
+	layer_r: Asset?,
+	layer_g: Asset?,
+	layer_b: Asset?,
+	layer_a: Asset?,
+	tiling: Vec4,
+	height_contrast: Vec4,
+	slope_min: Vec4,
+	slope_max: Vec4,
+	breakup: Vec4,
+	breakup_scale: Vec4,
+	stain: Vec4,
+	detile: Vec4,
+	baked_light: boolean,
+}
+
 --- `somnium.VoxelTerrain` (schema version 1).
 export type SomniumVoxelTerrain = {
 	radius_chunks: number,
@@ -650,6 +717,13 @@ export type SomniumWeather = {
 	particle_rate: number,
 }
 
+--- `somnium.WindVolume` (schema version 1).
+export type SomniumWindVolume = {
+	direction: Vec3,
+	strength: number,
+	radius: number,
+}
+
 --- `somnium.WorkTarget` (schema version 1).
 export type SomniumWorkTarget = {
 	kind: number --[[ Burn | Repair ]],
@@ -695,6 +769,8 @@ export type SelfComponents = {
 	blockout: SomniumBlockout?,
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
+	combatSurface: SomniumCombatSurface?,
+	combatant: SomniumCombatant?,
 	decal: SomniumDecal?,
 	editorFlags: SomniumEditorFlags?,
 	foliage: SomniumFoliage?,
@@ -726,9 +802,11 @@ export type SelfComponents = {
 	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,
 	uiCanvas: SomniumUiCanvas?,
+	vertexPaint: SomniumVertexPaint?,
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
 	weather: SomniumWeather?,
+	windVolume: SomniumWindVolume?,
 	workTarget: SomniumWorkTarget?,
 	worldPartition: SomniumWorldPartition?,
 }

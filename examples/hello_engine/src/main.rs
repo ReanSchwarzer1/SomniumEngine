@@ -21,6 +21,7 @@
 
 mod animated_preview;
 mod authoring_demo;
+mod combat_demo;
 mod dreams_fixture;
 mod fracture_demo;
 
@@ -727,6 +728,8 @@ pub struct HelloGame {
     lods: somnium_core::lod_group::Lods,
     interactions: authoring_demo::InteractionDemo,
     work_demo: fracture_demo::Demo,
+    /// The combat sandbox (Create > Examples > Combat Sandbox), while Play runs it.
+    combat: combat_demo::CombatDemo,
     animated_previews: animated_preview::Previews,
     log_timer: f32,
     camera: EditorCamera,
@@ -836,6 +839,7 @@ impl HelloGame {
             lods: Default::default(),
             interactions: Default::default(),
             work_demo: Default::default(),
+            combat: Default::default(),
             animated_previews: Default::default(),
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
@@ -1162,10 +1166,11 @@ impl GameApp for HelloGame {
     fn register_authoring(&mut self, registration: &mut somnium_core::authoring::GameRegistration) {
         authoring_demo::register(registration);
         fracture_demo::register(registration);
+        combat_demo::register(registration);
         animated_preview::register(registration);
     }
     fn authoring_state(&self) -> serde_json::Value {
-        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state()})
+        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state()})
     }
 
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
@@ -1690,6 +1695,16 @@ impl GameApp for HelloGame {
             }),
         );
 
+        // Evidence hook, inert unless set: `SOMNIUM_COMBAT_SANDBOX=1` builds what
+        // Create > Examples > Combat Sandbox builds, so a capture run can pair it
+        // with `SOMNIUM_AUDIT_UI_STATE=cmd:editor.simulation.play`.
+        if std::env::var("SOMNIUM_COMBAT_SANDBOX").as_deref() == Ok("1") {
+            match combat_demo::spawn_at_startup(ctx.world) {
+                Ok(count) => info!("SOMNIUM_COMBAT_SANDBOX=1 - combat sandbox spawned ({count} entities)"),
+                Err(error) => tracing::warn!("SOMNIUM_COMBAT_SANDBOX: {error}"),
+            }
+        }
+
         // CONTROL-A capture harness: select one real, already-spawned entity
         // by its displayed name so the populated Details surface is captured
         // without inventing fixture data or synthesising an Outliner click.
@@ -1707,6 +1722,7 @@ impl GameApp for HelloGame {
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
         self.work_demo.event(event);
+        self.combat.event(event);
         if play_session(ctx)
             && matches!(
                 event,
@@ -1841,6 +1857,7 @@ impl GameApp for HelloGame {
         if !play_session(ctx) {
             return;
         }
+        self.combat.fixed(ctx);
 
         let (eye, forward) = self
             .player
@@ -2053,15 +2070,23 @@ impl GameApp for HelloGame {
         if playing && !self.was_playing {
             self.interactions.begin_play(ctx.world);
             self.work_demo.reset(ctx.world);
-            if self.play_character {
+            // A scene with a player-controlled fighter is the combat
+            // sandbox's: you play the protagonist, not the walker.
+            if combat_demo::claims_play(ctx.world) {
+                self.combat.begin(ctx);
+            } else if self.play_character {
                 spawn_player(self, ctx);
             }
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
             self.work_demo.reset(ctx.world);
+            self.combat.end(ctx);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
+        if playing {
+            self.combat.update(ctx);
+        }
 
         // Propagate after physics/editor synchronization so render transforms
         // reflect Play, Pause, and Stop in the same frame.
@@ -2133,7 +2158,12 @@ impl GameApp for HelloGame {
         // stream chunks around the camera (async generation; finished meshes
         // are uploaded here, freed allocations recycled).
         self.sync_voxel_terrain(ctx);
-        let eye = active_view(ctx, &self.camera, self.player.as_ref()).1;
+        let eye = self
+            .combat
+            .view(ctx.world)
+            .map(camera_view_from_world)
+            .unwrap_or_else(|| active_view(ctx, &self.camera, self.player.as_ref()))
+            .1;
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
@@ -2150,7 +2180,12 @@ impl GameApp for HelloGame {
     fn on_render(&mut self, ctx: &mut EngineContext) {
         fracture_demo::Demo::sync(ctx.world);
         somnium_core::propagate_transforms(ctx.world);
-        let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
+        let (view_mat, eye) = self
+            .combat
+            .view(ctx.world)
+            .map(camera_view_from_world)
+            .unwrap_or_else(|| active_view(ctx, &self.camera, self.player.as_ref()));
+        self.combat.render(ctx);
         if let Some(renderer) = &mut ctx.renderer {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
@@ -2523,13 +2558,22 @@ impl GameApp for HelloGame {
                             index_count: alloc.index_count,
                         },
                     );
-                    let _ = ctx.world.insert_component(
-                        entity,
-                        MaterialComponent {
-                            asset: somnium_asset::database::AssetId::NONE,
-                            runtime_id: default_mat,
-                        },
-                    );
+                    // An authored material (an asset id) is kept: the engine
+                    // resolves its runtime slot. Only a bare primitive gets
+                    // the default grey.
+                    let authored = ctx
+                        .world
+                        .get::<MaterialComponent>(entity)
+                        .is_some_and(|m| m.asset != somnium_asset::database::AssetId::NONE);
+                    if !authored {
+                        let _ = ctx.world.insert_component(
+                            entity,
+                            MaterialComponent {
+                                asset: somnium_asset::database::AssetId::NONE,
+                                runtime_id: default_mat,
+                            },
+                        );
+                    }
                     if ctx.world.get::<WorldTransform>(entity).is_none() {
                         let transform = ctx
                             .world
@@ -2871,6 +2915,7 @@ impl GameApp for HelloGame {
         if self.runtime_ui_enabled {
             frame.draw(&mut self.runtime_ui);
         }
+        self.combat.draw_ui(frame);
     }
 
     fn on_shutdown(&mut self) {
