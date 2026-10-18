@@ -174,6 +174,8 @@ pub struct Command {
     pub channel: bool,
     /// Vault or climb what the body runs into (the AI on an off-mesh link).
     pub climb: bool,
+    /// Whistle for a mount ([`crate::mount::whistle`]).
+    pub whistle: bool,
 }
 
 impl Command {
@@ -191,6 +193,7 @@ impl Command {
         self.lock = false;
         self.focus = false;
         self.mount = false;
+        self.whistle = false;
         self.measure_steps = 0.0;
         self.measure_cycle = false;
         self.cast = None;
@@ -527,6 +530,8 @@ pub struct Combatant {
     pub rider: Option<CombatantId>,
     /// Mount stats, if this is a mount.
     pub mount_def: Option<crate::mount::MountDef>,
+    /// A mount's own mind while no one rides it.
+    pub herd: Option<crate::mount::Herd>,
 }
 
 impl Combatant {
@@ -991,7 +996,27 @@ pub enum CombatEvent {
         /// Mount, or none when dismounting.
         mount: Option<CombatantId>,
     },
+    /// Someone whistled for a mount.
+    Whistled {
+        /// Who.
+        who: CombatantId,
+        /// The mount that answers, if one heard.
+        mount: Option<CombatantId>,
+    },
+    /// A fall hurt (the host reported the landing, [`CombatWorld::landed`]).
+    Fell {
+        /// Who.
+        who: CombatantId,
+        /// Landing speed, metres per second.
+        speed: f32,
+        /// Harm before armour.
+        harm: f32,
+    },
 }
+
+/// Fastest landing that does not hurt a person, metres per second (about a
+/// 3.3 m drop). Mounts have their own ([`crate::mount::MountDef::safe_fall`]).
+pub const SAFE_FALL: f32 = 8.0;
 
 /// A sound for AI hearing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1086,6 +1111,7 @@ impl CombatWorld {
 
     /// Add a combatant.
     pub fn spawn(&mut self, desc: CombatantDesc) -> CombatantId {
+        let position = desc.position;
         let id = CombatantId(self.next_id);
         self.next_id += 1;
         let mut status = StatusSet::default();
@@ -1136,6 +1162,7 @@ impl CombatWorld {
                 last_attacker: None,
                 mount: None,
                 rider: None,
+                herd: desc.mount.map(|_| crate::mount::Herd::new(position)),
                 mount_def: desc.mount,
             },
         );
@@ -1228,6 +1255,45 @@ impl CombatWorld {
             if !matches!(c.action, Action::Attack(_)) {
                 c.facing = planar_dir(facing, c.facing);
             }
+        }
+    }
+
+    /// The host's controller set a body down after a fall at `speed` metres a
+    /// second. Past a safe speed it hurts, and floors past a hard one; a mount
+    /// that lands hard throws its rider, who takes the fall too.
+    pub fn landed(&mut self, id: CombatantId, speed: f32) {
+        let Some(c) = self.combatants.get(&id) else {
+            return;
+        };
+        let safe = c.mount_def.map_or(SAFE_FALL, |m| m.safe_fall);
+        let over = speed - safe;
+        if !c.alive() || !over.is_finite() || over <= 0.0 {
+            return;
+        }
+        let harm = 6.0 * over + 3.0 * over * over;
+        let mut hit = Hit::new(
+            None,
+            vec![crate::damage::DamagePart::new(DamageType::Blunt, harm)],
+            25.0 * over,
+        );
+        hit.flags = HitFlags::ENVIRONMENT | HitFlags::UNBLOCKABLE | HitFlags::UNPARRYABLE;
+        if over > 3.0 {
+            hit.flags |= HitFlags::HEAVY;
+        }
+        hit.point = c.position;
+        hit.direction = Vec3::NEG_Y;
+        let rider = c.rider;
+        self.queue_hit(id, hit, None);
+        self.emit(CombatEvent::Fell {
+            who: id,
+            speed,
+            harm,
+        });
+        if over > 3.0
+            && let Some(rider) = rider
+        {
+            crate::mount::dismount(self, rider);
+            self.landed(rider, speed);
         }
     }
 
@@ -1408,7 +1474,9 @@ impl CombatWorld {
         // 4. Brains.
         ai::think(self, world_dt, query, nav);
 
-        // 5-6. Commands and actions (a ridden mount takes its rider's reins first).
+        // 5-6. Commands and actions (a ridden mount takes its rider's reins
+        // first; one left alone keeps its own counsel).
+        crate::mount::herd(self, query);
         crate::mount::drive(self);
         for id in self.ids() {
             let body_dt = dt * self.time_scale_for(id);

@@ -357,6 +357,34 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         },
     );
     out.push(basin);
+    // West: a 6 m bluff with a 27 degree slope up to it from the north and
+    // sheer drops on its other sides, for a mount's footing and a fall.
+    out.push(stone(
+        world,
+        "Bluff",
+        Vec3::new(-16.0, 3.0, -4.0),
+        Vec3::new(6.0, 6.0, 4.0),
+    ));
+    let rise = (6.0f32 / 12.0).atan();
+    let tilt = Quat::from_rotation_x(rise);
+    let slope = world.spawn((
+        Name::new("Bluff slope"),
+        Transform {
+            translation: Vec3::new(-16.0, 3.0, 4.0) - tilt * Vec3::Y * 0.25,
+            rotation: tilt,
+            scale: Vec3::new(6.0, 0.5, 12.0 / rise.cos()),
+        },
+        WorldTransform::identity(),
+        Parent { entity: root },
+        MeshKind::Cube,
+        material("stone"),
+        CombatSurfaceComponent {
+            surface: Surface::Stone as u32,
+            round: false,
+            solid: true,
+        },
+    ));
+    out.push(slope);
     // Off-mesh links, so the AI's routes go over the low wall and up the
     // ledge: each runs from a foot to the far side (the top), and the
     // controller vaults or climbs whatever the body meets on the way.
@@ -898,7 +926,7 @@ impl CombatDemo {
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
             run.log.push_back(
-                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk; run into walls to climb".into(),
+                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk, H whistles it; run into walls to climb".into(),
             );
         }
     }
@@ -984,7 +1012,7 @@ impl CombatDemo {
             physics: ctx.physics,
             water: &run.water,
         };
-        for (id, event) in walk(&mut run.world, &mut run.walkers, dt, &terrain, &query) {
+        for (id, event) in walk(&mut run.world, &mut run.walkers, dt, &terrain) {
             log_locomotion(run, id, event);
         }
         let events = run.world.drain_events();
@@ -1033,7 +1061,11 @@ impl CombatDemo {
                     "team": c.team.0,
                     "health": (c.vitals.health.current * 10.0).round() / 10.0,
                     "state": c.action.label(),
-                    "doing": c.brain.as_ref().map(|b| b.mind.doing),
+                    "doing": c
+                        .brain
+                        .as_ref()
+                        .map(|b| b.mind.doing)
+                        .or_else(|| c.herd.filter(|_| c.rider.is_none()).map(|h| h.doing.label())),
                     "position": c.position.to_array(),
                 })
             })
@@ -1190,15 +1222,7 @@ fn build(world: &World) -> Option<Run> {
         .collect();
     let walkers = combat
         .combatants()
-        .filter(|c| c.mount_def.is_none())
-        .map(|c| {
-            let config = ControllerConfig {
-                radius: c.body.radius,
-                height: c.body.height,
-                ..ControllerConfig::default()
-            };
-            (c.id, Controller::new(config, c.position + Vec3::Y * 0.02))
-        })
+        .map(|c| (c.id, Controller::new(walker_config(c), c.position + Vec3::Y * 0.02)))
         .collect();
     let floor = if floor.is_finite() { floor } else { 0.0 };
     Some(Run {
@@ -1223,18 +1247,35 @@ fn build(world: &World) -> Option<Run> {
     })
 }
 
+/// A body's controller: a person's walks, vaults, climbs and swims; a mount's
+/// takes its own slopes and steps, swims, and neither vaults nor climbs, so it
+/// can be ridden off an edge and fall.
+fn walker_config(c: &somnium_combat::Combatant) -> ControllerConfig {
+    let mut config = ControllerConfig {
+        radius: c.body.radius,
+        height: c.body.height,
+        ..ControllerConfig::default()
+    };
+    if let Some(m) = c.mount_def {
+        config.max_slope = m.max_slope;
+        config.step = m.step;
+        config.vault_max = 0.0;
+        config.climb_max = 0.0;
+        config.swim_depth = m.saddle * 0.85;
+    }
+    config
+}
+
 /// Everyone's feet from their controllers, after the combat step decided
 /// where each wants to go. Running into a ledge (the run key, or an AI on an
-/// off-mesh link) vaults or climbs it. Mounts keep the combat world's flat
-/// motion and seat their riders. Returns what each body's locomotion did.
+/// off-mesh link) vaults or climbs it. Mounts walk their own slopes and carry
+/// their riders. Returns what each body's locomotion did.
 fn walk(
     combat: &mut CombatWorld,
     walkers: &mut BTreeMap<CombatantId, Controller>,
     dt: f32,
     terrain: &impl Terrain,
-    query: &impl CombatQuery,
 ) -> Vec<(CombatantId, LocomotionEvent)> {
-    combat.integrate(dt, query, |c| c.mount_def.is_some());
     // Pushes from where everyone stood before anyone moved.
     let pushes: Vec<(CombatantId, Vec3)> = walkers
         .keys()
@@ -1274,8 +1315,15 @@ fn walk(
             c.position = feet;
             c.velocity = velocity;
         }
+        // A hard landing hurts (and throws a mount's rider).
+        for event in &events {
+            if let LocomotionEvent::Landed { speed } = event {
+                combat.landed(id, *speed);
+            }
+        }
         out.extend(events.into_iter().map(|e| (id, e)));
     }
+    somnium_combat::mount::seat_riders(combat);
     out
 }
 
@@ -1753,6 +1801,16 @@ fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
             log(run, format!("{} raised the alarm", name_of(run, *by)))
         }
         CombatEvent::Fled { who } => log(run, format!("{} broke and ran", name_of(run, *who))),
+        CombatEvent::Whistled { who, mount } => {
+            let line = match mount {
+                Some(m) => format!("{} whistles; the {} comes", name_of(run, *who), name_of(run, *m)),
+                None => format!("{} whistles; nothing answers", name_of(run, *who)),
+            };
+            log(run, line);
+        }
+        CombatEvent::Fell { who, speed, .. } => {
+            log(run, format!("{} fell hard ({speed:.1} m/s)", name_of(run, *who)))
+        }
         CombatEvent::Kindled { who, on } if Some(*who) == run.player => {
             log(
                 run,
@@ -1934,7 +1992,18 @@ fn write_scene(ctx: &mut EngineContext, run: &mut Run) {
                 let (_, r, p) = parts[0].to_scale_rotation_translation();
                 (p, r)
             }
-            None => (c.position + Vec3::Y * size.y * 0.5, yaw(c.facing)),
+            // A mount's long body lies along its slope; people stand upright.
+            None => {
+                let up = run
+                    .walkers
+                    .get(id)
+                    .filter(|w| c.mount_def.is_some() && w.grounded())
+                    .map_or(Vec3::Y, |w| w.ground_normal);
+                (
+                    c.position + up * size.y * 0.5,
+                    Quat::from_rotation_arc(Vec3::Y, up) * yaw(c.facing),
+                )
+            }
         };
         let parent = world
             .get::<Parent>(*entity)
@@ -1951,11 +2020,15 @@ fn write_scene(ctx: &mut EngineContext, run: &mut Run) {
             t.scale = s;
         }
         // Live readouts, rounded so regeneration does not write every step.
+        let state = c
+            .herd
+            .filter(|_| c.rider.is_none() && c.alive())
+            .map_or(c.action.label(), |h| h.doing.label());
         let reading = (
             (c.vitals.health.current * 10.0).round() as i32,
             (c.vitals.stamina.current).round() as i32,
             (c.vitals.mana.current * 10.0).round() as i32,
-            c.action.label(),
+            state,
         );
         if run.readouts.get(entity) != Some(&reading) {
             run.readouts.insert(*entity, reading);
@@ -1963,7 +2036,7 @@ fn write_scene(ctx: &mut EngineContext, run: &mut Run) {
                 cc.health = c.vitals.health.current;
                 cc.stamina = c.vitals.stamina.current;
                 cc.mana = c.vitals.mana.current;
-                cc.state = c.action.label().to_string();
+                cc.state = state.to_string();
             }
         }
     }
@@ -2258,6 +2331,87 @@ mod tests {
         terrain
     }
 
+    /// Ridden at a gallop, the frost-elk takes the slope up the bluff on its
+    /// own controller, runs off the far edge, falls 6 m and is hurt; its rider
+    /// holds on (a horse's fall would need to be far longer to throw them).
+    #[test]
+    fn the_elk_takes_the_slope_and_falls_off_the_bluff() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        let others: Vec<Entity> = world
+            .iter_with::<CombatantComponent>()
+            .filter(|(e, _)| {
+                world
+                    .get::<Name>(*e)
+                    .is_none_or(|n| !matches!(n.as_str(), "Protagonist" | "Frost-elk"))
+            })
+            .map(|(e, _)| e)
+            .collect();
+        for e in others {
+            world.get_mut::<CombatantComponent>(e).unwrap().enabled = false;
+        }
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let terrain = boxes(&world, &run);
+        let rider = run.player.expect("the protagonist");
+        let elk = run
+            .world
+            .combatants()
+            .find(|c| c.name == "Frost-elk")
+            .map(|c| c.id)
+            .expect("the elk");
+        let floor = run.floor;
+        for (id, feet) in [
+            (elk, Vec3::new(-16.0, floor, 12.5)),
+            (rider, Vec3::new(-14.8, floor, 12.5)),
+        ] {
+            let c = run.world.combatant_mut(id).unwrap();
+            c.position = feet;
+            c.facing = -Vec3::Z;
+            let walker = run.walkers.get_mut(&id).unwrap();
+            walker.feet = feet + Vec3::Y * 0.02;
+            walker.mode = Mode::Air;
+        }
+        assert_eq!(somnium_combat::mount::mount(&mut run.world, rider, elk), Ok(()));
+        let full = run.world.combatant(elk).unwrap().vitals.health.current;
+        let open = somnium_combat::OpenField;
+        let (mut top, mut fell) = (f32::MIN, false);
+        for _ in 0..8 * 60 {
+            run.world.command(
+                rider,
+                somnium_combat::Command {
+                    move_dir: -Vec3::Z,
+                    sprint: true,
+                    ..Default::default()
+                },
+            );
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+            fell |= run
+                .world
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, CombatEvent::Fell { who, .. } if *who == elk));
+            let at = run.world.combatant(elk).unwrap().position;
+            top = top.max(at.y - floor);
+            if fell && run.walkers[&elk].grounded() {
+                break;
+            }
+        }
+        // The fall's harm resolves on the next step.
+        run.world.command(rider, somnium_combat::Command::default());
+        run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+        walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+        let at = run.world.combatant(elk).unwrap().position;
+        assert!(top > 5.9, "up the slope onto the bluff: {top}");
+        assert!(fell, "and off its edge: {at}");
+        assert!(at.z < -6.0 && (at.y - floor).abs() < 0.1, "landed below: {at}");
+        assert!(run.world.combatant(elk).unwrap().vitals.health.current < full);
+        assert_eq!(run.world.combatant(rider).unwrap().mount, Some(elk), "held on");
+        let seat = run.world.combatant(rider).unwrap().position;
+        assert!((seat - at).length() < 2.5, "and rode it down: {seat} vs {at}");
+    }
+
     /// The preset builds a fight the combat world accepts, and the fight runs
     /// headless through the same `build` Play uses.
     #[test]
@@ -2356,20 +2510,14 @@ mod tests {
         let feet = run.world.combatant(run.player.unwrap()).unwrap().position;
         assert!(feet.y.abs() < 0.1, "feet on the floor: {feet}");
         assert!(run.nav.is_some(), "the course baked");
-        // Every body on foot has a controller; the elk keeps the world's motion.
-        assert_eq!(run.walkers.len(), 9);
+        // Every body has a controller, the elk too.
+        assert_eq!(run.walkers.len(), 10);
         let terrain = boxes(&world, &run);
         let mut events = Vec::new();
         for _ in 0..(20.0 / (1.0 / 60.0)) as usize {
             let open = somnium_combat::OpenField;
             run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
-            walk(
-                &mut run.world,
-                &mut run.walkers,
-                1.0 / 60.0,
-                &terrain,
-                &open,
-            );
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
             events.extend(run.world.drain_events());
         }
         let harmed = events
@@ -2437,13 +2585,7 @@ mod tests {
         let mut reached = false;
         for step in 0..30 * 60 {
             run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
-            for (id, event) in walk(
-                &mut run.world,
-                &mut run.walkers,
-                1.0 / 60.0,
-                &terrain,
-                &open,
-            ) {
+            for (id, event) in walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain) {
                 if let (true, LocomotionEvent::MantleStarted { kind, .. }) = (id == raider, event) {
                     mantles.push(kind);
                 }

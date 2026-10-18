@@ -58,6 +58,9 @@ pub(super) fn handle_command(
     if cmd.mount && w.get(id).is_some_and(|c| c.status.can_act()) {
         let _ = crate::mount::toggle(w, id);
     }
+    if cmd.whistle {
+        let _ = crate::mount::whistle(w, id);
+    }
 
     cast::handle_spell_input(w, id, &cmd);
 

@@ -12,11 +12,30 @@
 //! For the rider's pose the host asks [`rider_targets`] for the seat, the
 //! stirrups and the reins, and [`pose_rider`] bends the legs (and the rein arm)
 //! onto them with the engine's two-bone IK (`somnium_anim::TwoBoneIk`).
+//!
+//! Left alone, a mount keeps its own [`Herd`] mind: it grazes, ambles a few
+//! metres from where it was left, bolts from whoever hurts it, and comes to a
+//! [`whistle`] (its last rider's first, from up to [`WHISTLE_RANGE`]). It never
+//! walks off a drop on its own; ridden, it goes where the rider sends it, and
+//! [`CombatWorld::landed`] hurts a hard landing and throws the rider.
+//!
+//! On real ground the host moves a mount with its own controller, as it moves
+//! people: [`MountDef::max_slope`], [`MountDef::step`] and
+//! [`MountDef::safe_fall`] are its footing, and [`seat_riders`] puts riders
+//! back in the saddle after the host has moved the mounts.
 use crate::damage::{DamagePart, DamageType, Hit, HitFlags};
 use crate::geometry::{flat, planar_dir};
-use crate::world::{Body, CombatEvent, CombatWorld, CombatantDesc};
-use crate::{CombatantId, Resistances, StatusKind, TeamId, Vitals};
+use crate::world::{Body, CombatEvent, CombatWorld, Combatant, CombatantDesc};
+use crate::{CombatQuery, CombatantId, Resistances, StatusKind, TeamId, Vitals};
 use glam::Vec3;
+
+/// How far a whistle carries, metres: across a field, well short of the next
+/// village (about 570 m off at Rimeborn's scale).
+pub const WHISTLE_RANGE: f32 = 150.0;
+/// How far an unridden mount ambles from where it was left, metres.
+pub const WANDER_RADIUS: f32 = 6.0;
+/// The deepest drop an unridden mount steps down on its own, metres.
+const SAFE_STEP_DOWN: f32 = 1.2;
 
 /// Kinds of mount.
 #[derive(
@@ -48,6 +67,13 @@ pub struct MountDef {
     pub trample: f32,
     /// Grip on ice (1 ignores it).
     pub sure_footed: f32,
+    /// Steepest ground it climbs, degrees (a host's controller reads it).
+    pub max_slope: f32,
+    /// Highest step it walks over, metres.
+    pub step: f32,
+    /// Fastest landing that does not hurt it, metres per second (about a
+    /// 4.5 m drop for a horse).
+    pub safe_fall: f32,
 }
 
 impl MountKind {
@@ -69,6 +95,9 @@ impl MountKind {
                 length: 2.4,
                 trample: 30.0,
                 sure_footed: 0.0,
+                max_slope: 34.0,
+                step: 0.45,
+                safe_fall: 9.5,
             },
             Self::FrostElk => MountDef {
                 kind: self,
@@ -78,6 +107,9 @@ impl MountKind {
                 length: 2.3,
                 trample: 38.0,
                 sure_footed: 1.0,
+                max_slope: 40.0,
+                step: 0.5,
+                safe_fall: 10.0,
             },
             Self::Strider => MountDef {
                 kind: self,
@@ -87,6 +119,9 @@ impl MountKind {
                 length: 1.8,
                 trample: 24.0,
                 sure_footed: 0.5,
+                max_slope: 30.0,
+                step: 0.6,
+                safe_fall: 8.5,
             },
         }
     }
@@ -232,6 +267,7 @@ pub enum MountError {
 pub fn make_mount(w: &mut CombatWorld, id: CombatantId, kind: MountKind) {
     if let Some(c) = w.combatant_mut(id) {
         c.mount_def = Some(kind.def());
+        c.herd.get_or_insert(Herd::new(c.position));
     }
 }
 
@@ -284,11 +320,256 @@ pub fn dismount(w: &mut CombatWorld, rider: CombatantId) {
         r.mount = None;
         r.position = Vec3::new(beside.x, ground, beside.z);
     }
+    let now = w.time();
     if let Some(m) = w.combatant_mut(steed) {
         m.rider = None;
         m.command = Default::default();
+        // Left here: it grazes here and answers this rider's whistle first.
+        m.herd = Some(Herd {
+            home: m.position,
+            owner: Some(rider),
+            doing: Herding::Grazing,
+            until: now + 4.0,
+        });
     }
     w.emit(CombatEvent::Mounted { rider, mount: None });
+}
+
+/// What an unridden mount is doing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Herding {
+    /// Head down, standing.
+    Grazing,
+    /// Ambling to a spot near home.
+    Wandering(Vec3),
+    /// Answering a whistle.
+    Coming(CombatantId),
+    /// Running from harm, this way.
+    Bolting(Vec3),
+}
+
+impl Herding {
+    /// A word for the host's animation and readouts.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Grazing => "grazing",
+            Self::Wandering(_) => "wandering",
+            Self::Coming(_) => "coming",
+            Self::Bolting(_) => "bolting",
+        }
+    }
+}
+
+/// An unridden mount's own mind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Herd {
+    /// Where it was left; it ambles near here.
+    pub home: Vec3,
+    /// Whose whistle it answers first: its last rider.
+    pub owner: Option<CombatantId>,
+    /// What it is doing.
+    pub doing: Herding,
+    /// World time the current doing ends.
+    pub until: f64,
+}
+
+impl Herd {
+    /// Grazing where it stands, for a few seconds.
+    #[must_use]
+    pub fn new(home: Vec3) -> Self {
+        Self {
+            home,
+            owner: None,
+            doing: Herding::Grazing,
+            until: 3.0,
+        }
+    }
+}
+
+/// Whistle for a mount: the whistler's own (the last it carried) if it is in
+/// earshot, else the nearest unridden mount of the whistler's side. It comes
+/// at a walk, galloping when far. Everyone near hears the whistle too.
+pub fn whistle(w: &mut CombatWorld, who: CombatantId) -> Option<CombatantId> {
+    let c = w.combatant(who)?;
+    if c.mount.is_some() || !c.alive() {
+        return None;
+    }
+    let (at, team) = (c.position, c.team);
+    let distance = |m: &Combatant| flat(m.position - at).length();
+    let free = |m: &&Combatant| {
+        m.herd.is_some() && m.rider.is_none() && m.alive() && distance(m) <= WHISTLE_RANGE
+    };
+    let nearest = |own: bool| {
+        w.combatants()
+            .filter(free)
+            .filter(|m| {
+                if own {
+                    m.herd.is_some_and(|h| h.owner == Some(who))
+                } else {
+                    m.team == team
+                }
+            })
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+            .map(|m| m.id)
+    };
+    let called = nearest(true).or_else(|| nearest(false));
+    let now = w.time();
+    if let Some(herd) = called
+        .and_then(|id| w.combatant_mut(id))
+        .and_then(|m| m.herd.as_mut())
+    {
+        herd.doing = Herding::Coming(who);
+        herd.until = now + 45.0;
+        herd.owner = Some(who);
+    }
+    w.noise(who, at, 0.9);
+    w.emit(CombatEvent::Whistled { who, mount: called });
+    called
+}
+
+/// Unridden mounts graze, amble near home, bolt from harm and answer
+/// whistles; none walks off a drop on its own (before commands are read).
+pub(crate) fn herd(w: &mut CombatWorld, query: &impl CombatQuery) {
+    let now = w.time();
+    let ids: Vec<CombatantId> = w
+        .combatants()
+        .filter(|c| c.herd.is_some() && c.rider.is_none() && c.alive())
+        .map(|c| c.id)
+        .collect();
+    for id in ids {
+        let Some(c) = w.combatant(id) else {
+            continue;
+        };
+        let Some(mut herd) = c.herd else {
+            continue;
+        };
+        let (at, facing) = (c.position, c.facing);
+        let reach = c.mount_def.map_or(1.2, |d| d.length * 0.5) + 0.6;
+        let attacker = c
+            .last_attacker
+            .and_then(|a| w.combatant(a))
+            .map(|a| a.position);
+        let struck = now - c.last_hurt < 0.25;
+        let caller = match herd.doing {
+            Herding::Coming(who) => w
+                .combatant(who)
+                .filter(|c| c.alive() && c.mount.is_none())
+                .map(|c| c.position),
+            _ => None,
+        };
+        if struck && !matches!(herd.doing, Herding::Bolting(_)) {
+            let from = attacker.unwrap_or(at + facing);
+            herd.doing = Herding::Bolting(planar_dir(at - from, -facing));
+            herd.until = now + 3.0;
+        }
+        let settle = |herd: &mut Herd, rest: f64| {
+            herd.doing = Herding::Grazing;
+            herd.home = at;
+            herd.until = now + rest;
+        };
+        let mut aim = None;
+        let (mut dir, sprint) = match herd.doing {
+            Herding::Grazing => {
+                if now >= herd.until {
+                    let a = w.rng.unit() * std::f32::consts::TAU;
+                    let r = WANDER_RADIUS * (0.3 + 0.7 * w.rng.unit());
+                    let to = herd.home + Vec3::new(a.cos() * r, 0.0, a.sin() * r);
+                    herd.doing = Herding::Wandering(Vec3::new(to.x, at.y, to.z));
+                    herd.until = now + 15.0;
+                }
+                (Vec3::ZERO, false)
+            }
+            Herding::Wandering(to) => {
+                let d = flat(to - at);
+                if d.length() < 0.5 || now >= herd.until {
+                    herd.doing = Herding::Grazing;
+                    herd.until = now + 4.0 + 6.0 * f64::from(w.rng.unit());
+                    (Vec3::ZERO, false)
+                } else {
+                    // An amble: a little under half a walk.
+                    (d.normalize() * 0.4, false)
+                }
+            }
+            Herding::Coming(_) => match caller {
+                Some(p) if flat(p - at).length() < 3.0 => {
+                    aim = Some(p);
+                    settle(&mut herd, 8.0);
+                    (Vec3::ZERO, false)
+                }
+                Some(p) if now < herd.until => {
+                    let d = flat(p - at);
+                    (d.normalize(), d.length() > 12.0)
+                }
+                _ => {
+                    settle(&mut herd, 4.0);
+                    (Vec3::ZERO, false)
+                }
+            },
+            Herding::Bolting(away) => {
+                if now >= herd.until {
+                    settle(&mut herd, 5.0);
+                    (Vec3::ZERO, false)
+                } else {
+                    (away, true)
+                }
+            }
+        };
+        // Never off a drop: stop at the edge, and give up on the spot (an
+        // answered whistle waits there instead).
+        if dir.length_squared() > 1e-4 && !footing(query, at, planar_dir(dir, facing), reach) {
+            dir = Vec3::ZERO;
+            if !matches!(herd.doing, Herding::Coming(_)) {
+                settle(&mut herd, 3.0);
+            }
+        }
+        if let Some(c) = w.combatant_mut(id) {
+            c.herd = Some(herd);
+            c.command.move_dir = dir;
+            c.command.sprint = sprint;
+            c.command.aim = aim;
+        }
+    }
+}
+
+/// Whether there is ground `reach` ahead no deeper than a safe step down. A
+/// world that reports no ground under the body itself (an open test field)
+/// counts as flat.
+fn footing(query: &impl CombatQuery, at: Vec3, dir: Vec3, reach: f32) -> bool {
+    let (lift, radius) = (1.5, 0.15);
+    let depth = lift + SAFE_STEP_DOWN + 0.5;
+    let ground = |p: Vec3| {
+        let top = p + Vec3::Y * lift;
+        query
+            .sweep(top, top - Vec3::Y * depth, radius)
+            .map(|h| top.y - depth * h.fraction - radius)
+    };
+    let Some(here) = ground(at) else {
+        return true;
+    };
+    ground(at + dir * reach).is_some_and(|there| there > here - SAFE_STEP_DOWN)
+}
+
+/// Put riders in their saddles where their mounts now stand. [`CombatWorld::step`]
+/// does it; a host whose controller moves the mounts after the step calls it
+/// again once they have moved.
+pub fn seat_riders(w: &mut CombatWorld) {
+    let pairs: Vec<(CombatantId, CombatantId)> = w
+        .combatants()
+        .filter_map(|c| Some((c.id, c.mount?)))
+        .collect();
+    for (rider, steed) in pairs {
+        let Some(seat) = w
+            .combatant(steed)
+            .and_then(|m| Some(rider_targets(m.position, m.facing, &m.mount_def?).seat))
+        else {
+            continue;
+        };
+        if let Some(r) = w.combatant_mut(rider) {
+            // The rider's feet hang from the seat; its capsule rides above the mount's.
+            r.position = seat - Vec3::Y * r.body.height * 0.45;
+        }
+    }
 }
 
 /// Hand each ridden mount its rider's movement (before commands are read).
@@ -319,6 +600,7 @@ pub(crate) fn sync_riders(w: &mut CombatWorld) {
         .combatants()
         .filter_map(|c| Some((c.id, c.mount?)))
         .collect();
+    seat_riders(w);
     for (rider, steed) in pairs {
         let thrown = w
             .combatant(rider)
@@ -333,13 +615,8 @@ pub(crate) fn sync_riders(w: &mut CombatWorld) {
         let Some(def) = m.mount_def else {
             continue;
         };
-        let targets = rider_targets(m.position, m.facing, &def);
         let (facing, galloping, velocity, position) =
             (m.facing, m.intent.sprinting, m.intent.velocity, m.position);
-        if let Some(r) = w.combatant_mut(rider) {
-            // The rider's feet hang from the seat; its capsule rides above the mount's.
-            r.position = targets.seat - Vec3::Y * r.body.height * 0.45;
-        }
         if galloping && velocity.length() > def.speed * 1.4 {
             trample(
                 w,
