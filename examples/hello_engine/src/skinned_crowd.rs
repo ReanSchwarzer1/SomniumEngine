@@ -153,8 +153,11 @@ fn spawn_crowd(world: &mut World, at: Vec3, count: usize) -> Vec<Entity> {
         ));
         let ball = world.spawn((
             Name::new(&format!("Body {} ball", i + 1)),
+            // The demo rig's tip joint is its bend, a metre up a 2 m tube:
+            // the ball sits on the tube's end, along the bent half.
             Transform {
-                scale: Vec3::splat(0.3),
+                translation: Vec3::new(0.0, 1.05, 0.0),
+                scale: Vec3::splat(0.5),
                 ..Default::default()
             },
             WorldTransform::identity(),
@@ -743,3 +746,4 @@ mod tests {
         assert_eq!(levels(&body).len(), 1, "LOD 2 without LOD 1 is not used");
     }
 }
+

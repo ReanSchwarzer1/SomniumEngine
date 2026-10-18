@@ -62,6 +62,23 @@ export type HelloMirrorPart = {
 	role: number,
 }
 
+--- `hello.SkinnedBody` (schema version 1).
+export type HelloSkinnedBody = {
+	source: Asset?,
+	clip: string,
+	speed: number,
+	time: number,
+	lod1: Asset?,
+	lod2: Asset?,
+	lod1_beyond: number,
+	lod2_beyond: number,
+}
+
+--- `hello.SkinnedSocket` (schema version 1).
+export type HelloSkinnedSocket = {
+	joint: string,
+}
+
 --- `somnium.AnimationAuthoring` (schema version 1).
 export type SomniumAnimationAuthoring = {
 	playing: boolean,
@@ -865,6 +882,8 @@ export type SomniumWorldPartition = {
 export type SelfComponents = {
 	animatedPreview: HelloAnimatedPreview?,
 	mirrorPart: HelloMirrorPart?,
+	skinnedBody: HelloSkinnedBody?,
+	skinnedSocket: HelloSkinnedSocket?,
 	animationAuthoring: SomniumAnimationAuthoring?,
 	animationLod: SomniumAnimationLod?,
 	animationPreviewJoint: SomniumAnimationPreviewJoint?,
