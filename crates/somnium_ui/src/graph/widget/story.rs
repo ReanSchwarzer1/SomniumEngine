@@ -48,6 +48,8 @@ pub(super) struct Preview {
     setup: String,
     setup_edit: Option<String>,
     followed: Option<NodeId>,
+    /// Show the play-through in the game's dialogue presenter over the editor.
+    game_view: bool,
 }
 
 #[derive(Default)]
@@ -59,6 +61,17 @@ pub(super) struct StoryTools {
     pub(super) preview: Option<Preview>,
     /// The setup a writer typed survives replays.
     last_setup: String,
+    /// What the Game View was last sent, so a beat is sent once.
+    sent: Option<Beat>,
+}
+
+/// What the Game View's presenter asked of the play-through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewInput {
+    Next,
+    Choose(usize),
+    /// The player pressed Esc with nothing open: leave the Game View.
+    Leave,
 }
 
 /// One inspector field.
@@ -699,6 +712,12 @@ impl GraphEditor {
             setup,
             setup_edit: None,
             followed: None,
+            game_view: self
+                .authoring
+                .story
+                .preview
+                .as_ref()
+                .is_some_and(|p| p.game_view),
         };
         Self::run_preview(&mut preview);
         self.authoring.status = match &preview.error {
@@ -813,12 +832,59 @@ impl GraphEditor {
         self.follow_preview(widget);
     }
 
-    fn preview_buttons(widget: &Widget) -> [Rect; 2] {
+    fn preview_buttons(widget: &Widget) -> [Rect; 3] {
         let panel = Self::preview_rect(widget);
         [
+            Rect::new(panel.x + panel.w - 236.0, panel.y + 7.0, 90.0, 22.0),
             Rect::new(panel.x + panel.w - 140.0, panel.y + 7.0, 66.0, 22.0),
             Rect::new(panel.x + panel.w - 68.0, panel.y + 7.0, 58.0, 22.0),
         ]
+    }
+
+    /// Tell the host what the Game View should show, when that changed.
+    pub(super) fn emit_story_beat(&mut self, widget: &Widget, emit: &mut Vec<UiMessage>) {
+        let beat = self
+            .authoring
+            .story
+            .preview
+            .as_ref()
+            .filter(|p| p.game_view)
+            .and_then(|p| p.conversation.as_ref())
+            .map(|c| c.beat().clone());
+        if beat == self.authoring.story.sent {
+            return;
+        }
+        self.authoring.story.sent.clone_from(&beat);
+        emit.push(UiMessage::new(
+            widget.handle,
+            MessageDirection::FromWidget,
+            GraphEditorMessage::PreviewBeat(beat),
+        ));
+    }
+
+    /// The Game View's presenter moved the play-through.
+    pub(super) fn preview_input(&mut self, widget: &Widget, input: PreviewInput) {
+        match input {
+            PreviewInput::Next => {
+                let beat = self
+                    .authoring
+                    .story
+                    .preview
+                    .as_ref()
+                    .and_then(|p| p.conversation.as_ref().map(|c| c.beat().clone()));
+                match beat {
+                    Some(Beat::Line(_)) => self.preview_act(widget, |c, s| c.advance(s)),
+                    Some(Beat::Wait { .. }) => self.preview_act(widget, |c, s| c.resume(s)),
+                    _ => {}
+                }
+            }
+            PreviewInput::Choose(index) => self.preview_act(widget, |c, s| c.choose(s, index)),
+            PreviewInput::Leave => {
+                if let Some(preview) = self.authoring.story.preview.as_mut() {
+                    preview.game_view = false;
+                }
+            }
+        }
     }
 
     fn preview_setup_rect(widget: &Widget) -> Rect {
@@ -926,8 +992,12 @@ impl GraphEditor {
                 ..
             } if panel.contains(*pos) => {
                 self.commit_literal(widget, emit);
-                let [restart, stop] = Self::preview_buttons(widget);
-                if restart.contains(*pos) {
+                let [game_view, restart, stop] = Self::preview_buttons(widget);
+                if game_view.contains(*pos) {
+                    if let Some(preview) = self.authoring.story.preview.as_mut() {
+                        preview.game_view = !preview.game_view;
+                    }
+                } else if restart.contains(*pos) {
                     if let Some(preview) = self.authoring.story.preview.as_mut() {
                         Self::run_preview(preview);
                     }
@@ -1207,10 +1277,15 @@ impl GraphEditor {
             12.0,
             theme.semantic.text.primary.bytes(),
         );
-        for (rect, label) in Self::preview_buttons(widget)
-            .into_iter()
-            .zip(["Restart", "Stop"])
-        {
+        for (rect, label) in Self::preview_buttons(widget).into_iter().zip([
+            if preview.game_view {
+                "Game View ✓"
+            } else {
+                "Game View"
+            },
+            "Restart",
+            "Stop",
+        ]) {
             ctx.push_primitive(
                 Primitive::fill(rect, theme.semantic.surface.popup.bytes())
                     .with_radius(theme.geometry.radius_input)
@@ -1647,6 +1722,46 @@ mod tests {
         );
         editor.authoring_changed();
         assert_eq!(editor.story_border(n1), None);
+    }
+
+    #[test]
+    fn the_game_view_gets_each_beat_once_and_drives_the_play_through() {
+        let (mut editor, widget) = editor();
+        let mut sources = StorySources::default();
+        sources.add_file("story.somstory", MANIFEST);
+        sources.add_file(
+            "intro.somdialogue",
+            &saved(&mut editor, &widget, true).unwrap(),
+        );
+        let (database, _) = StoryDatabase::build(sources).unwrap();
+        editor.start_preview(&widget, Arc::new(database));
+        let beats = |editor: &mut GraphEditor| {
+            let mut emit = Vec::new();
+            editor.emit_story_beat(&widget, &mut emit);
+            emit.iter()
+                .filter_map(|m| match m.data::<GraphEditorMessage>() {
+                    Some(GraphEditorMessage::PreviewBeat(beat)) => Some(beat.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(beats(&mut editor).is_empty(), "the Game View is off");
+        editor.authoring.story.preview.as_mut().unwrap().game_view = true;
+        let first = beats(&mut editor);
+        assert!(matches!(first.as_slice(), [Some(Beat::Line(l))] if l.node == "n1"));
+        assert!(
+            beats(&mut editor).is_empty(),
+            "the same beat is not sent twice"
+        );
+        editor.preview_input(&widget, PreviewInput::Next);
+        assert!(matches!(
+            beats(&mut editor).as_slice(),
+            [Some(Beat::Choices { .. })]
+        ));
+        editor.preview_input(&widget, PreviewInput::Choose(0));
+        assert!(matches!(beats(&mut editor).as_slice(), [Some(Beat::Line(l))] if l.node == "n2"));
+        editor.preview_input(&widget, PreviewInput::Leave);
+        assert_eq!(beats(&mut editor), [None], "leaving closes the presenter");
     }
 
     #[test]

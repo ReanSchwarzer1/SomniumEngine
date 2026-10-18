@@ -150,7 +150,7 @@ pub fn catalogue() -> Catalogue {
             .with_input(text("Count", "fact >= target: a counter the HUD shows as 2/3."))
             .with_input(text(
                 "Marker",
-                "An anchor name or (x, y, z), then r=<metres> and arrive: strongroom_door r=2 arrive",
+                "An anchor name, or (x, y, z) in game metres with region=<name> for region-local; then r=<metres> and arrive: strongroom_door r=2 arrive",
             ))
             .with_input(
                 PinArchetype::new("Optional", TEXT)
@@ -235,6 +235,9 @@ pub fn format_marker(marker: &MarkerDef) -> String {
     } else {
         marker.anchor.clone()
     };
+    if !marker.region.is_empty() {
+        out.push_str(&format!(" region={}", marker.region));
+    }
     if marker.radius != 0.0 {
         out.push_str(&format!(" r={}", marker.radius));
     }
@@ -269,14 +272,18 @@ pub fn parse_marker(text: &str) -> Result<Option<MarkerDef>, String> {
         rest
     };
     for word in rest.split_whitespace() {
-        if let Some(radius) = word.strip_prefix("r=") {
+        if let Some(region) = word.strip_prefix("region=") {
+            marker.region = region.to_owned();
+        } else if let Some(radius) = word.strip_prefix("r=") {
             marker.radius = radius
                 .parse()
                 .map_err(|_| format!("`{word}`: a radius is r=<metres>"))?;
         } else if word == "arrive" {
             marker.arrive = true;
         } else {
-            return Err(format!("`{word}` is not r=<metres> or arrive"));
+            return Err(format!(
+                "`{word}` is not region=<name>, r=<metres> or arrive"
+            ));
         }
     }
     Ok(Some(marker))
@@ -1091,9 +1098,14 @@ mod tests {
             ("strongroom_door", 2.0, true)
         );
         assert_eq!(format_marker(&marker), "strongroom_door r=2 arrive");
-        let at = parse_marker("(12.5, 0, -3) r=10").unwrap().unwrap();
-        assert_eq!(at.position, Some([12.5, 0.0, -3.0]));
-        assert_eq!(format_marker(&at), "(12.5, 0, -3) r=10");
+        let at = parse_marker("(12.5, 0, -3) region=eirvane r=10")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (at.position, at.region.as_str()),
+            (Some([12.5, 0.0, -3.0]), "eirvane")
+        );
+        assert_eq!(format_marker(&at), "(12.5, 0, -3) region=eirvane r=10");
         assert!(parse_marker("(1, 2) r=3").is_err());
         assert!(parse_marker("door radius=3").is_err());
         assert_eq!(

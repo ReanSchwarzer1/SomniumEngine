@@ -134,6 +134,8 @@ pub struct QuestMarker {
     pub objective: String,
     pub anchor: String,
     pub position: Option<[f32; 3]>,
+    /// The region `position` is local to; empty for world metres. [`crate::quest::MarkerDef::world_position`].
+    pub region: String,
     pub radius: f32,
     pub tracked: bool,
     pub priority: i32,
@@ -474,20 +476,17 @@ impl Story {
         self.arrive(|marker| !marker.anchor.is_empty() && marker.anchor == anchor)
     }
 
-    /// The player is at `position`: arrival objectives whose marker (an anchor `resolve` places, or a position) is
-    /// within its radius complete. Returns how many.
+    /// The player is at `position` (world, game metres): arrival objectives whose marker is within its radius
+    /// complete. `anchor` places named anchors and `region` a region's anchor (Rimeborn: `world::region_anchor`).
+    /// Returns how many.
     pub fn arrived_at(
         &mut self,
         position: [f32; 3],
-        resolve: impl Fn(&str) -> Option<[f32; 3]>,
+        anchor: impl Fn(&str) -> Option<[f32; 3]>,
+        region: impl Fn(&str) -> Option<[f32; 3]>,
     ) -> usize {
         self.arrive(|marker| {
-            let target = if marker.anchor.is_empty() {
-                marker.position
-            } else {
-                resolve(&marker.anchor)
-            };
-            target.is_some_and(|t| {
+            marker.world_position(&anchor, &region).is_some_and(|t| {
                 let d = [t[0] - position[0], t[1] - position[1], t[2] - position[2]];
                 (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() <= marker.radius
             })
@@ -624,6 +623,7 @@ impl Story {
                     objective: objective.def.id.clone(),
                     anchor: marker.anchor.clone(),
                     position: marker.position,
+                    region: marker.region.clone(),
                     radius: marker.radius,
                     tracked: self.quests.tracked.as_deref() == Some(quest.id()),
                     priority: quest.asset.priority,

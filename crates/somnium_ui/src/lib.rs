@@ -970,6 +970,8 @@ pub struct UiManager {
     /// Wall clock of the previous `end_frame`, for the motion delta. `None`
     /// until the first frame, which therefore advances nothing.
     last_frame_at: Option<std::time::Instant>,
+    /// The dialogue graph's Game View: the game's presenter over the editor, made on first use.
+    story_presenter: Option<NodeHandle>,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -1857,6 +1859,7 @@ impl UiManager {
             physical_size: (size.width, size.height),
             ui_scale,
             last_frame_at: None,
+            story_presenter: None,
             native_ui,
             ui_pass,
             font_id,
@@ -2635,6 +2638,13 @@ impl UiManager {
             // A stalled frame (breakpoint, minimised window) must not teleport
             // every track to its end state.
             self.native_ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+            if let Some(presenter) = self.story_presenter {
+                self.native_ui.send(UiMessage::new(
+                    presenter,
+                    MessageDirection::ToWidget,
+                    crate::widgets::dialogue_presenter::DialoguePresenterMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
         }
         self.last_frame_at = Some(now);
 
@@ -8757,6 +8767,22 @@ impl UiManager {
                 }
                 continue;
             }
+            if let Some(crate::graph::GraphEditorMessage::PreviewBeat(beat)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_game_view(beat.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::dialogue_presenter::DialoguePresenterMessage::Output(output)) =
+                msg.data::<crate::widgets::dialogue_presenter::DialoguePresenterMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.story_presenter_output(output.clone());
+                }
+                continue;
+            }
             if matches!(
                 msg.data::<crate::graph::GraphEditorMessage>(),
                 Some(
@@ -12103,6 +12129,74 @@ impl UiManager {
             self.animation_graph_editor,
             MessageDirection::ToWidget,
             crate::graph::GraphEditorMessage::RequestDocument { apply, preview },
+        ));
+    }
+
+    /// Show (or, with `None` or an end, close) the dialogue graph's Game View.
+    fn show_story_game_view(&mut self, beat: Option<somnium_story::Beat>) {
+        use crate::widgets::dialogue_presenter::{DialoguePresenterBuilder, DialoguePresenterMessage as P};
+        let handle = match self.story_presenter {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = DialoguePresenterBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_presenter = Some(handle);
+                handle
+            }
+        };
+        let send = |ui: &mut UserInterface, message: P| {
+            ui.send(UiMessage::new(handle, MessageDirection::ToWidget, message));
+        };
+        match beat {
+            Some(somnium_story::Beat::Line(line)) => {
+                send(&mut self.native_ui, P::SetBackdrop(160));
+                send(&mut self.native_ui, P::ShowLine { beat: line, display: None });
+                self.native_ui.set_focus(handle);
+            }
+            Some(somnium_story::Beat::Choices { choices, timeout_ms, .. }) => {
+                send(&mut self.native_ui, P::SetBackdrop(160));
+                send(&mut self.native_ui, P::ShowChoices(choices));
+                send(&mut self.native_ui, P::SetTimeLeft(timeout_ms.map(|ms| (ms, ms))));
+                self.native_ui.set_focus(handle);
+            }
+            // An action holding for the game: the line stays up; the panel's Space resumes it.
+            Some(somnium_story::Beat::Wait { .. }) => {}
+            Some(somnium_story::Beat::End { .. }) | None => {
+                send(&mut self.native_ui, P::Close);
+                send(&mut self.native_ui, P::SetBackdrop(0));
+                self.native_ui.set_focus(self.animation_graph_editor);
+            }
+        }
+    }
+
+    /// The Game View's player moved: drive the play-through on the graph.
+    fn story_presenter_output(&mut self, output: somnium_story::PresenterOutput) {
+        use crate::graph::PreviewInput;
+        use somnium_story::PresenterOutput as O;
+        let input = match output {
+            O::Next => PreviewInput::Next,
+            O::Chose(index) => PreviewInput::Choose(index),
+            O::Back => PreviewInput::Leave,
+            O::PlayVoice(_) => {
+                // No voice in the editor's preview: the line has finished speaking at once.
+                if let Some(presenter) = self.story_presenter {
+                    self.native_ui.send(UiMessage::new(
+                        presenter,
+                        MessageDirection::ToWidget,
+                        crate::widgets::dialogue_presenter::DialoguePresenterMessage::VoiceFinished,
+                    ));
+                }
+                return;
+            }
+            O::StopVoice => return,
+        };
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::PreviewInput(input),
         ));
     }
 

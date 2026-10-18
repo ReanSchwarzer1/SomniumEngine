@@ -60,7 +60,7 @@ pub use archetype::{
 pub use geometry::{GraphView, NodeLayout, PinLayout};
 pub use material::{CompiledMaterialGraph, MaterialGraphError};
 pub use surface::{GraphHistory, GraphSurface};
-pub use widget::{GraphEditor, GraphEditorBuilder, GraphEditorMessage};
+pub use widget::{GraphEditor, GraphEditorBuilder, GraphEditorMessage, PreviewInput};
 
 use glam::Vec2;
 use std::collections::{HashMap, HashSet};

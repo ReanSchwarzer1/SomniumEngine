@@ -115,6 +115,8 @@ pub enum PresenterOutput {
     /// Play this voice clip; call [`Presenter::voice_finished`] when it ends.
     PlayVoice(String),
     StopVoice,
+    /// `Back` with nothing to close or stop: the player wants out (a game's pause menu, an editor's preview).
+    Back,
 }
 
 /// A cue inside a line.
@@ -196,7 +198,17 @@ pub fn parse_cues(text: &str) -> CuedText {
 fn is_markup_tag(name: &str) -> bool {
     matches!(
         name,
-        "b" | "i" | "u" | "s" | "color" | "size" | "font" | "link" | "wave" | "shake" | "sprite"
+        "b" | "i"
+            | "u"
+            | "s"
+            | "color"
+            | "size"
+            | "font"
+            | "face"
+            | "link"
+            | "wave"
+            | "shake"
+            | "sprite"
     )
 }
 
@@ -435,6 +447,9 @@ impl Presenter {
     pub fn input(&mut self, input: PresenterInput) {
         match input {
             PresenterInput::Back => {
+                if !self.history_open && self.settings.skip == SkipMode::Off {
+                    self.outputs.push(PresenterOutput::Back);
+                }
                 self.history_open = false;
                 self.settings.skip = SkipMode::Off;
             }
@@ -857,6 +872,19 @@ mod tests {
             "advance closes the history first"
         );
         assert_eq!(presenter.history().len(), 3);
+        presenter.drain();
+        presenter.input(PresenterInput::ToggleHistory);
+        presenter.input(PresenterInput::Back);
+        assert!(
+            presenter.drain().is_empty(),
+            "Back closes the history first"
+        );
+        presenter.input(PresenterInput::Back);
+        assert_eq!(
+            presenter.drain(),
+            [PresenterOutput::Back],
+            "then asks to leave"
+        );
         presenter.close();
         assert!(!presenter.is_visible() && presenter.portraits().iter().all(Option::is_none));
     }

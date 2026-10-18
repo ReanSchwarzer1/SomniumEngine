@@ -406,6 +406,42 @@ fn a_quest_runs_its_stages_objectives_and_branches() {
 }
 
 #[test]
+fn arrival_is_measured_in_game_metres_around_anchors_and_regions() {
+    let mut sources = content();
+    sources.add_file(
+        "quests/walk.somquest",
+        r#"{"version": 1, "id": "walk", "title": "Walk", "stages": [
+            {"id": "go", "objectives": [
+                {"id": "mere", "text": "Walk to the mere", "marker": {"position": [40.0, 0.0, -10.0], "region": "eirvane", "radius": 5.0, "arrive": true}},
+                {"id": "gate", "text": "Reach the gate", "marker": {"anchor": "hall_gate", "radius": 3.0, "arrive": true}}],
+             "next": [{"to": "done"}]},
+            {"id": "done", "end": "complete"}]}"#,
+    );
+    let (database, _) = StoryDatabase::build(sources).unwrap();
+    let mut story = Story::new(Arc::new(database), 1);
+    story.start_quest("walk").unwrap();
+    let anchor = |name: &str| (name == "hall_gate").then_some([10_620.0, 0.0, 6_790.0]);
+    let region = |name: &str| (name == "eirvane").then_some([10_600.0, 0.0, 6_800.0]);
+    let markers = story.markers();
+    assert_eq!(markers[0].region, "eirvane");
+    assert_eq!(
+        story.arrived_at([10_600.0, 0.0, 6_800.0], anchor, region),
+        0,
+        "the anchor itself is not the mere"
+    );
+    assert_eq!(
+        story.arrived_at([10_643.0, 0.0, 6_791.0], anchor, region),
+        1,
+        "40 m east, 10 m north of the anchor"
+    );
+    assert_eq!(
+        story.arrived_at([10_621.0, 0.0, 6_791.0], anchor, region),
+        1
+    );
+    assert_eq!(story.quest_status("walk"), QuestStatus::Completed);
+}
+
+#[test]
 fn a_running_timer_fails_a_required_objective_and_the_quest() {
     let mut story = story();
     story.start_quest("varga_job").unwrap();

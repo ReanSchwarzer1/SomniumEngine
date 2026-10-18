@@ -22,6 +22,7 @@ use somnium_anim::{CompareOp, Condition};
 
 mod authoring;
 mod story;
+pub use story::PreviewInput;
 
 /// A node's kind as a glyph and a colour, so a graph reads at a glance: clips, blends, states and the output each
 /// look like themselves. Kinds without one get a neutral band.
@@ -148,6 +149,10 @@ pub enum GraphEditorMessage {
     StoryProblems(Vec<(String, String, bool)>),
     /// Play the open dialogue from the selected node over this content (the host built it with the edits in).
     StoryPreview(std::sync::Arc<somnium_story::StoryDatabase>),
+    /// From the control: what the Game View presenter should show; `None` closes it.
+    PreviewBeat(Option<somnium_story::Beat>),
+    /// To the control: the Game View presenter's player moved the play-through.
+    PreviewInput(story::PreviewInput),
 }
 
 impl GraphEditorMessage {
@@ -1374,8 +1379,12 @@ impl Control for GraphEditor {
                     self.set_story_problems(&all);
                 }
                 GraphEditorMessage::StoryPreview(database) => self.start_preview(widget, database),
-                GraphEditorMessage::Changed(_) | GraphEditorMessage::StateMachineChanged(_) => {}
+                GraphEditorMessage::PreviewInput(input) => self.preview_input(widget, input),
+                GraphEditorMessage::PreviewBeat(_)
+                | GraphEditorMessage::Changed(_)
+                | GraphEditorMessage::StateMachineChanged(_) => {}
             }
+            self.emit_story_beat(widget, emit);
             return;
         }
 
@@ -1387,6 +1396,7 @@ impl Control for GraphEditor {
             return;
         }
         if self.handle_story_input(widget, &message, emit) {
+            self.emit_story_beat(widget, emit);
             msg.handled = true;
             return;
         }

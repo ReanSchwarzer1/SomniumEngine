@@ -9,6 +9,13 @@
 //! Objectives complete by a condition (`done_when`), by a counter reaching its target (`count`), by the game
 //! reporting arrival at their marker, by a story command (`complete_objective`), or when their timer runs out
 //! (`on_expire: complete`). Their markers are what the HUD puts on the world canvas.
+//!
+//! Markers are in game metres, the frame the scenes are built in (Rimeborn's game scale: things at real size, the
+//! land compressed, one atlas point 25 m). Prefer a named **anchor** (an entity, a spawn point): it follows the
+//! place when the place moves, which at game scale they do (a footprint that crowds its neighbours pushes them
+//! outward). A **position** is either world metres or, with `region`, local metres around that region's anchor,
+//! the way Rimeborn's scenes are authored. Text the player reads keeps the lore's distances ("three days' ride");
+//! only what the game measures is in game metres.
 
 use crate::expr::{Condition, Context, Effects, ExprError};
 use crate::problem::{Problem, has_errors};
@@ -54,15 +61,43 @@ pub struct MarkerDef {
     /// A named place the game resolves (an entity name, a spawn point). Wins over `position` when both are given.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub anchor: String,
-    /// A world position in metres.
+    /// A position in game metres: world, or local to `region`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
+    /// The region `position` is local to (`local = world - the region's anchor`). Empty: world metres.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
     /// Arrival radius in metres, and the marker's area when drawn as a zone.
     #[serde(default)]
     pub radius: f32,
     /// Reaching the marker completes the objective.
     #[serde(default, skip_serializing_if = "is_false")]
     pub arrive: bool,
+}
+
+impl MarkerDef {
+    /// Where the marker is in the world: the anchor `anchor` places, else the position, moved by the region's anchor
+    /// when it has one. `None` when the game cannot place it (an anchor or region it does not know).
+    #[must_use]
+    pub fn world_position(
+        &self,
+        anchor: impl Fn(&str) -> Option<[f32; 3]>,
+        region: impl Fn(&str) -> Option<[f32; 3]>,
+    ) -> Option<[f32; 3]> {
+        if !self.anchor.is_empty() {
+            return anchor(&self.anchor);
+        }
+        let local = self.position?;
+        if self.region.is_empty() {
+            return Some(local);
+        }
+        let origin = region(&self.region)?;
+        Some([
+            origin[0] + local[0],
+            origin[1] + local[1],
+            origin[2] + local[2],
+        ])
+    }
 }
 
 /// What a running-out timer does.
@@ -352,6 +387,12 @@ impl QuestAsset {
                 if let Some(marker) = &objective.marker {
                     if marker.anchor.is_empty() && marker.position.is_none() {
                         error(at.clone(), "a marker needs an anchor or a position".into());
+                    }
+                    if !marker.region.is_empty() && marker.position.is_none() {
+                        error(
+                            at.clone(),
+                            "a region places a position; this marker has none".into(),
+                        );
                     }
                     if !(marker.radius.is_finite() && marker.radius >= 0.0)
                         || marker
