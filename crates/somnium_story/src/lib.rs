@@ -17,7 +17,9 @@
 //! - [`story`]: the runtime that owns all of it for one playthrough, and its save.
 //! - [`database`]: loading a game's story content from disk, linting it as a whole and extracting its strings.
 //! - [`presenter`]: the presentation model behind a light-novel dialogue box (typewriter, auto, skip, history).
+//! - [`actor`]: story actors' performance (talking, jaw and blinks, looks, gestures, marks) for the game to apply.
 
+pub mod actor;
 pub mod barks;
 pub mod conversation;
 pub mod database;

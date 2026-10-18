@@ -527,6 +527,20 @@ export type SomniumStagedMirror = {
 	rendered_triangles: number, -- engine-owned; reading only
 }
 
+--- `somnium.StoryActor` (schema version 1).
+export type SomniumStoryActor = {
+	speaker: string,
+	drive_look: boolean,
+	look_weight: number,
+	talking: boolean, -- engine-owned; reading only
+	jaw_open: number, -- engine-owned; reading only
+	lids_shut: number, -- engine-owned; reading only
+	expression: string, -- engine-owned; reading only
+	look_at: string, -- engine-owned; reading only
+	gesture: string, -- engine-owned; reading only
+	mark: string, -- engine-owned; reading only
+}
+
 --- `somnium.SurfaceTags` (schema version 1).
 export type SomniumSurfaceTags = {
 	names: { string },
@@ -721,6 +735,7 @@ export type SelfComponents = {
 	skyEye: SomniumSkyEye?,
 	spline: SomniumSpline?,
 	stagedMirror: SomniumStagedMirror?,
+	storyActor: SomniumStoryActor?,
 	surfaceTags: SomniumSurfaceTags?,
 	terrain: SomniumTerrain?,
 	timeOfDay: SomniumTimeOfDay?,
