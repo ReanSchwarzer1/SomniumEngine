@@ -565,6 +565,17 @@ pub struct NavWorld {
     /// By link id; kept when a link is removed and set again (an editor
     /// re-syncing a moved link keeps its kind).
     kinds: BTreeMap<u64, LinkKind>,
+    /// Polygons by the ground cells ([`INDEX_CELL`] metres) their extent
+    /// touches, so `nearest` looks only near the point.
+    index: BTreeMap<(i32, i32), Vec<u32>>,
+}
+/// The side of a [`NavWorld`] index cell, metres.
+const INDEX_CELL: f32 = 2.0;
+fn index_cell(x: f32, z: f32) -> (i32, i32) {
+    (
+        (x / INDEX_CELL).floor() as i32,
+        (z / INDEX_CELL).floor() as i32,
+    )
 }
 impl NavWorld {
     pub fn revision(&self) -> u64 {
@@ -643,15 +654,34 @@ impl NavWorld {
         if !point.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {
             return None;
         }
-        self.polygons
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i, p.closest(point)))
-            .filter(|(_, p)| p.distance(point) <= max_distance)
-            .min_by(|a, b| {
-                a.1.distance_squared(point)
-                    .total_cmp(&b.1.distance_squared(point))
-            })
+        // In index order, as a scan of every polygon would, so ties go the
+        // same way; a polygon within reach has its extent within reach on
+        // the ground (a millimetre spare for rounding).
+        let best = |ids: &mut dyn Iterator<Item = usize>| {
+            ids.map(|i| (i, self.polygons[i].closest(point)))
+                .filter(|(_, p)| p.distance(point) <= max_distance)
+                .min_by(|a, b| {
+                    a.1.distance_squared(point)
+                        .total_cmp(&b.1.distance_squared(point))
+                })
+        };
+        let reach = max_distance + 1e-3;
+        let lo = index_cell(point.x - reach, point.z - reach);
+        let hi = index_cell(point.x + reach, point.z + reach);
+        let span =
+            (i64::from(hi.0) - i64::from(lo.0) + 1) * (i64::from(hi.1) - i64::from(lo.1) + 1);
+        if span > 64 {
+            return best(&mut (0..self.polygons.len()));
+        }
+        let mut ids: Vec<usize> = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|cell| self.index.get(&cell))
+            .flatten()
+            .map(|&i| i as usize)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        best(&mut ids.into_iter())
     }
     pub fn nearest(&self, point: Vec3, max_distance: f32) -> Option<Vec3> {
         self.nearest_index(point, max_distance).map(|(_, p)| p)
@@ -668,6 +698,19 @@ impl NavWorld {
             self.polygons.extend(tile.polygons.iter().cloned());
         }
         self.adjacency = vec![Vec::new(); self.polygons.len()];
+        self.index.clear();
+        for (i, p) in self.polygons.iter().enumerate() {
+            let (a, c) = (p.vertices[0], p.vertices[2]);
+            let (lo, hi) = (
+                index_cell(a[0] - 1e-3, a[2] - 1e-3),
+                index_cell(c[0] + 1e-3, c[2] + 1e-3),
+            );
+            for x in lo.0..=hi.0 {
+                for z in lo.1..=hi.1 {
+                    self.index.entry((x, z)).or_default().push(i as u32);
+                }
+            }
+        }
         // Bucket coplanar XZ edges independently of height to stitch stacked
         // floors only when their step-height policy allows it.
         type EdgeKey = (i64, i64, i64, i64);
@@ -735,7 +778,10 @@ impl NavWorld {
         let (source, start) = self.nearest_index(start, snap_distance)?;
         let (target, goal) = self.nearest_index(goal, snap_distance)?;
         let mut best = vec![f32::INFINITY; self.polygons.len()];
-        let mut previous = vec![None; self.polygons.len()];
+        // Where each polygon was reached from, by the edge's place in that
+        // polygon's list (a copy of the edge would make this array several
+        // megabytes to clear on a large mesh, for every path).
+        let mut previous: Vec<Option<(u32, u32)>> = vec![None; self.polygons.len()];
         let mut open = BinaryHeap::new();
         best[source] = 0.0;
         open.push(Open {
@@ -747,11 +793,11 @@ impl NavWorld {
             if node == target {
                 break;
             }
-            for &edge in &self.adjacency[node] {
+            for (k, &edge) in self.adjacency[node].iter().enumerate() {
                 let cost = best[node] + edge.cost;
                 if cost < best[edge.to] {
                     best[edge.to] = cost;
-                    previous[edge.to] = Some((node, edge));
+                    previous[edge.to] = Some((node as u32, k as u32));
                     open.push(Open {
                         node: edge.to,
                         score: cost + self.polygons[edge.to].center().distance(target_center),
@@ -765,8 +811,9 @@ impl NavWorld {
         let mut corridor = Vec::new();
         let mut cursor = target;
         while cursor != source {
-            let (from, edge) = previous[cursor]?;
-            corridor.push((from, edge));
+            let (from, k) = previous[cursor]?;
+            let from = from as usize;
+            corridor.push((from, self.adjacency[from][k as usize]));
             cursor = from;
         }
         corridor.reverse();

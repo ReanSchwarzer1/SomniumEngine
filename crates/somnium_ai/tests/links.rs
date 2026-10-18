@@ -127,3 +127,153 @@ fn legs_follow_the_corners_and_only_link_legs_name_a_link() {
         "the climbing leg: {crossing:?}"
     );
 }
+
+/// What a navmesh costs as it grows: a flat square at the sandbox's 0.25 m
+/// voxels, a nearest-point query and a corner-to-corner path. Run with
+/// `cargo test --release -p somnium_ai --test links nav_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn nav_cost() {
+    for side in [20.0f32, 40.0, 80.0] {
+        let started = std::time::Instant::now();
+        let tile = bake(&BakeInput {
+            cell: [0, 0, 0],
+            bounds: Bounds {
+                min: [0.0, -1.0, 0.0],
+                max: [side, 2.0, side],
+            },
+            triangles: plane(0.0, 0.0, side, side, 0.0),
+            obstacles: vec![],
+            settings: BakeSettings {
+                voxel_size: 0.25,
+                agent_radius: 0.35,
+                ..BakeSettings::default()
+            },
+        })
+        .unwrap();
+        let baked = started.elapsed().as_secs_f64() * 1e3;
+        let polygons = tile.polygons().len();
+        let mut nav = NavWorld::default();
+        let started = std::time::Instant::now();
+        nav.install(tile);
+        let installed = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
+        for i in 0..100 {
+            let x = (i as f32 * 0.37) % side;
+            nav.nearest(Vec3::new(x, 0.0, side - x), 1.0);
+        }
+        let nearest = started.elapsed().as_secs_f64() * 1e3 / 100.0;
+        let started = std::time::Instant::now();
+        let path = nav.path(
+            Vec3::splat(1.0),
+            Vec3::new(side - 1.0, 0.0, side - 1.0),
+            1.0,
+        );
+        let pathed = started.elapsed().as_secs_f64() * 1e3;
+        // A chase's replan: five metres across the middle.
+        let mid = side * 0.5;
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            nav.path(
+                Vec3::new(mid, 0.0, mid),
+                Vec3::new(mid + 4.0, 0.0, mid + 3.0),
+                1.0,
+            );
+        }
+        let short = started.elapsed().as_secs_f64() * 1e3 / 20.0;
+        println!(
+            "{side} m: {polygons} polygons, bake {baked:.1} ms, install {installed:.1} ms, \
+             nearest {nearest:.3} ms, path {pathed:.2} ms ({} points), 5 m path {short:.3} ms",
+            path.map_or(0, |p| p.points.len())
+        );
+    }
+}
+
+/// Thousands of nearest-point and path queries over floors with a hole, a
+/// ramp and links, hashed to the bit. A change meant only to make queries
+/// cheaper must print the same fingerprint before and after.
+#[test]
+#[ignore = "a fingerprint"]
+fn nav_fingerprint() {
+    use std::hash::{Hash, Hasher};
+    let mut triangles = plane(0.0, 0.0, 30.0, 12.0, 0.0);
+    triangles.extend(plane(33.0, 0.0, 14.0, 12.0, 1.0));
+    // A ramp up to a deck over the first floor.
+    triangles.push([[0.0, 0.0, 14.0], [12.0, 3.0, 14.0], [12.0, 3.0, 18.0]]);
+    triangles.push([[0.0, 0.0, 14.0], [12.0, 3.0, 18.0], [0.0, 0.0, 18.0]]);
+    triangles.extend(plane(12.0, 14.0, 10.0, 4.0, 3.0));
+    let tile = bake(&BakeInput {
+        cell: [0, 0, 0],
+        bounds: Bounds {
+            min: [0.0, -1.0, 0.0],
+            max: [47.0, 5.0, 18.0],
+        },
+        triangles,
+        obstacles: vec![Bounds {
+            min: [10.0, -1.0, 4.0],
+            max: [14.0, 3.0, 8.0],
+        }],
+        settings: BakeSettings {
+            voxel_size: 0.25,
+            agent_radius: 0.35,
+            ..BakeSettings::default()
+        },
+    })
+    .unwrap();
+    let mut nav = NavWorld::default();
+    nav.install(tile);
+    nav.set_link(OffMeshLink {
+        id: 7,
+        start: Vec3::new(29.5, 0.0, 6.0),
+        end: Vec3::new(33.5, 1.0, 6.0),
+        bidirectional: true,
+        radius: 0.6,
+        cost: 1.0,
+    })
+    .unwrap();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f32 / (1u64 << 53) as f32
+    };
+    let point = |next: &mut dyn FnMut() -> f32| {
+        Vec3::new(next() * 52.0 - 2.0, next() * 4.0 - 0.5, next() * 22.0 - 2.0)
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let (mut found, mut paths) = (0, 0);
+    for i in 0..3000 {
+        let a = point(&mut next);
+        let reach = [0.0, 0.3, 1.0, 3.0, 40.0][i % 5];
+        let near = nav.nearest(a, reach);
+        found += usize::from(near.is_some());
+        format!("{:?}", near.map(|p| p.to_array().map(f32::to_bits))).hash(&mut h);
+        if i % 3 == 0 {
+            // Ends near a floor (the first, the second, the deck), snapped
+            // from half a metre to three.
+            let grounded = |next: &mut dyn FnMut() -> f32| {
+                let y = [0.0, 1.0, 3.0][(next() * 2.999) as usize] + next() * 0.4;
+                Vec3::new(next() * 50.0 - 1.0, y, next() * 20.0 - 1.0)
+            };
+            let (a, b) = (grounded(&mut next), grounded(&mut next));
+            let path = nav.path(a, b, [0.5, 1.0, 3.0][(i / 3) % 3]);
+            paths += usize::from(path.is_some());
+            format!(
+                "{:?}",
+                path.map(|p| (
+                    p.points
+                        .iter()
+                        .map(|v| v.to_array().map(f32::to_bits))
+                        .collect::<Vec<_>>(),
+                    p.links
+                ))
+            )
+            .hash(&mut h);
+        }
+    }
+    println!(
+        "fingerprint {:016x}: {found} nearest found, {paths} paths",
+        h.finish()
+    );
+}
