@@ -1076,6 +1076,9 @@ fn patch(
 struct Encounter {
     kind: String,
     floor: bool,
+    /// Its kind and where it was placed, half-metre steps: how a streamed
+    /// copy of the same encounter is known.
+    home: (String, [i64; 3]),
     /// Its entity's forward: the layout turns with it.
     facing: Vec3,
     /// Survivors by name, with their health, after its first sleep; `None`
@@ -1094,22 +1097,44 @@ struct Encounter {
 /// Every enabled Combat Encounter as a sleeping record at its entity.
 fn encounters_asleep(world: &World) -> Dormancy<Encounter> {
     let mut set = Dormancy::new(DormancySettings::default());
-    for (e, c) in world.iter_with::<CombatEncounterComponent>() {
-        if c.enabled {
-            let m = world_matrix(world, e);
-            set.add(
-                m.transform_point3(Vec3::ZERO),
-                encounter_extent(&c.kind),
-                Encounter {
-                    kind: c.kind.clone(),
-                    floor: c.floor,
-                    facing: m.transform_vector3(Vec3::Z),
-                    ..Encounter::default()
-                },
-            );
-        }
-    }
+    enlist_encounters(world, &mut set);
     set
+}
+
+/// Every enabled Combat Encounter that is not a record yet becomes one: those
+/// a streamed cell brings in after Play began, or a script spawns. A record
+/// is known by its kind and where it was placed (to half a metre), so a cell
+/// that streams out and back in brings its encounters only once.
+fn enlist_encounters(world: &World, set: &mut Dormancy<Encounter>) {
+    let mut known: std::collections::BTreeSet<(String, [i64; 3])> = (0..set.len())
+        .filter_map(|i| set.data(GroupId(i as u32)))
+        .map(|r| r.home.clone())
+        .collect();
+    for (e, c) in world.iter_with::<CombatEncounterComponent>() {
+        if !c.enabled {
+            continue;
+        }
+        let m = world_matrix(world, e);
+        let at = m.transform_point3(Vec3::ZERO);
+        let home = (
+            c.kind.trim().to_ascii_lowercase(),
+            at.to_array().map(|v| (v * 2.0).round() as i64),
+        );
+        if !known.insert(home.clone()) {
+            continue;
+        }
+        set.add(
+            at,
+            encounter_extent(&c.kind),
+            Encounter {
+                kind: c.kind.clone(),
+                floor: c.floor,
+                facing: m.transform_vector3(Vec3::Z),
+                home,
+                ..Encounter::default()
+            },
+        );
+    }
 }
 
 /// Wake the encounters the protagonist has come near and put back to sleep
@@ -1131,6 +1156,9 @@ fn tend_encounters(
         return;
     }
     run.tended = 0.0;
+    if let Some(set) = run.encounters.as_mut() {
+        enlist_encounters(world, set);
+    }
     let watchers: Vec<Vec3> = run
         .player
         .and_then(|p| run.world.combatant(p))
@@ -4417,6 +4445,60 @@ mod tests {
         run.world.combatant_mut(hero).unwrap().position = Vec3::new(-400.0, 0.0, 0.0);
         tend_encounters(&mut world, Some(&mut physics), &mut run, f32::INFINITY);
         assert_eq!(run.nav.as_ref().map(|n| n.cells().count()), Some(0));
+    }
+
+    /// An encounter that arrives after Play began (a streamed cell, a script)
+    /// is taken up at the next look and wakes like any other; the same
+    /// encounter streamed in again is not taken up twice.
+    #[test]
+    fn an_encounter_streamed_in_after_play_wakes_once() {
+        let mut world = World::new();
+        let root = world.spawn((
+            Name::new("Scene"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        fighter(
+            &mut world,
+            root,
+            "Protagonist",
+            Vec3::ZERO,
+            Vec3::X,
+            CombatantComponent::protagonist(),
+        );
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        assert_eq!(run.world.combatants().count(), 1, "nothing to wake yet");
+        let den = |world: &mut World| {
+            let e = world.spawn((
+                Name::new("Streamed den"),
+                Transform::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: "wolves".into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ));
+            somnium_core::propagate_transforms(world);
+            e
+        };
+        let first = den(&mut world);
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let wolves = |run: &Run| {
+            run.world
+                .combatants()
+                .filter(|c| c.name.starts_with("Rime wolf"))
+                .count()
+        };
+        assert_eq!(wolves(&run), 5, "taken up and woken");
+        // The cell streams out and back in: a new entity, the same encounter.
+        world.despawn(first);
+        den(&mut world);
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        assert_eq!(wolves(&run), 5, "not twice");
+        assert_eq!(run.encounters.as_ref().map(|s| s.len()), Some(1));
     }
 
     /// A pack and a camp placed apart (as across Tyffir): each builds only
