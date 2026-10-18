@@ -16,10 +16,12 @@
 //! to slow time. The AI fights on its own. Water freezes, grass burns, wind
 //! carries the fire. The dead fall as Jolt ragdolls.
 //!
-//! The protagonist walks on `somnium_character`'s controller through Jolt:
+//! Everyone on foot walks on `somnium_character`'s controller through Jolt:
 //! run (hold Shift) into the low wall to vault it, into the ledge to climb
 //! it, over the basin's wall to drop into deep water and swim, and into the
-//! wall again to climb out.
+//! wall again to climb out. The AI takes the same course along the navmesh
+//! Play bakes from the solid boxes, whose off-mesh links (the scene's
+//! **Navigation Link** entities) lead over the wall and up the ledge.
 //!
 //! The camera is a fixed scene camera on purpose: the isometric rig is the
 //! engine lead's (Rimeborn workstream 0). Editor overlays are off in Play, so
@@ -28,6 +30,7 @@
 //! and impacts; decals for scorch and frost; a game-UI canvas for the HUD.
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::{Value, json};
+use somnium_ai::navigation::{BakeInput, BakeSettings, Bounds, NavWorld, OffMeshLink};
 use somnium_asset::database::AssetId;
 use somnium_character::{
     Contact, Controller, ControllerConfig, LocomotionEvent, MantleKind, Mode, MoveInput, Terrain,
@@ -42,6 +45,7 @@ use somnium_combat::{
     Action, Attitude, CombatEvent, CombatQuery, CombatRules, CombatWorld, CombatantId, DamageType,
     HitFlags, StatusKind, TeamId, WorldHit,
 };
+use somnium_core::ai::NavigationLink;
 use somnium_core::{
     CameraSettingsComponent, EngineContext, EngineEvent, GameUiFrame, InputState,
     MaterialComponent, MeshKind, Name, Parent, ParticleEmitter, Transform, UiCanvas,
@@ -353,6 +357,33 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         },
     );
     out.push(basin);
+    // Off-mesh links, so the AI's routes go over the low wall and up the
+    // ledge: each runs from a foot to the far side (the top), and the
+    // controller vaults or climbs whatever the body meets on the way.
+    for (name, from, to) in [
+        (
+            "Nav link (over the low wall)",
+            Vec3::new(8.25, 0.0, -5.0),
+            Vec3::new(9.75, 0.0, -5.0),
+        ),
+        (
+            "Nav link (up the ledge)",
+            Vec3::new(10.6, 0.0, -5.0),
+            Vec3::new(12.6, 2.0, -5.0),
+        ),
+    ] {
+        out.push(world.spawn((
+            Name::new(name),
+            Transform::from_translation(from),
+            WorldTransform::identity(),
+            Parent { entity: root },
+            NavigationLink {
+                destination: at + to,
+                attachment_radius: 0.6,
+                ..NavigationLink::default()
+            },
+        )));
+    }
     out.push(world.spawn((
         Name::new("Draught"),
         Transform::from_translation(Vec3::new(4.0, 1.0, 3.0)),
@@ -579,6 +610,29 @@ impl Terrain for JoltTerrain<'_> {
     }
 }
 
+/// A terrain with the fight's standing spell walls (stone, ice, force) in it.
+struct Walled<'a, T> {
+    terrain: &'a T,
+    combat: &'a CombatWorld,
+}
+
+impl<T: Terrain> Terrain for Walled<'_, T> {
+    fn sweep(&self, feet: Vec3, delta: Vec3, radius: f32, height: f32) -> Option<Contact> {
+        let ground = self.terrain.sweep(feet, delta, radius, height);
+        match self.combat.wall_contact(feet, delta, radius, height) {
+            Some(w) if ground.is_none_or(|g| w.fraction < g.fraction) => Some(Contact {
+                fraction: w.fraction,
+                normal: w.normal,
+            }),
+            _ => ground,
+        }
+    }
+
+    fn water_surface(&self, x: f32, z: f32) -> Option<f32> {
+        self.terrain.water_surface(x, z)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
     Hidden,
@@ -610,9 +664,12 @@ struct Run {
     /// Each body's world size as authored (a fighter's cylinder, a mount's box).
     dims: BTreeMap<CombatantId, Vec3>,
     player: Option<CombatantId>,
-    /// The protagonist's locomotion (vault, climb, swim); the others keep the
-    /// combat world's own motion.
-    walker: Option<Controller>,
+    /// Locomotion (vault, climb, swim) for everyone but the mounts, which
+    /// keep the combat world's own motion and carry their riders.
+    walkers: BTreeMap<CombatantId, Controller>,
+    /// The navmesh baked at Play from the solid boxes, with the scene's
+    /// Navigation Links; an editor bake takes over when there is one.
+    nav: Option<NavWorld>,
     water: Vec<Pool>,
     camera: Option<Entity>,
     restore: Vec<(Entity, Transform)>,
@@ -914,10 +971,22 @@ impl CombatDemo {
             return;
         };
         let dt = ctx.simulation.fixed_delta_seconds;
-        let nav = &ctx.navigation.cells.world;
-        let nav = nav.cells().next().is_some().then_some(nav);
-        run.world.step(dt, &JoltQuery(ctx.physics), nav);
-        walk(ctx, run, dt);
+        let editor = &ctx.navigation.cells.world;
+        let nav = editor
+            .cells()
+            .next()
+            .is_some()
+            .then_some(editor)
+            .or(run.nav.as_ref());
+        let query = JoltQuery(ctx.physics);
+        run.world.step(dt, &query, nav);
+        let terrain = JoltTerrain {
+            physics: ctx.physics,
+            water: &run.water,
+        };
+        for (id, event) in walk(&mut run.world, &mut run.walkers, dt, &terrain, &query) {
+            log_locomotion(run, id, event);
+        }
         let events = run.world.drain_events();
         for event in &events {
             react(ctx, run, event);
@@ -969,13 +1038,16 @@ impl CombatDemo {
                 })
             })
             .collect();
-        let locomotion = run.walker.as_ref().map(|w| match w.mode {
-            Mode::Ground => "ground",
-            Mode::Air => "air",
-            Mode::Mantle(m) if m.kind == MantleKind::Vault => "vault",
-            Mode::Mantle(_) => "climb",
-            Mode::Swim => "swim",
-        });
+        let locomotion = run
+            .player
+            .and_then(|p| run.walkers.get(&p))
+            .map(|w| match w.mode {
+                Mode::Ground => "ground",
+                Mode::Air => "air",
+                Mode::Mantle(m) if m.kind == MantleKind::Vault => "vault",
+                Mode::Mantle(_) => "climb",
+                Mode::Swim => "swim",
+            });
         json!({
             "running": true,
             "time": run.world.time(),
@@ -996,8 +1068,9 @@ fn build(world: &World) -> Option<Run> {
     if fighters.is_empty() {
         return None;
     }
+    // The controllers move people (`walk`), as in the game.
     let mut combat = CombatWorld::new(CombatRules {
-        integrate_motion: true,
+        integrate_motion: false,
         seed: 0x00C0_FFEE,
         ..CombatRules::default()
     });
@@ -1115,30 +1188,34 @@ fn build(world: &World) -> Option<Run> {
             }
         })
         .collect();
-    let walker = player.and_then(|p| combat.combatant(p)).map(|c| {
-        Controller::new(
-            ControllerConfig {
+    let walkers = combat
+        .combatants()
+        .filter(|c| c.mount_def.is_none())
+        .map(|c| {
+            let config = ControllerConfig {
                 radius: c.body.radius,
                 height: c.body.height,
                 ..ControllerConfig::default()
-            },
-            c.position + Vec3::Y * 0.02,
-        )
-    });
+            };
+            (c.id, Controller::new(config, c.position + Vec3::Y * 0.02))
+        })
+        .collect();
+    let floor = if floor.is_finite() { floor } else { 0.0 };
     Some(Run {
         world: combat,
         effects: None,
         bodies,
         dims,
         player,
-        walker,
+        walkers,
+        nav: bake_nav(world, floor),
         water,
         camera,
         restore,
         colliders: Vec::new(),
         ragdolls: BTreeMap::new(),
         tiles: BTreeMap::new(),
-        floor: if floor.is_finite() { floor } else { 0.0 },
+        floor,
         pools: Pools::default(),
         spawned: Vec::new(),
         log: VecDeque::new(),
@@ -1146,58 +1223,147 @@ fn build(world: &World) -> Option<Run> {
     })
 }
 
-/// The protagonist's feet from the controller, after the combat step decided
-/// where it wants to go. Running into a ledge vaults or climbs it.
-fn walk(ctx: &mut EngineContext, run: &mut Run, dt: f32) {
-    let (Some(id), Some(walker)) = (run.player, run.walker.as_mut()) else {
-        return;
-    };
-    let Some(c) = run.world.combatant(id) else {
-        return;
-    };
-    if c.mount.is_some() || !c.alive() {
-        // The mount carries the rider; the dead are the ragdoll's.
-        walker.feet = c.position;
-        walker.velocity = Vec3::ZERO;
-        walker.mode = Mode::Air;
-        return;
-    }
-    let input = MoveInput {
-        velocity: if c.intent.rooted {
-            Vec3::ZERO
-        } else {
-            c.intent.velocity
-        },
-        jump: false,
-        climb: c.intent.sprinting,
-    };
-    let terrain = JoltTerrain {
-        physics: ctx.physics,
-        water: &run.water,
-    };
-    let events = walker.step(dt, &input, &terrain);
-    let (feet, velocity) = (walker.feet, walker.velocity);
-    if let Some(c) = run.world.combatant_mut(id) {
-        c.position = feet;
-        c.velocity = velocity;
-    }
-    for event in events {
-        let line = match event {
-            LocomotionEvent::MantleStarted {
-                kind: MantleKind::Vault,
-                height,
-                ..
-            } => format!("Vaulted {height:.1} m"),
-            LocomotionEvent::MantleStarted { height, .. } => format!("Climbed {height:.1} m"),
-            LocomotionEvent::EnteredWater => "Swimming".into(),
-            LocomotionEvent::LeftWater => "Out of the water".into(),
-            LocomotionEvent::Landed { speed } if speed > 6.0 => {
-                format!("Hard landing ({speed:.1} m/s)")
-            }
-            _ => continue,
+/// Everyone's feet from their controllers, after the combat step decided
+/// where each wants to go. Running into a ledge (the run key, or an AI on an
+/// off-mesh link) vaults or climbs it. Mounts keep the combat world's flat
+/// motion and seat their riders. Returns what each body's locomotion did.
+fn walk(
+    combat: &mut CombatWorld,
+    walkers: &mut BTreeMap<CombatantId, Controller>,
+    dt: f32,
+    terrain: &impl Terrain,
+    query: &impl CombatQuery,
+) -> Vec<(CombatantId, LocomotionEvent)> {
+    combat.integrate(dt, query, |c| c.mount_def.is_some());
+    // Pushes from where everyone stood before anyone moved.
+    let pushes: Vec<(CombatantId, Vec3)> = walkers
+        .keys()
+        .map(|&id| (id, combat.separation(id)))
+        .collect();
+    let mut out = Vec::new();
+    for (id, push) in pushes {
+        let (Some(c), Some(walker)) = (combat.combatant(id), walkers.get_mut(&id)) else {
+            continue;
         };
-        log(run, line);
+        if c.mount.is_some() || !c.alive() {
+            // The mount carries the rider; the dead are the ragdoll's.
+            walker.feet = c.position;
+            walker.velocity = Vec3::ZERO;
+            walker.mode = Mode::Air;
+            continue;
+        }
+        // The body's own clock (focus slows it). On the ground the intent is
+        // the velocity, so dodges, lunges and knockback keep their distance.
+        let body_dt = dt * combat.time_scale_for(id);
+        if body_dt <= 0.0 {
+            continue;
+        }
+        let velocity = c.intent.velocity + push / body_dt;
+        if walker.grounded() {
+            walker.velocity.x = velocity.x;
+            walker.velocity.z = velocity.z;
+        }
+        let input = MoveInput {
+            velocity,
+            jump: false,
+            climb: c.intent.climb || c.intent.sprinting,
+        };
+        let events = walker.step(body_dt, &input, &Walled { terrain, combat });
+        let (feet, velocity) = (walker.feet, walker.velocity);
+        if let Some(c) = combat.combatant_mut(id) {
+            c.position = feet;
+            c.velocity = velocity;
+        }
+        out.extend(events.into_iter().map(|e| (id, e)));
     }
+    out
+}
+
+/// Anyone's vaults and climbs, and the protagonist's swims and hard landings.
+fn log_locomotion(run: &mut Run, id: CombatantId, event: LocomotionEvent) {
+    let player = run.player == Some(id);
+    let line = match event {
+        LocomotionEvent::MantleStarted { kind, height, .. } => {
+            let verb = match kind {
+                MantleKind::Vault => "vaulted",
+                MantleKind::Climb => "climbed",
+            };
+            format!("{} {verb} {height:.1} m", name_of(run, id))
+        }
+        LocomotionEvent::EnteredWater if player => "Swimming".into(),
+        LocomotionEvent::LeftWater if player => "Out of the water".into(),
+        LocomotionEvent::Landed { speed } if player && speed > 6.0 => {
+            format!("Hard landing ({speed:.1} m/s)")
+        }
+        _ => return,
+    };
+    log(run, line);
+}
+
+/// The sandbox's navmesh: the solid boxes baked at a quarter metre (the bake
+/// erodes by the agent's radius twice, so half-metre voxels close the gap
+/// between the low wall and the ledge), and the scene's Navigation Links.
+/// Only ground a body could climb to counts, so the pillars' tops do not.
+fn bake_nav(world: &World, floor: f32) -> Option<NavWorld> {
+    let mut triangles = Vec::new();
+    let (mut min, mut max) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for (e, s) in world.iter_with::<CombatSurfaceComponent>() {
+        if !s.solid {
+            continue;
+        }
+        let m = world_matrix(world, e);
+        // Corner `i` has x, y, z from its bits 0, 1, 2.
+        let c: [Vec3; 8] = std::array::from_fn(|i| {
+            let bit = |b: usize| if i & b == 0 { -0.5 } else { 0.5 };
+            m.transform_point3(Vec3::new(bit(1), bit(2), bit(4)))
+        });
+        for p in c {
+            min = min.min(p);
+            max = max.max(p);
+        }
+        for [i, j, k, l] in [
+            [0, 1, 3, 2],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4],
+            [2, 3, 7, 6],
+            [0, 2, 6, 4],
+            [1, 3, 7, 5],
+        ] {
+            triangles.push([c[i], c[j], c[k]].map(|v| v.to_array()));
+            triangles.push([c[i], c[k], c[l]].map(|v| v.to_array()));
+        }
+    }
+    let climb = ControllerConfig::default().climb_max;
+    let tile = somnium_ai::navigation::bake(&BakeInput {
+        cell: [0, 0, 0],
+        bounds: Bounds {
+            min: [min.x, floor - 0.1, min.z],
+            max: [max.x, floor + climb + 0.2, max.z],
+        },
+        triangles,
+        obstacles: Vec::new(),
+        settings: BakeSettings {
+            voxel_size: 0.25,
+            agent_radius: 0.35,
+            ..BakeSettings::default()
+        },
+    })
+    .ok()?;
+    let mut nav = NavWorld::default();
+    nav.install(tile);
+    for (e, l) in world.iter_with::<NavigationLink>() {
+        if l.enabled {
+            let _ = nav.set_link(OffMeshLink {
+                id: (u64::from(e.generation()) << 32) | u64::from(e.index()),
+                start: world_matrix(world, e).transform_point3(Vec3::ZERO),
+                end: l.destination,
+                bidirectional: l.bidirectional,
+                radius: l.attachment_radius,
+                cost: l.extra_cost,
+            });
+        }
+    }
+    Some(nav)
 }
 
 /// Static Jolt boxes for solid surfaces (the floor, pillars), so ragdolls
@@ -2067,21 +2233,14 @@ mod tests {
         }
     }
 
-    /// The preset builds a fight the combat world accepts, and the fight runs
-    /// headless through the same `build` Play uses.
-    #[test]
-    fn the_course_is_vaulted_climbed_and_swum() {
+    /// The boxes `colliders` gives Jolt, and the basin's water.
+    fn boxes(world: &World, run: &Run) -> somnium_character::boxes::Boxes {
         use somnium_character::boxes::{Boxes, Solid, Water};
-        let mut world = World::new();
-        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
-        somnium_core::propagate_transforms(&mut world);
-        let run = build(&world).expect("a fight");
-        // The boxes `colliders` gives Jolt, and the basin's water.
         let mut terrain = Boxes::default();
         for (e, s) in world.iter_with::<CombatSurfaceComponent>() {
             if s.solid {
                 let (scale, rotation, center) =
-                    world_matrix(&world, e).to_scale_rotation_translation();
+                    world_matrix(world, e).to_scale_rotation_translation();
                 terrain.solids.push(Solid {
                     center,
                     half: scale.abs() * 0.5,
@@ -2096,7 +2255,19 @@ mod tests {
                 surface: w.line,
             });
         }
-        let mut walker = run.walker.clone().expect("the protagonist walks");
+        terrain
+    }
+
+    /// The preset builds a fight the combat world accepts, and the fight runs
+    /// headless through the same `build` Play uses.
+    #[test]
+    fn the_course_is_vaulted_climbed_and_swum() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let run = build(&world).expect("a fight");
+        let terrain = boxes(&world, &run);
+        let mut walker = run.walkers[&run.player.expect("a protagonist")].clone();
         let go = |walker: &mut Controller, velocity: Vec3, seconds: f32| {
             let input = MoveInput {
                 velocity,
@@ -2184,9 +2355,21 @@ mod tests {
         assert!(census[Surface::Water as usize] > 50 && census[Surface::Grass as usize] > 100);
         let feet = run.world.combatant(run.player.unwrap()).unwrap().position;
         assert!(feet.y.abs() < 0.1, "feet on the floor: {feet}");
+        assert!(run.nav.is_some(), "the course baked");
+        // Every body on foot has a controller; the elk keeps the world's motion.
+        assert_eq!(run.walkers.len(), 9);
+        let terrain = boxes(&world, &run);
         let mut events = Vec::new();
         for _ in 0..(20.0 / (1.0 / 60.0)) as usize {
-            run.world.step(1.0 / 60.0, &somnium_combat::OpenField, None);
+            let open = somnium_combat::OpenField;
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(
+                &mut run.world,
+                &mut run.walkers,
+                1.0 / 60.0,
+                &terrain,
+                &open,
+            );
             events.extend(run.world.drain_events());
         }
         let harmed = events
@@ -2201,5 +2384,82 @@ mod tests {
         assert!(cast > 0, "the mage cast");
         let (vitals, hotbar) = player_lines(&run);
         assert!(vitals.contains("Health") && hotbar.contains("Ice Lance"));
+    }
+
+    /// A raider west of the low wall reaches a target standing on the 2 m
+    /// ledge: its route takes the off-mesh links, and its controller vaults
+    /// the wall and climbs the ledge on the way.
+    #[test]
+    fn a_raider_vaults_and_climbs_to_a_target_on_the_ledge() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        // Only the protagonist and the axe raider fight.
+        let others: Vec<Entity> = world
+            .iter_with::<CombatantComponent>()
+            .filter(|(e, _)| {
+                world
+                    .get::<Name>(*e)
+                    .is_none_or(|n| !matches!(n.as_str(), "Protagonist" | "Raider (axe)"))
+            })
+            .map(|(e, _)| e)
+            .collect();
+        for e in others {
+            world.get_mut::<CombatantComponent>(e).unwrap().enabled = false;
+        }
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let terrain = boxes(&world, &run);
+        let target = run.player.expect("the protagonist");
+        let raider = run
+            .world
+            .combatants()
+            .find(|c| c.name == "Raider (axe)")
+            .map(|c| c.id)
+            .expect("the raider");
+        let floor = run.floor;
+        for (id, feet) in [
+            (target, Vec3::new(13.0, floor + 2.0, -5.0)),
+            (raider, Vec3::new(5.0, floor, -5.0)),
+        ] {
+            run.world.combatant_mut(id).unwrap().position = feet;
+            let walker = run.walkers.get_mut(&id).unwrap();
+            walker.feet = feet + Vec3::Y * 0.02;
+            walker.mode = Mode::Air;
+        }
+        // The navmesh's way up goes over the wall and up the ledge.
+        let top = Vec3::new(13.0, floor + 2.0, -5.0);
+        let route = run.nav.as_ref().expect("the course baked");
+        let route = route.path(Vec3::new(5.0, floor, -5.0), top, 0.7);
+        assert_eq!(route.map(|p| p.links.len()), Some(2), "both links");
+        somnium_combat::ai::alert(&mut run.world, raider, target, top);
+        let open = somnium_combat::OpenField;
+        let (mut mantles, mut trail) = (Vec::new(), Vec::new());
+        let mut reached = false;
+        for step in 0..30 * 60 {
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            for (id, event) in walk(
+                &mut run.world,
+                &mut run.walkers,
+                1.0 / 60.0,
+                &terrain,
+                &open,
+            ) {
+                if let (true, LocomotionEvent::MantleStarted { kind, .. }) = (id == raider, event) {
+                    mantles.push(kind);
+                }
+            }
+            run.world.drain_events();
+            let r = run.world.combatant(raider).unwrap().position;
+            let t = run.world.combatant(target).unwrap().position;
+            if step % 60 == 0 {
+                trail.push(r);
+            }
+            if r.y > floor + 1.9 && Vec2::new(r.x - t.x, r.z - t.z).length() < 2.0 {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "the raider went {trail:?}; mantles {mantles:?}");
+        assert_eq!(mantles, [MantleKind::Vault, MantleKind::Climb], "{trail:?}");
     }
 }

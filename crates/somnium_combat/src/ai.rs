@@ -384,7 +384,8 @@ pub struct Mind {
     /// What it is doing, for debugging and Details.
     pub doing: &'static str,
     memory: StimulusMemory,
-    route: Vec<Vec3>,
+    /// Corners, each with whether it is reached over an off-mesh link.
+    route: Vec<(Vec3, bool)>,
     route_goal: Option<Vec3>,
     route_age: f32,
     think: f32,
@@ -687,6 +688,28 @@ pub fn order(w: &mut CombatWorld, id: CombatantId, order: Order) {
     }
 }
 
+/// A path's corners, each marked when the leg to it is one of the path's
+/// off-mesh links (its ends sit within the link's radius of the leg's).
+fn corners(nav: &NavWorld, path: &somnium_ai::navigation::NavPath) -> Vec<(Vec3, bool)> {
+    let links: Vec<_> = path.links.iter().filter_map(|id| nav.link(*id)).collect();
+    let near = |a: Vec3, b: Vec3, r: f32| a.distance(b) <= r + 1e-3;
+    path.points
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            let link = i > 0
+                && links.iter().any(|l| {
+                    let from = path.points[i - 1];
+                    (near(from, l.start, l.radius) && near(p, l.end, l.radius))
+                        || (l.bidirectional
+                            && near(from, l.end, l.radius)
+                            && near(p, l.start, l.radius))
+                });
+            (p, link)
+        })
+        .collect()
+}
+
 struct Host<'a, Q: CombatQuery> {
     me: Seen,
     view: &'a [Seen],
@@ -718,42 +741,75 @@ impl<Q: CombatQuery> Host<'_, Q> {
         self.mind.target.and_then(|t| self.find(t)).copied()
     }
 
+    /// Gap between the bodies. To a melee fighter a height past a metre is
+    /// far out of reach (someone on a ledge), so it keeps closing, up the link.
     fn distance(&self, other: &Seen) -> f32 {
-        flat(other.position - self.me.position).length() - other.radius - self.me.radius
+        let gap = flat(other.position - self.me.position).length() - other.radius - self.me.radius;
+        let rise = ((other.position.y - self.me.position.y).abs() - 1.0).max(0.0);
+        if self.mind.ranged {
+            gap
+        } else {
+            gap + rise * 10.0
+        }
     }
 
     /// Steer toward `dest`, along the navmesh when there is one.
     fn go(&mut self, dest: Vec3, sprint: bool) -> bool {
-        let to = flat(dest - self.me.position);
-        if to.length() < 0.4 {
+        let me = self.me.position;
+        // Passed: near on the ground plane, and not a ledge's height away.
+        let at = |p: Vec3, within: f32| flat(p - me).length() < within && (p.y - me.y).abs() < 1.0;
+        if at(dest, 0.4) {
             self.cmd.move_dir = Vec3::ZERO;
             return true;
         }
-        let mut dir = to.normalize();
+        let to = flat(dest - me);
+        let mut dir = to.normalize_or_zero();
         if let Some(nav) = self.nav {
             // Walk the corridor's corners. `NavAgent` advances a corner only on
             // exact arrival, which assumes it moved the body; here collide and
             // slide moves it, so corners are passed within an arrival radius.
-            let stale = self.mind.route_goal.is_none_or(|g| g.distance(dest) > 1.0)
-                || self.mind.route_age > 1.0;
+            // A leg over an off-mesh link (a vault, a climb) keeps its plan
+            // until its end: one made mid-climb sends the body back to the foot.
+            let on_link = self.mind.route.first().is_some_and(|c| c.1);
+            let stale = if on_link {
+                self.mind.route_age > 3.0
+            } else {
+                self.mind.route_goal.is_none_or(|g| g.distance(dest) > 1.0)
+                    || self.mind.route_age > 1.0
+            };
             if stale {
-                self.mind.route = nav
-                    .path(self.me.position, dest, (self.me.radius * 2.0).max(0.5))
-                    .map(|p| p.points)
-                    .unwrap_or_default();
+                // A point off the mesh (a slot in the air beside a ledge) is
+                // planned to the nearest ground instead.
+                let snap = (self.me.radius * 2.0).max(0.5);
+                let planned = nav
+                    .path(me, dest, snap)
+                    .or_else(|| {
+                        let near = nav.nearest(dest, 3.0)?;
+                        nav.path(me, near, snap)
+                    })
+                    .map(|p| corners(nav, &p));
+                // Falling or mid-climb the body is off the mesh: keep its plan.
+                if planned.is_some() || nav.nearest(me, snap).is_some() {
+                    self.mind.route = planned.unwrap_or_default();
+                }
                 self.mind.route_goal = Some(dest);
                 self.mind.route_age = 0.0;
             }
             self.mind.route_age += self.dt;
-            while self.mind.route.len() > 1
-                && flat(self.mind.route[0] - self.me.position).length() < 0.35
-            {
+            while self.mind.route.len() > 1 && at(self.mind.route[0].0, 0.35) {
                 self.mind.route.remove(0);
             }
-            if let Some(next) = self.mind.route.first() {
-                dir = flat(*next - self.me.position)
-                    .try_normalize()
-                    .unwrap_or(dir);
+            if let [(end, _)] = self.mind.route[..]
+                && at(end, 0.35)
+            {
+                // The end of a route planned to the nearest ground short of `dest`.
+                self.cmd.move_dir = Vec3::ZERO;
+                return true;
+            }
+            if let Some(&(next, link)) = self.mind.route.first() {
+                dir = flat(next - me).try_normalize().unwrap_or(dir);
+                // Run into the wall; the host's controller vaults or climbs it.
+                self.cmd.climb = link;
             }
         }
         // Keep clear of friends.
@@ -1488,6 +1544,7 @@ pub(crate) fn think(
         };
         cmd.guard = Press::default();
         cmd.channel = false;
+        cmd.climb = false;
         if let Some(c) = w.combatant(id) {
             brain.mind.ranged = matches!(c.weapon.kind, WeaponKind::Bow | WeaponKind::LatticeRifle);
             brain.mind.reach = c

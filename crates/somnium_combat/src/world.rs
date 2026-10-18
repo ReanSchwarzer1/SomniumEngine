@@ -37,7 +37,7 @@ use crate::spell::{CastSpeed, Element, Magic, Shape, SpellAsset, SpellError, Spe
 use crate::status::{StatusChange, StatusKind, StatusSet};
 use crate::weapon::{ProjectileKind, WeaponDef};
 use crate::{
-    CombatQuery, CombatantId, DamageType, Relations, Resistances, Rng, TeamId, Vitals, ai,
+    CombatQuery, CombatantId, DamageType, Relations, Resistances, Rng, TeamId, Vitals, WorldHit, ai,
 };
 use glam::Vec3;
 use std::collections::BTreeMap;
@@ -172,6 +172,8 @@ pub struct Command {
     pub cast: Option<SpellRequest>,
     /// Hold the current channel (AI; the player holds the spell key).
     pub channel: bool,
+    /// Vault or climb what the body runs into (the AI on an off-mesh link).
+    pub climb: bool,
 }
 
 impl Command {
@@ -337,6 +339,8 @@ pub struct MoveIntent {
     pub time_scale: f32,
     /// The body should not be moved by the controller (frozen, down, dead).
     pub rooted: bool,
+    /// Vault or climb a ledge the body runs into ([`Command::climb`]).
+    pub climb: bool,
 }
 
 impl Default for MoveIntent {
@@ -348,6 +352,7 @@ impl Default for MoveIntent {
             traction: 1.0,
             time_scale: 1.0,
             rooted: false,
+            climb: false,
         }
     }
 }
@@ -1429,7 +1434,7 @@ impl CombatWorld {
             self.compute_intent(id, body_dt);
         }
         if self.rules.integrate_motion {
-            self.integrate(dt, query);
+            self.integrate(dt, query, |_| true);
         }
         crate::mount::sync_riders(self);
         self.noises.clear();
@@ -1746,12 +1751,82 @@ impl CombatWorld {
         intent.velocity = velocity;
         intent.facing = c.facing;
         intent.sprinting = sprint && wants.length_squared() > 0.01;
+        intent.climb = cmd.climb;
         c.intent = intent;
     }
 
-    /// Move bodies by their intents, sliding along spell walls and the
-    /// host's world, and keep bodies apart.
-    fn integrate(&mut self, dt: f32, query: &impl CombatQuery) {
+    /// How far to push a body this step so it stops overlapping the standing
+    /// others: half of each overlap, on the ground plane. The world's own
+    /// motion adds it; a host's controller adds it to the intent.
+    #[must_use]
+    pub fn separation(&self, id: CombatantId) -> Vec3 {
+        let Some(me) = self.combatants.get(&id) else {
+            return Vec3::ZERO;
+        };
+        self.combatants
+            .values()
+            .filter(|o| o.id != id && o.alive() && o.mount.is_none())
+            .fold(Vec3::ZERO, |push, o| {
+                let d = flat(me.position - o.position);
+                let (len, min) = (d.length(), me.body.radius + o.body.radius);
+                if len < min && len > 1e-4 {
+                    push + d / len * (min - len) * 0.5
+                } else {
+                    push
+                }
+            })
+    }
+
+    /// The first standing spell wall (stone, ice, force) that stops an upright
+    /// capsule standing on `feet` (`radius`, overall `height`) moved by
+    /// `delta`, for a host's controller to add to its own world. A wall raised
+    /// around a body does not hold it, so it walks out.
+    #[must_use]
+    pub fn wall_contact(
+        &self,
+        feet: Vec3,
+        delta: Vec3,
+        radius: f32,
+        height: f32,
+    ) -> Option<WorldHit> {
+        let len = delta.length();
+        let dir = delta.try_normalize()?;
+        let core = (height * 0.5 - radius).max(0.0);
+        let centre = feet + Vec3::Y * (height * 0.5);
+        self.walls
+            .iter()
+            .filter(|w| w.blocks_movement())
+            .filter_map(|w| {
+                // The box grown by the capsule's core (walls stand upright,
+                // so their own Y is the world's): square where the capsule's
+                // caps are round, which a wall does not notice.
+                let grown = Obb {
+                    half: w.obb.half + Vec3::Y * core,
+                    ..w.obb
+                };
+                if grown.distance(centre) <= radius {
+                    return None;
+                }
+                grown.ray(centre, dir, len, radius)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(t, normal)| WorldHit {
+                fraction: (t / len).clamp(0.0, 1.0),
+                normal,
+            })
+    }
+
+    /// Move the bodies `only` picks by their intents, sliding along spell
+    /// walls and the host's world, keep bodies apart, and seat riders on
+    /// their mounts. [`Self::step`] does this for everyone when
+    /// [`CombatRules::integrate_motion`] is on; a host whose controller moves
+    /// people can still leave mounts to it.
+    pub fn integrate(
+        &mut self,
+        dt: f32,
+        query: &impl CombatQuery,
+        only: impl Fn(&Combatant) -> bool,
+    ) {
         let blockers: Vec<Obb> = self
             .walls
             .iter()
@@ -1770,26 +1845,19 @@ impl CombatWorld {
                 )
             })
             .collect();
-        for (id, position, radius, alive) in bodies.iter().copied() {
+        // Pushes from where everyone stood before anyone moved.
+        let pushes: Vec<Vec3> = bodies.iter().map(|b| self.separation(b.0)).collect();
+        for ((id, position, radius, alive), push) in bodies.iter().copied().zip(pushes) {
             let Some(c) = self.combatants.get(&id) else {
                 continue;
             };
-            let scale = self.time_scale_for(id);
-            let mut displacement = c.intent.velocity * dt * scale;
-            if !alive && c.knock.length_squared() < 1e-4 {
+            if !only(c) {
                 continue;
             }
-            // Separation from other standing bodies.
-            for (other, p, r, other_alive) in &bodies {
-                if *other == id || !other_alive {
-                    continue;
-                }
-                let d = flat(position - *p);
-                let min = radius + r;
-                let len = d.length();
-                if len < min && len > 1e-4 {
-                    displacement += d / len * (min - len) * 0.5;
-                }
+            let scale = self.time_scale_for(id);
+            let displacement = c.intent.velocity * dt * scale + push;
+            if !alive && c.knock.length_squared() < 1e-4 {
+                continue;
             }
             let height = c.body.height;
             let chest = Vec3::Y * height * 0.5;
@@ -1827,6 +1895,7 @@ impl CombatWorld {
                 }
             }
         }
+        crate::mount::sync_riders(self);
     }
 }
 

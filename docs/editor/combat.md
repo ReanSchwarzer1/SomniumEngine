@@ -20,7 +20,7 @@ Use **Create > Examples > Combat Sandbox** in Hello Engine, then press **Play**.
 
 Every binding is data in the combat action map and can be rebound.
 
-East of where you start is a course: a low wall to vault, a ledge to climb, and a walled basin of water deep enough to swim in.
+East of where you start is a course: a low wall to vault, a ledge to climb, and a walled basin of water deep enough to swim in. The fighters walk the same way you do, so a raider follows you over the wall and up the ledge: Play bakes a navmesh from the solid surfaces, and the course's two **Navigation Link** entities (Details: Destination, Bidirectional, Attachment Radius) tell the AI it can go over and up. Add a link to give the AI another way over something; a running fighter also climbs whatever it is pushing into.
 
 ## Components
 

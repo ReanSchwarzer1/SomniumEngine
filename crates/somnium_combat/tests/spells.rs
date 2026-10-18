@@ -292,6 +292,36 @@ fn an_ice_wall_stops_a_runner() {
     assert!(z < 5.65 && z > 4.5, "the runner stopped at the ice: {z}");
 }
 
+/// A host's controller meets the same wall through `wall_contact`.
+#[test]
+fn a_host_controller_meets_the_ice_wall_too() {
+    let mut w = world();
+    let caster = mage(
+        &mut w,
+        PARTY,
+        Vec3::new(0.0, 0.0, -2.0),
+        &[Discipline::Rime],
+    );
+    let wall = request(
+        "ice_wall",
+        Bearing::Cursor(Vec3::new(0.0, 0.0, 6.0)),
+        CastSpeed::Silent,
+    );
+    assert_eq!(w.cast(caster, wall), Ok(()));
+    run(&mut w, 0.5, |_, _| {});
+    let feet = Vec3::new(0.0, 0.0, 3.0);
+    let hit = w
+        .wall_contact(feet, Vec3::Z * 4.0, 0.35, 1.8)
+        .expect("the wall is in the way");
+    let stop = feet.z + 4.0 * hit.fraction;
+    assert!(
+        stop > 4.5 && stop < 5.8 && hit.normal.z < -0.9,
+        "{stop} {hit:?}"
+    );
+    let beside = Vec3::new(9.0, 0.0, 3.0);
+    assert!(w.wall_contact(beside, Vec3::Z * 4.0, 0.35, 1.8).is_none());
+}
+
 #[test]
 fn a_hard_blow_breaks_a_short_chant_but_not_an_incantation() {
     let cast_while_struck = |release: CastSpeed| {

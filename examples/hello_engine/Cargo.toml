@@ -26,6 +26,7 @@ somnium_ui = { workspace = true }
 somnium_character = { workspace = true }
 somnium_combat = { workspace = true }
 somnium_input = { workspace = true }
+somnium_ai = { workspace = true }
 glam = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -222,6 +222,7 @@ impl CombatInput {
             measure_cycle: input.just_activated("MeasureNext"),
             cast: None,
             channel: false,
+            climb: false,
         }
     }
 }
