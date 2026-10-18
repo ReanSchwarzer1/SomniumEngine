@@ -254,6 +254,18 @@ impl VelocityPass {
 
     /// This frame's per-instance motion (indexed like the opaque instances) and the buffer of last frame's skinned
     /// poses with its generation (`AnimatedGeometry::previous_pose`).
+    /// This frame's motion records are the ones already uploaded (a still frame): only follow the previous-pose
+    /// buffer, as [`Self::set_motion`] would.
+    pub fn keep_motion(&mut self, device: &wgpu::Device, previous_pose: Option<(&wgpu::Buffer, u64)>) {
+        if let Some((buffer, generation)) = previous_pose
+            && generation != self.pose_generation
+        {
+            self.previous_pose = buffer.clone();
+            self.pose_generation = generation;
+            self.rebind(device);
+        }
+    }
+
     pub fn set_motion(
         &mut self,
         device: &wgpu::Device,

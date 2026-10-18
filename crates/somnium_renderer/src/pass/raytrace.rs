@@ -411,6 +411,12 @@ impl RaytracePass {
         self.instance_count
     }
 
+    /// How many instances the top level holds.
+    #[must_use]
+    pub fn capacity(&self) -> u32 {
+        self.max_instances
+    }
+
     /// Whether `vertex_offset` has a bottom level: a draw without one never reaches the top level.
     #[must_use]
     pub fn has_blas(&self, vertex_offset: u32) -> bool {

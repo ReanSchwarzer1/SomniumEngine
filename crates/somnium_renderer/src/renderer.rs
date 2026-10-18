@@ -133,6 +133,8 @@ pub struct SomniumRenderer {
     last_motion: Vec<((u32, u32, u32), glam::Mat4)>,
     /// The vector `last_motion` was before this frame, reused for the next one.
     motion_spare: Vec<((u32, u32, u32), glam::Mat4)>,
+    /// Last frame's motion records had nothing moving: the same draws again need no new records.
+    motion_still: bool,
     motion_records: Vec<crate::pass::velocity::GpuMotion>,
     pub skin_pass: crate::pass::skin::SkinPass,
     /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
@@ -593,6 +595,8 @@ pub struct SomniumRenderer {
     graphics_preset: crate::quality::GraphicsPreset,
     /// A game's own budget in place of the tier's (its settings menu, feature by feature). None: the tier's.
     graphics_budget_override: Option<crate::quality::GraphicsBudget>,
+    /// `set_tlas_distance_budget`: past the TLAS's capacity, trace the nearest instead of the first in draw order.
+    tlas_distance_budget: bool,
     /// The real-time path tracer switched on whatever the scene authored (a game's experimental setting).
     pub path_tracing_requested: bool,
     /// Ray-traced reflections on glossy surfaces switched on whatever the scene authored (the path tracer's
@@ -1202,6 +1206,7 @@ impl SomniumRenderer {
             animated_geometry: Default::default(),
             last_motion: Vec::new(),
             motion_spare: Vec::new(),
+            motion_still: false,
             motion_records: Vec::new(),
             global_pool,
             vis_pass,
@@ -1404,6 +1409,7 @@ impl SomniumRenderer {
             cluster_posed: Vec::new(),
             graphics_preset: crate::quality::GraphicsPreset::from_env(),
             graphics_budget_override: None,
+            tlas_distance_budget: false,
             path_tracing_requested: false,
             traced_reflections_requested: false,
             lens_flare_requested: 0.0,
@@ -5492,6 +5498,12 @@ impl SomniumRenderer {
                     })
                 })
                 .collect();
+            let capacity = self.raytrace_pass.capacity() as usize;
+            let instances = if self.tlas_distance_budget && instances.len() > capacity {
+                nearest_tlas_instances(instances, capacity, self.camera_pos, |offset| geometry.mesh_aabb(offset))
+            } else {
+                instances
+            };
             self.profiler.begin(&mut encoder, "TLAS build");
             self.raytrace_pass.build(
                 &ctx.device,
@@ -6973,6 +6985,15 @@ impl SomniumRenderer {
         self.graphics_budget_override.unwrap_or_else(|| self.graphics_preset.budget())
     }
 
+    /// An open world's traced scene: when more instances qualify for ray tracing than the top level holds (8,192),
+    /// keep the nearest to the eye (by the distance to their bounds) rather than the first in draw order, which is by
+    /// material, so a wall beside the camera never loses its traced shadow to a far one. The far ones left out are
+    /// not counted as an overflow, so traced water reflections stay on. Off by default: a scene within the capacity
+    /// traces the same either way, and one past it traces as it always did.
+    pub fn set_tlas_distance_budget(&mut self, on: bool) {
+        self.tlas_distance_budget = on;
+    }
+
     /// Lay a game's own budget over the scene instead of the tier's (None gives the tier back). Like a tier it can
     /// only take away what a scene authored.
     pub fn set_graphics_budget(&mut self, budget: Option<crate::quality::GraphicsBudget>) {
@@ -7411,6 +7432,20 @@ impl SomniumRenderer {
     fn record_motion(&mut self, ctx: &crate::context::RenderContext) {
         use crate::pass::velocity::{GpuMotion, NO_POSE};
         let posed: Vec<(u32, u32)> = self.animated_geometry.previous_bases().collect();
+        // A still frame: nothing posed, nothing moved last frame, and every draw the same geometry at the same place as
+        // last frame's at its index. Its records (previous = current, not moving) are the ones on the GPU already;
+        // rebuilding and comparing them was 9 ms of a 100,000-draw frame (`examples/scale_probe.rs`).
+        let still = posed.is_empty()
+            && self.motion_still
+            && self.motion_records.len() == self.draw_queue.len()
+            && self.last_motion.len() == self.draw_queue.len()
+            && self.draw_queue.iter().zip(&self.last_motion).all(|(cmd, (key, transform))| {
+                *key == (cmd.vertex_offset, cmd.index_offset, cmd.index_count) && *transform == cmd.transform
+            });
+        if still {
+            self.velocity_pass.keep_motion(&ctx.device, self.animated_geometry.previous_pose());
+            return;
+        }
         let mut current = std::mem::take(&mut self.motion_spare);
         current.clear();
         current.extend(
@@ -7434,6 +7469,7 @@ impl SomniumRenderer {
             });
         }
         self.motion_spare = std::mem::replace(&mut self.last_motion, current);
+        self.motion_still = self.motion_records.iter().all(|record| record.moving == 0);
         self.velocity_pass.set_motion(
             &ctx.device,
             &ctx.queue,
@@ -7511,6 +7547,39 @@ fn pair_motion(now: &[MotionKey], last: &[MotionKey]) -> Vec<glam::Mat4> {
 
 /// A draw's geometry (vertex offset, index offset, index count) and its transform.
 type MotionKey = ((u32, u32, u32), glam::Mat4);
+
+/// The `capacity` instances nearest `eye`, by the distance to their bounds (centre less radius), in their draw order:
+/// the order keeps the top level's signature still while the same set stays nearest.
+fn nearest_tlas_instances(
+    instances: Vec<(u32, u32, glam::Mat4, bool)>,
+    capacity: usize,
+    eye: glam::Vec3,
+    bounds: impl Fn(u32) -> Option<([f32; 3], [f32; 3])>,
+) -> Vec<(u32, u32, glam::Mat4, bool)> {
+    if instances.len() <= capacity || capacity == 0 {
+        return instances;
+    }
+    let mut keyed: Vec<(f32, usize)> = instances
+        .iter()
+        .enumerate()
+        .map(|(k, (_, offset, model, _))| {
+            let reach = bounds(*offset).map_or_else(
+                || model.w_axis.truncate().distance(eye),
+                |(min, max)| {
+                    let (min, max) = (glam::Vec3::from(min), glam::Vec3::from(max));
+                    let centre = model.transform_point3((min + max) * 0.5);
+                    let radius = model.transform_vector3((max - min) * 0.5).length();
+                    centre.distance(eye) - radius
+                },
+            );
+            (reach, k)
+        })
+        .collect();
+    keyed.select_nth_unstable_by(capacity - 1, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    keyed.truncate(capacity);
+    keyed.sort_unstable_by_key(|(_, k)| *k);
+    keyed.into_iter().map(|(_, k)| instances[k]).collect()
+}
 
 /// The motion keys' hasher: the crate's per-draw one ([`crate::fast_hash`]).
 type MotionHash = crate::fast_hash::FastHash;
@@ -7862,6 +7931,30 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
         for texel in data.chunks_exact_mut(4) {
             texel[3] = (f32::from(texel[3]) * scale).round().clamp(0.0, 255.0) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tlas_budget_tests {
+    use super::nearest_tlas_instances;
+
+    #[test]
+    fn past_the_capacity_the_nearest_are_traced_in_draw_order() {
+        // Draw order (by material) puts the far ones first.
+        let instances: Vec<(u32, u32, glam::Mat4, bool)> = (0..20u32)
+            .map(|i| (i, 0, glam::Mat4::from_translation(glam::Vec3::new(1000.0 - i as f32 * 50.0, 0.0, 0.0)), true))
+            .collect();
+        let bounds = |_| Some(([-1.0; 3], [1.0; 3]));
+        let kept = nearest_tlas_instances(instances.clone(), 5, glam::Vec3::ZERO, bounds);
+        assert_eq!(kept.iter().map(|k| k.0).collect::<Vec<_>>(), [15, 16, 17, 18, 19]);
+        assert_eq!(nearest_tlas_instances(instances.clone(), 20, glam::Vec3::ZERO, bounds).len(), 20, "within capacity: all");
+        // A big far thing reaches nearer than its centre: a 900 m mountain at 1 km is as near as a hut at 100 m.
+        let mountain = (99, 1, glam::Mat4::from_scale_rotation_translation(glam::Vec3::splat(900.0), glam::Quat::IDENTITY, glam::Vec3::X * 1000.0), true);
+        let mut with_mountain = instances;
+        with_mountain.insert(0, mountain);
+        let sized = |offset| Some(if offset == 1 { ([-1.0; 3], [1.0; 3]) } else { ([-1.0; 3], [1.0; 3]) });
+        let kept = nearest_tlas_instances(with_mountain, 5, glam::Vec3::ZERO, sized);
+        assert_eq!(kept[0].0, 99, "{:?}", kept.iter().map(|k| k.0).collect::<Vec<_>>());
     }
 }
 
