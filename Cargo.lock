@@ -3971,6 +3971,16 @@ name = "somnium_jobs"
 version = "0.1.0"
 
 [[package]]
+name = "somnium_life"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "serde",
+ "serde_json",
+ "somnium_ecs",
+]
+
+[[package]]
 name = "somnium_physics"
 version = "0.1.0"
 dependencies = [

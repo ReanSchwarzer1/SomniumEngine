@@ -1,0 +1,15 @@
+[package]
+name = "somnium_life"
+description = "Ambient life: villagers on daily routines between a place's spots, livestock in pens, carts on roads, with simulation LOD."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Editor components and their schemas.
+somnium_ecs = { workspace = true }
