@@ -432,6 +432,14 @@ impl GlobalResourcePool {
         })
     }
 
+    /// The instance buffer grew ([`crate::instance::InstancePool::reserve`]): bind the new one in both groups.
+    pub fn set_instance_buffer(&mut self, device: &wgpu::Device, buffer: &wgpu::Buffer) {
+        self.instance_buffer = buffer.clone();
+        self.update_textures(device);
+        let dummy = self.dummy_view.clone();
+        self.lean_bind_group = self.rebuild_bind_group(device, &[&dummy]);
+    }
+
     pub fn update_textures(&mut self, device: &wgpu::Device) {
         let views: Vec<&wgpu::TextureView> = self.texture_views[..self.bound_len()].iter().collect();
         self.bind_group = self.rebuild_bind_group(device, &views);

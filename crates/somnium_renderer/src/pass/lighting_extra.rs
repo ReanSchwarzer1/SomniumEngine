@@ -16,6 +16,7 @@ pub const FLAG_SDF: u32 = 8;
 pub const FLAG_PROBES: u32 = 16;
 
 /// One mesh contribution to the world SDF clipmap.
+#[derive(Clone)]
 pub struct MeshSdfDraw {
     pub model: glam::Mat4,
     pub local_min: [f32; 3],
@@ -403,6 +404,54 @@ impl LightingExtraPass {
         height: u32,
         mesh_sdf: &[MeshSdfDraw],
     ) {
+        self.record_with(
+            device,
+            queue,
+            encoder,
+            global_bind,
+            tlas,
+            depth_view,
+            vis_view,
+            gi_view,
+            env_view,
+            env_sampler,
+            view_proj,
+            view,
+            projection,
+            scene_revision,
+            sdf_scene_revision,
+            camera_pos,
+            width,
+            height,
+            &|| mesh_sdf.to_vec(),
+        );
+    }
+
+    /// [`Self::record`] with the mesh SDF draws built only if the SDF is refilled this frame: building one per draw
+    /// every frame cost 14 ms at 100,000 draws (`scale_probe`) for a fill that runs when the camera crosses a cell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        global_bind: &wgpu::BindGroup,
+        tlas: Option<&wgpu::Tlas>,
+        depth_view: &wgpu::TextureView,
+        vis_view: &wgpu::TextureView,
+        gi_view: &wgpu::TextureView,
+        env_view: &wgpu::TextureView,
+        env_sampler: &wgpu::Sampler,
+        view_proj: glam::Mat4,
+        view: glam::Mat4,
+        projection: glam::Mat4,
+        scene_revision: u64,
+        sdf_scene_revision: u64,
+        camera_pos: glam::Vec3,
+        width: u32,
+        height: u32,
+        mesh_sdf: &dyn Fn() -> Vec<MeshSdfDraw>,
+    ) {
         if self.flags == 0 {
             self.cache_history_valid = false;
             self.specular_history_valid = false;
@@ -472,7 +521,8 @@ impl LightingExtraPass {
             );
             let dirty = force_rebuild || revision_ready;
             if dirty {
-                self.fill_sdf(queue, camera_pos, mesh_sdf);
+                let draws = mesh_sdf();
+                self.fill_sdf(queue, camera_pos, &draws);
                 self.last_sdf_origin = Some(origin);
                 self.last_sdf_scene_revision = Some(sdf_scene_revision);
                 self.pending_sdf_scene_revision = None;

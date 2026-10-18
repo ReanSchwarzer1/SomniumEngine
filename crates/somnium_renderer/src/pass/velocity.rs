@@ -41,6 +41,8 @@ pub struct VelocityPass {
     /// Per-instance motion, its capacity in records, and last frame's skinned poses (with their generation).
     motion: wgpu::Buffer,
     motion_capacity: usize,
+    /// What `motion` holds, so a still frame re-sends nothing ([`crate::instance::upload_changed`]).
+    motion_uploaded: Vec<GpuMotion>,
     previous_pose: wgpu::Buffer,
     pose_generation: u64,
     depth_view: wgpu::TextureView,
@@ -162,6 +164,7 @@ impl VelocityPass {
             params,
             motion,
             motion_capacity: 1,
+            motion_uploaded: Vec::new(),
             previous_pose,
             pose_generation: 0,
             depth_view: depth_view.clone(),
@@ -262,6 +265,7 @@ impl VelocityPass {
         if motion.len() > self.motion_capacity {
             self.motion_capacity = motion.len().next_power_of_two();
             self.motion = motion_buffer(device, self.motion_capacity);
+            self.motion_uploaded.clear();
             rebind = true;
         }
         if let Some((buffer, generation)) = previous_pose
@@ -274,9 +278,7 @@ impl VelocityPass {
         if rebind {
             self.rebind(device);
         }
-        if !motion.is_empty() {
-            queue.write_buffer(&self.motion, 0, bytemuck::cast_slice(motion));
-        }
+        crate::instance::upload_changed(queue, &self.motion, motion, &mut self.motion_uploaded, 1024);
     }
 
     pub fn resize(

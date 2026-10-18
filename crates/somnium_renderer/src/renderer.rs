@@ -159,7 +159,7 @@ pub struct SomniumRenderer {
     /// While set (`set_first_person`), submitted casters are the game's first-person rig: they cast into the nearest
     /// cascade only, so the player's own hands, tools and body never dirty the cached distant ones.
     first_person: bool,
-    first_person_casters: std::collections::HashSet<(u32, u32)>,
+    first_person_casters: crate::fast_hash::FastSet<(u32, u32)>,
     /// Meshes (by vertex offset) left out of this frame's traced scene (`exclude_from_tracing`).
     untraced_meshes: std::collections::HashSet<u32>,
     /// Meshes (by vertex offset) traced only within a distance of the camera this frame (`limit_tracing`).
@@ -577,7 +577,7 @@ pub struct SomniumRenderer {
     cluster_args: Vec<crate::indirect::DrawIndirectArgs>,
     /// How many times each mesh appears in this frame's draw queue, used to
     /// decide whether cluster expansion is worth it (Phase 17G).
-    instanced_counts: std::collections::HashMap<u32, u32>,
+    instanced_counts: crate::fast_hash::FastMap<u32, u32>,
     /// What `cluster_args` / `cull_aabbs` were expanded from (draw geometry,
     /// sidedness, meshlet mode) and the meshlet count, so an unchanged draw
     /// list reuses them. See `draw_list_signature`.
@@ -625,8 +625,8 @@ pub struct SomniumRenderer {
     /// 6.4x and the `Instances` zone measured 5.4x. The terrain loop below
     /// already holds the chunk when it builds the draw, so the word is
     /// recorded there instead of searched for afterwards.
-    terrain_lod_by_vertex: std::collections::HashMap<u32, u32>,
-    reactive_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
+    terrain_lod_by_vertex: crate::fast_hash::FastMap<u32, u32>,
+    reactive_draws: crate::fast_hash::FastSet<crate::pass::taa::ReactiveDrawKey>,
     /// Off-camera casters that still shadow into a cascade. Not in `draw_queue`,
     /// so they skip vis / GPU 15B, but they occupy instance slots after the
     /// opaque vis draws so the shadow pass can find their transforms.
@@ -654,6 +654,9 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
+    /// `sort_draws_stable`'s keys and output, kept between frames.
+    sort_keys: Vec<(u64, u32)>,
+    sort_scratch: Vec<DrawCommand>,
 
     /// Per-entity vertex paint masks (see `crate::vertex_paint`).
     pub vertex_paint: crate::vertex_paint::VertexPaintPool,
@@ -1212,7 +1215,7 @@ impl SomniumRenderer {
             virtual_shadow_readiness: crate::shadow::virtual_map::VirtualShadowReadiness::default(),
             shadow_caster_content_revision: 0,
             first_person: false,
-            first_person_casters: std::collections::HashSet::new(),
+            first_person_casters: Default::default(),
             untraced_meshes: std::collections::HashSet::new(),
             trace_reach: std::collections::HashMap::new(),
             no_contact_meshes: std::collections::HashSet::new(),
@@ -1392,7 +1395,7 @@ impl SomniumRenderer {
             cull_pass: crate::pass::cull::CullPass::new(&ctx.device, &shaders),
             cull_aabbs: Vec::with_capacity(256),
             cluster_args: Vec::with_capacity(256),
-            instanced_counts: std::collections::HashMap::new(),
+            instanced_counts: Default::default(),
             cluster_source: None,
             cluster_meshlet_arguments: 0,
             cluster_posed: Vec::new(),
@@ -1407,8 +1410,8 @@ impl SomniumRenderer {
             cascade_caster_cull: !cascade_cull_env_off(),
             cascade_view_projs: [glam::Mat4::IDENTITY; crate::shadow::NUM_CASCADES],
             rebuilt_chunks: Vec::with_capacity(32),
-            terrain_lod_by_vertex: std::collections::HashMap::new(),
-            reactive_draws: std::collections::HashSet::new(),
+            terrain_lod_by_vertex: Default::default(),
+            reactive_draws: Default::default(),
             shadow_only_queue: Vec::with_capacity(256),
             shadow_caster_scratch: Vec::with_capacity(256),
             gpu_driven: ctx.supports_gpu_driven(),
@@ -1464,6 +1467,8 @@ impl SomniumRenderer {
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
+            sort_keys: Vec::new(),
+            sort_scratch: Vec::new(),
             vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
             water_textures_bind_group,
@@ -4952,22 +4957,26 @@ impl SomniumRenderer {
         // reordering the queue afterwards pairs every draw with a different
         // mesh's offsets — which renders as triangles stretched between
         // unrelated parts of the geometry pool.
-        self.draw_queue.sort_by_key(|cmd| cmd.sort_key);
+        sort_draws_stable(&mut self.draw_queue, &mut self.sort_keys, &mut self.sort_scratch);
         if self.taa_pass.enabled() || self.fsr_pass.enabled {
-            let posed: std::collections::HashSet<_> =
+            let posed: crate::fast_hash::FastSet<u32> =
                 self.animated_geometry.posed_offsets().collect();
-            let flags: Vec<_> = self
-                .draw_queue
-                .iter()
-                .map(|cmd| {
-                    u32::from(
-                        posed.contains(&cmd.vertex_offset)
-                            || self
-                                .reactive_draws
-                                .contains(&crate::pass::taa::ReactiveDrawKey::of(cmd)),
-                    )
-                })
-                .collect();
+            // Nothing posed and nothing declared moving: every flag is zero, without a key built and hashed per draw.
+            let flags: Vec<u32> = if posed.is_empty() && self.reactive_draws.is_empty() {
+                vec![0; self.draw_queue.len()]
+            } else {
+                self.draw_queue
+                    .iter()
+                    .map(|cmd| {
+                        u32::from(
+                            posed.contains(&cmd.vertex_offset)
+                                || self
+                                    .reactive_draws
+                                    .contains(&crate::pass::taa::ReactiveDrawKey::of(cmd)),
+                        )
+                    })
+                    .collect()
+            };
             if self.taa_pass.enabled() {
                 self.taa_pass
                     .set_reactive_instances(&ctx.device, &ctx.queue, &flags);
@@ -5021,6 +5030,9 @@ impl SomniumRenderer {
             });
         }
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
+        if self.instances.reserve(&ctx.device) {
+            self.global_pool.set_instance_buffer(&ctx.device, &self.instances.buffer);
+        }
         self.instances.upload(&ctx.queue);
         self.record_motion(ctx);
         self.upload_vertex_paint(ctx);
@@ -5398,7 +5410,7 @@ impl SomniumRenderer {
             // frame behind its character cannot be seen.
             self.rt_pose_tick = self.rt_pose_tick.wrapping_add(1);
             let repose = self.rt_pose_tick % 2 == 0;
-            for cmd in &self.draw_queue {
+            for cmd in self.draw_queue.iter().filter(|_| !posed.is_empty()) {
                 let Some(&count) = posed.get(&cmd.vertex_offset) else { continue };
                 if self.first_person_casters.contains(&(cmd.vertex_offset, cmd.index_offset)) {
                     continue;
@@ -5431,14 +5443,25 @@ impl SomniumRenderer {
             // material order and truncated it at its cap, so *which* trees and
             // walls rays could see depended on how materials happened to sort.
             let geometry = &self.geometry;
+            let raytrace = &self.raytrace_pass;
+            let first_person = &self.first_person_casters;
             let instances: Vec<(u32, u32, glam::Mat4, bool)> = self
                 .draw_queue
                 .iter()
                 .enumerate()
-                .filter(|(_, cmd)| !self.first_person_casters.contains(&(cmd.vertex_offset, cmd.index_offset)))
+                // A draw with no bottom level never reaches the top one (`build` skips it): ask that first, before the
+                // bounds and the maths, which at 100,000 draws were most of this zone (`scale_probe`).
+                .filter(|(_, cmd)| raytrace.has_blas(cmd.vertex_offset))
+                .filter(|(_, cmd)| {
+                    first_person.is_empty() || !first_person.contains(&(cmd.vertex_offset, cmd.index_offset))
+                })
                 .filter(|(_, cmd)| !self.untraced_meshes.contains(&cmd.vertex_offset))
                 // A posed mesh out of reach keeps whatever pose its bottom level last had: left out, not shown stale.
-                .filter(|(_, cmd)| !posed.contains_key(&cmd.vertex_offset) || live_posed.contains(&cmd.vertex_offset))
+                .filter(|(_, cmd)| {
+                    posed.is_empty()
+                        || !posed.contains_key(&cmd.vertex_offset)
+                        || live_posed.contains(&cmd.vertex_offset)
+                })
                 .filter_map(|(i, cmd)| {
                     let radius = geometry.mesh_aabb(cmd.vertex_offset).map_or(f32::MAX, |(min, max)| {
                         let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
@@ -5517,30 +5540,26 @@ impl SomniumRenderer {
 
         {
             self.profiler.cpu_begin("Lighting extra");
-            let mesh_sdf: Vec<crate::pass::lighting_extra::MeshSdfDraw> = self
-                .draw_queue
-                .iter()
-                .filter_map(|cmd| {
-                    let (min, max) = self.geometry.mesh_aabb(cmd.vertex_offset)?;
-                    Some(crate::pass::lighting_extra::MeshSdfDraw {
-                        model: cmd.transform,
-                        local_min: min,
-                        local_max: max,
-                        vertex_offset: cmd.vertex_offset,
-                        base_color: self.materials_pool.get(cmd.material_id).map_or(
-                            [0.5; 3],
-                            |material| {
-                                [
-                                    material.base_color[0],
-                                    material.base_color[1],
-                                    material.base_color[2],
-                                ]
-                            },
-                        ),
-                        brick: self.geometry.mesh_sdf(cmd.vertex_offset),
+            // Built only when the pass refills its SDF (a camera cell crossed, the scene changed), not every frame.
+            let (draw_queue, geometry, materials) = (&self.draw_queue, &self.geometry, &self.materials_pool);
+            let mesh_sdf = || -> Vec<crate::pass::lighting_extra::MeshSdfDraw> {
+                draw_queue
+                    .iter()
+                    .filter_map(|cmd| {
+                        let (min, max) = geometry.mesh_aabb(cmd.vertex_offset)?;
+                        Some(crate::pass::lighting_extra::MeshSdfDraw {
+                            model: cmd.transform,
+                            local_min: min,
+                            local_max: max,
+                            vertex_offset: cmd.vertex_offset,
+                            base_color: materials.get(cmd.material_id).map_or([0.5; 3], |material| {
+                                [material.base_color[0], material.base_color[1], material.base_color[2]]
+                            }),
+                            brick: geometry.mesh_sdf(cmd.vertex_offset),
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
             self.profiler.begin(&mut encoder, "Lighting extra");
             let traced_scene_revision = if (self.lighting_extra_pass.flags_bits()
                 & (crate::pass::lighting_extra::FLAG_PATH
@@ -5556,7 +5575,7 @@ impl SomniumRenderer {
             } else {
                 traced_scene_revision
             };
-            self.lighting_extra_pass.record(
+            self.lighting_extra_pass.record_with(
                 &ctx.device,
                 &ctx.queue,
                 &mut encoder,
@@ -7435,37 +7454,31 @@ impl SomniumRenderer {
     }
 }
 
-/// A small multiplicative hasher for the motion keys (a few u32s): the default SipHash costs too much per draw in a
-/// debug build of the renderer.
-#[derive(Default, Clone, Copy)]
-struct MotionHash;
-impl std::hash::BuildHasher for MotionHash {
-    type Hasher = MotionHasher;
-    fn build_hasher(&self) -> MotionHasher {
-        MotionHasher(0)
+/// `draws.sort_by_key(|d| d.sort_key)`, exactly (equal keys keep their order), without moving 104-byte commands
+/// through a merge: the keys and indices are sorted and the commands gathered once. A queue already in order is left
+/// as it is. At 100,000 draws the stable sort was 14 ms of the frame (`examples/scale_probe.rs`).
+fn sort_draws_stable(draws: &mut Vec<DrawCommand>, keys: &mut Vec<(u64, u32)>, scratch: &mut Vec<DrawCommand>) {
+    if draws.windows(2).all(|pair| pair[0].sort_key <= pair[1].sort_key) {
+        return;
     }
+    keys.clear();
+    keys.extend(draws.iter().enumerate().map(|(i, d)| (d.sort_key.0, i as u32)));
+    // Ties broken by the original index: the order a stable sort keeps.
+    keys.sort_unstable();
+    scratch.clear();
+    scratch.extend(keys.iter().map(|&(_, i)| draws[i as usize].clone()));
+    std::mem::swap(draws, scratch);
 }
-struct MotionHasher(u64);
-impl std::hash::Hasher for MotionHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.0 = (self.0.rotate_left(5) ^ u64::from(*b)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-        }
-    }
-    fn write_u32(&mut self, n: u32) {
-        self.0 = (self.0.rotate_left(5) ^ u64::from(n)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-}
+
+/// The motion keys' hasher: the crate's per-draw one ([`crate::fast_hash`]).
+type MotionHash = crate::fast_hash::FastHash;
 
 /// PORTAL-0-D: `packed` is this frame's `terrain_lod_by_vertex`, built by the
 /// terrain loop. A non-terrain draw is simply absent from it, which is the same
 /// answer the old scan gave by falling off the end of every chunk list — but in
 /// one hash lookup instead of one pass over every chunk of every terrain.
 fn gpu_instance_from_cmd(
-    packed: &std::collections::HashMap<u32, u32>,
+    packed: &crate::fast_hash::FastMap<u32, u32>,
     cmd: &DrawCommand,
     shadow_debug: f32,
 ) -> crate::instance::GpuInstanceData {
@@ -7553,6 +7566,17 @@ fn consider_shadow_caster(
     };
     let min = glam::Vec3::from(min);
     let max = glam::Vec3::from(max);
+    // Too small to cast at its distance: the cheap test first. Both it and the cascade tests below must pass, so the
+    // order changes nothing but the cost (in a region most draws fail this one).
+    if threshold > 0.0 {
+        let half = cmd.transform.transform_vector3((max - min) * 0.5);
+        let radius = half.length();
+        let centre = cmd.transform.transform_point3((min + max) * 0.5);
+        let dist_sq = (centre - camera_pos).length_squared();
+        if !crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
+            return;
+        }
+    }
     let (wmin, wmax) = crate::culling::transform_aabb(cmd.transform, min, max);
     // A posed caster's shadow lies within its own size plus the run of its shadow: no receiver further from the eye
     // than that reads it, and a receiver reads the cascade its own depth falls in (from 90% of the split before, the
@@ -7570,15 +7594,6 @@ fn consider_shadow_caster(
     });
     if !coverage.into_iter().any(|inside| inside) {
         return;
-    }
-    if threshold > 0.0 {
-        let half = cmd.transform.transform_vector3((max - min) * 0.5);
-        let radius = half.length();
-        let centre = cmd.transform.transform_point3((min + max) * 0.5);
-        let dist_sq = (centre - camera_pos).length_squared();
-        if !crate::pass::shadow::casts_shadow(radius, dist_sq, threshold) {
-            return;
-        }
     }
     let cascades = coverage.iter().enumerate().fold(0u8, |mask, (i, inside)| mask | (u8::from(*inside) << i));
     out.push(crate::pass::shadow::ShadowCaster { cascades, ..caster });
@@ -7809,6 +7824,42 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
 }
 
 #[cfg(test)]
+mod draw_sort_tests {
+    use super::sort_draws_stable;
+    use crate::command::{DrawCommand, SortKey};
+
+    #[test]
+    fn the_gathered_sort_keeps_the_stable_order_of_equal_keys() {
+        // Foliage submits with one key for every instance; the order among equal keys is what pairs this frame's
+        // instance `i` with last frame's for motion vectors, so it must be the stable sort's exactly.
+        let draws: Vec<DrawCommand> = (0..5_000u32)
+            .map(|i| DrawCommand {
+                paint: 0,
+                sort_key: SortKey::new(0, (i * 7 % 5) as u16, if i % 3 == 0 { 0 } else { i % 11 }),
+                vertex_offset: i,
+                index_offset: 0,
+                index_count: 3,
+                material_id: 0,
+                transform: glam::Mat4::IDENTITY,
+                casts_shadow: true,
+            })
+            .collect();
+        let mut expected = draws.clone();
+        expected.sort_by_key(|d| d.sort_key);
+        let (mut keys, mut scratch) = (Vec::new(), Vec::new());
+        let mut gathered = draws.clone();
+        sort_draws_stable(&mut gathered, &mut keys, &mut scratch);
+        assert!(gathered.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
+        // Sorted already: left alone, and a second frame reuses the buffers.
+        sort_draws_stable(&mut gathered, &mut keys, &mut scratch);
+        assert!(gathered.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
+        let mut again = draws;
+        sort_draws_stable(&mut again, &mut keys, &mut scratch);
+        assert!(again.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
+    }
+}
+
+#[cfg(test)]
 mod traced_shadow_tests {
     use super::traces_shadow;
 
@@ -8018,7 +8069,7 @@ mod frame_instance_layout_tests {
         let shadow_only = draw(22, 202, 2, 20.0);
         let transparent = draw(33, 303, 3, 30.0);
         let uploaded = [&visible, &shadow_only, &transparent]
-            .map(|cmd| gpu_instance_from_cmd(&std::collections::HashMap::new(), cmd, 0.0));
+            .map(|cmd| gpu_instance_from_cmd(&Default::default(), cmd, 0.0));
         let layout = frame_instance_layout(1, 1);
 
         for gpu_driven in [false, true] {

@@ -21,6 +21,7 @@ pub mod cluster;
 pub mod command;
 pub mod context;
 pub mod culling;
+pub(crate) mod fast_hash;
 pub mod geometry;
 pub mod imported_bc;
 pub mod indirect;

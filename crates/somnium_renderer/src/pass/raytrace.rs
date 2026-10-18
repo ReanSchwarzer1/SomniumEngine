@@ -14,7 +14,6 @@
 //! says, and effectively Vulkan-only, so every entry point here checks whether
 //! the device granted it and does nothing when it did not.
 
-use std::collections::HashMap;
 
 /// Geometry registered for tracing, keyed by its vertex offset in the pool.
 ///
@@ -34,7 +33,7 @@ struct MeshBlas {
 pub struct RaytracePass {
     /// `None` when the device did not grant ray query.
     tlas: Option<wgpu::Tlas>,
-    blas: HashMap<u32, MeshBlas>,
+    blas: crate::fast_hash::FastMap<u32, MeshBlas>,
     /// Bottom-level structures whose geometry changed and must be (re)built.
     ///
     /// Phase 25B. `build` used to reissue **every** BLAS every frame, which was
@@ -84,7 +83,7 @@ impl RaytracePass {
         if !supported {
             return Self {
                 tlas: None,
-                blas: HashMap::new(),
+                blas: Default::default(),
                 pending_blas: Vec::new(),
                 layout: None,
                 bind_group: None,
@@ -123,7 +122,7 @@ impl RaytracePass {
 
         Self {
             tlas: Some(tlas),
-            blas: HashMap::new(),
+            blas: Default::default(),
             pending_blas: Vec::new(),
             layout: Some(layout),
             bind_group: None,
@@ -410,6 +409,12 @@ impl RaytracePass {
 
     pub fn instance_count(&self) -> u32 {
         self.instance_count
+    }
+
+    /// Whether `vertex_offset` has a bottom level: a draw without one never reaches the top level.
+    #[must_use]
+    pub fn has_blas(&self, vertex_offset: u32) -> bool {
+        self.blas.contains_key(&vertex_offset)
     }
 
     pub fn overflowed(&self) -> bool {
