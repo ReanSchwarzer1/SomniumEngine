@@ -73,6 +73,17 @@ const FIRES: usize = 24;
 const BURSTS: usize = 12;
 const DECALS: usize = 14;
 const LOG_LINES: usize = 6;
+/// The vertical field of view hello_engine draws a fight's camera with
+/// (`main.rs`, `on_render`): the aim and the marks project through it too.
+const VIEW_FOV: f32 = 45.0;
+/// "?" and "!" over the heads of those who have noticed the protagonist: how
+/// many at once, how long each stays (it fades in two steps over the last
+/// second), and their bare colours: bone for a look, a dull red for the alarm.
+const MARKS: usize = 8;
+const MARK_SECONDS: f32 = 2.5;
+const MARK_ALPHA: [u8; 3] = [235, 150, 70];
+const MARK_LOOK: [u8; 3] = [214, 206, 186];
+const MARK_ALARM: [u8; 3] = [178, 64, 52];
 
 fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
@@ -85,6 +96,7 @@ fn material(name: &str) -> MaterialComponent {
 
 pub fn register(r: &mut somnium_core::authoring::GameRegistration) {
     r.components.push(somnium_combat::components::register);
+    r.components.push(register_encounter);
     r.presets.push(somnium_core::authoring::GamePreset {
         id: "hello.combat_sandbox",
         label: "Combat Sandbox",
@@ -151,6 +163,12 @@ fn beast(
 fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     let at = origin(args)?;
     let floor = args.get("floor").and_then(Value::as_bool).unwrap_or(true);
+    // Built from a scene's Combat Encounter: the scene has its own camera and
+    // protagonist.
+    let encounter = args
+        .get("encounter")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let root = world.spawn((
         Name::new("Combat Wilds"),
         Transform::from_translation(at),
@@ -178,8 +196,16 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         out.push(ground);
     }
     for (name, pos, scale) in [
-        ("Tall grass (east)", Vec3::new(8.0, 0.012, 8.0), Vec3::new(8.0, 0.02, 10.0)),
-        ("Tall grass (west)", Vec3::new(-8.0, 0.012, 6.0), Vec3::new(7.0, 0.02, 8.0)),
+        (
+            "Tall grass (east)",
+            Vec3::new(8.0, 0.012, 8.0),
+            Vec3::new(8.0, 0.02, 10.0),
+        ),
+        (
+            "Tall grass (west)",
+            Vec3::new(-8.0, 0.012, 6.0),
+            Vec3::new(7.0, 0.02, 8.0),
+        ),
     ] {
         let e = block(world, root, name, pos, scale, MeshKind::Cube, "grass");
         let _ = world.insert_component(
@@ -219,28 +245,30 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         );
         out.push(e);
     }
-    let eye = Vec3::new(0.0, 34.0, -30.0);
-    let camera_world = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, 8.0), Vec3::Y).inverse();
-    let (_, rotation, _) = camera_world.to_scale_rotation_translation();
-    out.push(world.spawn((
-        Name::new("Combat Camera"),
-        Transform {
-            translation: eye,
-            rotation,
-            ..Default::default()
-        },
-        WorldTransform::identity(),
-        Parent { entity: root },
-        CameraSettingsComponent::default(),
-    )));
-    out.extend(fighter(
-        world,
-        root,
-        "Protagonist",
-        Vec3::new(0.0, 0.0, -8.0),
-        Vec3::Z,
-        CombatantComponent::protagonist(),
-    ));
+    if !encounter {
+        let eye = Vec3::new(0.0, 34.0, -30.0);
+        let camera_world = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, 8.0), Vec3::Y).inverse();
+        let (_, rotation, _) = camera_world.to_scale_rotation_translation();
+        out.push(world.spawn((
+            Name::new("Combat Camera"),
+            Transform {
+                translation: eye,
+                rotation,
+                ..Default::default()
+            },
+            WorldTransform::identity(),
+            Parent { entity: root },
+            CameraSettingsComponent::default(),
+        )));
+        out.extend(fighter(
+            world,
+            root,
+            "Protagonist",
+            Vec3::new(0.0, 0.0, -8.0),
+            Vec3::Z,
+            CombatantComponent::protagonist(),
+        ));
+    }
     out.push(world.spawn((
         Name::new("Horse"),
         Transform {
@@ -300,7 +328,12 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     let camp = Vec3::new(-14.0, 0.0, 16.0);
     for (i, (name, archetype, weapon, leader)) in [
         ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
-        ("Bandit (spear)", Archetype::Spearman, WeaponKind::Spear, false),
+        (
+            "Bandit (spear)",
+            Archetype::Spearman,
+            WeaponKind::Spear,
+            false,
+        ),
         ("Bandit (axe)", Archetype::Brute, WeaponKind::Axe, false),
         ("Bandit (bow)", Archetype::Archer, WeaponKind::Bow, false),
     ]
@@ -832,6 +865,75 @@ pub fn claims_play(world: &World) -> bool {
     world
         .iter_with::<CombatantComponent>()
         .any(|(_, c)| c.enabled && c.player)
+        || world
+            .iter_with::<CombatEncounterComponent>()
+            .any(|(_, c)| c.enabled)
+}
+
+/// A fight authored into a scene: on Play the host builds the encounter at
+/// this entity's position, its fighters stood on the ground there, and takes
+/// it away again on Stop. The scene keeps its own camera and protagonist.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CombatEncounterComponent {
+    /// Built on Play.
+    pub enabled: bool,
+    /// Which: `wilds` (a horse, a rime wolf pack and a bandit camp, none of
+    /// them aware yet).
+    pub kind: String,
+    /// Bring its own flat ground; off stands everyone on the scene's.
+    pub floor: bool,
+}
+
+impl somnium_ecs::Component for CombatEncounterComponent {}
+
+impl Default for CombatEncounterComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kind: "wilds".into(),
+            floor: false,
+        }
+    }
+}
+
+fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
+    registry.register(somnium_ecs::component_schema! {
+        CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
+        fields {
+            enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet." },
+            floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
+        }
+    });
+}
+
+/// Every enabled Combat Encounter built at its entity's position (the
+/// scene's own camera and protagonist kept): the entities made, for Stop to
+/// take away.
+fn expand_encounters(world: &mut World) -> Vec<Entity> {
+    let wanted: Vec<(Vec3, CombatEncounterComponent)> = world
+        .iter_with::<CombatEncounterComponent>()
+        .filter(|(_, c)| c.enabled)
+        .map(|(e, c)| {
+            (
+                world_matrix(world, e).transform_point3(Vec3::ZERO),
+                c.clone(),
+            )
+        })
+        .collect();
+    let mut made = Vec::new();
+    for (at, encounter) in wanted {
+        let args =
+            json!({"position": [at.x, at.y, at.z], "floor": encounter.floor, "encounter": true});
+        match encounter.kind.trim().to_ascii_lowercase().as_str() {
+            "wilds" => match spawn_wilds(world, &args) {
+                Ok(entities) => made.extend(entities),
+                Err(e) => tracing::warn!("Combat Encounter at {at}: {e}"),
+            },
+            other => tracing::warn!("Combat Encounter at {at}: no kind {other:?} (try \"wilds\")"),
+        }
+    }
+    made
 }
 
 /// The physics world as combat sees it: a thin capsule swept through Jolt.
@@ -981,6 +1083,9 @@ struct Run {
     pools: Pools,
     spawned: Vec<Entity>,
     log: VecDeque<String>,
+    /// Who has noticed the protagonist, how far (suspicious or alerted), and
+    /// the seconds its mark has left.
+    marks: BTreeMap<CombatantId, (somnium_combat::ai::Awareness, f32)>,
     readouts: HashMap<Entity, (i32, i32, i32, &'static str)>,
 }
 
@@ -992,6 +1097,10 @@ struct Hud {
     shown: [String; 3],
     /// The viewport rectangle (logical x, y, w, h) the panels were laid out in.
     rect: (u32, u32, u32, u32),
+    /// Per mark slot, a glyph ("?", "!") at each fade step.
+    marks: Vec<[[NodeHandle; 3]; 2]>,
+    /// What each slot shows: glyph, fade step, where.
+    marks_shown: Vec<Option<(usize, usize, [i32; 2])>>,
 }
 
 impl Hud {
@@ -1048,6 +1157,22 @@ impl Hud {
         let log_w = 330.0f32.min(vw * 0.5);
         // Below the viewport's own toolbar row.
         let log = panel(ui, vx + vw - gap - log_w, vy + 48.0, log_w, 140.0);
+        // Bare glyphs, no box or outline: one node per glyph and fade step.
+        let marks = (0..MARKS)
+            .map(|_| {
+                [("?", MARK_LOOK), ("!", MARK_ALARM)].map(|(glyph, rgb)| {
+                    MARK_ALPHA.map(|a| {
+                        let mark = TextBuilder::new(WidgetBuilder::new().with_visibility(false))
+                            .with_text(glyph)
+                            .with_font_id(font)
+                            .with_font_size(22.0)
+                            .with_color([rgb[0], rgb[1], rgb[2], a])
+                            .build();
+                        ui.add_node(mark, root)
+                    })
+                })
+            })
+            .collect();
         Self {
             canvas,
             vitals,
@@ -1055,6 +1180,32 @@ impl Hud {
             log,
             shown: Default::default(),
             rect,
+            marks,
+            marks_shown: vec![None; MARKS],
+        }
+    }
+
+    /// Show each mark (glyph, fade step, centre on screen) and hide the rest,
+    /// touching only the slots that changed.
+    fn place_marks(&mut self, marks: &[(usize, usize, Vec2)]) {
+        let ui = self.canvas.ui_mut();
+        for (i, slot) in self.marks.iter().enumerate() {
+            let want = marks
+                .get(i)
+                .map(|&(g, a, p)| (g, a, [p.x.round() as i32, p.y.round() as i32]));
+            if self.marks_shown[i] == want {
+                continue;
+            }
+            if let Some((g, a, _)) = self.marks_shown[i] {
+                ui.set_visibility(slot[g][a], false);
+            }
+            if let Some((g, a, [x, y])) = want {
+                let rect =
+                    somnium_ui::types::Rect::new(x as f32 - 7.0, y as f32 - 14.0, 14.0, 28.0);
+                ui.place_node(slot[g][a], rect);
+                ui.set_visibility(slot[g][a], true);
+            }
+            self.marks_shown[i] = want;
         }
     }
 
@@ -1076,6 +1227,8 @@ pub struct CombatDemo {
     reader: CombatInput,
     cursor: Option<Vec2>,
     hud: Option<Hud>,
+    /// Ctrl held: the wheel is the camera's, not the measure's.
+    ctrl: bool,
 }
 
 impl Default for CombatDemo {
@@ -1088,6 +1241,7 @@ impl Default for CombatDemo {
             reader: CombatInput::new(),
             cursor: None,
             hud: None,
+            ctrl: false,
         }
     }
 }
@@ -1164,6 +1318,12 @@ impl CombatDemo {
                 if let Some(name) = somnium_input::device::key_name(*key) {
                     devices.set_key(name, *state == InputState::Pressed);
                 }
+                if matches!(
+                    key,
+                    somnium_core::KeyCode::ControlLeft | somnium_core::KeyCode::ControlRight
+                ) {
+                    self.ctrl = *state == InputState::Pressed;
+                }
             }
             EngineEvent::MouseButton { button, state } => {
                 let name = match button {
@@ -1174,11 +1334,17 @@ impl CombatDemo {
                 };
                 devices.set_mouse_button(name, *state == InputState::Pressed);
             }
-            EngineEvent::MouseWheel { delta_y } => devices.add_scroll(*delta_y as f32),
+            // Ctrl+wheel is the camera's zoom (Rimeborn's rig), not the measure.
+            EngineEvent::MouseWheel { delta_y } if !self.ctrl => {
+                devices.add_scroll(*delta_y as f32);
+            }
             EngineEvent::CursorMoved { x, y } => {
                 self.cursor = Some(Vec2::new(*x as f32, *y as f32))
             }
-            EngineEvent::WindowFocused(false) => devices.release_all(),
+            EngineEvent::WindowFocused(false) => {
+                devices.release_all();
+                self.ctrl = false;
+            }
             _ => {}
         }
     }
@@ -1191,9 +1357,19 @@ impl CombatDemo {
     /// Build the fight from the scene's authored fighters, ground and wind.
     pub fn begin(&mut self, ctx: &mut EngineContext) {
         somnium_core::propagate_transforms(ctx.world);
-        if let Some(run) = build(ctx.world) {
+        let encounters = expand_encounters(ctx.world);
+        somnium_core::propagate_transforms(ctx.world);
+        let Some(run) = build(ctx.world) else {
+            for e in encounters {
+                ctx.world.despawn(e);
+            }
+            return;
+        };
+        {
             self.run = Some(run);
             let run = self.run.as_mut().expect("just built");
+            // Stop takes the encounters away with everything else Play made.
+            run.spawned.extend(encounters);
             run.colliders = colliders(ctx);
             stand_on_ground(ctx, run);
             spawn_pools(ctx.world, run);
@@ -1246,7 +1422,7 @@ impl CombatDemo {
             let (x, y, w, h) = ctx.ui.viewport_physical_rect(1.0);
             let size = Vec2::new(w as f32, h as f32);
             let projection =
-                Mat4::perspective_rh(45f32.to_radians(), size.x / size.y.max(1.0), 0.1, 1000.0);
+                Mat4::perspective_rh(VIEW_FOV.to_radians(), size.x / size.y.max(1.0), 0.1, 1000.0);
             let (o, d) = cursor_ray(
                 cursor - Vec2::new(x as f32, y as f32),
                 size,
@@ -1306,6 +1482,10 @@ impl CombatDemo {
         for event in &events {
             react(ctx, run, event);
         }
+        run.marks.retain(|_, (_, left)| {
+            *left -= dt;
+            *left > 0.0
+        });
         write_scene(ctx, run);
     }
 
@@ -1320,6 +1500,7 @@ impl CombatDemo {
         }
         let hud = self.hud.as_mut().expect("just built");
         let (vitals, hotbar) = player_lines(run);
+        hud.place_marks(&mark_places(ctx, run));
         hud.set(0, vitals);
         hud.set(1, hotbar);
         hud.set(2, run.log.iter().cloned().collect::<Vec<_>>().join("\n"));
@@ -1560,7 +1741,12 @@ fn build(world: &World) -> Option<Run> {
         .collect();
     let walkers = combat
         .combatants()
-        .map(|c| (c.id, Controller::new(walker_config(c), c.position + Vec3::Y * 0.02)))
+        .map(|c| {
+            (
+                c.id,
+                Controller::new(walker_config(c), c.position + Vec3::Y * 0.02),
+            )
+        })
         .collect();
     let floor = if floor.is_finite() { floor } else { 0.0 };
     Some(Run {
@@ -1581,6 +1767,7 @@ fn build(world: &World) -> Option<Run> {
         pools: Pools::default(),
         spawned: Vec::new(),
         log: VecDeque::new(),
+        marks: BTreeMap::new(),
         readouts: HashMap::new(),
     })
 }
@@ -1621,14 +1808,18 @@ fn stand_on_ground(ctx: &mut EngineContext, run: &mut Run) {
     }
 }
 
-/// How dark it is in the sandbox: night by the scene's Time of Day (light
-/// from about 05:30 to 20:30, an hour of dusk each side). Rimeborn's host
-/// copies the Lid's eclipse into [`CombatWorld::darkness`] instead.
+/// How dark it is: night by the scene's Time of Day (light from about 05:30
+/// to 20:30, an hour of dusk each side), or, under a fixed sun (Rimeborn's,
+/// which never moves), its eclipse: 0 by day, 1 under the Lid.
 fn darkness(world: &World) -> f32 {
     world
         .iter_with::<somnium_core::time_of_day::TimeOfDayComponent>()
         .find(|(_, t)| t.enabled)
         .map_or(0.0, |(_, t)| {
+            if t.fixed_sun {
+                // A sun that never moves (Rimeborn): its night is the Lid.
+                return t.eclipse.clamp(0.0, 1.0);
+            }
             let h = t.hour.rem_euclid(24.0);
             1.0 - (h - 5.5f32).clamp(0.0, 1.0).min((20.5 - h).clamp(0.0, 1.0))
         })
@@ -2200,14 +2391,19 @@ fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
         CombatEvent::Fled { who } => log(run, format!("{} broke and ran", name_of(run, *who))),
         CombatEvent::Whistled { who, mount } => {
             let line = match mount {
-                Some(m) => format!("{} whistles; the {} comes", name_of(run, *who), name_of(run, *m)),
+                Some(m) => format!(
+                    "{} whistles; the {} comes",
+                    name_of(run, *who),
+                    name_of(run, *m)
+                ),
                 None => format!("{} whistles; nothing answers", name_of(run, *who)),
             };
             log(run, line);
         }
-        CombatEvent::Fell { who, speed, .. } => {
-            log(run, format!("{} fell hard ({speed:.1} m/s)", name_of(run, *who)))
-        }
+        CombatEvent::Fell { who, speed, .. } => log(
+            run,
+            format!("{} fell hard ({speed:.1} m/s)", name_of(run, *who)),
+        ),
         CombatEvent::Kindled { who, on } if Some(*who) == run.player => {
             log(
                 run,
@@ -2282,8 +2478,88 @@ fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
                 }
             }
         }
+        CombatEvent::Noticed {
+            watcher,
+            target,
+            level,
+            ..
+        } => notice(run, *watcher, *target, *level),
         _ => {}
     }
+}
+
+/// A brain's awareness of the protagonist changed: a "?" for a look, a "!"
+/// for the alarm, gone when it forgets. Others noticing others show nothing.
+fn notice(
+    run: &mut Run,
+    watcher: CombatantId,
+    target: CombatantId,
+    level: somnium_combat::ai::Awareness,
+) {
+    if Some(target) != run.player {
+        return;
+    }
+    if level == somnium_combat::ai::Awareness::Unaware {
+        run.marks.remove(&watcher);
+    } else {
+        run.marks.insert(watcher, (level, MARK_SECONDS));
+    }
+}
+
+/// [`marks_on_screen`] through the fight's camera and the editor's viewport.
+fn mark_places(ctx: &EngineContext, run: &Run) -> Vec<(usize, usize, Vec2)> {
+    match run.camera {
+        Some(c) => marks_on_screen(
+            run,
+            world_matrix(ctx.world, c),
+            ctx.ui.viewport_physical_rect(1.0),
+        ),
+        None => Vec::new(),
+    }
+}
+
+/// Where each mark goes on screen (the viewport's x, y, width, height):
+/// over the watcher's head through `camera`, its glyph ("?" 0, "!" 1) and
+/// fade step; none off screen or behind the camera.
+fn marks_on_screen(
+    run: &Run,
+    camera: Mat4,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> Vec<(usize, usize, Vec2)> {
+    let size = Vec2::new(w as f32, h as f32);
+    let (view, _) = somnium_core::camera_view_from_world(camera);
+    let projection =
+        Mat4::perspective_rh(VIEW_FOV.to_radians(), size.x / size.y.max(1.0), 0.1, 1000.0);
+    let to_clip = projection * view;
+    run.marks
+        .iter()
+        .filter_map(|(id, (level, left))| {
+            let c = run.world.combatant(*id).filter(|c| c.alive())?;
+            let head = c.position + Vec3::Y * (c.body.height + 0.35);
+            let clip = to_clip * head.extend(1.0);
+            if clip.w <= 0.0 {
+                return None;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0 {
+                return None;
+            }
+            let glyph = usize::from(*level == somnium_combat::ai::Awareness::Alerted);
+            let fade = if *left > 1.0 {
+                0
+            } else if *left > 0.5 {
+                1
+            } else {
+                2
+            };
+            let at = Vec2::new(
+                x as f32 + (ndc.x * 0.5 + 0.5) * size.x,
+                y as f32 + (0.5 - ndc.y * 0.5) * size.y,
+            );
+            Some((glyph, fade, at))
+        })
+        .take(MARKS)
+        .collect()
 }
 
 /// A fallen fighter becomes a two-part Jolt ragdoll pushed by the blow.
@@ -2769,7 +3045,10 @@ mod tests {
             walker.feet = feet + Vec3::Y * 0.02;
             walker.mode = Mode::Air;
         }
-        assert_eq!(somnium_combat::mount::mount(&mut run.world, rider, elk), Ok(()));
+        assert_eq!(
+            somnium_combat::mount::mount(&mut run.world, rider, elk),
+            Ok(())
+        );
         let full = run.world.combatant(elk).unwrap().vitals.health.current;
         let open = somnium_combat::OpenField;
         let (mut top, mut fell) = (f32::MIN, false);
@@ -2802,11 +3081,21 @@ mod tests {
         let at = run.world.combatant(elk).unwrap().position;
         assert!(top > 5.9, "up the slope onto the bluff: {top}");
         assert!(fell, "and off its edge: {at}");
-        assert!(at.z < -6.0 && (at.y - floor).abs() < 0.1, "landed below: {at}");
+        assert!(
+            at.z < -6.0 && (at.y - floor).abs() < 0.1,
+            "landed below: {at}"
+        );
         assert!(run.world.combatant(elk).unwrap().vitals.health.current < full);
-        assert_eq!(run.world.combatant(rider).unwrap().mount, Some(elk), "held on");
+        assert_eq!(
+            run.world.combatant(rider).unwrap().mount,
+            Some(elk),
+            "held on"
+        );
         let seat = run.world.combatant(rider).unwrap().position;
-        assert!((seat - at).length() < 2.5, "and rode it down: {seat} vs {at}");
+        assert!(
+            (seat - at).length() < 2.5,
+            "and rode it down: {seat} vs {at}"
+        );
     }
 
     /// Combat Wilds: the pack follows its alpha and the band its chief (both
@@ -2848,7 +3137,10 @@ mod tests {
         }
         let wolf = run.world.combatant(alpha).unwrap();
         assert!(wolf.body.radius < 0.5, "a wolf's body");
-        assert!(run.world.combatant(horse).unwrap().herd.is_some(), "the horse grazes");
+        assert!(
+            run.world.combatant(horse).unwrap().herd.is_some(),
+            "the horse grazes"
+        );
         assert_eq!(darkness(&world), 0.0, "no Time of Day: day");
         let terrain = boxes(&world, &run);
         let open = somnium_combat::OpenField;
@@ -2858,12 +3150,16 @@ mod tests {
             walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
             events.extend(run.world.drain_events());
         }
-        let noticed = events.iter().any(|e| {
-            matches!(e, CombatEvent::Noticed { target, .. } if *target == hero)
-        });
+        let noticed = events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::Noticed { target, .. } if *target == hero));
         assert!(!noticed, "nobody has noticed the protagonist: {events:?}");
         for c in run.world.combatants().filter(|c| c.brain.is_some()) {
-            assert!(somnium_combat::ai::awareness(&run.world, c.id, hero) < 0.35, "{}", c.name);
+            assert!(
+                somnium_combat::ai::awareness(&run.world, c.id, hero) < 0.35,
+                "{}",
+                c.name
+            );
         }
     }
 
@@ -3152,5 +3448,155 @@ mod tests {
         );
         assert!(events.contains(&LocomotionEvent::LeftWater), "{events:?}");
         assert_eq!(mantles(&events).len(), 2, "in and out: {events:?}");
+    }
+
+    /// Under a fixed sun (Rimeborn's, which never moves) the dark is the
+    /// Lid's eclipse, whatever the hour; otherwise the hour decides.
+    #[test]
+    fn a_fixed_sun_takes_its_dark_from_the_eclipse() {
+        use somnium_core::time_of_day::TimeOfDayComponent;
+        let mut world = World::new();
+        let sky = world.spawn((
+            Name::new("Sky"),
+            TimeOfDayComponent {
+                enabled: true,
+                hour: 12.0,
+                ..TimeOfDayComponent::default()
+            },
+        ));
+        assert_eq!(darkness(&world), 0.0, "noon");
+        world.get_mut::<TimeOfDayComponent>(sky).unwrap().hour = 0.0;
+        assert_eq!(darkness(&world), 1.0, "midnight");
+        let t = world.get_mut::<TimeOfDayComponent>(sky).unwrap();
+        t.fixed_sun = true;
+        t.eclipse = 0.0;
+        assert_eq!(darkness(&world), 0.0, "day under a fixed sun, at midnight");
+        world.get_mut::<TimeOfDayComponent>(sky).unwrap().eclipse = 0.8;
+        assert!(
+            (darkness(&world) - 0.8).abs() < 1e-6,
+            "most of the way under the Lid"
+        );
+    }
+
+    /// A Combat Encounter in a scene: Play builds its horse, wolves and
+    /// bandits where the entity stands (no second camera or protagonist),
+    /// and they join the fight.
+    #[test]
+    fn a_scene_encounter_is_built_where_it_stands() {
+        let mut world = World::new();
+        let at = Vec3::new(40.0, 3.0, -20.0);
+        world.spawn((
+            Name::new("Camp"),
+            Transform::from_translation(at),
+            WorldTransform::identity(),
+            CombatEncounterComponent::default(),
+        ));
+        assert!(claims_play(&world), "an encounter alone claims Play");
+        somnium_core::propagate_transforms(&mut world);
+        let made = expand_encounters(&mut world);
+        somnium_core::propagate_transforms(&mut world);
+        let names: Vec<String> = made
+            .iter()
+            .filter_map(|e| world.get::<Name>(*e).map(|n| n.as_str().to_string()))
+            .collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == "Combat Camera" || n == "Protagonist"),
+            "{names:?}"
+        );
+        assert!(names.iter().any(|n| n == "Horse"), "{names:?}");
+        assert!(names.iter().any(|n| n == "Bandit chief"), "{names:?}");
+        let run = build(&world).expect("a fight");
+        assert!(
+            run.player.is_none(),
+            "the scene's protagonist, not the encounter's"
+        );
+        let wolves: Vec<Vec3> = run
+            .world
+            .combatants()
+            .filter(|c| c.name.starts_with("Rime wolf"))
+            .map(|c| c.position)
+            .collect();
+        assert_eq!(wolves.len(), 5);
+        assert!(
+            wolves
+                .iter()
+                .all(|p| p.distance(at) < 40.0 && (p.y - at.y).abs() < 1.0),
+            "{wolves:?}"
+        );
+        // Off, or of an unknown kind, it builds nothing.
+        let mut off = World::new();
+        off.spawn((
+            Name::new("Nothing here"),
+            Transform::default(),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "dragons".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut off);
+        assert!(expand_encounters(&mut off).is_empty());
+    }
+
+    /// "?" over a raider who has seen the protagonist, "!" over one who is
+    /// alerted, fading at the end; nothing for raiders noticing someone else,
+    /// and gone when forgotten.
+    #[test]
+    fn marks_show_who_has_noticed_the_protagonist() {
+        use somnium_combat::ai::Awareness;
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let hero = run.player.expect("the protagonist");
+        let raiders: Vec<CombatantId> = run
+            .world
+            .combatants()
+            .filter(|c| c.name.starts_with("Raider ("))
+            .map(|c| c.id)
+            .take(3)
+            .collect();
+        notice(&mut run, raiders[0], hero, Awareness::Suspicious);
+        notice(&mut run, raiders[1], hero, Awareness::Alerted);
+        notice(&mut run, raiders[2], raiders[0], Awareness::Alerted);
+        run.marks.get_mut(&raiders[1]).unwrap().1 = 0.3;
+        let camera = world_matrix(&world, run.camera.expect("the camera"));
+        let screen = (0, 0, 1280, 720);
+        let shown = marks_on_screen(&run, camera, screen);
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert_eq!((shown[0].0, shown[0].1), (0, 0), "a full ?");
+        assert_eq!((shown[1].0, shown[1].1), (1, 2), "a fading !");
+        assert!(
+            shown
+                .iter()
+                .all(|(_, _, p)| (0.0..1280.0).contains(&p.x) && (0.0..720.0).contains(&p.y)),
+            "{shown:?}"
+        );
+        notice(&mut run, raiders[0], hero, Awareness::Unaware);
+        assert_eq!(marks_on_screen(&run, camera, screen).len(), 1);
+    }
+
+    /// Ctrl and the wheel are the camera's zoom (Rimeborn's rig): the
+    /// measure is left alone; the plain wheel still edits it.
+    #[test]
+    fn ctrl_and_the_wheel_leave_the_measure_alone() {
+        let mut demo = CombatDemo::default();
+        let wheel = |demo: &mut CombatDemo| {
+            demo.event(&EngineEvent::MouseWheel { delta_y: 1.0 });
+            demo.input.update(1.0 / 60.0);
+            demo.input.axis("MeasureWheel")
+        };
+        let ctrl = |demo: &mut CombatDemo, state| {
+            demo.event(&EngineEvent::KeyInput {
+                key: somnium_core::KeyCode::ControlLeft,
+                state,
+            });
+        };
+        ctrl(&mut demo, InputState::Pressed);
+        assert_eq!(wheel(&mut demo), 0.0, "Ctrl held");
+        ctrl(&mut demo, InputState::Released);
+        assert!(wheel(&mut demo) != 0.0, "the plain wheel");
     }
 }
