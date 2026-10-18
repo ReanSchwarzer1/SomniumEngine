@@ -1267,7 +1267,7 @@ impl CombatDemo {
         if run
             .walkers
             .get(&player)
-            .is_some_and(|w| matches!(w.mode, Mode::Mantle(_)))
+            .is_some_and(|w| w.mantle().is_some())
         {
             // Hands on the ledge: no swing, guard, dodge or verse until up.
             cmd = somnium_combat::Command {
@@ -1703,7 +1703,10 @@ fn walk(
         };
         let events = walker.step(body_dt, &input, &Walled { terrain, combat });
         let (feet, velocity) = (walker.feet, walker.velocity);
-        let climbing = matches!(walker.mode, Mode::Mantle(_));
+        let climb = walker.mantle().map(|m| ai::Climb {
+            progress: m.progress(),
+            vulnerable: m.vulnerable(),
+        });
         if let Some(c) = combat.combatant_mut(id) {
             c.position = feet;
             c.velocity = velocity;
@@ -1714,7 +1717,7 @@ fn walk(
                 combat.landed(id, *speed);
             }
         }
-        ai::set_climbing(combat, id, climbing);
+        ai::set_climbing(combat, id, climb);
         out.extend(events.into_iter().map(|e| (id, e)));
     }
     somnium_combat::mount::seat_riders(combat);

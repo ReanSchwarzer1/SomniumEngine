@@ -62,9 +62,11 @@
 //!
 //! A host whose controller moves the bodies hears two things from a brain
 //! besides the movement intent: [`wants_jump`] on the first stride of a level
-//! off-mesh link (a gap; a low wall is vaulted from the jump), and it tells
-//! the brain [`set_climbing`] while a vault or climb lasts, so it neither
-//! swings, guards nor dodges until it is up.
+//! off-mesh link (a gap; a low wall is vaulted from the jump), and it reports
+//! each body's vault or climb with [`set_climbing`] ([`Climb`]: progress, and
+//! whether the hands are on the edge): a climbing brain neither swings,
+//! guards nor dodges until it is up, and a melee brain can strike a climber
+//! hanging on the edge, out of reach otherwise.
 use crate::geometry::{flat, planar_dir};
 use crate::spell::{Address, Bearing, SpellRequest};
 use crate::weapon::WeaponKind;
@@ -597,6 +599,7 @@ pub struct Tactics {
     tokens: BTreeMap<CombatantId, Vec<(CombatantId, f64)>>,
     slots: BTreeMap<CombatantId, Vec<(CombatantId, u8)>>,
     formations: Vec<Formation>,
+    climbing: BTreeMap<CombatantId, Climb>,
 }
 
 /// Slots around a target.
@@ -683,6 +686,7 @@ impl Tactics {
     pub fn forget(&mut self, id: CombatantId) {
         self.tokens.remove(&id);
         self.slots.remove(&id);
+        self.climbing.remove(&id);
         for h in self.tokens.values_mut() {
             h.retain(|(a, _)| *a != id);
         }
@@ -698,6 +702,7 @@ impl Tactics {
         }
         self.tokens.retain(|t, h| alive(*t) && !h.is_empty());
         self.slots.retain(|t, _| alive(*t));
+        self.climbing.retain(|t, _| alive(*t));
     }
 }
 
@@ -720,6 +725,8 @@ struct Seen {
     windup: Option<(f32, Vec3, f32, u32)>,
     busy: bool,
     mounted: bool,
+    /// Mid-vault or mid-climb ([`set_climbing`]).
+    climb: Option<Climb>,
 }
 
 fn reach_of(def: &crate::weapon::MoveDef) -> f32 {
@@ -759,6 +766,7 @@ fn snapshot(w: &CombatWorld) -> Vec<Seen> {
             },
             busy: !matches!(c.action, Action::Idle | Action::Guard { .. }),
             mounted: c.mount.is_some(),
+            climb: w.tactics.climbing.get(&c.id).copied(),
         })
         .collect()
 }
@@ -869,12 +877,30 @@ pub fn order(w: &mut CombatWorld, id: CombatantId, order: Order) {
     }
 }
 
-/// The host tells a brain its body is vaulting or climbing (its controller's
-/// mantle), or is up: while it climbs the brain holds still, with no swing,
-/// guard, dodge or verse, and picks up where it was once on top.
-pub fn set_climbing(w: &mut CombatWorld, id: CombatantId, climbing: bool) {
+/// A body's vault or climb, as the host's controller reports it
+/// (`somnium_character::Controller::mantle`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Climb {
+    /// 0 at the start to 1 standing on top.
+    pub progress: f32,
+    /// Hands on the edge, the feet not yet over: it can neither strike nor
+    /// guard.
+    pub vulnerable: bool,
+}
+
+/// The host reports each body's vault or climb after its controller's step,
+/// `None` once it is up (or on its feet). A climbing brain holds still, with
+/// no swing, guard, dodge or verse, and picks up where it was once on top.
+/// Every brain sees who is climbing: a melee fighter can reach a climber
+/// whose hands are on the edge, above or below it, where a ledge's height
+/// otherwise puts a body out of reach.
+pub fn set_climbing(w: &mut CombatWorld, id: CombatantId, climb: Option<Climb>) {
+    match climb {
+        Some(c) => w.tactics.climbing.insert(id, c),
+        None => w.tactics.climbing.remove(&id),
+    };
     if let Some(brain) = w.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
-        brain.mind.climbing = climbing;
+        brain.mind.climbing = climb.is_some();
     }
 }
 
@@ -944,7 +970,9 @@ impl<Q: CombatQuery> Host<'_, Q> {
     fn distance(&self, other: &Seen) -> f32 {
         let gap = flat(other.position - self.me.position).length() - other.radius - self.me.radius;
         let rise = ((other.position.y - self.me.position.y).abs() - 1.0).max(0.0);
-        if self.mind.ranged {
+        // A climber hanging on the edge is in reach from the top and the foot.
+        let hanging = other.climb.is_some_and(|c| c.vulnerable);
+        if self.mind.ranged || hanging {
             gap
         } else {
             gap + rise * 10.0

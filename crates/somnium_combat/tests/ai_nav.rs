@@ -178,7 +178,11 @@ fn a_climbing_brain_holds_still_and_a_host_reads_its_jump() {
         Archetype::Brute,
     );
     ai::alert(&mut w, axe, enemy, Vec3::new(0.0, 0.0, 1.5));
-    ai::set_climbing(&mut w, axe, true);
+    let hanging = ai::Climb {
+        progress: 0.3,
+        vulnerable: true,
+    };
+    ai::set_climbing(&mut w, axe, Some(hanging));
     let events = idle(&mut w, 2.0);
     assert!(
         !events
@@ -187,12 +191,56 @@ fn a_climbing_brain_holds_still_and_a_host_reads_its_jump() {
         "no swing mid-climb"
     );
     assert!(!ai::wants_jump(&w, axe), "no route, no jump");
-    ai::set_climbing(&mut w, axe, false);
+    ai::set_climbing(&mut w, axe, None);
     let events = idle(&mut w, 2.0);
     assert!(
         events
             .iter()
             .any(|e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == axe)),
         "swings once up"
+    );
+}
+
+/// A brute on a ledge cannot reach someone below it, but strikes at one
+/// whose hands are on the edge.
+#[test]
+fn a_climber_hanging_on_the_edge_is_struck_from_the_top() {
+    let mut w = world();
+    let climber = post(&mut w, PARTY, Vec3::new(0.0, 0.6, 1.2));
+    let axe = brain(
+        &mut w,
+        "Axe",
+        RAIDERS,
+        Vec3::new(0.0, 2.0, 0.0),
+        weapon::axe(),
+        Archetype::Brute,
+    );
+    ai::alert(&mut w, axe, climber, Vec3::new(0.0, 0.6, 1.2));
+    let swings = |events: &[CombatEvent]| {
+        events
+            .iter()
+            .filter(
+                |e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == axe),
+            )
+            .count()
+    };
+    let hold = |w: &mut CombatWorld, _: usize| {
+        // The ledge holds the brute up; the climber hangs where it is.
+        w.combatant_mut(axe).unwrap().position.y = 2.0;
+        w.combatant_mut(climber).unwrap().position = Vec3::new(0.0, 0.6, 1.2);
+    };
+    assert_eq!(
+        swings(&run(&mut w, 1.5, hold)),
+        0,
+        "out of reach below the ledge"
+    );
+    let hanging = ai::Climb {
+        progress: 0.3,
+        vulnerable: true,
+    };
+    ai::set_climbing(&mut w, climber, Some(hanging));
+    assert!(
+        swings(&run(&mut w, 1.5, hold)) > 0,
+        "struck while its hands are on the edge"
     );
 }
