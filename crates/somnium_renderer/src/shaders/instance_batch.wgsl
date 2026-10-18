@@ -63,7 +63,9 @@ struct ShadowParams {
     // 1: survivors appended and counted; 0: one argument per slot with a 0 or 1 count.
     compact: u32,
     instance_base: u32,
-    _pad0: u32,
+    // Unreal's `r.Shadow.RadiusThreshold`, as `pass/shadow.rs` `casts_shadow` applies it to submitted casters: a copy
+    // whose radius over its distance from the eye is below this casts nothing (0 = every copy).
+    radius_threshold: f32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -122,6 +124,12 @@ fn shadow_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_extent = abs(s.model[0].xyz) * extent.x + abs(s.model[1].xyz) * extent.y + abs(s.model[2].xyz) * extent.z;
     let world_min = world_centre - world_extent;
     let world_max = world_centre + world_extent;
+    if casts && shadow_params.radius_threshold > 0.0 {
+        let radius = length(world_extent);
+        let to = world_centre - shadow_params.camera.xyz;
+        let threshold = shadow_params.radius_threshold;
+        casts = radius * radius > threshold * threshold * dot(to, to);
+    }
     let arg = DrawArgs(s.index_count, 1u, 0u, shadow_params.instance_base + j);
     for (var c = 0u; c < 4u; c = c + 1u) {
         if ((shadow_params.dirty >> c) & 1u) == 0u {

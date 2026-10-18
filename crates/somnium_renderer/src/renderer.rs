@@ -5397,6 +5397,11 @@ impl SomniumRenderer {
         }
         if batches_live {
             let planes = self.cascade_view_projs.map(crate::culling::frustum_planes);
+            // The same size cut as the submitted casters (`rebuild_shadow_casters`).
+            let threshold = match self.directional_shadow_technique() {
+                crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_radius_threshold,
+                crate::shadow::virtual_map::ShadowTechnique::Virtual => 0.0,
+            };
             self.instance_batches.record_shadow_cull(
                 &ctx.device,
                 &ctx.queue,
@@ -5405,6 +5410,7 @@ impl SomniumRenderer {
                 self.camera_pos,
                 dirty_cascades,
                 self.supports_counted_draws,
+                threshold,
             );
         }
         // Only this frame's: a frame that did not cull them (batches not drawn) draws none.

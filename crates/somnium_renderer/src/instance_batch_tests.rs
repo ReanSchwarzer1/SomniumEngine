@@ -129,6 +129,7 @@ fn shadow_cull_keeps_the_casters_inside_each_redrawn_cascade() {
             glam::Vec3::ZERO,
             [true, false, true, false],
             compact,
+            0.0,
         );
         queue.submit([encoder.finish()]);
         let draws = batches.shadow_draws().expect("the cull ran");
@@ -146,4 +147,29 @@ fn shadow_cull_keeps_the_casters_inside_each_redrawn_cascade() {
             assert_eq!(counts, [1, 1, 0, 0], "a 0 or 1 count per slot");
         }
     }
+}
+
+#[test]
+fn a_copy_too_small_at_its_distance_casts_no_shadow() {
+    let (device, queue) = gpu::device();
+    let shaders = crate::shaders::Shaders::new();
+    let mut batches = InstanceBatches::default();
+    // Unit boxes (radius ~1.7) 2 m and 8 m from the eye; a threshold of 0.5 keeps only the nearer.
+    batches.set(1, slots(&part(36, 0.0), &[2.0, 8.0]));
+    batches.flush(&device, &queue, &shaders);
+    let open: [[f32; 4]; 6] = [[0.0, 0.0, 0.0, 1.0]; 6];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    batches.record_shadow_cull(
+        &device,
+        &queue,
+        &mut encoder,
+        &[open; crate::shadow::NUM_CASCADES],
+        glam::Vec3::ZERO,
+        [true, false, false, false],
+        true,
+        0.5,
+    );
+    queue.submit([encoder.finish()]);
+    let counts: Vec<u32> = read(&device, &queue, batches.shadow_draws().unwrap().counts.unwrap());
+    assert_eq!(counts[0], 1);
 }

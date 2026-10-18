@@ -177,7 +177,8 @@ struct ShadowParams {
     dirty: u32,
     compact: u32,
     instance_base: u32,
-    _pad: [u32; 3],
+    radius_threshold: f32,
+    _pad: [u32; 2],
 }
 
 fn storage(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
@@ -451,7 +452,8 @@ impl InstanceBatches {
         pass.dispatch_workgroups(slots.div_ceil(64), 1, 1);
     }
 
-    /// Cull the shadow-casting slots into each cascade in `dirty` (planes as `culling::frustum_planes`).
+    /// Cull the shadow-casting slots into each cascade in `dirty` (planes as `culling::frustum_planes`), leaving
+    /// out copies too small at their distance for `radius_threshold` (0: none), as submitted casters are.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_shadow_cull(
         &mut self,
@@ -462,6 +464,7 @@ impl InstanceBatches {
         camera: glam::Vec3,
         dirty: [bool; crate::shadow::NUM_CASCADES],
         compact: bool,
+        radius_threshold: f32,
     ) {
         self.shadow_culled = None;
         let Some(gpu) = self.gpu.as_ref() else { return };
@@ -482,7 +485,8 @@ impl InstanceBatches {
             dirty: mask,
             compact: u32::from(compact),
             instance_base: self.instance_base,
-            _pad: [0; 3],
+            radius_threshold,
+            _pad: [0; 2],
         };
         queue.write_buffer(&gpu.shadow_params, 0, bytemuck::bytes_of(&params));
         if compact {
