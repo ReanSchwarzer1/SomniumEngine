@@ -660,8 +660,8 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
-    /// `sort_draws_stable`'s keys and output, kept between frames.
-    sort_keys: Vec<(u64, u32)>,
+    /// `sort_draws_stable`'s order and output, kept between frames.
+    sort_keys: DrawSortCache,
     sort_scratch: Vec<DrawCommand>,
 
     /// Per-entity vertex paint masks (see `crate::vertex_paint`).
@@ -1476,7 +1476,7 @@ impl SomniumRenderer {
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
-            sort_keys: Vec::new(),
+            sort_keys: DrawSortCache::default(),
             sort_scratch: Vec::new(),
             vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
@@ -7482,16 +7482,20 @@ impl SomniumRenderer {
 /// `draws.sort_by_key(|d| d.sort_key)`, exactly (equal keys keep their order), without moving 104-byte commands
 /// through a merge: the keys and indices are sorted and the commands gathered once. A queue already in order is left
 /// as it is. At 100,000 draws the stable sort was 14 ms of the frame (`examples/scale_probe.rs`).
-fn sort_draws_stable(draws: &mut Vec<DrawCommand>, keys: &mut Vec<(u64, u32)>, scratch: &mut Vec<DrawCommand>) {
+fn sort_draws_stable(draws: &mut Vec<DrawCommand>, sort: &mut DrawSortCache, scratch: &mut Vec<DrawCommand>) {
     if draws.windows(2).all(|pair| pair[0].sort_key <= pair[1].sort_key) {
         return;
     }
-    // A still region submits the same keys in the same order every frame: last frame's order holds again. `keys`
-    // keeps it, each entry's key being the one at that sorted position, so the check is one pass over the submissions.
-    let reuse = keys.len() == draws.len()
-        && keys.iter().all(|&(key, i)| draws.get(i as usize).is_some_and(|d| d.sort_key.0 == key))
-        && keys.windows(2).all(|pair| pair[0] <= pair[1]);
+    // A still region submits the same keys in the same order every frame: last frame's order holds again. Checked in
+    // submission order against last frame's submissions, one sequential pass (reading the draws in sorted order
+    // missed the cache at 300,000).
+    let keys = &mut sort.order;
+    let reuse = sort.submitted.len() == draws.len()
+        && keys.len() == draws.len()
+        && draws.iter().zip(&sort.submitted).all(|(d, key)| d.sort_key.0 == *key);
     if !reuse {
+        sort.submitted.clear();
+        sort.submitted.extend(draws.iter().map(|d| d.sort_key.0));
         keys.clear();
         keys.extend(draws.iter().enumerate().map(|(i, d)| (d.sort_key.0, i as u32)));
         // Ties broken by the original index: the order a stable sort keeps.
@@ -7500,6 +7504,13 @@ fn sort_draws_stable(draws: &mut Vec<DrawCommand>, keys: &mut Vec<(u64, u32)>, s
     scratch.clear();
     scratch.extend(keys.iter().map(|&(_, i)| draws[i as usize].clone()));
     std::mem::swap(draws, scratch);
+}
+
+/// What [`sort_draws_stable`] keeps between frames: last frame's submitted keys, and their sorted `(key, index)` order.
+#[derive(Default)]
+struct DrawSortCache {
+    submitted: Vec<u64>,
+    order: Vec<(u64, u32)>,
 }
 
 /// Each draw's transform last frame: the draw at the same index when it is the same geometry, else the same
@@ -8025,7 +8036,7 @@ mod motion_pairing_tests {
 
 #[cfg(test)]
 mod draw_sort_tests {
-    use super::sort_draws_stable;
+    use super::{DrawSortCache, sort_draws_stable};
     use crate::command::{DrawCommand, SortKey};
 
     #[test]
@@ -8046,7 +8057,7 @@ mod draw_sort_tests {
             .collect();
         let mut expected = draws.clone();
         expected.sort_by_key(|d| d.sort_key);
-        let (mut keys, mut scratch) = (Vec::new(), Vec::new());
+        let (mut keys, mut scratch) = (DrawSortCache::default(), Vec::new());
         let mut gathered = draws.clone();
         sort_draws_stable(&mut gathered, &mut keys, &mut scratch);
         assert!(gathered.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));

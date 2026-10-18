@@ -300,6 +300,21 @@ impl RenderContext {
             info!(?backends, "Backend selection overridden by the environment");
             descriptor.backends = backends;
         }
+        // `SOMNIUM_INDIRECT_VALIDATION=0`: wgpu validates every indirect draw on the CPU when the encoder finishes, and
+        // this renderer issues one per draw: 7 ms of a 100,000-draw frame and 18 ms of a 300,000 one
+        // (`examples/scale_probe.rs`). The arguments are this renderer's own (CPU-built, then culled on the GPU to 0 or
+        // 1 instance), so an open world may skip it. Not on D3D12, where wgpu then misreports `first_instance`, which
+        // the visibility buffer reads: only with a backend set that leaves D3D12 out (`SOMNIUM_BACKEND=vulkan`).
+        if std::env::var("SOMNIUM_INDIRECT_VALIDATION").as_deref() == Ok("0") {
+            if descriptor.backends.contains(wgpu::Backends::DX12) {
+                warn!(
+                    "SOMNIUM_INDIRECT_VALIDATION=0 needs a backend set without D3D12 (SOMNIUM_BACKEND=vulkan);                      indirect draw validation stays on"
+                );
+            } else {
+                descriptor.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+                info!("Indirect draw validation off (SOMNIUM_INDIRECT_VALIDATION=0)");
+            }
+        }
         let instance = wgpu::Instance::new(descriptor);
 
         // Create the surface from the window.

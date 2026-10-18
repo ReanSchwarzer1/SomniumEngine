@@ -176,6 +176,8 @@ impl Probe {
             let proj = glam::Mat4::perspective_rh(0.6, 16.0 / 9.0, 0.5, 4000.0);
             let mut submit_ms = 0.0;
             let mut frame_ms = 0.0;
+            // Acquire, then encoder finish, queue submit, the work between, present.
+            let mut outside = [0.0f64; 5];
             for frame in 0..WARM_FRAMES + TIMED_FRAMES {
                 let start = Instant::now();
                 let target = if pan { glam::Vec3::new(frame as f32 * 2.0, 0.0, 0.0) } else { glam::Vec3::ZERO };
@@ -191,6 +193,10 @@ impl Probe {
                 if frame >= WARM_FRAMES {
                     submit_ms += (submitted - start).as_secs_f64() * 1000.0;
                     frame_ms += (end - submitted).as_secs_f64() * 1000.0;
+                    outside[0] += f64::from(renderer.profiler.surface_acquire_ms);
+                    for (sum, part) in outside[1..].iter_mut().zip(renderer.profiler.submit_parts_ms) {
+                        *sum += f64::from(part);
+                    }
                 }
             }
             let frames = TIMED_FRAMES as f64;
@@ -199,6 +205,10 @@ impl Probe {
                 "submit {:.3} ms   render call {:.3} ms (wall, mean of {TIMED_FRAMES})",
                 submit_ms / frames,
                 frame_ms / frames
+            );
+            let [acquire, finish, queue_submit, between, present] = outside.map(|ms| ms / frames);
+            println!(
+                "outside the zones: acquire {acquire:.3}  finish {finish:.3}  submit {queue_submit:.3}  then {between:.3}  present {present:.3} ms"
             );
             for line in renderer.profiler.report() {
                 println!("  {line}");
