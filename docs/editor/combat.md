@@ -7,7 +7,7 @@ Use **Create > Examples > Combat Sandbox** in Hello Engine, then press **Play**.
 | Key | Does |
 |---|---|
 | W A S D | Move, relative to the camera |
-| Hold Left Shift | Run |
+| Hold Left Shift | Run. Running into a wall you can reach vaults it (up to 1.25 m) or climbs it (up to 2.3 m); running into deep water swims, and into the bank climbs out |
 | Left click | Strike. Click again to chain; hold for the heavy blow; with a bow, hold to draw and release to loose |
 | Right click | Guard. The first instant parries (and opens a riposte); holding blocks |
 | Space, or tap Left Shift | Dodge |
@@ -19,6 +19,8 @@ Use **Create > Examples > Combat Sandbox** in Hello Engine, then press **Play**.
 | E | Climb onto the nearest mount (the frost-elk beside you), or off it. Riding, W A S D steers it and Shift gallops; you can still strike, guard and cast |
 
 Every binding is data in the combat action map and can be rebound.
+
+East of where you start is a course: a low wall to vault, a ledge to climb, and a walled basin of water deep enough to swim in.
 
 ## Components
 

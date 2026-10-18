@@ -23,7 +23,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
-| Workspace | 18 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
+| Workspace | 19 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
 | Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests. Not regenerated since: the generator now also counts `.claude/worktrees/` copies and must exclude them first |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
@@ -214,6 +214,11 @@ at a time (`set_pose`, `command`, `animation_event` in; `intent` and `CombatEven
 | Input | the rebindable `combat` action map, cursor-to-ground aim | `input.rs` |
 | Editor | `Combatant`, `Combat Surface`, `Wind Volume` schemas; hello_engine's **Create > Examples > Combat Sandbox** | `components.rs`, `examples/hello_engine/src/combat_demo.rs` |
 | Mounts | riding, trample, mounted cuts, rider IK targets | `mount.rs` |
+
+`crates/somnium_character` is the character controller beside it: walk, run, step up, slopes, jump, fall,
+vault and climb ledges (with the edge for the hands' IK), swim in deep water, sledge. Kinematic, over a
+`Terrain` trait (capsule sweeps plus water lines), built on `somnium_anim::collide_and_slide`. The Combat
+Sandbox's protagonist walks on it through Jolt; its low wall, ledge and basin are the course.
 
 Record: [`COMBAT_2026-10-18.md`](<dev records/COMBAT_2026-10-18.md>). Help: [`docs/editor/combat.md`](docs/editor/combat.md).
 
@@ -724,6 +729,7 @@ name is a mnemonic, not a claim of similarity.
 | `somnium_physics_sys` | Raw Jolt FFI and C++ build boundary |
 | `somnium_voxel` | Voxel chunks, generation, edits, meshing, LOD |
 | `somnium_combat` | Combat simulation: hits, damage, statuses, weapons, spells, the reactive ground, combat AI, combat input, mounts |
+| `somnium_character` | Kinematic character controller: walk, step, slopes, jump, vault and climb ledges, swim, sledge |
 
 ### Dependency layers
 

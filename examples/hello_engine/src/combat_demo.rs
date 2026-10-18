@@ -301,34 +301,34 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
     out.push(stone(
         world,
         "Low wall",
-        Vec3::new(9.0, 0.5, -8.0),
+        Vec3::new(9.0, 0.5, -5.0),
         Vec3::new(0.3, 1.0, 3.0),
     ));
     out.push(stone(
         world,
         "Ledge",
-        Vec3::new(13.0, 1.0, -8.0),
+        Vec3::new(13.0, 1.0, -5.0),
         Vec3::new(3.0, 2.0, 3.0),
     ));
     for (name, at, scale) in [
         (
             "Basin wall (north)",
-            Vec3::new(12.5, 0.8, -11.65),
+            Vec3::new(12.5, 0.8, -8.65),
             Vec3::new(7.0, 1.6, 0.3),
         ),
         (
             "Basin wall (south)",
-            Vec3::new(12.5, 0.8, -15.85),
+            Vec3::new(12.5, 0.8, -12.85),
             Vec3::new(7.0, 1.6, 0.3),
         ),
         (
             "Basin wall (west)",
-            Vec3::new(9.15, 0.8, -13.75),
+            Vec3::new(9.15, 0.8, -10.75),
             Vec3::new(0.3, 1.6, 3.9),
         ),
         (
             "Basin wall (east)",
-            Vec3::new(15.85, 0.8, -13.75),
+            Vec3::new(15.85, 0.8, -10.75),
             Vec3::new(0.3, 1.6, 3.9),
         ),
     ] {
@@ -339,7 +339,7 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         world,
         root,
         "Basin water",
-        Vec3::new(12.5, 1.48, -13.75),
+        Vec3::new(12.5, 1.48, -10.75),
         Vec3::new(6.4, 0.04, 3.9),
         MeshKind::Cube,
         "water",
@@ -2120,7 +2120,7 @@ mod tests {
         };
         // East over the low wall and up the ledge.
         // The preset stands on its root, 5 cm up.
-        walker.feet = Vec3::new(6.0, run.floor + 0.02, -8.0);
+        walker.feet = Vec3::new(6.0, run.floor + 0.02, -5.0);
         walker.mode = Mode::Air;
         let events = go(&mut walker, Vec3::X * 4.0, 3.0);
         assert_eq!(
@@ -2135,7 +2135,7 @@ mod tests {
             walker.mode
         );
         // South over the basin's wall, into deep water, across and out.
-        walker.feet = Vec3::new(12.5, run.floor + 0.02, -9.5);
+        walker.feet = Vec3::new(12.5, run.floor + 0.02, -6.5);
         walker.mode = Mode::Air;
         // (Until it stands outside: the arena's edge is not far beyond.)
         let mut events = Vec::new();
@@ -2155,7 +2155,7 @@ mod tests {
         assert!(events.contains(&LocomotionEvent::LeftWater), "{events:?}");
         assert_eq!(kinds(&events).len(), 2, "over the wall and out: {events:?}");
         assert!(
-            walker.grounded() && walker.feet.z < -16.0 && (walker.feet.y - run.floor).abs() < 0.05,
+            walker.grounded() && walker.feet.z < -13.0 && (walker.feet.y - run.floor).abs() < 0.05,
             "{:?} {:?} {events:?}",
             walker.feet,
             walker.mode
