@@ -22,7 +22,7 @@
 //! every enabled map. The camera is not here: the host supplies the cursor's
 //! ray and the camera's heading.
 use crate::world::{Command, Press};
-use glam::{Mat4, Vec2, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3};
 use somnium_input::{Action, ActionMap, Binding, ControlPath, InputSystem, Interaction, Processor};
 
 /// The map's name.
@@ -81,8 +81,11 @@ pub fn combat_map() -> ActionMap {
     map
 }
 
-/// The ray under a cursor: origin and unit direction, from the camera's
-/// view and projection (depth 0 to 1, as `glam::Mat4::perspective_rh` makes).
+/// The ray under a cursor: origin (the eye) and unit direction, from the
+/// camera's view and a perspective projection. The same pinhole ray as
+/// `somnium_core::isometric_camera::screen_ray`, so the camera and the aim
+/// agree; only the projection's focal terms are read, so any depth convention
+/// (forward, reverse or infinite) gives the same ray.
 #[must_use]
 pub fn cursor_ray(
     cursor: Vec2,
@@ -97,27 +100,27 @@ pub fn cursor_ray(
         cursor.x / viewport.x * 2.0 - 1.0,
         1.0 - cursor.y / viewport.y * 2.0,
     );
-    let inverse = (projection * view).inverse();
-    if !inverse.is_finite() {
+    let (fx, fy) = (projection.x_axis.x, projection.y_axis.y);
+    let camera = view.inverse();
+    if fx.abs() < 1e-8 || fy.abs() < 1e-8 || !camera.is_finite() {
         return None;
     }
-    let unproject = |z: f32| {
-        let p = inverse * Vec4::new(ndc.x, ndc.y, z, 1.0);
-        (p.w.abs() > 1e-8).then(|| p.truncate() / p.w)
-    };
-    let near = unproject(0.0)?;
-    let far = unproject(1.0)?;
-    Some((near, (far - near).try_normalize()?))
+    let local = Vec3::new(ndc.x / fx, ndc.y / fy, -1.0);
+    Some((
+        camera.w_axis.truncate(),
+        camera.transform_vector3(local).try_normalize()?,
+    ))
 }
 
-/// Where a ray meets the horizontal plane at `height`.
+/// Where a ray meets the horizontal plane at `height`, in front of its origin
+/// (as `somnium_core::isometric_camera::ray_plane`).
 #[must_use]
 pub fn ray_plane(origin: Vec3, dir: Vec3, height: f32) -> Option<Vec3> {
     if dir.y.abs() < 1e-6 {
         return None;
     }
     let t = (height - origin.y) / dir.y;
-    (t >= 0.0).then(|| origin + dir * t)
+    (t > 0.0).then(|| origin + dir * t)
 }
 
 /// Where a ray meets terrain given by `ground(x, z)`: marched in half-metre
@@ -365,5 +368,13 @@ mod tests {
             ray_plane(origin, -dir, 0.0).is_none(),
             "the sky has no ground"
         );
+        // A reverse infinite projection (as renderers use) gives the same ray.
+        let reverse = Mat4::perspective_infinite_reverse_rh(45f32.to_radians(), 16.0 / 9.0, 0.1);
+        for cursor in [Vec2::new(960.0, 540.0), Vec2::new(100.0, 900.0)] {
+            let a = cursor_ray(cursor, Vec2::new(1920.0, 1080.0), view, projection).unwrap();
+            let b = cursor_ray(cursor, Vec2::new(1920.0, 1080.0), view, reverse).unwrap();
+            assert!(a.0.abs_diff_eq(eye, 1e-4) && a.0.abs_diff_eq(b.0, 1e-4));
+            assert!(a.1.abs_diff_eq(b.1, 1e-5), "{} vs {}", a.1, b.1);
+        }
     }
 }
