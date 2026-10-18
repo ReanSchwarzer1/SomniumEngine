@@ -17,7 +17,9 @@
 //!
 //! Simulation LOD measures from the camera: villagers near it step every
 //! frame, further out every few, far off rarely; the far and the indoor are
-//! not drawn. The step and the transform writes are timed and reported to MCP
+//! not drawn. Only the nearest 160 villagers, 48 beasts and 16 carts out of
+//! doors get a body (`somnium_life::Bodies`), so a town of any size costs that
+//! many entities. The step and the transform writes are timed and reported to MCP
 //! (`life` in the authoring state) and the log every ten seconds.
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
@@ -34,11 +36,12 @@ use somnium_life::components::{
     CartComponent, LifePlaceComponent, LifeSpotComponent, LivestockComponent, VillagerComponent,
 };
 use somnium_life::{
-    BeastKind, Clock, Flat, LifeWorld, LodConfig, Place, Role, Spot, SpotKind, Tier, VillagerDesc,
+    BeastKind, Bodies, Clock, Flat, LifeWorld, LodConfig, Place, Role, Spot, SpotKind, Tier,
+    VillagerDesc,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tracing::info;
 
@@ -46,6 +49,11 @@ use tracing::info;
 const SECONDS_PER_HOUR: f32 = 60.0;
 /// Where hidden visuals wait.
 const PARKED: Vec3 = Vec3::new(0.0, -10_000.0, 0.0);
+/// Bodies for the populated: only the nearest this many villagers, beasts and
+/// carts out of doors are drawn, so a town of any size costs these entities.
+const VILLAGER_BODIES: usize = 160;
+const BEAST_BODIES: usize = 48;
+const CART_BODIES: usize = 16;
 
 fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
@@ -473,6 +481,7 @@ fn yaw(facing: Vec3) -> Quat {
 struct Look(Vec3, Quat);
 
 /// Who an agent's visual is.
+#[derive(Clone, Copy)]
 enum Visual {
     Villager(usize),
     Beast(usize),
@@ -481,8 +490,12 @@ enum Visual {
 
 struct Run {
     life: LifeWorld,
-    /// Each agent's entity: pooled for the populated, the authored entity itself otherwise.
+    /// Hand-placed agents' own entities.
     visuals: Vec<(Entity, Visual, Vec3)>,
+    /// Pooled bodies for everyone the places populated.
+    villagers: Pool,
+    beasts: Pool,
+    carts: Pool,
     looks: HashMap<Entity, Look>,
     authored: Vec<(Entity, Transform)>,
     villager_readouts: Vec<(Entity, usize, String)>,
@@ -495,6 +508,90 @@ struct Run {
     write_ms: f64,
     frames: u32,
     reported: f32,
+}
+
+/// One kind's bodies: each slot's entity (and a villager's head).
+struct Pool {
+    bodies: Bodies<usize>,
+    slots: Vec<(Entity, Option<Entity>)>,
+    /// Agents of this kind shown by their own hand-placed entity.
+    own: HashSet<usize>,
+}
+
+impl Pool {
+    fn new(
+        world: &mut World,
+        spawned: &mut Vec<Entity>,
+        parent: Entity,
+        (n, name, mesh, head): (usize, &str, MeshKind, bool),
+        own: HashSet<usize>,
+    ) -> Self {
+        let slots = (0..n)
+            .map(|_| {
+                let body = world.spawn((
+                    Name::new(name),
+                    Transform {
+                        translation: PARKED,
+                        ..Default::default()
+                    },
+                    WorldTransform::identity(),
+                    Parent { entity: parent },
+                    mesh,
+                    material("ash"),
+                ));
+                spawned.push(body);
+                let head = head.then(|| {
+                    let h = world.spawn((
+                        Name::new(&format!("{name} head")),
+                        Transform::from_translation(Vec3::new(0.0, 0.62, 0.0)),
+                        WorldTransform::identity(),
+                        Parent { entity: body },
+                        MeshKind::Sphere,
+                        material("skin"),
+                    ));
+                    spawned.push(h);
+                    h
+                });
+                (body, head)
+            })
+            .collect();
+        Self {
+            bodies: Bodies::new(n),
+            slots,
+            own,
+        }
+    }
+
+    /// Hand the bodies to the nearest `candidates`; the slots that changed
+    /// hands, with their new holder.
+    fn assign(&mut self, mut candidates: Vec<(usize, f32)>) -> Vec<(usize, Option<usize>)> {
+        self.bodies
+            .assign(&mut candidates)
+            .into_iter()
+            .map(|slot| (slot, self.bodies.holder(slot)))
+            .collect()
+    }
+}
+
+fn villager_size(role: Role) -> Vec3 {
+    if role == Role::Child {
+        Vec3::new(0.38, 1.05, 0.38)
+    } else {
+        Vec3::new(0.5, 1.45, 0.5)
+    }
+}
+
+/// Dress a pooled entity for its new holder.
+fn dress(world: &mut World, entity: Entity, name: &str, size: Vec3, look: &str) {
+    if let Some(t) = world.get_mut::<Transform>(entity) {
+        t.scale = size;
+    }
+    if let Some(n) = world.get_mut::<Name>(entity) {
+        *n = Name::new(name);
+    }
+    if let Some(m) = world.get_mut::<MaterialComponent>(entity) {
+        *m = material(look);
+    }
 }
 
 #[derive(Default)]
@@ -750,21 +847,29 @@ fn gather(world: &World) -> Option<Gathered> {
 
 impl LifeDemo {
     /// Build the world from the scene's places, spots, lanes and hand-placed
-    /// agents; pooled visuals for everyone the places populated; colliders for
-    /// the solid blocks.
+    /// agents; a pool of bodies for everyone the places populated; colliders
+    /// for the solid blocks.
     pub fn begin(&mut self, ctx: &mut EngineContext) {
-        somnium_core::propagate_transforms(ctx.world);
+        let Some(mut run) = Self::start(ctx.world) else {
+            return;
+        };
+        run.colliders = colliders(ctx);
+        self.run = Some(run);
+    }
+
+    /// Everything but the colliders.
+    fn start(world: &mut World) -> Option<Run> {
+        somnium_core::propagate_transforms(world);
         let Some(Gathered {
             life,
             places: place_entities,
             mut visuals,
             authored,
             villager_readouts,
-        }) = gather(ctx.world)
+        }) = gather(world)
         else {
-            return;
+            return None;
         };
-        let world = &mut *ctx.world;
         let mut spawned = Vec::new();
         let effects = world.spawn((
             Name::new("Life (runtime)"),
@@ -772,94 +877,55 @@ impl LifeDemo {
             WorldTransform::identity(),
         ));
         spawned.push(effects);
-        let has_visual = |list: &Vec<(Entity, Visual, Vec3)>, which: &dyn Fn(&Visual) -> bool| {
-            list.iter().any(|(_, v, _)| which(v))
+        let own = |pick: fn(&Visual) -> Option<usize>| -> HashSet<usize> {
+            visuals.iter().filter_map(|(_, v, _)| pick(v)).collect()
         };
-        for (i, v) in life.villagers().iter().enumerate() {
-            if has_visual(&visuals, &|w| matches!(w, Visual::Villager(j) if *j == i)) {
-                continue;
-            }
-            let size = if v.role == Role::Child {
-                Vec3::new(0.38, 1.05, 0.38)
-            } else {
-                Vec3::new(0.5, 1.45, 0.5)
-            };
-            let body = world.spawn((
-                Name::new(&v.name),
-                Transform {
-                    translation: PARKED,
-                    scale: size,
-                    ..Default::default()
-                },
-                WorldTransform::identity(),
-                Parent { entity: effects },
-                MeshKind::Cylinder,
-                material(role_material(v.role)),
-            ));
-            let head = world.spawn((
-                Name::new(&format!("{} head", v.name)),
-                Transform {
-                    translation: Vec3::new(0.0, 0.62, 0.0),
-                    scale: Vec3::splat(0.3) / size,
-                    ..Default::default()
-                },
-                WorldTransform::identity(),
-                Parent { entity: body },
-                MeshKind::Sphere,
-                material("skin"),
-            ));
-            spawned.extend([body, head]);
-            visuals.push((body, Visual::Villager(i), size));
+        let (own_villagers, own_beasts, own_carts) = (
+            own(|v| match v {
+                Visual::Villager(i) => Some(*i),
+                _ => None,
+            }),
+            own(|v| match v {
+                Visual::Beast(i) => Some(*i),
+                _ => None,
+            }),
+            own(|v| match v {
+                Visual::Cart(i) => Some(*i),
+                _ => None,
+            }),
+        );
+        let villagers = Pool::new(
+            world,
+            &mut spawned,
+            effects,
+            (VILLAGER_BODIES, "Villager", MeshKind::Cylinder, true),
+            own_villagers,
+        );
+        let beasts = Pool::new(
+            world,
+            &mut spawned,
+            effects,
+            (BEAST_BODIES, "Beast", MeshKind::Cube, false),
+            own_beasts,
+        );
+        let mut carts = Pool::new(
+            world,
+            &mut spawned,
+            effects,
+            (CART_BODIES, "Cart", MeshKind::Cube, false),
+            own_carts,
+        );
+        for (body, _) in &carts.slots {
+            dress(world, *body, "Cart", Vec3::new(1.4, 1.1, 2.6), "hide");
         }
-        for (i, b) in life.beasts().iter().enumerate() {
-            if has_visual(&visuals, &|w| matches!(w, Visual::Beast(j) if *j == i)) {
-                continue;
-            }
-            let (size, mat) = beast_look(b.kind);
-            let e = world.spawn((
-                Name::new(BeastKind::NAMES[b.kind as usize]),
-                Transform {
-                    translation: PARKED,
-                    scale: size,
-                    ..Default::default()
-                },
-                WorldTransform::identity(),
-                Parent { entity: effects },
-                MeshKind::Cube,
-                material(mat),
-            ));
-            spawned.push(e);
-            visuals.push((e, Visual::Beast(i), size));
-        }
-        for (i, _) in life.carts().iter().enumerate() {
-            if has_visual(&visuals, &|w| matches!(w, Visual::Cart(j) if *j == i)) {
-                continue;
-            }
-            let size = Vec3::new(1.4, 1.1, 2.6);
-            let e = world.spawn((
-                Name::new("Cart"),
-                Transform {
-                    translation: PARKED,
-                    scale: size,
-                    ..Default::default()
-                },
-                WorldTransform::identity(),
-                Parent { entity: effects },
-                MeshKind::Cube,
-                material("hide"),
-            ));
-            spawned.push(e);
-            visuals.push((e, Visual::Cart(i), size));
-        }
+        carts.bodies.keep = 10.0;
         // Authored visuals keep their own scale.
         for (e, _, size) in &mut visuals {
             if let Some((_, t)) = authored.iter().find(|(a, _)| a == e) {
                 *size = t.scale;
             }
         }
-        let colliders = colliders(ctx);
-        let tod = ctx
-            .world
+        let tod = world
             .iter_with::<TimeOfDayComponent>()
             .find(|(_, t)| t.enabled)
             .map(|(_, t)| (t.hour, t.eclipse));
@@ -871,22 +937,25 @@ impl LifeDemo {
             "life: {population} agents in {} places",
             place_entities.len()
         );
-        self.run = Some(Run {
+        Some(Run {
             life,
             visuals,
+            villagers,
+            beasts,
+            carts,
             looks: HashMap::new(),
             authored,
             villager_readouts,
             places: place_entities,
             spawned,
-            colliders,
+            colliders: Vec::new(),
             hour: tod.map_or(6.5, |t| t.0),
             eclipse: tod.map_or(0.0, |t| t.1),
             step_ms: 0.0,
             write_ms: 0.0,
             frames: 0,
             reported: 0.0,
-        });
+        })
     }
 
     /// Put everything back as authored.
@@ -940,7 +1009,7 @@ impl LifeDemo {
             &Flat,
         );
         let t1 = Instant::now();
-        write_visuals(ctx.world, run);
+        write_visuals(ctx.world, run, focus.first().copied().unwrap_or_default());
         let t2 = Instant::now();
         let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
         run.frames += 1;
@@ -984,13 +1053,104 @@ impl LifeDemo {
             "lod": {"near": s.near, "mid": s.mid, "far": s.far, "stepped": s.stepped, "deferred": s.deferred},
             "step_ms": run.step_ms,
             "write_ms": run.write_ms,
+            "bodies": {
+                "villagers": [run.villagers.bodies.held(), VILLAGER_BODIES],
+                "beasts": [run.beasts.bodies.held(), BEAST_BODIES],
+                "carts": [run.carts.bodies.held(), CART_BODIES],
+            },
         })
     }
 }
 
-/// Write each visual's pose when it changed; the far and the indoor are parked.
-fn write_visuals(world: &mut World, run: &mut Run) {
-    for (entity, which, size) in &run.visuals {
+/// Hand the pooled bodies to the nearest agents out of doors, then write each
+/// visual's pose when it changed; the far, the indoor and empty bodies are
+/// parked.
+fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
+    let life = &run.life;
+    let near = |p: Vec3| p.distance(focus);
+    let changed = run.villagers.assign(
+        life.villagers()
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| v.visible && v.tier != Tier::Far && !run.villagers.own.contains(i))
+            .map(|(i, v)| (i, near(v.position)))
+            .collect(),
+    );
+    for (slot, holder) in changed {
+        let (body, head) = run.villagers.slots[slot];
+        run.looks.remove(&body);
+        if let Some(i) = holder {
+            let v = &life.villagers()[i];
+            let size = villager_size(v.role);
+            dress(world, body, &v.name, size, role_material(v.role));
+            if let Some(t) = head.and_then(|h| world.get_mut::<Transform>(h)) {
+                t.scale = Vec3::splat(0.3) / size;
+            }
+        }
+    }
+    let changed = run.beasts.assign(
+        life.beasts()
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| b.tier != Tier::Far && !run.beasts.own.contains(i))
+            .map(|(i, b)| (i, near(b.position)))
+            .collect(),
+    );
+    for (slot, holder) in changed {
+        let body = run.beasts.slots[slot].0;
+        run.looks.remove(&body);
+        if let Some(i) = holder {
+            let kind = life.beasts()[i].kind;
+            let (size, look) = beast_look(kind);
+            dress(world, body, BeastKind::NAMES[kind as usize], size, look);
+        }
+    }
+    let changed = run.carts.assign(
+        life.carts()
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.tier != Tier::Far && !run.carts.own.contains(i))
+            .map(|(i, c)| (i, near(c.position)))
+            .collect(),
+    );
+    for (slot, _) in changed {
+        run.looks.remove(&run.carts.slots[slot].0);
+    }
+    let pooled = |pool: &Pool, kind: fn(usize) -> Visual, size: &dyn Fn(usize) -> Vec3| {
+        pool.slots
+            .iter()
+            .enumerate()
+            .map(|(slot, (e, _))| match pool.bodies.holder(slot) {
+                Some(i) => (*e, Some(kind(i)), size(i)),
+                None => (*e, None, Vec3::ONE),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut all: Vec<(Entity, Option<Visual>, Vec3)> = run
+        .visuals
+        .iter()
+        .map(|(e, v, size)| (*e, Some(*v), *size))
+        .collect();
+    all.extend(pooled(&run.villagers, Visual::Villager, &|i| {
+        villager_size(life.villagers()[i].role)
+    }));
+    all.extend(pooled(&run.beasts, Visual::Beast, &|i| {
+        beast_look(life.beasts()[i].kind).0
+    }));
+    all.extend(pooled(&run.carts, Visual::Cart, &|_| {
+        Vec3::new(1.4, 1.1, 2.6)
+    }));
+    for (entity, which, size) in &all {
+        let Some(which) = which else {
+            let look = Look(PARKED, Quat::IDENTITY);
+            if run.looks.get(entity) != Some(&look) {
+                run.looks.insert(*entity, look);
+                if let Some(t) = world.get_mut::<Transform>(*entity) {
+                    t.translation = PARKED;
+                }
+            }
+            continue;
+        };
         let (shown, position, facing) = match which {
             Visual::Villager(i) => {
                 let v = &run.life.villagers()[*i];
@@ -1127,6 +1287,67 @@ mod tests {
 
     /// The preset gives a place with homes for every house, the trades, the
     /// green, fields and a pen; its lanes are splines.
+    #[test]
+    fn a_big_village_draws_only_its_pooled_bodies_nearest_first() {
+        let mut world = World::new();
+        spawn_village(&mut world, &json!({"homes": 300})).unwrap();
+        let before = world.entity_count();
+        let mut run = LifeDemo::start(&mut world).unwrap();
+        let villagers = run.life.villagers().len();
+        assert!(villagers > 2 * VILLAGER_BODIES, "{villagers}");
+        // One entity per body (and head), not per agent.
+        let pooled = VILLAGER_BODIES * 2 + BEAST_BODIES + CART_BODIES + 1;
+        assert_eq!(world.entity_count(), before + pooled);
+        let focus = Vec3::ZERO;
+        let clock = Clock {
+            hour: 11.0,
+            eclipse: 0.0,
+        };
+        for _ in 0..600 {
+            run.life.step(0.5, clock, &[focus], &Flat);
+        }
+        write_visuals(&mut world, &mut run, focus);
+        let out: Vec<f32> = run
+            .life
+            .villagers()
+            .iter()
+            .filter(|v| v.visible && v.tier != Tier::Far)
+            .map(|v| v.position.distance(focus))
+            .collect();
+        assert!(out.len() > VILLAGER_BODIES, "more out than bodies: {}", out.len());
+        let held = run.villagers.bodies.held();
+        assert_eq!(held, out.len().min(VILLAGER_BODIES));
+        // Every drawn villager is nearer than every outdoor one left undrawn.
+        let drawn: Vec<usize> = (0..VILLAGER_BODIES)
+            .filter_map(|s| run.villagers.bodies.holder(s))
+            .collect();
+        let far_drawn = drawn
+            .iter()
+            .map(|i| run.life.villagers()[*i].position.distance(focus))
+            .fold(0.0, f32::max);
+        let near_left = run
+            .life
+            .villagers()
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| v.visible && v.tier != Tier::Far && !drawn.contains(i))
+            .map(|(_, v)| v.position.distance(focus))
+            .fold(f32::INFINITY, f32::min);
+        assert!(far_drawn <= near_left, "{far_drawn} > {near_left}");
+        // A drawn body stands where its villager is; an empty one is parked.
+        for slot in 0..VILLAGER_BODIES {
+            let (body, _) = run.villagers.slots[slot];
+            let at = world.get::<Transform>(body).unwrap().translation;
+            match run.villagers.bodies.holder(slot) {
+                Some(i) => {
+                    let v = &run.life.villagers()[i];
+                    assert!((at.x - v.position.x).abs() + (at.z - v.position.z).abs() < 1e-3);
+                }
+                None => assert_eq!(at, PARKED),
+            }
+        }
+    }
+
     #[test]
     fn the_village_preset_has_its_spots_and_lanes() {
         let mut world = World::new();

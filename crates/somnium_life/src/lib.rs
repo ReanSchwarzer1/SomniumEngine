@@ -22,11 +22,13 @@
 #![deny(missing_docs)]
 
 pub mod components;
+pub mod crowd;
 pub mod lod;
 pub mod place;
 pub mod routine;
 mod sim;
 
+pub use crowd::Bodies;
 pub use lod::{LodConfig, Tier};
 pub use place::{LaneGraph, Place, Spot, SpotKind};
 pub use routine::{Activity, Role, Routine};
