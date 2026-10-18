@@ -160,10 +160,13 @@ fn beast(
 /// all unaware of the protagonist at first (they face away). Sneak up at a
 /// walk for a blow on the unaware; at night (Time of Day) they see a third as
 /// far. Untick the floor to drop it on terrain: Play stands everyone on the
-/// ground.
+/// ground. `only` ("wolves" or "bandits") builds just the pack or the camp,
+/// round the position.
 fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     let at = origin(args)?;
     let floor = args.get("floor").and_then(Value::as_bool).unwrap_or(true);
+    let only = args.get("only").and_then(Value::as_str);
+    let all = only.is_none();
     // Built from a scene's Combat Encounter: the scene has its own camera and
     // protagonist.
     let encounter = args
@@ -196,55 +199,57 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         );
         out.push(ground);
     }
-    for (name, pos, scale) in [
-        (
-            "Tall grass (east)",
-            Vec3::new(8.0, 0.012, 8.0),
-            Vec3::new(8.0, 0.02, 10.0),
-        ),
-        (
-            "Tall grass (west)",
-            Vec3::new(-8.0, 0.012, 6.0),
-            Vec3::new(7.0, 0.02, 8.0),
-        ),
-    ] {
-        let e = block(world, root, name, pos, scale, MeshKind::Cube, "grass");
-        let _ = world.insert_component(
-            e,
-            CombatSurfaceComponent {
-                surface: Surface::Grass as u32,
-                round: false,
-                solid: false,
-            },
-        );
-        out.push(e);
-    }
-    for (i, (pos, scale)) in [
-        (Vec3::new(3.0, 0.6, 12.0), Vec3::new(2.0, 1.2, 1.6)),
-        (Vec3::new(-4.0, 0.9, 13.5), Vec3::new(1.6, 1.8, 2.2)),
-        (Vec3::new(11.0, 0.5, 4.0), Vec3::new(1.4, 1.0, 1.4)),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let e = block(
-            world,
-            root,
-            &format!("Boulder {}", i + 1),
-            pos,
-            scale,
-            MeshKind::Cube,
-            "stone",
-        );
-        let _ = world.insert_component(
-            e,
-            CombatSurfaceComponent {
-                surface: Surface::Stone as u32,
-                round: false,
-                solid: true,
-            },
-        );
-        out.push(e);
+    if all {
+        for (name, pos, scale) in [
+            (
+                "Tall grass (east)",
+                Vec3::new(8.0, 0.012, 8.0),
+                Vec3::new(8.0, 0.02, 10.0),
+            ),
+            (
+                "Tall grass (west)",
+                Vec3::new(-8.0, 0.012, 6.0),
+                Vec3::new(7.0, 0.02, 8.0),
+            ),
+        ] {
+            let e = block(world, root, name, pos, scale, MeshKind::Cube, "grass");
+            let _ = world.insert_component(
+                e,
+                CombatSurfaceComponent {
+                    surface: Surface::Grass as u32,
+                    round: false,
+                    solid: false,
+                },
+            );
+            out.push(e);
+        }
+        for (i, (pos, scale)) in [
+            (Vec3::new(3.0, 0.6, 12.0), Vec3::new(2.0, 1.2, 1.6)),
+            (Vec3::new(-4.0, 0.9, 13.5), Vec3::new(1.6, 1.8, 2.2)),
+            (Vec3::new(11.0, 0.5, 4.0), Vec3::new(1.4, 1.0, 1.4)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let e = block(
+                world,
+                root,
+                &format!("Boulder {}", i + 1),
+                pos,
+                scale,
+                MeshKind::Cube,
+                "stone",
+            );
+            let _ = world.insert_component(
+                e,
+                CombatSurfaceComponent {
+                    surface: Surface::Stone as u32,
+                    round: false,
+                    solid: true,
+                },
+            );
+            out.push(e);
+        }
     }
     if !encounter {
         let eye = Vec3::new(0.0, 34.0, -30.0);
@@ -270,26 +275,48 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
             CombatantComponent::protagonist(),
         ));
     }
-    out.push(world.spawn((
-        Name::new("Horse"),
-        Transform {
-            translation: Vec3::new(3.0, 0.8, -8.5),
-            rotation: yaw(Vec3::Z),
-            scale: Vec3::new(0.85, 1.6, 2.4),
-        },
-        WorldTransform::identity(),
-        Parent { entity: root },
-        MeshKind::Cube,
-        material("hide"),
-        CombatantComponent {
-            team: 0,
-            mount: 1,
-            max_health: 200.0,
-            poise: 80.0,
-            ..CombatantComponent::default()
-        },
-    )));
-    // A rime wolf pack to the north-east, the alpha leading; facing away.
+    if all {
+        out.push(world.spawn((
+            Name::new("Horse"),
+            Transform {
+                translation: Vec3::new(3.0, 0.8, -8.5),
+                rotation: yaw(Vec3::Z),
+                scale: Vec3::new(0.85, 1.6, 2.4),
+            },
+            WorldTransform::identity(),
+            Parent { entity: root },
+            MeshKind::Cube,
+            material("hide"),
+            CombatantComponent {
+                team: 0,
+                mount: 1,
+                max_health: 200.0,
+                poise: 80.0,
+                ..CombatantComponent::default()
+            },
+        )));
+    }
+    if all || only == Some("wolves") {
+        let den = if all {
+            Vec3::new(14.0, 0.0, 18.0)
+        } else {
+            Vec3::ZERO
+        };
+        spawn_pack(world, root, den, &mut out);
+    }
+    if all || only == Some("bandits") {
+        let camp = if all {
+            Vec3::new(-14.0, 0.0, 16.0)
+        } else {
+            Vec3::ZERO
+        };
+        spawn_camp(world, root, camp, &mut out);
+    }
+    Ok(out)
+}
+
+/// A rime wolf pack round its den, the alpha leading; facing away.
+fn spawn_pack(world: &mut World, root: Entity, den: Vec3, out: &mut Vec<Entity>) {
     let wolf = |alpha: bool| CombatantComponent {
         team: 2,
         archetype: Archetype::Wolf as u32,
@@ -301,7 +328,6 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         leader: alpha,
         ..CombatantComponent::default()
     };
-    let den = Vec3::new(14.0, 0.0, 18.0);
     out.extend(beast(
         world,
         root,
@@ -325,8 +351,10 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
             wolf(false),
         ));
     }
-    // A bandit camp to the north-west round its chief; facing in.
-    let camp = Vec3::new(-14.0, 0.0, 16.0);
+}
+
+/// A bandit camp round its chief; facing in.
+fn spawn_camp(world: &mut World, root: Entity, camp: Vec3, out: &mut Vec<Entity>) {
     for (i, (name, archetype, weapon, leader)) in [
         ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
         (
@@ -360,7 +388,6 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
             },
         ));
     }
-    Ok(out)
 }
 
 fn origin(args: &Value) -> Result<Vec3, String> {
@@ -879,7 +906,7 @@ pub struct CombatEncounterComponent {
     /// Built on Play.
     pub enabled: bool,
     /// Which: `wilds` (a horse, a rime wolf pack and a bandit camp, none of
-    /// them aware yet).
+    /// them aware yet), `wolves` (the pack alone) or `bandits` (the camp).
     pub kind: String,
     /// Bring its own flat ground; off stands everyone on the scene's.
     pub floor: bool,
@@ -902,7 +929,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -924,25 +951,43 @@ fn expand_encounters(world: &mut World) -> Vec<Entity> {
         .collect();
     let mut made = Vec::new();
     for (at, encounter) in wanted {
-        let args =
-            json!({"position": [at.x, at.y, at.z], "floor": encounter.floor, "encounter": true});
-        match encounter.kind.trim().to_ascii_lowercase().as_str() {
-            "wilds" => match spawn_wilds(world, &args) {
-                Ok(entities) => made.extend(entities),
-                Err(e) => tracing::warn!("Combat Encounter at {at}: {e}"),
-            },
-            other => tracing::warn!("Combat Encounter at {at}: no kind {other:?} (try \"wilds\")"),
+        match build_encounter(world, &encounter.kind, at, encounter.floor) {
+            Ok(entities) => made.extend(entities),
+            Err(e) => tracing::warn!("Combat Encounter at {at}: {e}"),
         }
     }
     made
+}
+
+/// One encounter of `kind` built at `at`, without a camera or protagonist.
+fn build_encounter(
+    world: &mut World,
+    kind: &str,
+    at: Vec3,
+    floor: bool,
+) -> Result<Vec<Entity>, String> {
+    let mut args = json!({"position": [at.x, at.y, at.z], "floor": floor, "encounter": true});
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "wilds" => {}
+        part @ ("wolves" | "bandits") => args["only"] = json!(part),
+        other => return Err(format!("no kind {other:?} (try wilds, wolves or bandits)")),
+    }
+    spawn_wilds(world, &args)
+}
+
+/// How far an encounter of `kind` spreads from its centre, metres.
+fn encounter_extent(kind: &str) -> f32 {
+    if kind.trim().eq_ignore_ascii_case("wilds") {
+        25.0
+    } else {
+        6.0
+    }
 }
 
 /// How often sleeping encounters are looked at, seconds (the check costs
 /// only the grid cells around the protagonist, but there is no need to look
 /// sixty times a second).
 const TEND_EVERY: f32 = 0.5;
-/// How far a woken Wilds encounter spreads from its centre, metres.
-const ENCOUNTER_EXTENT: f32 = 25.0;
 
 /// A scene encounter while Play runs: what it is, who of it is left once it
 /// has woken and slept again, and while it is awake what it made.
@@ -967,7 +1012,7 @@ fn encounters_asleep(world: &World) -> Dormancy<Encounter> {
             let at = world_matrix(world, e).transform_point3(Vec3::ZERO);
             set.add(
                 at,
-                ENCOUNTER_EXTENT,
+                encounter_extent(&c.kind),
                 Encounter {
                     kind: c.kind.clone(),
                     floor: c.floor,
@@ -1041,11 +1086,7 @@ fn wake(
         // Cleared: nobody left to wake.
         return;
     }
-    let args = json!({"position": [at.x, at.y, at.z], "floor": record.floor, "encounter": true});
-    let made = match record.kind.trim().to_ascii_lowercase().as_str() {
-        "wilds" => spawn_wilds(world, &args).unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let made = build_encounter(world, &record.kind, at, record.floor).unwrap_or_default();
     somnium_core::propagate_transforms(world);
     let mut left = record.left.clone();
     let mut members = Vec::new();
@@ -3846,6 +3887,55 @@ mod tests {
         ));
         somnium_core::propagate_transforms(&mut off);
         assert!(expand_encounters(&mut off).is_empty());
+    }
+
+    /// A pack and a camp placed apart (as across Tyffir): each builds only
+    /// itself, round its own entity.
+    #[test]
+    fn a_pack_and_a_camp_are_encounters_of_their_own() {
+        let mut world = World::new();
+        let (den, camp) = (Vec3::new(-60.0, 2.0, 10.0), Vec3::new(80.0, 1.0, -30.0));
+        for (name, at, kind) in [("Den", den, "wolves"), ("Camp", camp, "Bandits")] {
+            world.spawn((
+                Name::new(name),
+                Transform::from_translation(at),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: kind.into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ));
+        }
+        somnium_core::propagate_transforms(&mut world);
+        expand_encounters(&mut world);
+        somnium_core::propagate_transforms(&mut world);
+        let run = build(&world).expect("a fight");
+        let near = |prefix: &str, at: Vec3| {
+            let found: Vec<Vec3> = run
+                .world
+                .combatants()
+                .filter(|c| c.name.starts_with(prefix))
+                .map(|c| c.position)
+                .collect();
+            assert!(
+                found.iter().all(|p| p.distance(at) < 6.0),
+                "{prefix}: {found:?}"
+            );
+            found.len()
+        };
+        assert_eq!(near("Rime wolf", den), 5);
+        assert_eq!(near("Bandit", camp), 4);
+        assert_eq!(
+            run.world.combatants().count(),
+            9,
+            "no horse, no protagonist"
+        );
+        assert!(
+            world
+                .iter_with::<Name>()
+                .all(|(_, n)| !n.as_str().starts_with("Boulder"))
+        );
+        assert!(encounter_extent("wolves") < encounter_extent("wilds"));
     }
 
     /// "?" over a raider who has seen the protagonist, "!" over one who is
