@@ -9,7 +9,7 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use somnium_jobs::{JobDesc, JobError, JobHandle, JobSystem};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 
 pub type CellId = [i64; 3];
 pub type Triangle = [[f32; 3]; 3];
@@ -567,7 +567,7 @@ pub struct NavWorld {
     kinds: BTreeMap<u64, LinkKind>,
     /// Polygons by the ground cells ([`INDEX_CELL`] metres) their extent
     /// touches, so `nearest` looks only near the point.
-    index: BTreeMap<(i32, i32), Vec<u32>>,
+    index: HashMap<(i32, i32), Vec<u32>>,
     /// Kept between path searches (see [`Search`]).
     search: std::sync::Mutex<Search>,
 }
@@ -765,7 +765,10 @@ impl NavWorld {
         // floors only when their step-height policy allows it.
         type EdgeKey = (i64, i64, i64, i64);
         type PolygonEdges = Vec<(usize, [Vec3; 2])>;
-        let mut edges: BTreeMap<EdgeKey, PolygonEdges> = BTreeMap::new();
+        // Only ever looked up, never walked: a hash map gives the same
+        // adjacency, sooner.
+        let mut edges: HashMap<EdgeKey, PolygonEdges> =
+            HashMap::with_capacity(self.polygons.len() * 2);
         let quant = |v: f32| (f64::from(v) * 10_000.0).round() as i64;
         for (i, p) in self.polygons.iter().enumerate() {
             for e in 0..4 {
