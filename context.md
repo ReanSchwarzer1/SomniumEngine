@@ -213,12 +213,16 @@ at a time (`set_pose`, `command`, `animation_event` in; `intent` and `CombatEven
 | AI | brains on `somnium_ai` trees (native `combat.*` tasks), perception, navmesh corridors; attack tokens and flank slots | `ai.rs` |
 | Input | the rebindable `combat` action map, cursor-to-ground aim | `input.rs` |
 | Editor | `Combatant`, `Combat Surface`, `Wind Volume` schemas; hello_engine's **Create > Examples > Combat Sandbox** | `components.rs`, `examples/hello_engine/src/combat_demo.rs` |
-| Mounts | riding, trample, mounted cuts, rider IK targets | `mount.rs` |
+| Mounts | riding, trample, mounted cuts, rider IK targets; left alone a mount grazes, ambles, bolts and comes to a whistle (H); falls hurt (`CombatWorld::landed`) | `mount.rs` |
+| Wilds | rime wolf packs (circle, dart in two at a time, leap from behind, break when the alpha falls) and bandit bands (spear, axe, bow, chief) | `wilds.rs`, `ai.rs` |
+| Stealth | awareness per enemy that fills with sight and drains unseen; heard versus seen; `CombatWorld::darkness` (the host copies `TimeOfDay` eclipse) cuts sight; blows on the unaware land 2.5x | `ai.rs` |
 
 `crates/somnium_character` is the character controller beside it: walk, run, step up, slopes, jump, fall,
 vault and climb ledges (with the edge for the hands' IK), swim in deep water, sledge. Kinematic, over a
 `Terrain` trait (capsule sweeps plus water lines), built on `somnium_anim::collide_and_slide`. The Combat
-Sandbox's protagonist walks on it through Jolt; its low wall, ledge and basin are the course.
+Sandbox's bodies (mounts too, on their own slopes and steps) walk on it through Jolt, so on the engine's
+terrain heightfields they follow real ground. **Combat Wilds** (hello_engine) puts a horse, a wolf pack and a bandit camp
+on open ground or on a terrain.
 
 Record: [`COMBAT_2026-10-18.md`](<dev records/COMBAT_2026-10-18.md>). Help: [`docs/editor/combat.md`](docs/editor/combat.md).
 

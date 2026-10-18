@@ -92,6 +92,241 @@ pub fn register(r: &mut somnium_core::authoring::GameRegistration) {
         schema: json!({"type":"object","properties":{"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"additionalProperties":false}),
         build: spawn_sandbox,
     });
+    r.presets.push(somnium_core::authoring::GamePreset {
+        id: "hello.combat_wilds",
+        label: "Combat Wilds",
+        category: "Examples",
+        schema: json!({"type":"object","properties":{
+            "position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},
+            "floor":{"type":"boolean","description":"Lay a 60 m floor (untick on terrain: Play stands everyone on the ground)."}
+        },"additionalProperties":false}),
+        build: spawn_wilds,
+    });
+}
+
+/// A beast: a long body (with the Combatant) and a head forward.
+fn beast(
+    world: &mut World,
+    root: Entity,
+    name: &str,
+    feet: Vec3,
+    facing: Vec3,
+    size: Vec3,
+    mat: &str,
+    combat: CombatantComponent,
+) -> Vec<Entity> {
+    let body = world.spawn((
+        Name::new(name),
+        Transform {
+            translation: feet + Vec3::Y * size.y * 0.5,
+            rotation: yaw(facing),
+            scale: size,
+        },
+        WorldTransform::identity(),
+        Parent { entity: root },
+        MeshKind::Cube,
+        material(mat),
+        combat,
+    ));
+    let head = world.spawn((
+        Name::new(&format!("{name} head")),
+        Transform {
+            translation: Vec3::new(0.0, 0.25, 0.55),
+            scale: Vec3::splat(0.36) / size,
+            ..Default::default()
+        },
+        WorldTransform::identity(),
+        Parent { entity: body },
+        MeshKind::Sphere,
+        material(mat),
+    ));
+    vec![body, head]
+}
+
+/// Combat Wilds: open ground with a horse, a rime wolf pack and a bandit camp,
+/// all unaware of the protagonist at first (they face away). Sneak up at a
+/// walk for a blow on the unaware; at night (Time of Day) they see a third as
+/// far. Untick the floor to drop it on terrain: Play stands everyone on the
+/// ground.
+fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
+    let at = origin(args)?;
+    let floor = args.get("floor").and_then(Value::as_bool).unwrap_or(true);
+    let root = world.spawn((
+        Name::new("Combat Wilds"),
+        Transform::from_translation(at),
+        WorldTransform::identity(),
+    ));
+    let mut out = vec![root];
+    if floor {
+        let ground = block(
+            world,
+            root,
+            "Wilds ground",
+            Vec3::new(0.0, -0.1, 4.0),
+            Vec3::new(60.0, 0.2, 60.0),
+            MeshKind::Cube,
+            "floor",
+        );
+        let _ = world.insert_component(
+            ground,
+            CombatSurfaceComponent {
+                surface: Surface::Bare as u32,
+                round: false,
+                solid: true,
+            },
+        );
+        out.push(ground);
+    }
+    for (name, pos, scale) in [
+        ("Tall grass (east)", Vec3::new(8.0, 0.012, 8.0), Vec3::new(8.0, 0.02, 10.0)),
+        ("Tall grass (west)", Vec3::new(-8.0, 0.012, 6.0), Vec3::new(7.0, 0.02, 8.0)),
+    ] {
+        let e = block(world, root, name, pos, scale, MeshKind::Cube, "grass");
+        let _ = world.insert_component(
+            e,
+            CombatSurfaceComponent {
+                surface: Surface::Grass as u32,
+                round: false,
+                solid: false,
+            },
+        );
+        out.push(e);
+    }
+    for (i, (pos, scale)) in [
+        (Vec3::new(3.0, 0.6, 12.0), Vec3::new(2.0, 1.2, 1.6)),
+        (Vec3::new(-4.0, 0.9, 13.5), Vec3::new(1.6, 1.8, 2.2)),
+        (Vec3::new(11.0, 0.5, 4.0), Vec3::new(1.4, 1.0, 1.4)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = block(
+            world,
+            root,
+            &format!("Boulder {}", i + 1),
+            pos,
+            scale,
+            MeshKind::Cube,
+            "stone",
+        );
+        let _ = world.insert_component(
+            e,
+            CombatSurfaceComponent {
+                surface: Surface::Stone as u32,
+                round: false,
+                solid: true,
+            },
+        );
+        out.push(e);
+    }
+    let eye = Vec3::new(0.0, 34.0, -30.0);
+    let camera_world = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, 8.0), Vec3::Y).inverse();
+    let (_, rotation, _) = camera_world.to_scale_rotation_translation();
+    out.push(world.spawn((
+        Name::new("Combat Camera"),
+        Transform {
+            translation: eye,
+            rotation,
+            ..Default::default()
+        },
+        WorldTransform::identity(),
+        Parent { entity: root },
+        CameraSettingsComponent::default(),
+    )));
+    out.extend(fighter(
+        world,
+        root,
+        "Protagonist",
+        Vec3::new(0.0, 0.0, -8.0),
+        Vec3::Z,
+        CombatantComponent::protagonist(),
+    ));
+    out.push(world.spawn((
+        Name::new("Horse"),
+        Transform {
+            translation: Vec3::new(3.0, 0.8, -8.5),
+            rotation: yaw(Vec3::Z),
+            scale: Vec3::new(0.85, 1.6, 2.4),
+        },
+        WorldTransform::identity(),
+        Parent { entity: root },
+        MeshKind::Cube,
+        material("hide"),
+        CombatantComponent {
+            team: 0,
+            mount: 1,
+            max_health: 200.0,
+            poise: 80.0,
+            ..CombatantComponent::default()
+        },
+    )));
+    // A rime wolf pack to the north-east, the alpha leading; facing away.
+    let wolf = |alpha: bool| CombatantComponent {
+        team: 2,
+        archetype: Archetype::Wolf as u32,
+        weapon: WeaponKind::Fangs as u32,
+        max_health: if alpha { 110.0 } else { 75.0 },
+        max_stamina: 140.0,
+        poise: if alpha { 45.0 } else { 30.0 },
+        speed: 5.0,
+        leader: alpha,
+        ..CombatantComponent::default()
+    };
+    let den = Vec3::new(14.0, 0.0, 18.0);
+    out.extend(beast(
+        world,
+        root,
+        "Rime wolf (alpha)",
+        den,
+        Vec3::Z,
+        Vec3::new(0.6, 0.85, 1.4),
+        "frost",
+        wolf(true),
+    ));
+    for i in 0..4 {
+        let a = i as f32 / 4.0 * std::f32::consts::TAU;
+        out.extend(beast(
+            world,
+            root,
+            &format!("Rime wolf {}", i + 1),
+            den + Vec3::new(a.cos(), 0.0, a.sin()) * 2.5,
+            Vec3::new(a.sin(), 0.0, a.cos()),
+            Vec3::new(0.5, 0.75, 1.25),
+            "snow",
+            wolf(false),
+        ));
+    }
+    // A bandit camp to the north-west round its chief; facing in.
+    let camp = Vec3::new(-14.0, 0.0, 16.0);
+    for (i, (name, archetype, weapon, leader)) in [
+        ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
+        ("Bandit (spear)", Archetype::Spearman, WeaponKind::Spear, false),
+        ("Bandit (axe)", Archetype::Brute, WeaponKind::Axe, false),
+        ("Bandit (bow)", Archetype::Archer, WeaponKind::Bow, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let a = i as f32 / 4.0 * std::f32::consts::TAU;
+        let spot = camp + Vec3::new(a.cos(), 0.0, a.sin()) * 3.0;
+        out.extend(fighter(
+            world,
+            root,
+            name,
+            spot,
+            camp - spot,
+            CombatantComponent {
+                team: 1,
+                archetype: archetype as u32,
+                weapon: weapon as u32,
+                max_health: if leader { 160.0 } else { 100.0 },
+                armor: if leader { 4.0 } else { 2.0 },
+                leader,
+                ..CombatantComponent::default()
+            },
+        ));
+    }
+    Ok(out)
 }
 
 fn origin(args: &Value) -> Result<Vec3, String> {
@@ -549,9 +784,16 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
     Ok(out)
 }
 
-/// Build the sandbox at the origin outside the Create menu (the capture hook).
+/// Build the sandbox at the origin outside the Create menu (the capture hook,
+/// `SOMNIUM_COMBAT_SANDBOX=1`); with `SOMNIUM_COMBAT_WILDS=1` as well, the
+/// Wilds instead.
 pub fn spawn_at_startup(world: &mut World) -> Result<usize, String> {
-    spawn_sandbox(world, &json!({})).map(|entities| entities.len())
+    let spawned = if std::env::var("SOMNIUM_COMBAT_WILDS").as_deref() == Ok("1") {
+        spawn_wilds(world, &json!({}))
+    } else {
+        spawn_sandbox(world, &json!({}))
+    };
+    spawned.map(|entities| entities.len())
 }
 
 /// Whether the scene has a player-controlled fighter, so Play is the
@@ -923,6 +1165,7 @@ impl CombatDemo {
             self.run = Some(run);
             let run = self.run.as_mut().expect("just built");
             run.colliders = colliders(ctx);
+            stand_on_ground(ctx, run);
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
             run.log.push_back(
@@ -959,6 +1202,7 @@ impl CombatDemo {
             return;
         };
         self.input.update(ctx.dt());
+        run.world.darkness = darkness(ctx.world);
         let Some(player) = run.player else {
             return;
         };
@@ -1158,6 +1402,42 @@ fn build(world: &World) -> Option<Run> {
             }
         }
     }
+    // Leaders (a pack's alpha, a band's chief): their side within 15 m
+    // follows them and breaks when they fall.
+    let leaders: Vec<(CombatantId, TeamId, Vec3)> = fighters
+        .iter()
+        .filter(|(_, c)| c.leader)
+        .filter_map(|(e, _)| {
+            let id = *bodies.iter().find(|(_, b)| *b == e)?.0;
+            let c = combat.combatant(id)?;
+            Some((id, c.team, c.position))
+        })
+        .collect();
+    let followers: Vec<(CombatantId, CombatantId)> = combat
+        .combatants()
+        .filter(|c| {
+            c.brain
+                .as_ref()
+                .is_some_and(|b| b.mind.archetype != Archetype::Companion)
+        })
+        .filter_map(|c| {
+            leaders
+                .iter()
+                .filter(|(l, team, at)| {
+                    *l != c.id && *team == c.team && flat_distance(*at, c.position) < 15.0
+                })
+                .min_by(|a, b| {
+                    flat_distance(a.2, c.position).total_cmp(&flat_distance(b.2, c.position))
+                })
+                .map(|(l, _, _)| (c.id, *l))
+        })
+        .collect();
+    for (id, leader) in followers {
+        if let Some(brain) = combat.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
+            brain.mind.leader = Some(leader);
+            brain.mind.profile.breaks_with_leader = true;
+        }
+    }
     // The ground: every authored surface's footprint (axis-aligned), plus wind.
     let surfaces: Vec<(Mat4, CombatSurfaceComponent)> = world
         .iter_with::<CombatSurfaceComponent>()
@@ -1245,6 +1525,55 @@ fn build(world: &World) -> Option<Run> {
         log: VecDeque::new(),
         readouts: HashMap::new(),
     })
+}
+
+fn flat_distance(a: Vec3, b: Vec3) -> f32 {
+    Vec2::new(a.x - b.x, a.z - b.z).length()
+}
+
+/// Stand every fighter on the ground under it (or over it): a preset dropped
+/// on terrain, whose heightfield the engine has already given to Jolt.
+fn stand_on_ground(ctx: &mut EngineContext, run: &mut Run) {
+    let query = JoltQuery(ctx.physics);
+    let radius = 0.2;
+    let ground = |from: Vec3, to: Vec3| {
+        query
+            .sweep(from, to, radius)
+            .map(|h| from.y + (to.y - from.y) * h.fraction - radius)
+    };
+    let ids: Vec<CombatantId> = run.world.combatants().map(|c| c.id).collect();
+    for id in ids {
+        let Some(p) = run.world.combatant(id).map(|c| c.position) else {
+            continue;
+        };
+        let Some(y) = ground(p + Vec3::Y, p - Vec3::Y * 80.0)
+            .or_else(|| ground(p + Vec3::Y * 80.0, p + Vec3::Y))
+        else {
+            continue;
+        };
+        if (y - p.y).abs() > 0.05 {
+            let feet = Vec3::new(p.x, y, p.z);
+            if let Some(c) = run.world.combatant_mut(id) {
+                c.position = feet;
+            }
+            if let Some(w) = run.walkers.get_mut(&id) {
+                w.feet = feet + Vec3::Y * 0.02;
+            }
+        }
+    }
+}
+
+/// How dark it is in the sandbox: night by the scene's Time of Day (light
+/// from about 05:30 to 20:30, an hour of dusk each side). Rimeborn's host
+/// copies the Lid's eclipse into [`CombatWorld::darkness`] instead.
+fn darkness(world: &World) -> f32 {
+    world
+        .iter_with::<somnium_core::time_of_day::TimeOfDayComponent>()
+        .find(|(_, t)| t.enabled)
+        .map_or(0.0, |(_, t)| {
+            let h = t.hour.rem_euclid(24.0);
+            1.0 - (h - 5.5f32).clamp(0.0, 1.0).min((20.5 - h).clamp(0.0, 1.0))
+        })
 }
 
 /// A body's controller: a person's walks, vaults, climbs and swims; a mount's
@@ -2410,6 +2739,64 @@ mod tests {
         assert_eq!(run.world.combatant(rider).unwrap().mount, Some(elk), "held on");
         let seat = run.world.combatant(rider).unwrap().position;
         assert!((seat - at).length() < 2.5, "and rode it down: {seat} vs {at}");
+    }
+
+    /// Combat Wilds: the pack follows its alpha and the band its chief (both
+    /// break when their leader falls), the horse grazes, and nobody has
+    /// noticed the protagonist yet.
+    #[test]
+    fn the_wilds_have_a_pack_a_band_and_a_horse_none_of_them_aware() {
+        let mut world = World::new();
+        spawn_wilds(&mut world, &json!({})).expect("preset builds");
+        assert!(claims_play(&world));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let id = |name: &str| {
+            run.world
+                .combatants()
+                .find(|c| c.name == name)
+                .map(|c| c.id)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let (alpha, chief, horse, hero) = (
+            id("Rime wolf (alpha)"),
+            id("Bandit chief"),
+            id("Horse"),
+            id("Protagonist"),
+        );
+        for c in run.world.combatants() {
+            let Some(brain) = &c.brain else { continue };
+            let expected = if c.name.starts_with("Rime wolf ") && c.id != alpha {
+                Some(alpha)
+            } else if c.name.starts_with("Bandit (") {
+                Some(chief)
+            } else {
+                None
+            };
+            assert_eq!(brain.mind.leader, expected, "{}", c.name);
+            if expected.is_some() {
+                assert!(brain.mind.profile.breaks_with_leader, "{}", c.name);
+            }
+        }
+        let wolf = run.world.combatant(alpha).unwrap();
+        assert!(wolf.body.radius < 0.5, "a wolf's body");
+        assert!(run.world.combatant(horse).unwrap().herd.is_some(), "the horse grazes");
+        assert_eq!(darkness(&world), 0.0, "no Time of Day: day");
+        let terrain = boxes(&world, &run);
+        let open = somnium_combat::OpenField;
+        let mut events = Vec::new();
+        for _ in 0..4 * 60 {
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+            events.extend(run.world.drain_events());
+        }
+        let noticed = events.iter().any(|e| {
+            matches!(e, CombatEvent::Noticed { target, .. } if *target == hero)
+        });
+        assert!(!noticed, "nobody has noticed the protagonist: {events:?}");
+        for c in run.world.combatants().filter(|c| c.brain.is_some()) {
+            assert!(somnium_combat::ai::awareness(&run.world, c.id, hero) < 0.35, "{}", c.name);
+        }
     }
 
     /// The preset builds a fight the combat world accepts, and the fight runs

@@ -62,6 +62,9 @@ pub struct CombatantComponent {
     pub mana: f32,
     /// Live: what it is doing.
     pub state: String,
+    /// Leads its side's fighters within 15 m (a pack's alpha, a band's
+    /// chief): they follow it, and break and run when it falls.
+    pub leader: bool,
 }
 
 impl Component for CombatantComponent {}
@@ -90,6 +93,7 @@ impl Default for CombatantComponent {
             stamina: 0.0,
             mana: 0.0,
             state: String::new(),
+            leader: false,
         }
     }
 }
@@ -320,6 +324,7 @@ pub fn register(registry: &mut TypeRegistry) {
             stamina { group: "Live", read_only: true, flags: LIVE },
             mana { group: "Live", read_only: true, flags: LIVE },
             state { group: "Live", read_only: true, flags: LIVE },
+            leader { group: "Combat", display_name: "Leads", doc: "Its side's fighters within 15 m follow it (a pack's alpha, a band's chief) and break and run when it falls." },
         }
     };
     for field in &mut combatant.fields {
