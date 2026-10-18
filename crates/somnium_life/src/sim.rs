@@ -5,6 +5,7 @@ use crate::place::{LaneGraph, Place, RoadPath, SpotKind};
 use crate::routine::{Activity, Role, Routine};
 use crate::{Clock, Pose, Rng};
 use glam::{Vec2, Vec3};
+use std::collections::HashMap;
 
 /// Walking pace, metres a second.
 const WALK: f32 = 1.35;
@@ -223,7 +224,7 @@ pub struct LifeWorld {
     next_id: u32,
     stats: Stats,
     /// Places adopted by a stable key (see [`LifeWorld::adopt_place`]).
-    keyed: std::collections::HashMap<u64, usize>,
+    keyed: HashMap<u64, usize>,
 }
 
 impl LifeWorld {
@@ -240,7 +241,7 @@ impl LifeWorld {
             time: 0.0,
             next_id: 1,
             stats: Stats::default(),
-            keyed: std::collections::HashMap::new(),
+            keyed: HashMap::new(),
         }
     }
 
@@ -575,14 +576,31 @@ impl LifeWorld {
         stats.stepped = chosen.len();
 
         // Carts keep their distance from one ahead going their way, and turn
-        // short of one standing at the end they are bound for.
+        // short of one standing at the end they are bound for. Only the carts
+        // stepping now look, and only along their own road.
         let places = &self.places;
-        let lanes: Vec<(bool, f32)> = self
-            .carts
+        let mut lanes: HashMap<usize, (bool, f32)> = HashMap::new();
+        let stepping: Vec<usize> = chosen
             .iter()
-            .map(|c| {
-                let same = |o: &&Cart| o.id != c.id && o.place == c.place && o.road == c.road;
-                let blocked = self.carts.iter().filter(same).any(|o| {
+            .filter_map(|w| match w {
+                Who::Cart(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        if !stepping.is_empty() {
+            let mut by_road: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+            for (j, o) in self.carts.iter().enumerate() {
+                by_road.entry((o.place, o.road)).or_default().push(j);
+            }
+            for i in stepping {
+                let c = &self.carts[i];
+                let others = || {
+                    by_road[&(c.place, c.road)]
+                        .iter()
+                        .map(|j| &self.carts[*j])
+                        .filter(|o| o.id != c.id)
+                };
+                let blocked = others().any(|o| {
                     let gap = (o.s - c.s) * c.dir;
                     o.dir == c.dir && gap > 0.0 && gap < CART_GAP
                 });
@@ -591,14 +609,13 @@ impl LifeWorld {
                     .and_then(|p| p.roads.get(c.road))
                     .map_or(0.0, RoadPath::length);
                 let end = if c.dir > 0.0 { length } else { 0.0 };
-                let taken = self
-                    .carts
-                    .iter()
-                    .filter(same)
-                    .any(|o| (o.s - end).abs() < 1.0 && o.wait_until > now);
-                (blocked, if taken { end - c.dir * CART_GAP } else { end })
-            })
-            .collect();
+                let taken = others().any(|o| (o.s - end).abs() < 1.0 && o.wait_until > now);
+                lanes.insert(
+                    i,
+                    (blocked, if taken { end - c.dir * CART_GAP } else { end }),
+                );
+            }
+        }
         for who in chosen {
             match who {
                 Who::Villager(i) => {
@@ -619,7 +636,7 @@ impl LifeWorld {
                     let c = &mut self.carts[i];
                     let owed = std::mem::take(&mut c.owed);
                     if let Some(road) = places.get(c.place).and_then(|p| p.roads.get(c.road)) {
-                        c.advance(road, clock, lanes[i], ground, owed, now);
+                        c.advance(road, clock, lanes[&i], ground, owed, now);
                     }
                 }
             }
