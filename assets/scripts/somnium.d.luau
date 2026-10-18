@@ -180,8 +180,8 @@ export type SomniumCombatant = {
 	enabled: boolean,
 	player: boolean,
 	team: number,
-	archetype: number --[[ Duelist | Spearman | Brute | Skirmisher | Archer | Rifleman | Caster | Companion ]],
-	weapon: number --[[ Sword | Lance-glaive | Spear | Axe | Knife | Bow | Lattice rifle | Unarmed ]],
+	archetype: number --[[ Duelist | Spearman | Brute | Skirmisher | Archer | Rifleman | Caster | Companion | Wolf ]],
+	weapon: number --[[ Sword | Lance-glaive | Spear | Axe | Knife | Bow | Lattice rifle | Unarmed | Fangs ]],
 	school: number --[[ None | Aetherlance | Meridian | Night Fang | Gale Edge ]],
 	forms: number,
 	rank: number --[[ Novice | Adept | Advanced | Saint | King | Emperor | Sovereign ]],
@@ -198,6 +198,7 @@ export type SomniumCombatant = {
 	stamina: number, -- engine-owned; reading only
 	mana: number, -- engine-owned; reading only
 	state: string, -- engine-owned; reading only
+	leader: boolean,
 }
 
 --- `somnium.Decal` (schema version 1).
