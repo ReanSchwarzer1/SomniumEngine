@@ -67,6 +67,8 @@ pub(super) struct StoryTools {
     pub(super) game_view: bool,
     /// Moves to make as soon as the next play-through starts (a capture script's choices).
     pub(super) script: Vec<PreviewInput>,
+    /// Send the journal to the host with the next beat.
+    journal_wanted: bool,
 }
 
 /// What the Game View's presenter asked of the play-through.
@@ -76,6 +78,8 @@ pub enum PreviewInput {
     Choose(usize),
     /// The player pressed Esc with nothing open: leave the Game View.
     Leave,
+    /// Open the game's journal on the play-through's story.
+    Journal,
 }
 
 /// One inspector field.
@@ -865,9 +869,10 @@ impl GraphEditor {
         self.follow_preview(widget);
     }
 
-    fn preview_buttons(widget: &Widget) -> [Rect; 3] {
+    fn preview_buttons(widget: &Widget) -> [Rect; 4] {
         let panel = Self::preview_rect(widget);
         [
+            Rect::new(panel.x + panel.w - 312.0, panel.y + 7.0, 70.0, 22.0),
             Rect::new(panel.x + panel.w - 236.0, panel.y + 7.0, 90.0, 22.0),
             Rect::new(panel.x + panel.w - 140.0, panel.y + 7.0, 66.0, 22.0),
             Rect::new(panel.x + panel.w - 68.0, panel.y + 7.0, 58.0, 22.0),
@@ -893,6 +898,15 @@ impl GraphEditor {
                 GraphEditorMessage::PreviewBeat(beat),
             ));
         }
+        if std::mem::take(&mut self.authoring.story.journal_wanted) {
+            if let Some(preview) = &self.authoring.story.preview {
+                emit.push(UiMessage::new(
+                    widget.handle,
+                    MessageDirection::FromWidget,
+                    GraphEditorMessage::PreviewJournal(preview.story.journal_view()),
+                ));
+            }
+        }
         // After the beat, so the notices stack over the presenter the beat made.
         if let Some(preview) = self.authoring.story.preview.as_mut() {
             for (heading, text) in preview.notices.drain(..) {
@@ -905,6 +919,27 @@ impl GraphEditor {
                 }
             }
         }
+    }
+
+    /// The game's journal, open over the editor, asked something of the play-through's story.
+    pub(super) fn preview_journal(
+        &mut self,
+        output: &crate::widgets::journal_screen::JournalOutput,
+    ) {
+        use crate::widgets::journal_screen::JournalOutput;
+        let Some(preview) = self.authoring.story.preview.as_mut() else {
+            return;
+        };
+        match output {
+            JournalOutput::Read(sequences) => {
+                for sequence in sequences {
+                    preview.story.mark_read(Some(*sequence));
+                }
+            }
+            JournalOutput::Track(quest) => preview.story.track(quest.as_deref()),
+            JournalOutput::Closed => return,
+        }
+        self.authoring.story.journal_wanted = true;
     }
 
     /// The Game View's presenter moved the play-through.
@@ -925,6 +960,7 @@ impl GraphEditor {
             }
             PreviewInput::Choose(index) => self.preview_act(widget, |c, s| c.choose(s, index)),
             PreviewInput::Leave => self.authoring.story.game_view = false,
+            PreviewInput::Journal => self.authoring.story.journal_wanted = true,
         }
     }
 
@@ -1033,8 +1069,10 @@ impl GraphEditor {
                 ..
             } if panel.contains(*pos) => {
                 self.commit_literal(widget, emit);
-                let [game_view, restart, stop] = Self::preview_buttons(widget);
-                if game_view.contains(*pos) {
+                let [journal, game_view, restart, stop] = Self::preview_buttons(widget);
+                if journal.contains(*pos) {
+                    self.authoring.story.journal_wanted = true;
+                } else if game_view.contains(*pos) {
                     self.authoring.story.game_view = !self.authoring.story.game_view;
                 } else if restart.contains(*pos) {
                     if let Some(preview) = self.authoring.story.preview.as_mut() {
@@ -1317,6 +1355,7 @@ impl GraphEditor {
             theme.semantic.text.primary.bytes(),
         );
         for (rect, label) in Self::preview_buttons(widget).into_iter().zip([
+            "Journal",
             if self.authoring.story.game_view {
                 "Game View ✓"
             } else {
@@ -1859,6 +1898,31 @@ mod tests {
             })
             .collect();
         assert_eq!(notices, [("QUEST STARTED", "Relight the lamps")]);
+        // The journal button hands the host the play-through's journal; its answers land on the story.
+        let journals = |editor: &mut GraphEditor| {
+            let mut emit = Vec::new();
+            editor.emit_story_beat(&widget, &mut emit);
+            emit.iter()
+                .filter_map(|m| match m.data::<GraphEditorMessage>() {
+                    Some(GraphEditorMessage::PreviewJournal(view)) => Some(view.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        editor.preview_input(&widget, PreviewInput::Journal);
+        let opened = journals(&mut editor);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].quests[0].title, "Relight the lamps");
+        assert!(!opened[0].quests[0].tracked);
+        editor.preview_journal(&crate::widgets::journal_screen::JournalOutput::Track(Some(
+            "lamps".into(),
+        )));
+        assert!(
+            journals(&mut editor)[0].quests[0].tracked,
+            "tracked on the story, sent back"
+        );
+        editor.preview_journal(&crate::widgets::journal_screen::JournalOutput::Closed);
+        assert!(journals(&mut editor).is_empty());
         editor.preview_input(&widget, PreviewInput::Leave);
         assert_eq!(beats(&mut editor), [None], "leaving closes the presenter");
     }

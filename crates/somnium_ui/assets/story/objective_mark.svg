@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24" height="24" viewBox="0 0 24 24">
+  <title>Untitled-2</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M12 2.5 L17.2 9.5 L12 16.5 L6.8 9.5 Z" fill="none" stroke="#ffffff" stroke-width="1.35" stroke-linejoin="round"/>
+    <path d="M12 7.2 L13.7 9.5 L12 11.8 L10.3 9.5 Z" fill="#ffffff"/>
+    <path d="M12 18.4 L12 21.4" fill="none" stroke="#ffffff" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

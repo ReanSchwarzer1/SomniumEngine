@@ -25,7 +25,7 @@
     { "id": "rep.*", "type": "int", "min": -100, "max": 100, "doc": "Standing with a faction, by name." }
   ],
   "cast": [
-    { "id": "wren", "name": "Wren", "portrait": "portraits/wren", "side": "left", "color": "#9fc7ff", "language": "common" },
+    { "id": "wren", "name": "Wren", "portrait": "portraits/wren", "side": "left", "color": "#9fc7ff", "language": "common", "journal": false },
     {
       "id": "oren",
       "name": "Oren",

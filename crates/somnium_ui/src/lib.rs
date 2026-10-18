@@ -38,6 +38,7 @@ pub mod thumbnail;
 pub mod timeline;
 pub mod types;
 pub mod typography;
+pub mod vector_glyph;
 pub mod ui;
 /// MORROWIND-J step 2: a panel living in its own OS window.
 /// `wgpu`, as this crate sees it.
@@ -974,6 +975,9 @@ pub struct UiManager {
     story_presenter: Option<NodeHandle>,
     /// The Game View's quest notices, over the presenter.
     story_notices: Option<NodeHandle>,
+    /// The game's journal screen over the editor, for a play-through's story, and whether it is open.
+    story_journal: Option<NodeHandle>,
+    story_journal_open: bool,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -1863,6 +1867,8 @@ impl UiManager {
             last_frame_at: None,
             story_presenter: None,
             story_notices: None,
+            story_journal: None,
+            story_journal_open: false,
             native_ui,
             ui_pass,
             font_id,
@@ -2373,7 +2379,8 @@ impl UiManager {
             }
             // A dialogue or quest file on the graph, as Open loads it: `story:<path>`, then `|from=<node>` selects a
             // node as Find does, `|game-view` turns the Game View on and `|play` presses Play, in the order given.
-            // `|choose=0,2` takes those choices as soon as the play-through starts.
+            // `|choose=0,2` takes those choices as soon as the play-through starts, and `|journal` then opens the
+            // game's journal on it.
             story if story.starts_with("story:") => {
                 let mut spec = raw.trim()["story:".len()..].split('|');
                 let path = spec.next().unwrap_or_default().trim().to_owned();
@@ -2386,25 +2393,22 @@ impl UiManager {
                     Ok(json) => self.open_story_document(catalogue, &json, Some(&path)),
                     Err(error) => warn!("SOMNIUM_AUDIT_UI_STATE story {path}: {error}"),
                 }
+                let mut script = Vec::new();
                 for option in spec.map(str::trim) {
                     match option {
+                        "journal" => script.push(crate::graph::PreviewInput::Journal),
                         "game-view" => self.native_ui.send(UiMessage::new(
                             self.animation_graph_editor,
                             MessageDirection::ToWidget,
                             crate::graph::GraphEditorMessage::PreviewGameView(true),
                         )),
                         "play" => self.request_graph_document(true, false),
-                        choose if choose.starts_with("choose=") => self.native_ui.send(UiMessage::new(
-                            self.animation_graph_editor,
-                            MessageDirection::ToWidget,
-                            crate::graph::GraphEditorMessage::PreviewScript(
-                                choose["choose=".len()..]
-                                    .split(',')
-                                    .filter_map(|i| i.trim().parse().ok())
-                                    .map(crate::graph::PreviewInput::Choose)
-                                    .collect(),
-                            ),
-                        )),
+                        choose if choose.starts_with("choose=") => script.extend(
+                            choose["choose=".len()..]
+                                .split(',')
+                                .filter_map(|i| i.trim().parse().ok())
+                                .map(crate::graph::PreviewInput::Choose),
+                        ),
                         from if from.starts_with("from=") => self.native_ui.send(UiMessage::new(
                             self.animation_graph_editor,
                             MessageDirection::ToWidget,
@@ -2412,6 +2416,13 @@ impl UiManager {
                         )),
                         other => warn!("SOMNIUM_AUDIT_UI_STATE story option {other:?} ignored"),
                     }
+                }
+                if !script.is_empty() {
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewScript(script),
+                    ));
                 }
             }
             // Any surface a command opens: `cmd:editor.workspace.animation`, several joined by `+`.
@@ -8828,6 +8839,30 @@ impl UiManager {
                 }
                 continue;
             }
+            if let Some(crate::graph::GraphEditorMessage::PreviewJournal(view)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_journal(view.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::journal_screen::JournalMessage::Output(output)) =
+                msg.data::<crate::widgets::journal_screen::JournalMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    if *output == crate::widgets::journal_screen::JournalOutput::Closed {
+                        self.story_journal_open = false;
+                        self.native_ui.set_focus(self.animation_graph_editor);
+                    }
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewJournalOutput(output.clone()),
+                    ));
+                }
+                continue;
+            }
             if let Some(crate::graph::GraphEditorMessage::PreviewNotice { heading, text }) =
                 msg.data::<crate::graph::GraphEditorMessage>()
             {
@@ -12239,6 +12274,28 @@ impl UiManager {
                     ));
                 }
             }
+        }
+    }
+
+    /// The game's journal screen over the editor, on a play-through's journal (opened, or kept open and refreshed).
+    fn show_story_journal(&mut self, view: somnium_story::story::JournalView) {
+        use crate::widgets::journal_screen::{JournalMessage, JournalScreenBuilder};
+        let handle = match self.story_journal {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = JournalScreenBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_journal = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::SetView(view)));
+        if !std::mem::replace(&mut self.story_journal_open, true) {
+            self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::Open(true)));
+            self.native_ui.set_focus(handle);
         }
     }
 

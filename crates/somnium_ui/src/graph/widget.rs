@@ -161,6 +161,10 @@ pub enum GraphEditorMessage {
     RevealNode(String),
     /// To the control: moves for the next play-through to make as soon as it starts.
     PreviewScript(Vec<story::PreviewInput>),
+    /// From the control: the play-through's journal, for the game's journal screen over the editor.
+    PreviewJournal(somnium_story::story::JournalView),
+    /// To the control: the journal screen's player read, tracked or closed.
+    PreviewJournalOutput(crate::widgets::journal_screen::JournalOutput),
 }
 
 impl GraphEditorMessage {
@@ -1390,6 +1394,7 @@ impl Control for GraphEditor {
                 GraphEditorMessage::PreviewInput(input) => self.preview_input(widget, input),
                 GraphEditorMessage::PreviewGameView(on) => self.authoring.story.game_view = on,
                 GraphEditorMessage::PreviewScript(script) => self.authoring.story.script = script,
+                GraphEditorMessage::PreviewJournalOutput(output) => self.preview_journal(&output),
                 GraphEditorMessage::RevealNode(id) => {
                     let graph = &self.surface().graph;
                     if let Some(node) =
@@ -1400,6 +1405,7 @@ impl Control for GraphEditor {
                 }
                 GraphEditorMessage::PreviewBeat(_)
                 | GraphEditorMessage::PreviewNotice { .. }
+                | GraphEditorMessage::PreviewJournal(_)
                 | GraphEditorMessage::Changed(_)
                 | GraphEditorMessage::StateMachineChanged(_) => {}
             }
