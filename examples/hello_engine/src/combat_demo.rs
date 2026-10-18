@@ -2236,6 +2236,61 @@ fn walker_config(c: &somnium_combat::Combatant) -> ControllerConfig {
     config
 }
 
+/// Each body's push out of those it stands inside, exactly as
+/// `CombatWorld::separation` gives it (the same terms summed in the same
+/// order, so the same bits), but from the bodies in the neighbouring cells
+/// only: a call each scans everyone, which a crowd pays for every step.
+fn separations(combat: &CombatWorld, ids: &[CombatantId]) -> Vec<(CombatantId, Vec3)> {
+    // In id order, as `separation` folds them.
+    let others: Vec<_> = combat
+        .combatants()
+        .filter(|o| o.alive() && o.mount.is_none())
+        .collect();
+    // Two bodies push only when closer than their radii together.
+    let cell = combat
+        .combatants()
+        .map(|c| c.body.radius)
+        .fold(0.0f32, f32::max)
+        .mul_add(2.0, 1e-3)
+        .max(0.1);
+    let key = |p: Vec3| ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, o) in others.iter().enumerate() {
+        grid.entry(key(o.position)).or_default().push(i);
+    }
+    let mut near = Vec::new();
+    ids.iter()
+        .map(|&id| {
+            let Some(me) = combat.combatant(id) else {
+                return (id, Vec3::ZERO);
+            };
+            let (x, z) = key(me.position);
+            near.clear();
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let at = (x.saturating_add(dx), z.saturating_add(dz));
+                    near.extend(grid.get(&at).into_iter().flatten().copied());
+                }
+            }
+            near.sort_unstable();
+            near.dedup();
+            let push = near.iter().map(|&i| others[i]).filter(|o| o.id != id).fold(
+                Vec3::ZERO,
+                |push, o| {
+                    let d = somnium_combat::geometry::flat(me.position - o.position);
+                    let (len, min) = (d.length(), me.body.radius + o.body.radius);
+                    if len < min && len > 1e-4 {
+                        push + d / len * (min - len) * 0.5
+                    } else {
+                        push
+                    }
+                },
+            );
+            (id, push)
+        })
+        .collect()
+}
+
 /// Everyone's feet from their controllers, after the combat step decided
 /// where each wants to go. Running into a ledge (the run key, or an AI on an
 /// off-mesh link) vaults or climbs it; a brain on a level link jumps. Each
@@ -2248,10 +2303,8 @@ fn walk(
     terrain: &impl Terrain,
 ) -> Vec<(CombatantId, LocomotionEvent)> {
     // Pushes from where everyone stood before anyone moved.
-    let pushes: Vec<(CombatantId, Vec3)> = walkers
-        .keys()
-        .map(|&id| (id, combat.separation(id)))
-        .collect();
+    let ids: Vec<CombatantId> = walkers.keys().copied().collect();
+    let pushes = separations(combat, &ids);
     let mut out = Vec::new();
     for (id, push) in pushes {
         let (Some(c), Some(walker)) = (combat.combatant(id), walkers.get_mut(&id)) else {
@@ -4030,6 +4083,125 @@ mod tests {
             "{} not {east}",
             alpha(&run)
         );
+    }
+
+    /// The host's pushes for everyone at once are `separation`'s, to the
+    /// bit, in a packed and partly fallen crowd with a horse in it (if
+    /// `separation` changes, this says so).
+    #[test]
+    fn everyone_is_pushed_as_separation_pushes_them() {
+        let mut world = World::new();
+        let root = world.spawn((
+            Name::new("Scene"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        let mut seed = 0x5851_f42d_4c95_7f2du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for i in 0..240 {
+            let at = Vec3::new(next() * 14.0 - 7.0, 0.0, next() * 14.0 - 7.0);
+            fighter(
+                &mut world,
+                root,
+                &format!("Body {i}"),
+                at,
+                Vec3::Z,
+                CombatantComponent::default(),
+            );
+        }
+        world.spawn((
+            Name::new("Horse"),
+            Transform {
+                translation: Vec3::new(0.5, 0.8, 0.5),
+                scale: Vec3::new(0.85, 1.6, 2.4),
+                ..Default::default()
+            },
+            WorldTransform::identity(),
+            Parent { entity: root },
+            CombatantComponent {
+                mount: 1,
+                ..CombatantComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let ids: Vec<CombatantId> = run.world.combatants().map(|c| c.id).collect();
+        for &id in ids.iter().step_by(7) {
+            run.world.combatant_mut(id).unwrap().action = Action::Dead;
+        }
+        let mut pushed = 0;
+        for (id, push) in separations(&run.world, &ids) {
+            assert_eq!(push, run.world.separation(id), "{id:?}");
+            pushed += usize::from(push != Vec3::ZERO);
+        }
+        assert!(pushed > 100, "a crowd that pushes: {pushed}");
+    }
+
+    /// What the host's walkers cost on Jolt ground: bodies standing idle
+    /// (as a woken camp at rest) and the same bodies walking. Run with
+    /// `cargo test --release -p hello_engine --bin hello_engine walker_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn walker_cost() {
+        for count in [100usize, 400] {
+            let mut world = World::new();
+            let root = world.spawn((
+                Name::new("Scene"),
+                Transform::default(),
+                WorldTransform::identity(),
+            ));
+            let side = (count as f32).sqrt().ceil() as usize;
+            for i in 0..count {
+                let at = Vec3::new((i % side) as f32 * 4.0, 0.0, (i / side) as f32 * 4.0);
+                fighter(
+                    &mut world,
+                    root,
+                    &format!("Body {i}"),
+                    at,
+                    Vec3::Z,
+                    CombatantComponent::default(),
+                );
+            }
+            somnium_core::propagate_transforms(&mut world);
+            let mut run = build(&world).expect("a fight");
+            let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
+            let extent = side as f32 * 4.0 + 20.0;
+            solid_bodies(
+                &mut physics,
+                vec![Mat4::from_scale_rotation_translation(
+                    Vec3::new(extent, 1.0, extent),
+                    Quat::IDENTITY,
+                    Vec3::new(extent * 0.5 - 10.0, -0.5, extent * 0.5 - 10.0),
+                )],
+            );
+            let terrain = JoltTerrain {
+                physics: &physics,
+                water: &[],
+            };
+            let dt = 1.0 / 60.0;
+            for _ in 0..30 {
+                walk(&mut run.world, &mut run.walkers, dt, &terrain);
+            }
+            let time = |run: &mut Run| {
+                let start = std::time::Instant::now();
+                for _ in 0..60 {
+                    walk(&mut run.world, &mut run.walkers, dt, &terrain);
+                }
+                start.elapsed().as_secs_f64() * 1e3 / 60.0
+            };
+            let idle = time(&mut run);
+            let ids: Vec<CombatantId> = run.world.combatants().map(|c| c.id).collect();
+            for id in ids {
+                run.world.combatant_mut(id).unwrap().intent.velocity = Vec3::X * 1.5;
+            }
+            let walking = time(&mut run);
+            println!("{count} bodies: idle {idle:.3} ms a step, walking {walking:.3} ms a step");
+        }
     }
 
     /// A pack and a camp placed apart (as across Tyffir): each builds only
