@@ -960,7 +960,12 @@ impl LifeDemo {
             greeted: 0,
             spawned,
             colliders: Vec::new(),
-            hour: tod.map_or(6.5, |t| t.0),
+            // `SOMNIUM_LIFE_HOUR` starts the day at another hour (captures).
+            hour: std::env::var("SOMNIUM_LIFE_HOUR")
+                .ok()
+                .and_then(|h| h.parse().ok())
+                .or(tod.map(|t| t.0))
+                .unwrap_or(6.5),
             eclipse: tod.map_or(0.0, |t| t.1),
             step_ms: 0.0,
             write_ms: 0.0,
