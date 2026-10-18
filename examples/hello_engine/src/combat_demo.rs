@@ -1081,6 +1081,8 @@ struct Encounter {
     /// Survivors by name, with their health, after its first sleep; `None`
     /// before it ever woke (everyone).
     left: Option<Vec<(String, f32)>>,
+    /// Where its navigation patch is centred, while it has one.
+    patch_at: Option<Vec3>,
     /// Awake: its entities, fighters (and where each stood when it woke)
     /// and colliders.
     entities: Vec<Entity>,
@@ -1151,6 +1153,11 @@ fn tend_encounters(
         if !(woke && dt.is_infinite()) {
             break;
         }
+    }
+    if run.patched
+        && let Some(physics) = physics
+    {
+        repatch(physics, run);
     }
 }
 
@@ -1241,6 +1248,7 @@ fn wake(
     }
     organise(&mut run.world, &members, &leaders);
     let mut solids = Vec::new();
+    let mut patched = None;
     if let Some(physics) = physics {
         let boxes: Vec<Mat4> = made
             .iter()
@@ -1260,6 +1268,7 @@ fn wake(
                     .get_or_insert_with(NavWorld::default)
                     .stream_in(tile);
                 run.patched = true;
+                patched = Some(at);
             }
         }
     }
@@ -1280,6 +1289,7 @@ fn wake(
         record.members = members;
         record.starts = starts;
         record.solids = solids;
+        record.patch_at = patched;
     }
 }
 
@@ -1342,6 +1352,47 @@ fn sleep(
         && let Some(nav) = run.nav.as_mut()
     {
         nav.stream_out([i64::from(id.0), PATCH_LAYER, 0]);
+    }
+    if let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) {
+        record.patch_at = None;
+    }
+}
+
+/// A woken group whose survivors have gone half its chase room from the
+/// middle of its patch gets a new one round where they are now: one group a
+/// look, so a valley of chases never lands on one frame.
+fn repatch(physics: &somnium_physics::world::PhysicsWorld, run: &mut Run) {
+    let Some(set) = &run.encounters else {
+        return;
+    };
+    let moved = set.awake().find_map(|id| {
+        let record = set.data(id)?;
+        let at = record.patch_at?;
+        let alive: Vec<Vec3> = record
+            .members
+            .iter()
+            .filter_map(|m| run.world.combatant(*m))
+            .filter(|c| c.alive())
+            .map(|c| c.position)
+            .collect();
+        if alive.is_empty() {
+            return None;
+        }
+        let centre = alive.iter().sum::<Vec3>() / alive.len() as f32;
+        let gone = Vec3::new(centre.x - at.x, 0.0, centre.z - at.z).length();
+        (gone > PATCH_REACH * 0.5).then(|| (id, centre, encounter_extent(&record.kind)))
+    });
+    let Some((id, centre, extent)) = moved else {
+        return;
+    };
+    if let (Some(tile), Some(nav)) = (
+        patch(physics, &run.water, id, centre, extent),
+        run.nav.as_mut(),
+    ) {
+        nav.stream_in(tile);
+    }
+    if let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) {
+        record.patch_at = Some(centre);
     }
 }
 
@@ -4336,8 +4387,33 @@ mod tests {
             path.points
         );
         println!("patch woken and built in {built:?}");
-        // Away: asleep, and its patch gone.
+        // The camp runs 30 m east: past its patch, until it is patched anew.
+        let far = Vec3::new(60.0, 0.0, 0.0);
+        assert!(
+            run.nav
+                .as_ref()
+                .unwrap()
+                .path(Vec3::new(30.0, 0.0, 0.0), far, 1.0)
+                .is_none()
+        );
         let hero = run.player.expect("the protagonist");
+        let camp: Vec<CombatantId> = run
+            .world
+            .combatants()
+            .filter(|c| c.id != hero)
+            .map(|c| c.id)
+            .collect();
+        for id in camp {
+            run.world.combatant_mut(id).unwrap().position += Vec3::X * 30.0;
+        }
+        tend_encounters(&mut world, Some(&mut physics), &mut run, f32::INFINITY);
+        let nav = run.nav.as_ref().unwrap();
+        assert_eq!(nav.cells().count(), 1, "one patch, moved");
+        assert!(
+            nav.path(Vec3::new(30.0, 0.0, 0.0), far, 1.0).is_some(),
+            "re-patched"
+        );
+        // Away: asleep, and its patch gone.
         run.world.combatant_mut(hero).unwrap().position = Vec3::new(-400.0, 0.0, 0.0);
         tend_encounters(&mut world, Some(&mut physics), &mut run, f32::INFINITY);
         assert_eq!(run.nav.as_ref().map(|n| n.cells().count()), Some(0));
