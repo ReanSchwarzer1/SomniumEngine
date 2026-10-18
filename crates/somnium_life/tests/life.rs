@@ -370,6 +370,38 @@ fn a_place_from_a_settlement_layout_and_back_through_json() {
 /// `cargo test -p somnium_life --release -- --ignored --nocapture`: the cost
 /// of a crowd: fifty villages with their beasts and carts, the player in one.
 #[test]
+fn a_place_that_streams_back_keeps_its_people() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let at = Vec3::new(500.0, 0.0, 0.0);
+    let key = Place::key("Testby", at);
+    let (index, new) = w.adopt_place(key, village(at), Some(7));
+    assert!(new);
+    let people = w.villagers().len();
+    assert!(people > 0);
+    // Its cell unloads; the day goes on in life, far from the player.
+    day(&mut w, 6.0, 11.0, 0.0, &[Vec3::ZERO], |_, _| {});
+    let out = w.villagers().iter().filter(|v| v.visible).count();
+    // Streamed back: same key, same place, nobody housed twice.
+    assert_eq!(
+        w.adopt_place(Place::key("Testby", at), village(at), Some(7)),
+        (index, false)
+    );
+    assert_eq!(w.villagers().len(), people);
+    assert_eq!(w.villagers().iter().filter(|v| v.visible).count(), out);
+    assert_eq!(w.place_count(), 1);
+    // Another place, or the same name elsewhere, is new.
+    assert_ne!(Place::key("Testby", at + Vec3::X), key);
+    let (other, new) = w.adopt_place(
+        Place::key("Otherby", at),
+        village(at + Vec3::Z * 300.0),
+        Some(7),
+    );
+    assert!(new);
+    assert_eq!(other, 1);
+    assert!(w.villagers().len() > people);
+}
+
+#[test]
 #[ignore]
 fn crowd_cost() {
     let build = || {

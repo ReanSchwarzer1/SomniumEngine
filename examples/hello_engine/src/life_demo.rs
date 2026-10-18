@@ -21,6 +21,11 @@
 //! doors get a body (`somnium_life::Bodies`), so a town of any size costs that
 //! many entities. The step and the transform writes are timed and reported to MCP
 //! (`life` in the authoring state) and the log every ten seconds.
+//!
+//! Places stream: a Life Place (or a hand-placed agent) that a streamed cell
+//! installs after Play began is adopted when it appears, keyed by its name and
+//! where it stands; when its cell unloads its people live on, and when it
+//! streams back it finds them again (`LifeWorld::adopt_place`).
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
@@ -497,9 +502,13 @@ struct Run {
     beasts: Pool,
     carts: Pool,
     looks: HashMap<Entity, Look>,
-    authored: Vec<(Entity, Transform)>,
-    villager_readouts: Vec<(Entity, usize, String)>,
-    places: Vec<Entity>,
+    /// Hand-placed entities' authored transforms, put back on Stop.
+    authored: HashMap<Entity, Transform>,
+    /// What each hand-placed villager was last shown doing.
+    readouts: HashMap<Entity, String>,
+    links: Links,
+    /// Seconds since the scene was last looked over for places and agents.
+    synced: f32,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -597,6 +606,8 @@ fn dress(world: &mut World, entity: Entity, name: &str, size: Vec3, look: &str) 
 #[derive(Default)]
 pub struct LifeDemo {
     run: Option<Run>,
+    /// Seconds since Play last looked for life that had not streamed in yet.
+    idle: f32,
 }
 
 fn role_material(role: Role) -> &'static str {
@@ -622,116 +633,121 @@ fn beast_look(kind: BeastKind) -> (Vec3, &'static str) {
     }
 }
 
-/// What the scene declares, as a life world: its places (with their spots and
-/// splines), and the hand-placed agents with the entities that show them.
-struct Gathered {
-    life: LifeWorld,
-    places: Vec<Entity>,
-    visuals: Vec<(Entity, Visual, Vec3)>,
-    authored: Vec<(Entity, Transform)>,
-    villager_readouts: Vec<(Entity, usize, String)>,
+/// What the scene declares, kept in step as cells stream in and out: places
+/// adopted by a stable key (housed the first time only) and hand-placed
+/// agents linked to their entities. An entity that streams out leaves its
+/// place or agent living on in life (an agent with no entity of its own is
+/// drawn from the pool); one that streams back finds it again by its key.
+#[derive(Default)]
+struct Links {
+    places: HashMap<Entity, usize>,
+    agents: HashMap<Entity, Visual>,
+    keys: HashMap<u64, Visual>,
+    /// The world's entity count when last synced.
+    seen: usize,
 }
 
-fn gather(world: &World) -> Option<Gathered> {
-    let places: Vec<(Entity, LifePlaceComponent)> = world
+fn declares_life(world: &World) -> bool {
+    world
         .iter_with::<LifePlaceComponent>()
-        .filter(|(_, p)| p.enabled)
+        .any(|(_, p)| p.enabled)
+        || world
+            .iter_with::<VillagerComponent>()
+            .any(|(_, v)| v.enabled)
+        || world
+            .iter_with::<LivestockComponent>()
+            .any(|(_, b)| b.enabled)
+        || world.iter_with::<CartComponent>().any(|(_, c)| c.enabled)
+}
+
+fn name_of(world: &World, e: Entity, or: &str) -> String {
+    world
+        .get::<Name>(e)
+        .map_or(or.to_string(), |n| n.as_str().to_string())
+}
+
+/// Adopt the places and hand-placed agents that appeared since the last look,
+/// and let go of the entities that went.
+fn sync(world: &World, run: &mut Run) {
+    let links = &mut run.links;
+    let life = &mut run.life;
+    links.seen = world.entity_count();
+    links.places.retain(|e, _| world.is_alive(*e));
+    links.agents.retain(|e, _| world.is_alive(*e));
+    run.authored.retain(|e, _| world.is_alive(*e));
+    run.readouts.retain(|e, _| world.is_alive(*e));
+    let new_places: Vec<(Entity, LifePlaceComponent)> = world
+        .iter_with::<LifePlaceComponent>()
+        .filter(|(e, p)| p.enabled && !links.places.contains_key(e))
         .map(|(e, p)| (e, p.clone()))
         .collect();
-    let authored_villagers: Vec<(Entity, VillagerComponent)> = world
-        .iter_with::<VillagerComponent>()
-        .filter(|(_, v)| v.enabled)
-        .map(|(e, v)| (e, v.clone()))
-        .collect();
-    let authored_beasts: Vec<(Entity, LivestockComponent)> = world
-        .iter_with::<LivestockComponent>()
-        .filter(|(_, b)| b.enabled)
-        .map(|(e, b)| (e, b.clone()))
-        .collect();
-    let authored_carts: Vec<Entity> = world
-        .iter_with::<CartComponent>()
-        .filter(|(_, c)| c.enabled)
-        .map(|(e, _)| e)
-        .collect();
-    if places.is_empty()
-        && authored_villagers.is_empty()
-        && authored_beasts.is_empty()
-        && authored_carts.is_empty()
-    {
-        return None;
-    }
-    let spots: Vec<(Entity, Spot)> = world
-        .iter_with::<LifeSpotComponent>()
-        .map(|(e, s)| {
-            let (scale, _, position) = world_matrix(world, e).to_scale_rotation_translation();
-            let kind = s.kind();
-            let radius = if kind.indoor() {
-                0.5
-            } else {
-                (scale.x.abs().min(scale.z.abs()) * 0.5).max(1.0)
-            };
-            (
-                e,
-                Spot {
-                    kind,
-                    position,
-                    radius,
-                    label: world
-                        .get::<Name>(e)
-                        .map_or(String::new(), |n| n.as_str().to_string()),
-                },
-            )
-        })
-        .collect();
-    let splines: Vec<(Entity, Vec<Vec3>)> = world
-        .iter_with::<SplineComponent>()
-        .map(|(e, s)| {
-            let m = world_matrix(world, e);
-            let mut points = Vec::new();
-            for seg in 0..s.segment_count() {
-                for k in 0..SAMPLES_PER_SEGMENT {
-                    points.push(m.transform_point3(
-                        s.sample_segment(seg, k as f32 / SAMPLES_PER_SEGMENT as f32),
-                    ));
+    if !new_places.is_empty() {
+        let spots: Vec<(Entity, Spot)> = world
+            .iter_with::<LifeSpotComponent>()
+            .map(|(e, s)| {
+                let (scale, _, position) = world_matrix(world, e).to_scale_rotation_translation();
+                let kind = s.kind();
+                let radius = if kind.indoor() {
+                    0.5
+                } else {
+                    (scale.x.abs().min(scale.z.abs()) * 0.5).max(1.0)
+                };
+                (
+                    e,
+                    Spot {
+                        kind,
+                        position,
+                        radius,
+                        label: name_of(world, e, ""),
+                    },
+                )
+            })
+            .collect();
+        let splines: Vec<(Entity, Vec<Vec3>)> = world
+            .iter_with::<SplineComponent>()
+            .map(|(e, s)| {
+                let m = world_matrix(world, e);
+                let mut points = Vec::new();
+                for seg in 0..s.segment_count() {
+                    for k in 0..SAMPLES_PER_SEGMENT {
+                        points.push(m.transform_point3(
+                            s.sample_segment(seg, k as f32 / SAMPLES_PER_SEGMENT as f32),
+                        ));
+                    }
                 }
-            }
-            if let Some(last) = s.points.last() {
-                points.push(m.transform_point3(*last));
-            }
-            (e, points)
-        })
-        .filter(|(_, p)| p.len() >= 2)
-        .collect();
-    let mut life = LifeWorld::new(LodConfig::default());
-    let mut place_entities = Vec::new();
-    for (e, p) in &places {
-        let mine: Vec<Spot> = spots
-            .iter()
-            .filter(|(s, _)| under(world, *s, *e))
-            .map(|(_, s)| s.clone())
+                if let Some(last) = s.points.last() {
+                    points.push(m.transform_point3(*last));
+                }
+                (e, points)
+            })
+            .filter(|(_, p)| p.len() >= 2)
             .collect();
-        let lanes: Vec<Vec<Vec3>> = splines
-            .iter()
-            .filter(|(s, _)| under(world, *s, *e))
-            .map(|(_, l)| l.clone())
-            .collect();
-        let name = world
-            .get::<Name>(*e)
-            .map_or("Place".to_string(), |n| n.as_str().to_string());
-        let index = life.add_place(Place {
-            name,
-            spots: mine,
-            roads: lanes.clone(),
-            lanes,
-        });
-        if p.populate {
-            life.populate(index, u64::from(p.seed));
+        for (e, p) in &new_places {
+            let mine: Vec<Spot> = spots
+                .iter()
+                .filter(|(s, _)| under(world, *s, *e))
+                .map(|(_, s)| s.clone())
+                .collect();
+            let lanes: Vec<Vec<Vec3>> = splines
+                .iter()
+                .filter(|(s, _)| under(world, *s, *e))
+                .map(|(_, l)| l.clone())
+                .collect();
+            let name = name_of(world, *e, "Place");
+            let key = Place::key(&name, world_matrix(world, *e).w_axis.truncate());
+            let place = Place {
+                name,
+                spots: mine,
+                roads: lanes.clone(),
+                lanes,
+            };
+            let (index, _) = life.adopt_place(key, place, p.populate.then_some(u64::from(p.seed)));
+            links.places.insert(*e, index);
         }
-        place_entities.push(*e);
     }
-    // Hand-placed agents keep to the nearest place (made on the spot if none).
+    // Hand-placed agents keep to the nearest place.
     let nearest_place = |life: &LifeWorld, at: Vec3| -> Option<usize> {
-        (0..place_entities.len()).min_by(|a, b| {
+        (0..life.place_count()).min_by(|a, b| {
             let d = |i: usize| {
                 life.place(i).map_or(f32::INFINITY, |p| {
                     p.spots
@@ -743,106 +759,122 @@ fn gather(world: &World) -> Option<Gathered> {
             d(*a).total_cmp(&d(*b))
         })
     };
-    let mut visuals = Vec::new();
-    let mut authored = Vec::new();
-    let mut villager_readouts = Vec::new();
-    for (e, v) in &authored_villagers {
+    let mut link = |links: &mut Links, e: Entity, key: u64, which: Option<Visual>| {
+        if let Some(which) = which {
+            links.keys.insert(key, which);
+            links.agents.insert(e, which);
+            if let Some(t) = world.get::<Transform>(e) {
+                run.authored.insert(e, *t);
+            }
+        }
+    };
+    let villagers: Vec<(Entity, VillagerComponent)> = world
+        .iter_with::<VillagerComponent>()
+        .filter(|(e, v)| v.enabled && !links.agents.contains_key(e))
+        .map(|(e, v)| (e, v.clone()))
+        .collect();
+    for (e, v) in &villagers {
         let at = world_matrix(world, *e).w_axis.truncate();
-        let Some(pi) = nearest_place(&life, at) else {
-            continue;
-        };
-        let p = life.place(pi).expect("exists").clone();
-        let near = |kind: SpotKind| {
-            p.spots_of(kind).min_by(|a, b| {
-                p.spots[*a]
-                    .position
-                    .distance(at)
-                    .total_cmp(&p.spots[*b].position.distance(at))
-            })
-        };
-        let Some(home) = near(SpotKind::Home) else {
-            continue;
-        };
-        let role = v.role();
-        let work = role.workplace().and_then(near);
-        let name = world
-            .get::<Name>(*e)
-            .map_or("Villager".into(), |n| n.as_str().to_string());
-        if life
-            .spawn_villager(VillagerDesc {
+        let name = name_of(world, *e, "Villager");
+        let key = Place::key(&format!("villager {name}"), at);
+        let which = links.keys.get(&key).copied().or_else(|| {
+            let pi = nearest_place(life, at)?;
+            let p = life.place(pi).expect("exists").clone();
+            let near = |kind: SpotKind| {
+                p.spots_of(kind).min_by(|a, b| {
+                    p.spots[*a]
+                        .position
+                        .distance(at)
+                        .total_cmp(&p.spots[*b].position.distance(at))
+                })
+            };
+            let home = near(SpotKind::Home)?;
+            let role = v.role();
+            let work = role.workplace().and_then(near);
+            life.spawn_villager(VillagerDesc {
                 name,
                 role,
                 place: pi,
                 home,
                 work,
-            })
-            .is_some()
-        {
-            let index = life.villagers().len() - 1;
-            visuals.push((*e, Visual::Villager(index), Vec3::ONE));
-            villager_readouts.push((*e, index, String::new()));
-            if let Some(t) = world.get::<Transform>(*e) {
-                authored.push((*e, *t));
-            }
-        }
-    }
-    for (e, b) in &authored_beasts {
-        let at = world_matrix(world, *e).w_axis.truncate();
-        let Some(pi) = nearest_place(&life, at) else {
-            continue;
-        };
-        let p = life.place(pi).expect("exists");
-        let pen = p
-            .spots
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| matches!(s.kind, SpotKind::Pen | SpotKind::Field))
-            .min_by(|a, b| {
-                a.1.position
-                    .distance(at)
-                    .total_cmp(&b.1.position.distance(at))
-            })
-            .map(|(i, _)| i);
-        if let Some(pen) = pen
-            && life.spawn_beast(b.kind(), pi, pen).is_some()
-        {
-            visuals.push((*e, Visual::Beast(life.beasts().len() - 1), Vec3::ONE));
-            if let Some(t) = world.get::<Transform>(*e) {
-                authored.push((*e, *t));
-            }
-        }
-    }
-    for e in &authored_carts {
-        let at = world_matrix(world, *e).w_axis.truncate();
-        let Some(pi) = nearest_place(&life, at) else {
-            continue;
-        };
-        let p = life.place(pi).expect("exists");
-        let road = (0..p.roads.len()).min_by(|a, b| {
-            let d = |r: usize| {
-                p.roads[r]
-                    .iter()
-                    .map(|q| q.distance(at))
-                    .fold(f32::INFINITY, f32::min)
-            };
-            d(*a).total_cmp(&d(*b))
+            })?;
+            Some(Visual::Villager(life.villagers().len() - 1))
         });
-        if let Some(road) = road
-            && life.spawn_cart(pi, road, 0.0).is_some()
-        {
-            visuals.push((*e, Visual::Cart(life.carts().len() - 1), Vec3::ONE));
-            if let Some(t) = world.get::<Transform>(*e) {
-                authored.push((*e, *t));
-            }
-        }
+        link(links, *e, key, which);
     }
-    Some(Gathered {
-        life,
-        places: place_entities,
-        visuals,
-        authored,
-        villager_readouts,
-    })
+    let beasts: Vec<(Entity, LivestockComponent)> = world
+        .iter_with::<LivestockComponent>()
+        .filter(|(e, b)| b.enabled && !links.agents.contains_key(e))
+        .map(|(e, b)| (e, b.clone()))
+        .collect();
+    for (e, b) in &beasts {
+        let at = world_matrix(world, *e).w_axis.truncate();
+        let key = Place::key(&format!("beast {}", name_of(world, *e, "")), at);
+        let which = links.keys.get(&key).copied().or_else(|| {
+            let pi = nearest_place(life, at)?;
+            let p = life.place(pi).expect("exists");
+            let pen = p
+                .spots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| matches!(s.kind, SpotKind::Pen | SpotKind::Field))
+                .min_by(|a, b| {
+                    a.1.position
+                        .distance(at)
+                        .total_cmp(&b.1.position.distance(at))
+                })
+                .map(|(i, _)| i)?;
+            life.spawn_beast(b.kind(), pi, pen)?;
+            Some(Visual::Beast(life.beasts().len() - 1))
+        });
+        link(links, *e, key, which);
+    }
+    let carts: Vec<Entity> = world
+        .iter_with::<CartComponent>()
+        .filter(|(e, c)| c.enabled && !links.agents.contains_key(e))
+        .map(|(e, _)| e)
+        .collect();
+    for e in &carts {
+        let at = world_matrix(world, *e).w_axis.truncate();
+        let key = Place::key(&format!("cart {}", name_of(world, *e, "")), at);
+        let which = links.keys.get(&key).copied().or_else(|| {
+            let pi = nearest_place(life, at)?;
+            let p = life.place(pi).expect("exists");
+            let road = (0..p.roads.len()).min_by(|a, b| {
+                let d = |r: usize| {
+                    p.roads[r]
+                        .iter()
+                        .map(|q| q.distance(at))
+                        .fold(f32::INFINITY, f32::min)
+                };
+                d(*a).total_cmp(&d(*b))
+            })?;
+            life.spawn_cart(pi, road, 0.0)?;
+            Some(Visual::Cart(life.carts().len() - 1))
+        });
+        link(links, *e, key, which);
+    }
+    // Hand-placed visuals keep their own scale; the pools draw everyone else.
+    run.visuals = links
+        .agents
+        .iter()
+        .map(|(e, w)| (*e, *w, run.authored.get(e).map_or(Vec3::ONE, |t| t.scale)))
+        .collect();
+    let own = |pick: fn(&Visual) -> Option<usize>| -> HashSet<usize> {
+        links.agents.values().filter_map(pick).collect()
+    };
+    run.villagers.own = own(|v| match v {
+        Visual::Villager(i) => Some(*i),
+        _ => None,
+    });
+    run.beasts.own = own(|v| match v {
+        Visual::Beast(i) => Some(*i),
+        _ => None,
+    });
+    run.carts.own = own(|v| match v {
+        Visual::Cart(i) => Some(*i),
+        _ => None,
+    });
 }
 
 impl LifeDemo {
@@ -857,19 +889,13 @@ impl LifeDemo {
         self.run = Some(run);
     }
 
-    /// Everything but the colliders.
+    /// Everything but the colliders: the pools of bodies, then the scene's
+    /// places and agents as they stand.
     fn start(world: &mut World) -> Option<Run> {
-        somnium_core::propagate_transforms(world);
-        let Some(Gathered {
-            life,
-            places: place_entities,
-            mut visuals,
-            authored,
-            villager_readouts,
-        }) = gather(world)
-        else {
+        if !declares_life(world) {
             return None;
-        };
+        }
+        somnium_core::propagate_transforms(world);
         let mut spawned = Vec::new();
         let effects = world.spawn((
             Name::new("Life (runtime)"),
@@ -877,76 +903,46 @@ impl LifeDemo {
             WorldTransform::identity(),
         ));
         spawned.push(effects);
-        let own = |pick: fn(&Visual) -> Option<usize>| -> HashSet<usize> {
-            visuals.iter().filter_map(|(_, v, _)| pick(v)).collect()
-        };
-        let (own_villagers, own_beasts, own_carts) = (
-            own(|v| match v {
-                Visual::Villager(i) => Some(*i),
-                _ => None,
-            }),
-            own(|v| match v {
-                Visual::Beast(i) => Some(*i),
-                _ => None,
-            }),
-            own(|v| match v {
-                Visual::Cart(i) => Some(*i),
-                _ => None,
-            }),
-        );
         let villagers = Pool::new(
             world,
             &mut spawned,
             effects,
             (VILLAGER_BODIES, "Villager", MeshKind::Cylinder, true),
-            own_villagers,
+            HashSet::new(),
         );
         let beasts = Pool::new(
             world,
             &mut spawned,
             effects,
             (BEAST_BODIES, "Beast", MeshKind::Cube, false),
-            own_beasts,
+            HashSet::new(),
         );
         let mut carts = Pool::new(
             world,
             &mut spawned,
             effects,
             (CART_BODIES, "Cart", MeshKind::Cube, false),
-            own_carts,
+            HashSet::new(),
         );
         for (body, _) in &carts.slots {
             dress(world, *body, "Cart", Vec3::new(1.4, 1.1, 2.6), "hide");
         }
         carts.bodies.keep = 10.0;
-        // Authored visuals keep their own scale.
-        for (e, _, size) in &mut visuals {
-            if let Some((_, t)) = authored.iter().find(|(a, _)| a == e) {
-                *size = t.scale;
-            }
-        }
         let tod = world
             .iter_with::<TimeOfDayComponent>()
             .find(|(_, t)| t.enabled)
             .map(|(_, t)| (t.hour, t.eclipse));
-        let population = life.villagers().len() + life.beasts().len() + life.carts().len();
-        info!(
-            villagers = life.villagers().len(),
-            beasts = life.beasts().len(),
-            carts = life.carts().len(),
-            "life: {population} agents in {} places",
-            place_entities.len()
-        );
-        Some(Run {
-            life,
-            visuals,
+        let mut run = Run {
+            life: LifeWorld::new(LodConfig::default()),
+            visuals: Vec::new(),
             villagers,
             beasts,
             carts,
             looks: HashMap::new(),
-            authored,
-            villager_readouts,
-            places: place_entities,
+            authored: HashMap::new(),
+            readouts: HashMap::new(),
+            links: Links::default(),
+            synced: 0.0,
             spawned,
             colliders: Vec::new(),
             hour: tod.map_or(6.5, |t| t.0),
@@ -955,11 +951,23 @@ impl LifeDemo {
             write_ms: 0.0,
             frames: 0,
             reported: 0.0,
-        })
+        };
+        sync(world, &mut run);
+        let life = &run.life;
+        info!(
+            villagers = life.villagers().len(),
+            beasts = life.beasts().len(),
+            carts = life.carts().len(),
+            "life: {} agents in {} places",
+            life.villagers().len() + life.beasts().len() + life.carts().len(),
+            life.place_count()
+        );
+        Some(run)
     }
 
     /// Put everything back as authored.
     pub fn end(&mut self, ctx: &mut EngineContext) {
+        self.idle = 0.0;
         let Some(run) = self.run.take() else { return };
         for (e, t) in run.authored {
             if let Some(slot) = ctx.world.get_mut::<Transform>(e) {
@@ -977,10 +985,25 @@ impl LifeDemo {
     /// One frame of life: the clock, the step with the camera as focus, then
     /// the visuals that changed.
     pub fn update(&mut self, ctx: &mut EngineContext) {
-        let Some(run) = &mut self.run else { return };
         let dt = ctx.dt();
         if !(dt.is_finite() && dt > 0.0) {
             return;
+        }
+        if self.run.is_none() {
+            // Life may stream in after Play began (cells load around the view).
+            self.idle += dt;
+            if self.idle >= 1.0 {
+                self.idle = 0.0;
+                self.begin(ctx);
+            }
+            return;
+        }
+        let run = self.run.as_mut().expect("running");
+        // Places and hand-placed agents stream in and out with their cells.
+        run.synced += dt;
+        if run.synced >= 1.0 || (run.synced >= 0.25 && ctx.world.entity_count() != run.links.seen) {
+            run.synced = 0.0;
+            sync(ctx.world, run);
         }
         let tod = ctx
             .world
@@ -1045,7 +1068,8 @@ impl LifeDemo {
             "running": true,
             "hour": run.hour,
             "eclipse": run.eclipse,
-            "places": run.places.len(),
+            "places": run.life.place_count(),
+            "places_loaded": run.links.places.len(),
             "villagers": run.life.villagers().len(),
             "outdoors": out,
             "beasts": run.life.beasts().len(),
@@ -1186,9 +1210,13 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
             t.rotation = r;
         }
     }
-    for (entity, index, last) in &mut run.villager_readouts {
+    for (entity, which) in &run.links.agents {
+        let Visual::Villager(index) = which else {
+            continue;
+        };
         let v = &run.life.villagers()[*index];
         let doing = format!("{:?} ({:?})", v.activity, v.pose);
+        let last = run.readouts.entry(*entity).or_default();
         if *last != doing {
             last.clone_from(&doing);
             if let Some(c) = world.get_mut::<VillagerComponent>(*entity) {
@@ -1197,7 +1225,7 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         }
     }
     let population = run.life.villagers().len() + run.life.beasts().len() + run.life.carts().len();
-    for e in &run.places {
+    for e in run.links.places.keys() {
         if let Some(p) = world.get_mut::<LifePlaceComponent>(*e)
             && p.population != population as u32
         {
@@ -1245,11 +1273,10 @@ mod tests {
     fn the_village_keeps_its_day_and_goes_in_under_the_lid() {
         let mut world = World::new();
         spawn_village(&mut world, &json!({"homes": 20})).expect("builds");
-        somnium_core::propagate_transforms(&mut world);
-        let Gathered {
-            mut life, places, ..
-        } = gather(&world).expect("a place");
-        assert_eq!(places.len(), 1);
+        let Run {
+            mut life, links, ..
+        } = LifeDemo::start(&mut world).expect("a place");
+        assert_eq!(links.places.len(), 1);
         assert!(life.villagers().len() >= 20, "a household a home");
         assert!(!life.beasts().is_empty() && !life.carts().is_empty());
         let mut hour = 6.0;
@@ -1285,8 +1312,8 @@ mod tests {
         );
     }
 
-    /// The preset gives a place with homes for every house, the trades, the
-    /// green, fields and a pen; its lanes are splines.
+    /// A town of any size spawns the same pool of bodies, and they go to the
+    /// nearest out of doors.
     #[test]
     fn a_big_village_draws_only_its_pooled_bodies_nearest_first() {
         let mut world = World::new();
@@ -1314,7 +1341,11 @@ mod tests {
             .filter(|v| v.visible && v.tier != Tier::Far)
             .map(|v| v.position.distance(focus))
             .collect();
-        assert!(out.len() > VILLAGER_BODIES, "more out than bodies: {}", out.len());
+        assert!(
+            out.len() > VILLAGER_BODIES,
+            "more out than bodies: {}",
+            out.len()
+        );
         let held = run.villagers.bodies.held();
         assert_eq!(held, out.len().min(VILLAGER_BODIES));
         // Every drawn villager is nearer than every outdoor one left undrawn.
@@ -1348,6 +1379,62 @@ mod tests {
         }
     }
 
+    /// A village that streams out keeps living, and streams back with the same
+    /// people: nobody housed twice, a hand-placed villager finds itself again.
+    #[test]
+    fn a_village_that_streams_out_and_back_keeps_its_people() {
+        let mut world = World::new();
+        let village = spawn_village(&mut world, &json!({"homes": 20})).unwrap();
+        let smith = world.spawn((
+            Name::new("Old Hal"),
+            Transform::from_translation(Vec3::new(3.0, 0.0, 3.0)),
+            WorldTransform::identity(),
+            VillagerComponent {
+                role: Role::ALL.iter().position(|r| *r == Role::Smith).unwrap() as u32,
+                ..Default::default()
+            },
+        ));
+        let mut run = LifeDemo::start(&mut world).unwrap();
+        let people = run.life.villagers().len();
+        assert_eq!(run.links.agents.len(), 1, "the hand-placed smith");
+        // The cell unloads: every entity it held goes.
+        for e in village.iter().copied().chain([smith]) {
+            world.despawn(e);
+        }
+        sync(&world, &mut run);
+        assert!(run.links.places.is_empty() && run.links.agents.is_empty());
+        assert!(
+            run.villagers.own.is_empty(),
+            "the smith is the pool's to draw now"
+        );
+        for _ in 0..100 {
+            run.life.step(0.5, Clock::at(9.0), &[], &Flat);
+        }
+        // It streams back: the same place and the same smith, nobody new.
+        let back = spawn_village(&mut world, &json!({"homes": 20})).unwrap();
+        let smith = world.spawn((
+            Name::new("Old Hal"),
+            Transform::from_translation(Vec3::new(3.0, 0.0, 3.0)),
+            WorldTransform::identity(),
+            VillagerComponent {
+                role: Role::ALL.iter().position(|r| *r == Role::Smith).unwrap() as u32,
+                ..Default::default()
+            },
+        ));
+        sync(&world, &mut run);
+        assert_eq!(run.life.villagers().len(), people);
+        assert_eq!(run.life.place_count(), 1);
+        assert_eq!(run.links.places.len(), 1);
+        assert!(back.iter().any(|e| run.links.places.contains_key(e)));
+        assert!(matches!(
+            run.links.agents.get(&smith),
+            Some(Visual::Villager(_))
+        ));
+        assert_eq!(run.villagers.own.len(), 1);
+    }
+
+    /// The preset gives a place with homes for every house, the trades, the
+    /// green, fields and a pen; its lanes are splines.
     #[test]
     fn the_village_preset_has_its_spots_and_lanes() {
         let mut world = World::new();

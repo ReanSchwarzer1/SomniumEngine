@@ -200,6 +200,25 @@ pub struct Place {
 }
 
 impl Place {
+    /// A stable key for a place (or a hand-placed agent) that streams: its
+    /// name and where it stands, to the decimetre. The same authored place
+    /// reloaded from its cell gets the same key.
+    #[must_use]
+    pub fn key(name: &str, at: Vec3) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                hash ^= u64::from(*b);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        eat(name.as_bytes());
+        for c in at.to_array() {
+            eat(&((c * 10.0).round() as i64).to_le_bytes());
+        }
+        hash
+    }
+
     /// A place from a settlement generator's buildings, named areas and
     /// lanes. Buildings and areas whose type means nothing to life are left
     /// out; every lane is also a road.

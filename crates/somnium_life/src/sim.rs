@@ -222,6 +222,8 @@ pub struct LifeWorld {
     time: f64,
     next_id: u32,
     stats: Stats,
+    /// Places adopted by a stable key (see [`LifeWorld::adopt_place`]).
+    keyed: std::collections::HashMap<u64, usize>,
 }
 
 impl LifeWorld {
@@ -238,7 +240,31 @@ impl LifeWorld {
             time: 0.0,
             next_id: 1,
             stats: Stats::default(),
+            keyed: std::collections::HashMap::new(),
         }
+    }
+
+    /// Add a place that comes and goes (with a streamed cell), keyed by
+    /// something stable such as [`Place::key`]: the first time, it is added
+    /// and, with a seed, populated; when it streams back, the place it already
+    /// is comes back with its people where life left them. Returns its index
+    /// and whether it was new.
+    pub fn adopt_place(&mut self, key: u64, place: Place, seed: Option<u64>) -> (usize, bool) {
+        if let Some(&index) = self.keyed.get(&key) {
+            return (index, false);
+        }
+        let index = self.add_place(place);
+        if let Some(seed) = seed {
+            self.populate(index, seed);
+        }
+        self.keyed.insert(key, index);
+        (index, true)
+    }
+
+    /// How many places there are.
+    #[must_use]
+    pub fn place_count(&self) -> usize {
+        self.places.len()
     }
 
     /// Add a place; returns its index.
