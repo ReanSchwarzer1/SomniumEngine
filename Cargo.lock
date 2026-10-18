@@ -4012,6 +4012,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "somnium_story"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "somnium_i18n",
+]
+
+[[package]]
 name = "somnium_ui"
 version = "0.1.0"
 dependencies = [
