@@ -17,6 +17,8 @@ const CART_GAP: f32 = 8.0;
 const RUN: f32 = 3.6;
 /// Neighbours idling at one spot this close stop to talk.
 const TALK_REACH: f32 = 4.0;
+/// How far a dog wanders from its home's door, metres.
+const DOG_ROAM: f32 = 8.0;
 /// Seconds before a villager notices the player again.
 const NOTICE_AGAIN: f64 = 60.0;
 /// How far to the side of the road's line a cart drives (each way its own side).
@@ -129,18 +131,28 @@ pub enum BeastKind {
     Pig,
     /// Hens.
     Hen,
+    /// A household's dog: it keeps about its home's door, not a pen.
+    Dog,
 }
 
 impl BeastKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 5] = [Self::Sheep, Self::Cow, Self::Goat, Self::Pig, Self::Hen];
+    pub const ALL: [Self; 6] = [
+        Self::Sheep,
+        Self::Cow,
+        Self::Goat,
+        Self::Pig,
+        Self::Hen,
+        Self::Dog,
+    ];
     /// Display names, in [`Self::ALL`] order.
-    pub const NAMES: [&'static str; 5] = ["Sheep", "Cow", "Goat", "Pig", "Hen"];
+    pub const NAMES: [&'static str; 6] = ["Sheep", "Cow", "Goat", "Pig", "Hen", "Dog"];
 
     fn pace(self) -> f32 {
         match self {
             Self::Cow => AMBLE * 0.8,
             Self::Hen => AMBLE * 0.7,
+            Self::Dog => AMBLE * 1.8,
             _ => AMBLE,
         }
     }
@@ -563,7 +575,8 @@ impl LifeWorld {
     /// House a household in every home of `place`, a trade for each by the
     /// workplaces there (a smith for each workshop, a keeper for the inn, a
     /// priest for the chapel, herders for the pens, the rest farmers or
-    /// labourers, with elders and children), livestock in every pen, and carts
+    /// labourers, with elders and children), livestock in every pen, a dog for
+    /// about one household in three, and carts
     /// on the longer roads. Returns everyone spawned.
     pub fn populate(&mut self, place: usize, seed: u64) -> Vec<AgentId> {
         let Some(p) = self.places.get(place).map(|p| p.place.clone()) else {
@@ -643,6 +656,14 @@ impl LifeWorld {
                 if let Some(id) = self.spawn_beast(kind, place, pen) {
                     out.push(id);
                 }
+            }
+        }
+        // About one household in three keeps a dog.
+        for &home in &homes {
+            if rng.unit() < 0.35
+                && let Some(id) = self.spawn_beast(BeastKind::Dog, place, home)
+            {
+                out.push(id);
             }
         }
         let lengths: Vec<f32> = self.places[place]
@@ -782,7 +803,13 @@ impl LifeWorld {
                     let b = &mut self.beasts[i];
                     let owed = std::mem::take(&mut b.owed);
                     if let Some(spot) = places.get(b.place).and_then(|p| p.place.spots.get(b.pen)) {
-                        b.advance(spot.position, spot.radius, ground, owed, now);
+                        // A dog's "pen" is its home's door: it roams round it.
+                        let radius = if b.kind == BeastKind::Dog {
+                            spot.radius.max(DOG_ROAM)
+                        } else {
+                            spot.radius
+                        };
+                        b.advance(spot.position, radius, ground, owed, now);
                     }
                 }
                 Who::Cart(i) => {

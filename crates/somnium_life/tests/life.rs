@@ -502,6 +502,41 @@ fn villagers_walk_round_the_player_not_through() {
 }
 
 #[test]
+fn some_households_keep_a_dog_that_roams_its_door() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = w.add_place(village(Vec3::ZERO));
+    for seed in 0..6 {
+        w.populate(place, seed);
+    }
+    let homes: Vec<Vec3> = w
+        .place(place)
+        .unwrap()
+        .spots_of(SpotKind::Home)
+        .map(|h| w.place(place).unwrap().spots[h].position)
+        .collect();
+    let dogs: Vec<_> = w
+        .beasts()
+        .iter()
+        .filter(|b| b.kind == BeastKind::Dog)
+        .map(|b| b.id)
+        .collect();
+    assert!(
+        !dogs.is_empty() && dogs.len() < 6 * homes.len(),
+        "some, not all: {}",
+        dogs.len()
+    );
+    day(&mut w, 8.0, 12.0, 0.0, &[Vec3::ZERO], |w, _| {
+        for b in w.beasts().iter().filter(|b| b.kind == BeastKind::Dog) {
+            let near = homes
+                .iter()
+                .map(|h| flat(*h, b.position))
+                .fold(f32::INFINITY, f32::min);
+            assert!(near < 8.5, "a dog stays about its door: {near} m");
+        }
+    });
+}
+
+#[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());
     let at = Vec3::new(500.0, 0.0, 0.0);

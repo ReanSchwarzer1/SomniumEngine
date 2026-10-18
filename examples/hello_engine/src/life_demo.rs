@@ -651,6 +651,7 @@ fn beast_look(kind: BeastKind) -> (Vec3, &'static str) {
         BeastKind::Goat => (Vec3::new(0.45, 0.7, 0.9), "ash"),
         BeastKind::Pig => (Vec3::new(0.6, 0.6, 1.1), "skin"),
         BeastKind::Hen => (Vec3::new(0.25, 0.35, 0.3), "fire"),
+        BeastKind::Dog => (Vec3::new(0.3, 0.55, 0.8), "dark"),
     }
 }
 
@@ -855,11 +856,19 @@ fn sync(world: &World, run: &mut Run) {
         let which = links.keys.get(&key).copied().or_else(|| {
             let pi = nearest_place(life, at)?;
             let p = life.place(pi).expect("exists");
+            // A dog keeps to the nearest home; livestock to a pen or field.
+            let dog = b.kind() == BeastKind::Dog;
             let pen = p
                 .spots
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| matches!(s.kind, SpotKind::Pen | SpotKind::Field))
+                .filter(|(_, s)| {
+                    if dog {
+                        s.kind == SpotKind::Home
+                    } else {
+                        matches!(s.kind, SpotKind::Pen | SpotKind::Field)
+                    }
+                })
                 .min_by(|a, b| {
                     a.1.position
                         .distance(at)

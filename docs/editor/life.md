@@ -9,7 +9,7 @@ Each home houses a household, and each trade has its keeper.
   - the smith works the forge;
   - people go to market and to prayer;
   - in the evening they go to the inn, then to bed.
-- **Animals and carts.** Livestock grazes in the pen, and carts ply the street by day.
+- **Animals and carts.** Livestock grazes in the pen, about one household in three keeps a dog that roams its door, and carts ply the street by day.
 - **The clock** comes from the scene's **Time of Day** when it moves (its timescale). Otherwise an hour passes each minute, starting at half six.
 - **The Lid.** Raise Time of Day's **Eclipse** past half and the Lid sends everyone indoors.
 
