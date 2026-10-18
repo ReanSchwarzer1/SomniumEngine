@@ -17,6 +17,8 @@ const CART_GAP: f32 = 8.0;
 const RUN: f32 = 3.6;
 /// Neighbours idling at one spot this close stop to talk.
 const TALK_REACH: f32 = 4.0;
+/// Seconds before a villager notices the player again.
+const NOTICE_AGAIN: f64 = 60.0;
 /// How far to the side of the road's line a cart drives (each way its own side).
 const CART_SIDE: f32 = 0.9;
 
@@ -107,6 +109,8 @@ pub struct Villager {
     owed: f32,
     /// Sheltering from an alarm until then.
     flee_until: f64,
+    /// Not to notice the player again before then.
+    notice_after: f64,
     /// Hours it runs behind the routine, so a household does not leave as one.
     late: f32,
     rng: Rng,
@@ -223,6 +227,10 @@ struct Placed {
 pub struct LifeWorld {
     /// How often each tier steps.
     pub lod: LodConfig,
+    /// New routes worked out a tick at most (a lane search each). When a
+    /// routine changes the hour for half a town at once, the rest set off a
+    /// tick or two later instead of the frame hitching.
+    pub paths_per_tick: usize,
     places: Vec<Placed>,
     villagers: Vec<Villager>,
     beasts: Vec<Beast>,
@@ -241,6 +249,7 @@ impl LifeWorld {
     pub fn new(lod: LodConfig) -> Self {
         Self {
             lod,
+            paths_per_tick: 24,
             places: Vec::new(),
             villagers: Vec::new(),
             beasts: Vec::new(),
@@ -298,6 +307,30 @@ impl LifeWorld {
             frightened += 1;
         }
         frightened
+    }
+
+    /// The player passes: villagers out of doors within `reach` (not running
+    /// from danger) notice them, those standing turn to face them, and each is
+    /// returned at most once a minute, for the game's greeting barks.
+    pub fn notice(&mut self, player: Vec3, reach: f32) -> Vec<AgentId> {
+        let now = self.time;
+        let mut noticed = Vec::new();
+        for v in &mut self.villagers {
+            if v.tier != Tier::Near
+                || !v.visible
+                || now < v.flee_until
+                || now < v.notice_after
+                || flat(v.position, player) > reach
+            {
+                continue;
+            }
+            v.notice_after = now + NOTICE_AGAIN;
+            if matches!(v.doing, Doing::At { .. }) {
+                v.facing = planar(player - v.position).unwrap_or(v.facing);
+            }
+            noticed.push(v.id);
+        }
+        noticed
     }
 
     /// Near villagers idling at the same outdoor spot pair off and talk,
@@ -427,6 +460,7 @@ impl LifeWorld {
             },
             owed: 0.0,
             flee_until: 0.0,
+            notice_after: 0.0,
             late,
             rng,
         });
@@ -692,13 +726,14 @@ impl LifeWorld {
                 );
             }
         }
+        let mut paths = self.paths_per_tick;
         for who in chosen {
             match who {
                 Who::Villager(i) => {
                     let v = &mut self.villagers[i];
                     let owed = std::mem::take(&mut v.owed);
                     if let Some(p) = places.get(v.place) {
-                        v.advance(p, clock, ground, owed, now);
+                        v.advance(p, clock, ground, owed, now, &mut paths);
                     }
                 }
                 Who::Beast(i) => {
@@ -791,7 +826,15 @@ impl Villager {
         None
     }
 
-    fn advance(&mut self, placed: &Placed, clock: Clock, ground: &impl Ground, dt: f32, now: f64) {
+    fn advance(
+        &mut self,
+        placed: &Placed,
+        clock: Clock,
+        ground: &impl Ground,
+        dt: f32,
+        now: f64,
+        paths: &mut usize,
+    ) {
         let place = &placed.place;
         let fleeing = now < self.flee_until;
         let wanted = if fleeing {
@@ -801,12 +844,14 @@ impl Villager {
         } else {
             self.routine.at(clock.hour - self.late)
         };
-        if wanted != self.activity || self.target.is_none() {
+        // Out of routes this tick: carry on as before and look again next tick.
+        if (wanted != self.activity || self.target.is_none()) && *paths > 0 {
             self.activity = wanted;
             let target = self.choose(place, wanted);
             if target != self.target
                 && let Some(to) = target
             {
+                *paths -= 1;
                 self.go(placed, to);
             }
             self.target = target;

@@ -3,7 +3,7 @@
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 /// glam here has no serde feature: positions travel as `[x, y, z]`.
 mod v3 {
@@ -272,6 +272,18 @@ pub struct LaneGraph {
     nodes: Vec<Vec3>,
     edges: Vec<Vec<(usize, f32)>>,
     segments: Vec<(usize, usize)>,
+    /// Segments by the grid cells their bounds touch, so the nearest lane is
+    /// found near the point instead of among every segment of a town.
+    cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+/// The lane grid's cell, metres.
+const CELL: f32 = 16.0;
+/// Rings of cells searched before falling back to every segment.
+const RINGS: i32 = 8;
+
+fn cell_of(p: Vec3) -> (i32, i32) {
+    ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32)
 }
 
 /// Points closer than this are one junction.
@@ -305,6 +317,17 @@ impl LaneGraph {
                 previous = Some(node);
             }
         }
+        for (i, &(a, b)) in g.segments.iter().enumerate() {
+            let (lo, hi) = (
+                cell_of(g.nodes[a].min(g.nodes[b])),
+                cell_of(g.nodes[a].max(g.nodes[b])),
+            );
+            for x in lo.0..=hi.0 {
+                for z in lo.1..=hi.1 {
+                    g.cells.entry((x, z)).or_default().push(i);
+                }
+            }
+        }
         g
     }
 
@@ -319,17 +342,42 @@ impl LaneGraph {
     }
 
     /// The nearest point on any lane to `p`: the segment's ends and the point.
+    /// Rings of grid cells outward from `p`, stopping once nothing further out
+    /// can be nearer; every segment only for a point far from all lanes.
     fn onto(&self, p: Vec3) -> Option<(usize, usize, Vec3)> {
-        self.segments
-            .iter()
-            .map(|&(a, b)| {
-                let (pa, pb) = (self.nodes[a], self.nodes[b]);
-                let ab = Vec2::new(pb.x - pa.x, pb.z - pa.z);
-                let ap = Vec2::new(p.x - pa.x, p.z - pa.z);
-                let t = (ap.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-                (a, b, pa.lerp(pb, t))
-            })
-            .min_by(|x, y| flat(x.2, p).total_cmp(&flat(y.2, p)))
+        let project = |i: usize| {
+            let (a, b) = self.segments[i];
+            let (pa, pb) = (self.nodes[a], self.nodes[b]);
+            let ab = Vec2::new(pb.x - pa.x, pb.z - pa.z);
+            let ap = Vec2::new(p.x - pa.x, p.z - pa.z);
+            let t = (ap.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            (a, b, pa.lerp(pb, t))
+        };
+        let nearer = |x: &(usize, usize, Vec3), y: &(usize, usize, Vec3)| {
+            flat(x.2, p).total_cmp(&flat(y.2, p))
+        };
+        let (cx, cz) = cell_of(p);
+        let mut best: Option<(usize, usize, Vec3)> = None;
+        for r in 0..=RINGS {
+            for x in cx - r..=cx + r {
+                for z in cz - r..=cz + r {
+                    if (x - cx).abs() != r && (z - cz).abs() != r {
+                        continue;
+                    }
+                    for &i in self.cells.get(&(x, z)).into_iter().flatten() {
+                        let hit = project(i);
+                        if best.is_none_or(|b| nearer(&hit, &b).is_lt()) {
+                            best = Some(hit);
+                        }
+                    }
+                }
+            }
+            // Anything in a further ring is at least `r` cells away.
+            if best.is_some_and(|b| flat(b.2, p) <= r as f32 * CELL) {
+                return best;
+            }
+        }
+        (0..self.segments.len()).map(project).min_by(nearer)
     }
 
     /// Junctions in the graph.
@@ -480,5 +528,51 @@ impl RoadPath {
         let span = (self.cum[i] - self.cum[i - 1]).max(1e-4);
         let t = ((s - self.cum[i - 1]) / span).clamp(0.0, 1.0);
         (a.lerp(b, t), (b - a).normalize_or(Vec3::Z))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grid finds the same nearest lane point as looking at every segment,
+    /// near the lanes and far from them.
+    #[test]
+    fn the_lane_grid_finds_the_true_nearest_point() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut unit = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1_u64 << 53) as f32
+        };
+        let lanes: Vec<Vec<Vec3>> = (0..40)
+            .map(|_| {
+                (0..6)
+                    .map(|_| Vec3::new(unit() * 600.0 - 300.0, 0.0, unit() * 600.0 - 300.0))
+                    .collect()
+            })
+            .collect();
+        let g = LaneGraph::new(&lanes);
+        for _ in 0..2000 {
+            let p = Vec3::new(unit() * 1400.0 - 700.0, 0.0, unit() * 1400.0 - 700.0);
+            let fast = g.onto(p).unwrap().2;
+            let slow = g
+                .segments
+                .iter()
+                .map(|&(a, b)| {
+                    let (pa, pb) = (g.nodes[a], g.nodes[b]);
+                    let ab = Vec2::new(pb.x - pa.x, pb.z - pa.z);
+                    let ap = Vec2::new(p.x - pa.x, p.z - pa.z);
+                    let t = (ap.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                    flat(pa.lerp(pb, t), p)
+                })
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                (flat(fast, p) - slow).abs() < 1e-3,
+                "{p}: {} vs {slow}",
+                flat(fast, p)
+            );
+        }
     }
 }

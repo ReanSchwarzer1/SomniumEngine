@@ -443,6 +443,35 @@ fn neighbours_idling_at_a_spot_stop_to_talk_face_to_face() {
 }
 
 #[test]
+fn villagers_notice_the_player_passing_once_a_minute() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = w.add_place(village(Vec3::ZERO));
+    w.populate(place, 5);
+    day(&mut w, 6.0, 11.0, 0.0, &[Vec3::ZERO], |_, _| {});
+    let (who, at) = w
+        .villagers()
+        .iter()
+        .find(|v| v.visible && v.pose != Pose::Walk)
+        .map(|v| (v.id, v.position))
+        .expect("someone standing out of doors");
+    let player = at + Vec3::new(2.0, 0.0, 0.0);
+    let noticed = w.notice(player, 3.0);
+    assert!(noticed.contains(&who));
+    let v = w.villagers().iter().find(|v| v.id == who).unwrap();
+    assert!(v.facing.dot(Vec3::X) > 0.99, "turned to face the player");
+    assert!(!w.notice(player, 3.0).contains(&who), "not again at once");
+    for _ in 0..130 {
+        w.step(DT, Clock::at(11.0), &[at], &Flat);
+    }
+    let again = w.villagers().iter().find(|v| v.id == who).unwrap().position + Vec3::X * 2.0;
+    assert!(w.notice(again, 3.0).contains(&who), "again after a minute");
+    assert!(
+        w.notice(Vec3::splat(1.0e4), 3.0).is_empty(),
+        "nobody far off"
+    );
+}
+
+#[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());
     let at = Vec3::new(500.0, 0.0, 0.0);

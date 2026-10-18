@@ -29,7 +29,9 @@
 //!
 //! **B** rings the alarm bell where the camera is: everyone within 80 m runs
 //! home and stays in for 45 seconds, beasts bolt, carts stop
-//! (`LifeWorld::alarm`; a game rings it from its fights).
+//! (`LifeWorld::alarm`; a game rings it from its fights). Walk past villagers
+//! and those standing turn to look at you (`LifeWorld::notice`; a game plays
+//! greeting barks for them).
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
@@ -517,6 +519,8 @@ struct Run {
     links: Links,
     /// Seconds since the scene was last looked over for places and agents.
     synced: f32,
+    /// Villagers who have noticed the camera walking past, all told.
+    greeted: usize,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -953,6 +957,7 @@ impl LifeDemo {
             readouts: HashMap::new(),
             links: Links::default(),
             synced: 0.0,
+            greeted: 0,
             spawned,
             colliders: Vec::new(),
             hour: tod.map_or(6.5, |t| t.0),
@@ -1062,6 +1067,9 @@ impl LifeDemo {
             &focus,
             &Flat,
         );
+        if let Some(at) = focus.first() {
+            run.greeted += run.life.notice(*at, 3.5).len();
+        }
         let t1 = Instant::now();
         write_visuals(ctx.world, run, focus.first().copied().unwrap_or_default());
         let t2 = Instant::now();
@@ -1101,6 +1109,7 @@ impl LifeDemo {
             "eclipse": run.eclipse,
             "places": run.life.place_count(),
             "places_loaded": run.links.places.len(),
+            "greeted": run.greeted,
             "villagers": run.life.villagers().len(),
             "outdoors": out,
             "beasts": run.life.beasts().len(),
@@ -1462,6 +1471,46 @@ mod tests {
             Some(Visual::Villager(_))
         ));
         assert_eq!(run.villagers.own.len(), 1);
+    }
+
+    /// The worst tick of a whole day in the biggest preset town, with the
+    /// camera in its middle (release: `cargo test -p hello_engine --release
+    /// day_spikes -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "timing; run in release"]
+    fn day_spikes() {
+        let day = |paths: usize| {
+            let mut world = World::new();
+            spawn_village(&mut world, &json!({"homes": 400})).unwrap();
+            let mut run = LifeDemo::start(&mut world).unwrap();
+            run.life.paths_per_tick = paths;
+            let dt = 1.0 / 60.0;
+            let mut hour = 0.0_f32;
+            let mut ticks = Vec::new();
+            while hour < 24.0 {
+                let t = Instant::now();
+                run.life.step(dt, Clock::at(hour), &[Vec3::ZERO], &Flat);
+                ticks.push((t.elapsed().as_secs_f64() * 1000.0, hour));
+                hour += dt / 6.0;
+            }
+            let mean = ticks.iter().map(|t| t.0).sum::<f64>() / ticks.len() as f64;
+            ticks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let at = |q: f64| ticks[((ticks.len() - 1) as f64 * q) as usize].0;
+            let over = ticks.iter().filter(|t| t.0 > 1.0).count();
+            let worst = ticks.last().unwrap();
+            eprintln!(
+                "paths a tick {paths}: {} ticks, mean {mean:.4} ms, p99 {:.3}, p99.9 {:.3}, worst {:.3} at {:.2} h, {over} over 1 ms",
+                ticks.len(),
+                at(0.99),
+                at(0.999),
+                worst.0,
+                worst.1
+            );
+        };
+        for _ in 0..2 {
+            day(usize::MAX);
+            day(24);
+        }
     }
 
     /// The preset gives a place with homes for every house, the trades, the
