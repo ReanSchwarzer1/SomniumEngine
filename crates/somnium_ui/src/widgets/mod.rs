@@ -18,6 +18,7 @@ pub mod curve_editor;
 pub mod data_grid;
 /// A light-novel dialogue box over `somnium_story`'s presenter model.
 pub mod dialogue_presenter;
+pub mod notice_stack;
 pub mod gradient_editor;
 pub mod grid;
 pub mod image;

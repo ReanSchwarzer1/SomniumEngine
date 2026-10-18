@@ -151,6 +151,8 @@ pub enum GraphEditorMessage {
     StoryPreview(std::sync::Arc<somnium_story::StoryDatabase>),
     /// From the control: what the Game View presenter should show; `None` closes it.
     PreviewBeat(Option<somnium_story::Beat>),
+    /// From the control: quest news from the play-through, for the Game View's notices.
+    PreviewNotice { heading: String, text: String },
     /// To the control: the Game View presenter's player moved the play-through.
     PreviewInput(story::PreviewInput),
 }
@@ -1381,6 +1383,7 @@ impl Control for GraphEditor {
                 GraphEditorMessage::StoryPreview(database) => self.start_preview(widget, database),
                 GraphEditorMessage::PreviewInput(input) => self.preview_input(widget, input),
                 GraphEditorMessage::PreviewBeat(_)
+                | GraphEditorMessage::PreviewNotice { .. }
                 | GraphEditorMessage::Changed(_)
                 | GraphEditorMessage::StateMachineChanged(_) => {}
             }

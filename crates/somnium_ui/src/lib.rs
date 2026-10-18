@@ -972,6 +972,8 @@ pub struct UiManager {
     last_frame_at: Option<std::time::Instant>,
     /// The dialogue graph's Game View: the game's presenter over the editor, made on first use.
     story_presenter: Option<NodeHandle>,
+    /// The Game View's quest notices, over the presenter.
+    story_notices: Option<NodeHandle>,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -1860,6 +1862,7 @@ impl UiManager {
             ui_scale,
             last_frame_at: None,
             story_presenter: None,
+            story_notices: None,
             native_ui,
             ui_pass,
             font_id,
@@ -2643,6 +2646,13 @@ impl UiManager {
                     presenter,
                     MessageDirection::ToWidget,
                     crate::widgets::dialogue_presenter::DialoguePresenterMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
+            if let Some(notices) = self.story_notices {
+                self.native_ui.send(UiMessage::new(
+                    notices,
+                    MessageDirection::ToWidget,
+                    crate::widgets::notice_stack::NoticeMessage::Tick(dt_ms.min(100.0) as u64),
                 ));
             }
         }
@@ -8775,6 +8785,14 @@ impl UiManager {
                 }
                 continue;
             }
+            if let Some(crate::graph::GraphEditorMessage::PreviewNotice { heading, text }) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_notice(heading.clone(), text.clone());
+                }
+                continue;
+            }
             if let Some(crate::widgets::dialogue_presenter::DialoguePresenterMessage::Output(output)) =
                 msg.data::<crate::widgets::dialogue_presenter::DialoguePresenterMessage>()
             {
@@ -12168,8 +12186,42 @@ impl UiManager {
                 send(&mut self.native_ui, P::Close);
                 send(&mut self.native_ui, P::SetBackdrop(0));
                 self.native_ui.set_focus(self.animation_graph_editor);
+                if let Some(notices) = self.story_notices {
+                    self.native_ui.send(UiMessage::new(
+                        notices,
+                        MessageDirection::ToWidget,
+                        crate::widgets::notice_stack::NoticeMessage::Clear,
+                    ));
+                }
             }
         }
+    }
+
+    /// A quest notice in the Game View, the way a game's notices would show it.
+    fn show_story_notice(&mut self, heading: String, text: String) {
+        use crate::widgets::notice_stack::{Notice, NoticeMessage, NoticeStackBuilder};
+        let handle = match self.story_notices {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = NoticeStackBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_notices = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(
+            handle,
+            MessageDirection::ToWidget,
+            NoticeMessage::Push(Notice {
+                category: "quest".into(),
+                heading,
+                text,
+                hold_ms: None,
+            }),
+        ));
     }
 
     /// The Game View's player moved: drive the play-through on the graph.

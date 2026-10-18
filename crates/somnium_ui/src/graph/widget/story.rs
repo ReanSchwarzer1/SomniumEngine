@@ -50,6 +50,8 @@ pub(super) struct Preview {
     followed: Option<NodeId>,
     /// Show the play-through in the game's dialogue presenter over the editor.
     game_view: bool,
+    /// Quest news for the Game View's notices, `(heading, text)`, not yet sent.
+    notices: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -718,6 +720,7 @@ impl GraphEditor {
                 .preview
                 .as_ref()
                 .is_some_and(|p| p.game_view),
+            notices: Vec::new(),
         };
         Self::run_preview(&mut preview);
         self.authoring.status = match &preview.error {
@@ -758,6 +761,27 @@ impl GraphEditor {
 
     fn drain_preview(preview: &mut Preview) {
         for event in preview.story.drain_events() {
+            let story = &preview.story;
+            let title = |quest: &str| {
+                story
+                    .database()
+                    .quest(quest)
+                    .map_or_else(|| quest.to_owned(), |q| story.text(&q.asset.title, None))
+            };
+            let notice = match &event {
+                StoryEvent::QuestStarted { quest } => Some(("QUEST STARTED", title(quest))),
+                StoryEvent::QuestCompleted { quest } => Some(("QUEST COMPLETED", title(quest))),
+                StoryEvent::QuestFailed { quest } => Some(("QUEST FAILED", title(quest))),
+                StoryEvent::ObjectiveDone { quest, objective } => story
+                    .objectives(quest)
+                    .into_iter()
+                    .find(|o| o.id == *objective)
+                    .map(|o| ("OBJECTIVE DONE", o.text)),
+                _ => None,
+            };
+            if let Some((heading, text)) = notice {
+                preview.notices.push((heading.to_owned(), text));
+            }
             let line = match event {
                 StoryEvent::FactChanged { fact, new, .. } => format!("{fact} = {new}"),
                 StoryEvent::Command { name, args } => format!(
@@ -851,15 +875,27 @@ impl GraphEditor {
             .filter(|p| p.game_view)
             .and_then(|p| p.conversation.as_ref())
             .map(|c| c.beat().clone());
-        if beat == self.authoring.story.sent {
-            return;
+        if beat != self.authoring.story.sent {
+            self.authoring.story.sent.clone_from(&beat);
+            emit.push(UiMessage::new(
+                widget.handle,
+                MessageDirection::FromWidget,
+                GraphEditorMessage::PreviewBeat(beat),
+            ));
         }
-        self.authoring.story.sent.clone_from(&beat);
-        emit.push(UiMessage::new(
-            widget.handle,
-            MessageDirection::FromWidget,
-            GraphEditorMessage::PreviewBeat(beat),
-        ));
+        // After the beat, so the notices stack over the presenter the beat made.
+        if let Some(preview) = self.authoring.story.preview.as_mut() {
+            let game_view = preview.game_view;
+            for (heading, text) in preview.notices.drain(..) {
+                if game_view {
+                    emit.push(UiMessage::new(
+                        widget.handle,
+                        MessageDirection::FromWidget,
+                        GraphEditorMessage::PreviewNotice { heading, text },
+                    ));
+                }
+            }
+        }
     }
 
     /// The Game View's presenter moved the play-through.
@@ -1733,7 +1769,13 @@ mod tests {
             "intro.somdialogue",
             &saved(&mut editor, &widget, true).unwrap(),
         );
-        let (database, _) = StoryDatabase::build(sources).unwrap();
+        sources.add_file(
+            "lamps.somquest",
+            r#"{"version": 1, "id": "lamps", "title": "Relight the lamps",
+                "stages": [{"id": "s", "objectives": [{"id": "o", "text": "Light them"}],
+                    "next": [{"to": "e"}]}, {"id": "e", "end": "complete"}]}"#,
+        );
+        let (database, _) = StoryDatabase::build(sources).unwrap_or_else(|i| panic!("{i:?}"));
         editor.start_preview(&widget, Arc::new(database));
         let beats = |editor: &mut GraphEditor| {
             let mut emit = Vec::new();
@@ -1760,6 +1802,22 @@ mod tests {
         ));
         editor.preview_input(&widget, PreviewInput::Choose(0));
         assert!(matches!(beats(&mut editor).as_slice(), [Some(Beat::Line(l))] if l.node == "n2"));
+        // Quest news goes up as a notice, after the beat.
+        let preview = editor.authoring.story.preview.as_mut().unwrap();
+        preview.story.start_quest("lamps").unwrap();
+        GraphEditor::drain_preview(preview);
+        let mut emit = Vec::new();
+        editor.emit_story_beat(&widget, &mut emit);
+        let notices: Vec<_> = emit
+            .iter()
+            .filter_map(|m| match m.data::<GraphEditorMessage>() {
+                Some(GraphEditorMessage::PreviewNotice { heading, text }) => {
+                    Some((heading.as_str(), text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices, [("QUEST STARTED", "Relight the lamps")]);
         editor.preview_input(&widget, PreviewInput::Leave);
         assert_eq!(beats(&mut editor), [None], "leaving closes the presenter");
     }
