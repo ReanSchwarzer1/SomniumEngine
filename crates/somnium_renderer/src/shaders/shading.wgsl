@@ -355,6 +355,11 @@ fn vertex_paint_slot(instance_id: u32) -> u32 {
     if table == 0u {
         return 0u;
     }
+    // Word 11: the table's length when instance batches sit past it (`vertex_paint.rs`), else 0.
+    let covered = vertex_paint[11];
+    if covered != 0u && instance_id >= covered {
+        return 0u;
+    }
     return vertex_paint[table + instance_id] & 0x7fffffffu;
 }
 

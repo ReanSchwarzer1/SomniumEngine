@@ -14,8 +14,10 @@
 //!   0 (as painted) to 1 (none). A whole level seen before it decayed;
 //! - word 7: `green` as f32 bits: how far foliage albedo is pulled to a
 //!   living green, 0 (as textured) to 1;
-//! - words 8..=11: the retro fog for baked-light slots: start and end in
-//!   metres (f32 bits), the colour as 10 bits a channel (R low), a spare;
+//! - words 8..=10: the retro fog for baked-light slots: start and end in
+//!   metres (f32 bits), the colour as 10 bits a channel (R low);
+//! - word 11: how many instances the table covers, or 0 for "all that read it"
+//!   ([`VertexPaintPool::header_with_len`]: instance batches sit past the table);
 //! - words 12..: each painted entity's slot: [`SLOT_HEADER_WORDS`] of layer
 //!   settings ([`PaintLayers::words`]), then its masks, one word per vertex,
 //!   in the mesh's own vertex order;
@@ -203,6 +205,15 @@ impl VertexPaintPool {
         let ten = |v: f32| (v.clamp(0.0, 1.0) * 1023.0).round() as u32;
         [table, self.preview, x, y, z, r, self.fade.clamp(0.0, 1.0).to_bits(), self.green.clamp(0.0, 1.0).to_bits(),
             start.to_bits(), end.to_bits(), ten(red) | (ten(green) << 10) | (ten(blue) << 20), 0]
+    }
+
+    /// [`Self::header`] for a table of `len` instances: an instance past it reads as unpainted. For frames with
+    /// instance batches (`crate::instance_batch`), whose instances sit past the frame's own; others keep 0.
+    #[must_use]
+    pub fn header_with_len(&self, table: u32, len: u32) -> [u32; HEADER_WORDS as usize] {
+        let mut header = self.header(table);
+        header[HEADER_WORDS as usize - 1] = len;
+        header
     }
 
     /// Words the GPU buffer needs for the vertex region plus `instances`.

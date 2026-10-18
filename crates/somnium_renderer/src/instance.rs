@@ -109,15 +109,21 @@ impl InstancePool {
     /// warning rather than written out of bounds. Returns whether there is a new buffer, which the bind groups that
     /// name it must be rebuilt for.
     pub fn reserve(&mut self, device: &wgpu::Device) -> bool {
+        self.reserve_extent(device, 0)
+    }
+
+    /// [`Self::reserve`], with room for `extent` instances at least: instance batches (`crate::instance_batch`)
+    /// keep theirs past the frame's own. The GPU rewrites those when this returns true.
+    pub fn reserve_extent(&mut self, device: &wgpu::Device, extent: usize) -> bool {
         let stride = std::mem::size_of::<GpuInstanceData>() as u64;
-        let need = self.instances.len() as u64 * stride;
+        let need = self.instances.len().max(extent) as u64 * stride;
         if need <= self.buffer.size() {
             return false;
         }
         let limit = u64::from(device.limits().max_storage_buffer_binding_size) / stride * stride;
         let size = need.next_power_of_two().min(limit).max(self.buffer.size());
         if size < need {
-            let keep = (size / stride) as usize;
+            let keep = ((size / stride) as usize).min(self.instances.len());
             tracing::warn!(
                 instances = self.instances.len(),
                 keep,

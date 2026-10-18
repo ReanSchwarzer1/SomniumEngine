@@ -112,6 +112,7 @@ impl Shaders {
             "clouds_composite.wgsl",
             "clouds_noise.wgsl",
             "cull.wgsl",
+            "instance_batch.wgsl",
             "dof.wgsl",
             "ddgi.wgsl",
             "fsr_sanitize.wgsl",

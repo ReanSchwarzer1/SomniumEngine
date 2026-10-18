@@ -214,6 +214,23 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_min = world_centre - world_extent;
     let world_max = world_centre + world_extent;
 
+    // Instance batches (`instance_batch.rs`): a part drawn only within a band of horizontal distance from the
+    // camera, kept in the bounds' otherwise unused `w`s (far in `min.w`, 0 = no limit; near in `max.w`). Every
+    // other draw leaves both 0 and skips this.
+    let far = aabbs[i].min.w;
+    let near = aabbs[i].max.w;
+    if far > 0.0 || near > 0.0 {
+        let flat = model[3].xz - params.camera_pos.xz;
+        let d2 = dot(flat, flat);
+        if (far > 0.0 && d2 > far * far) || d2 < near * near {
+            draws[i].instance_count = 0u;
+            if params.phase == 0u {
+                occluded_flags[i] = 0u;
+            }
+            return;
+        }
+    }
+
     // Conservative test: cull only when the box is fully behind some plane.
     var visible = true;
     for (var p = 0u; p < 6u; p = p + 1u) {

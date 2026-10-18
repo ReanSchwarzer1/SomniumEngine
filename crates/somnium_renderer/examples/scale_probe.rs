@@ -9,10 +9,15 @@
 //! cargo run --release -p somnium_renderer --example scale_probe -- 5000 20000 50000 100000 180000
 //! ```
 //!
+//! `SCALE_PROBE_BATCH=1` sets the same instances once, as instance batches (one per 96 m cell and mesh), instead of
+//! submitting them every frame. `SOMNIUM_CAPTURE_PNG=<file>` with `SOMNIUM_CAPTURE_FRAME=<n>` writes frame n, to
+//! compare the two ways by eye.
+//!
 //! One window: check `tasklist` and hold the shared native-game lock first (Rimeborn RULES 12).
 use somnium_renderer::SomniumRenderer as Renderer;
 use somnium_renderer::command::{DrawCommand, SortKey};
 use somnium_renderer::context::RenderContext;
+use somnium_renderer::instance_batch::{BatchPart, InstanceBatch};
 use somnium_renderer::material::pool::GpuMaterial;
 use std::sync::Arc;
 use std::time::Instant;
@@ -170,6 +175,38 @@ impl Probe {
                     }
                 })
                 .collect();
+            let batch = std::env::var("SCALE_PROBE_BATCH").as_deref() == Ok("1");
+            renderer.clear_instance_batches();
+            if batch {
+                let started = Instant::now();
+                let mut cells: std::collections::BTreeMap<(i32, i32, u32), Vec<glam::Mat4>> = Default::default();
+                for draw in &draws {
+                    let at = draw.transform.w_axis;
+                    let key = ((at.x / 96.0).floor() as i32, (at.z / 96.0).floor() as i32, draw.vertex_offset);
+                    cells.entry(key).or_default().push(draw.transform);
+                }
+                let batches = cells.len();
+                for (id, ((_, _, vertex_offset), placements)) in cells.into_iter().enumerate() {
+                    let (alloc, material_id) = meshes.iter().find(|(m, _)| m.vertex_offset == vertex_offset).unwrap();
+                    let part = BatchPart {
+                        vertex_offset: alloc.vertex_offset,
+                        index_offset: alloc.index_offset,
+                        index_count: alloc.index_count,
+                        material_id: *material_id,
+                        local: glam::Mat4::IDENTITY,
+                        near: 0.0,
+                        far: 0.0,
+                        casts_shadow: true,
+                        shadow_far: 0.0,
+                    };
+                    renderer.set_instance_batch(id as u64, &InstanceBatch { parts: vec![part], placements });
+                }
+                println!(
+                    "
+set {n} instances as {batches} batches in {:.1} ms",
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             // A high three-quarter view of the middle of the region, about 120 m across.
             // `SCALE_PROBE_MOVE=1` pans 2 m a frame, as a player walking does, which moves the shadow cascades.
             let pan = std::env::var("SCALE_PROBE_MOVE").as_deref() == Ok("1");
@@ -184,8 +221,10 @@ impl Probe {
                 let eye = target + glam::Vec3::new(55.0, 70.0, 55.0);
                 let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
                 renderer.set_view(view, proj, eye);
-                for draw in &draws {
-                    renderer.submit(draw.clone());
+                if !batch {
+                    for draw in &draws {
+                        renderer.submit(draw.clone());
+                    }
                 }
                 let submitted = Instant::now();
                 renderer.render(&ctx, &mut ui, &window);

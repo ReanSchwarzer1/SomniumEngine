@@ -662,6 +662,8 @@ pub struct SomniumRenderer {
     draw_queue: Vec<DrawCommand>,
     /// `sort_draws_stable`'s order and output, kept between frames.
     sort_keys: DrawSortCache,
+    /// Copies of mesh parts kept on the GPU between frames (`instance_batch.rs`); empty unless a game sets one.
+    instance_batches: crate::instance_batch::InstanceBatches,
     sort_scratch: Vec<DrawCommand>,
 
     /// Per-entity vertex paint masks (see `crate::vertex_paint`).
@@ -1477,6 +1479,7 @@ impl SomniumRenderer {
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
             sort_keys: DrawSortCache::default(),
+            instance_batches: Default::default(),
             sort_scratch: Vec::new(),
             vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
@@ -2671,7 +2674,10 @@ impl SomniumRenderer {
     fn counted_draws_active(&self) -> bool {
         self.gpu_driven
             && self.supports_counted_draws
-            && std::env::var("SOMNIUM_DRAW_COMPACTION").as_deref() == Ok("1")
+            && (std::env::var("SOMNIUM_DRAW_COMPACTION").as_deref() == Ok("1")
+                // Instance batches bring hundreds of thousands of arguments, which the dense path has wgpu check
+                // one by one on the CPU at encoder finish; the counted path is not checked (`instance_batch.rs`).
+                || !self.instance_batches.is_empty())
     }
 
     /// Submit one light's gizmo for this frame (Phase 13E).
@@ -2831,8 +2837,13 @@ impl SomniumRenderer {
             self.shading_pass.write_paint(&ctx.queue, table, &handles);
             pool.frame_instances = handles;
         }
-        self.shading_pass
-            .write_paint(&ctx.queue, 0, &pool.header(table));
+        // With instance batches, whose instances sit past the table, the table says how far it reaches.
+        let header = if self.instance_batches.is_empty() {
+            pool.header(table)
+        } else {
+            pool.header_with_len(table, u32::try_from(self.draw_queue.len()).unwrap_or(u32::MAX))
+        };
+        self.shading_pass.write_paint(&ctx.queue, 0, &header);
         pool.header_live = true;
     }
 
@@ -3192,6 +3203,41 @@ impl SomniumRenderer {
     /// Mark what is submitted until the next call as the first-person rig (or not): see `first_person`.
     pub fn set_first_person(&mut self, on: bool) {
         self.first_person = on;
+    }
+
+    /// Set instance batch `id`, replacing any batch of that id: every placement of its parts, drawn from the next
+    /// frame on without being submitted again, until it is replaced or removed (`crate::instance_batch`). For a
+    /// region's foliage and other repeated still things: the CPU pays per batch set, not per copy per frame. Drawn
+    /// on the GPU-driven path only; a part with a blended material is left out (the visibility buffer cannot
+    /// blend).
+    pub fn set_instance_batch(&mut self, id: u64, batch: &crate::instance_batch::InstanceBatch) {
+        let mut slots = Vec::with_capacity(batch.parts.len() * batch.placements.len());
+        for part in &batch.parts {
+            if self.material_blend.get(part.material_id as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let bounds = self.geometry.mesh_aabb(part.vertex_offset);
+            slots.extend(
+                batch.placements.iter().map(|&placement| crate::instance_batch::GpuSlot::new(part, placement, bounds)),
+            );
+        }
+        self.instance_batches.set(id, slots);
+    }
+
+    /// Remove instance batch `id`. Returns whether there was one.
+    pub fn remove_instance_batch(&mut self, id: u64) -> bool {
+        self.instance_batches.remove(id)
+    }
+
+    /// Remove every instance batch.
+    pub fn clear_instance_batches(&mut self) {
+        self.instance_batches.clear();
+    }
+
+    /// Instance batches set, and the slots (copies of parts) they span, free ones between them included.
+    #[must_use]
+    pub fn instance_batch_stats(&self) -> (usize, u32) {
+        (self.instance_batches.batch_count(), self.instance_batches.slot_end())
     }
 
     pub fn submit(&mut self, cmd: DrawCommand) {
@@ -5039,8 +5085,30 @@ impl SomniumRenderer {
             });
         }
         crate::pass::transparent::sort_back_to_front(&mut transparent_draws);
-        if self.instances.reserve(&ctx.device) {
+        // Instance batches keep their instances past the frame's own (`instance_batch.rs`).
+        self.instance_batches.flush(&ctx.device, &ctx.queue, &self.shaders);
+        let mut batches_live = self.gpu_driven && !self.instance_batches.is_empty();
+        let batch_extent = if batches_live {
+            let start = crate::instance_batch::region_start(
+                self.instances.instances().len(),
+                self.instance_batches.instance_base,
+            );
+            self.instance_batches.instance_base = start;
+            start as usize + self.instance_batches.slot_end() as usize
+        } else {
+            0
+        };
+        let instances_grown = self.instances.reserve_extent(&ctx.device, batch_extent);
+        if instances_grown {
             self.global_pool.set_instance_buffer(&ctx.device, &self.instances.buffer);
+        }
+        let instance_stride = std::mem::size_of::<crate::instance::GpuInstanceData>() as u64;
+        if batches_live && batch_extent as u64 * instance_stride > self.instances.buffer.size() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                tracing::warn!(batch_extent, "instance batches do not fit the instance buffer; not drawn");
+            });
+            batches_live = false;
         }
         self.profiler.cpu_begin("Instance upload");
         self.instances.upload(&ctx.queue);
@@ -5180,8 +5248,23 @@ impl SomniumRenderer {
             }
             self.profiler.counters.gpu_draw_arguments =
                 u32::try_from(self.cluster_args.len()).unwrap_or(u32::MAX);
+            // Instance batches' arguments and bounds go past the frame's own, written on the GPU.
+            let batch_args = if batches_live {
+                let start = crate::instance_batch::region_start(
+                    self.cluster_args.len(),
+                    self.instance_batches.arg_base,
+                );
+                self.instance_batches.arg_base = start;
+                start as usize + self.instance_batches.slot_end() as usize
+            } else {
+                0
+            };
+            self.indirect.reserve_extent(&ctx.device, batch_args);
             self.indirect
                 .upload(&ctx.device, &ctx.queue, &self.cluster_args);
+            self.indirect.set_extent(batch_args);
+            let bounds_grown = self.cull_pass.reserve_extent(&ctx.device, &ctx.queue, batch_args);
+            self.cull_pass.set_extent(batch_args);
             let counted_draws = self.counted_draws_active();
             self.cull_pass.update(
                 &ctx.device,
@@ -5205,6 +5288,27 @@ impl SomniumRenderer {
                 self.single_sided_args,
                 counted_draws,
             );
+            if batches_live {
+                // Between the frame's arguments and the batches': nothing drawn (last frame's may be there).
+                let own = self.cluster_args.len() as u64;
+                let start = u64::from(self.instance_batches.arg_base);
+                if start > own {
+                    encoder.clear_buffer(
+                        &self.indirect.buffer,
+                        own * crate::indirect::ARGS_SIZE,
+                        Some((start - own) * crate::indirect::ARGS_SIZE),
+                    );
+                }
+                self.instance_batches.record_expand(
+                    &ctx.device,
+                    &ctx.queue,
+                    &mut encoder,
+                    &self.instances.buffer,
+                    &self.indirect.buffer,
+                    self.cull_pass.aabb_buffer(),
+                    instances_grown || bounds_grown,
+                );
+            }
             if reuse && !self.cluster_posed.is_empty() {
                 let patches: Vec<_> = self
                     .cluster_posed
@@ -5234,6 +5338,13 @@ impl SomniumRenderer {
         // them reach the atlas. Phase CR-E also drops casters that miss every
         // cascade volume. See `rebuild_shadow_casters`.
         self.rebuild_shadow_casters();
+        if !self.instance_batches.is_empty() {
+            // A batch set or removed redraws every cascade; its casters are culled per cascade on the GPU below.
+            let mix = self.instance_batches.revision().wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            for revision in &mut self.cascade_shadow_revisions {
+                *revision ^= mix;
+            }
+        }
         let dirty_cascades = self.cascade_shadow_cache.finish_frame(
             self.cascade_shadow_revisions,
             cascade_cache_frame.view_dirty,
@@ -5284,25 +5395,41 @@ impl SomniumRenderer {
             );
             self.profiler.end(&mut encoder);
         }
+        if batches_live {
+            let planes = self.cascade_view_projs.map(crate::culling::frustum_planes);
+            self.instance_batches.record_shadow_cull(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &planes,
+                self.camera_pos,
+                dirty_cascades,
+                self.supports_counted_draws,
+            );
+        }
+        // Only this frame's: a frame that did not cull them (batches not drawn) draws none.
+        let batch_shadows = if batches_live { self.instance_batches.shadow_draws() } else { None };
         self.profiler.begin(&mut encoder, "Shadows");
         match self.directional_shadow_technique() {
-            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_pass.record(
+            crate::shadow::virtual_map::ShadowTechnique::Cascaded => self.shadow_pass.record_with_batches(
                 &mut encoder,
                 &self.shadow_resources.atlas_view,
                 &self.global_pool.bind_group,
                 &self.shadow_caster_scratch,
                 dirty_cascades,
+                batch_shadows,
             ),
             crate::shadow::virtual_map::ShadowTechnique::Virtual => {
                 // Keep a coarse CSM render as the authored policy's
                 // last-resort page-miss fallback. Sparse page raster happened
                 // above; opaque, terrain, and water consumers sample it later.
-                self.shadow_pass.record(
+                self.shadow_pass.record_with_batches(
                     &mut encoder,
                     &self.shadow_resources.atlas_view,
                     &self.global_pool.bind_group,
                     &self.shadow_caster_scratch,
                     dirty_cascades,
+                    batch_shadows,
                 );
             }
         }

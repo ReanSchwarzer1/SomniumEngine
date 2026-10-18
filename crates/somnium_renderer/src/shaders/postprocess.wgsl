@@ -79,6 +79,11 @@ fn outside_retro(uv: vec2<f32>) -> bool {
     if visible == 0u || table == 0u {
         return false;
     }
+    // Word 11: the table's length when instance batches sit past it (`vertex_paint.rs`), else 0.
+    let covered = paint_words[11];
+    if covered != 0u && visible - 1u >= covered {
+        return false;
+    }
     return (paint_words[table + visible - 1u] & 0x80000000u) != 0u;
 }
 

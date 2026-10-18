@@ -26,6 +26,7 @@ pub mod geometry;
 pub mod imported_bc;
 pub mod indirect;
 pub mod instance;
+pub mod instance_batch;
 pub mod jobs;
 pub mod material;
 pub mod meshlet;
