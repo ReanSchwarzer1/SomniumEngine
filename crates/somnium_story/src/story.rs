@@ -84,6 +84,11 @@ pub enum StoryEvent {
     Problem {
         message: String,
     },
+    /// The Voice announced something ([`Story::voice_view`] has it resolved): a notice, a chime, its log.
+    Voice {
+        sequence: u64,
+        line: String,
+    },
 }
 
 /// What a bark or chatter line has played recently.
@@ -196,13 +201,42 @@ pub struct NoteView {
     pub at_ms: u64,
 }
 
+/// One of the Voice's announcements, resolved with the values it had when it was made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VoiceView {
+    pub sequence: u64,
+    pub line: String,
+    pub category: String,
+    pub heading: String,
+    pub text: String,
+    pub voice: String,
+    pub at_ms: u64,
+    pub read: bool,
+}
+
+/// Someone on the journal's People page: a cast member the player has heard speak or has notes about.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PersonView {
+    pub id: String,
+    pub name: String,
+    pub portrait: String,
+    pub expression: String,
+    pub color: Option<[u8; 4]>,
+    /// Lines of theirs the player has heard.
+    pub lines_heard: u32,
+    /// The notes about them (`subject`), as sequences into [`JournalView::notes`].
+    pub notes: Vec<u64>,
+}
+
 /// The whole journal, resolved for drawing: active quests first (the tracked one at the top), then by priority and
-/// recency; notes in arrival order.
+/// recency; notes in arrival order; people in cast order; the Voice's log oldest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct JournalView {
     pub quests: Vec<QuestPage>,
     pub notes: Vec<NoteView>,
     pub unread: usize,
+    pub people: Vec<PersonView>,
+    pub voice: Vec<VoiceView>,
 }
 
 /// What a save holds of the story. Goes in `SaveGame::state` under [`StorySave::KEY`].
@@ -295,6 +329,25 @@ impl Env for Scope<'_> {
             return Value::Int(i64::from(self.story.visits.get(&key).copied().unwrap_or(0)));
         }
         self.story.quests.answer(func, args)
+    }
+}
+
+/// The story's facts, except those an announcement captured: how a log entry reads as it did when it was made.
+struct Captured<'a> {
+    scope: Scope<'a>,
+    values: &'a BTreeMap<String, Value>,
+}
+
+impl Env for Captured<'_> {
+    fn fact(&self, id: &str) -> Value {
+        self.values
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| self.scope.fact(id))
+    }
+
+    fn call(&self, func: Func, args: &[Value]) -> Value {
+        self.scope.call(func, args)
     }
 }
 
@@ -685,6 +738,7 @@ impl Story {
                         read: entry.read,
                     });
                 }
+                EntryRef::Voice { .. } => {}
                 EntryRef::Note { note } => {
                     let Some(def) = self.db.note(note) else {
                         continue;
@@ -734,11 +788,132 @@ impl Story {
                 .then(b_last.cmp(a_last))
                 .then_with(|| a.quest.cmp(&b.quest))
         });
+        let people = self.people(&notes);
         JournalView {
             quests: quests.into_iter().map(|(page, _, _)| page).collect(),
             notes,
             unread: self.journal.unread(),
+            people,
+            voice: self
+                .journal
+                .entries()
+                .iter()
+                .filter_map(|entry| self.voice_view(entry.sequence))
+                .collect(),
         }
+    }
+
+    /// The cast the player has heard speak or has notes about, in cast order.
+    fn people(&self, notes: &[NoteView]) -> Vec<PersonView> {
+        let mut heard: BTreeMap<&str, u32> = BTreeMap::new();
+        for dialogue in self.db.dialogues() {
+            for node in &dialogue.asset.nodes {
+                if let crate::dialogue::NodeDef::Line(line) = node {
+                    if !line.speaker.is_empty() && self.visits(dialogue.id(), &line.id) > 0 {
+                        *heard.entry(line.speaker.as_str()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        self.db
+            .manifest
+            .cast
+            .iter()
+            .filter(|speaker| speaker.journal)
+            .filter_map(|speaker| {
+                let about: Vec<u64> = notes
+                    .iter()
+                    .filter(|n| n.subject == speaker.id)
+                    .map(|n| n.sequence)
+                    .collect();
+                let lines_heard = heard.get(speaker.id.as_str()).copied().unwrap_or(0);
+                (lines_heard > 0 || !about.is_empty()).then(|| PersonView {
+                    id: speaker.id.clone(),
+                    name: self.text(&speaker.name, None),
+                    portrait: speaker.portrait.clone(),
+                    expression: if speaker.default_expression.is_empty() {
+                        self.db
+                            .manifest
+                            .expressions
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        speaker.default_expression.clone()
+                    },
+                    color: crate::manifest::parse_color(&speaker.color),
+                    lines_heard,
+                    notes: about,
+                })
+            })
+            .collect()
+    }
+
+    /// The Voice announces one of its lines: it goes in its log, saved, and a [`StoryEvent::Voice`] tells the game
+    /// to show it. The facts its text names are kept as they are now. Returns the log entry's sequence.
+    pub fn voice(&mut self, line: &str) -> Result<u64, String> {
+        let def = self
+            .db
+            .voice_line(line)
+            .ok_or_else(|| format!("voice('{line}'): no such voice line"))?;
+        let mut values = BTreeMap::new();
+        for text in [&def.heading, &def.text] {
+            let names = text
+                .placeholders()
+                .into_iter()
+                .chain([text.plural.clone(), text.gender.clone()]);
+            for name in names {
+                if self.db.schema.get(&name).is_some() {
+                    let value = self.state.read(&self.db.schema, &name);
+                    values.insert(name, value);
+                }
+            }
+        }
+        let sequence = self.journal.push(
+            EntryRef::Voice {
+                line: line.to_owned(),
+                values,
+            },
+            self.clock_ms,
+        );
+        self.revision += 1;
+        self.events.push(StoryEvent::Voice {
+            sequence,
+            line: line.to_owned(),
+        });
+        Ok(sequence)
+    }
+
+    /// One announcement of the Voice's log, resolved as it read when it was made.
+    #[must_use]
+    pub fn voice_view(&self, sequence: u64) -> Option<VoiceView> {
+        let entry = self
+            .journal
+            .entries()
+            .iter()
+            .find(|e| e.sequence == sequence)?;
+        let EntryRef::Voice { line, values } = &entry.entry else {
+            return None;
+        };
+        let def = self.db.voice_line(line)?;
+        let env = Captured {
+            scope: Scope {
+                story: self,
+                dialogue: None,
+            },
+            values,
+        };
+        let source = &self.db.manifest.source_locale;
+        Some(VoiceView {
+            sequence,
+            line: line.clone(),
+            category: def.category.clone(),
+            heading: def.heading.resolve(&self.catalog, source, &env),
+            text: def.text.resolve(&self.catalog, source, &env),
+            voice: def.voice.clone(),
+            at_ms: entry.at_ms,
+            read: entry.read,
+        })
     }
 
     fn page(&self, quest: &Quest) -> QuestPage {
@@ -966,6 +1141,7 @@ impl Story {
                 .and_then(|q| q.stage(stage))
                 .is_some_and(|s| s.def.journal.iter().any(|l| l.id == *line)),
             EntryRef::Note { note } => db.note(note).is_some(),
+            EntryRef::Voice { line, .. } => db.voice_line(line).is_some(),
         });
         if dropped > 0 {
             notes.push(format!(
@@ -1108,6 +1284,11 @@ impl Story {
                 {
                     self.revision += 1;
                     self.events.push(StoryEvent::JournalAdded { sequence });
+                }
+            }
+            "voice" => {
+                if let Err(message) = self.voice(&text(0)) {
+                    self.events.push(StoryEvent::Problem { message });
                 }
             }
             "journal_obscure" | "journal_restore" => {

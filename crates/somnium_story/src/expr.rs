@@ -739,6 +739,7 @@ pub const BUILTIN_COMMANDS: &[(&str, &[ParamType])] = &[
     ("journal", &[ParamType::Text]),
     ("journal_obscure", &[ParamType::Text]),
     ("journal_restore", &[ParamType::Text]),
+    ("voice", &[ParamType::Text]),
 ];
 
 /// What compilation checks names against.

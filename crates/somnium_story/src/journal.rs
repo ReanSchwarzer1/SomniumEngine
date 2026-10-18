@@ -11,9 +11,9 @@
 
 use crate::problem::Problem;
 use crate::text::LocalText;
-use crate::value::valid_id;
+use crate::value::{Value, valid_id};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The notes format this build reads.
 pub const NOTES_VERSION: u32 = 1;
@@ -39,13 +39,38 @@ pub struct NoteDef {
     pub note: String,
 }
 
+/// One thing the Voice can announce: Rimeborn's interface voice ("Confirmed. Weave acquired: Frost Step."). Its log is
+/// a page of the journal; each announcement keeps the values its placeholders had when it was made.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceDef {
+    /// Unique across every notes file of the game.
+    pub id: String,
+    /// What kind of announcement (`weave`, `skill`, `rank`, `trial`). Free: the game styles and files by it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
+    /// The small line above ("WEAVE ACQUIRED").
+    #[serde(default, skip_serializing_if = "LocalText::is_empty")]
+    pub heading: LocalText,
+    pub text: LocalText,
+    /// A clip of the Voice saying it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 /// A notes file (`*.somnotes`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotesAsset {
     pub version: u32,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<NoteDef>,
+    /// What the Voice can say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voice: Vec<VoiceDef>,
 }
 
 impl NotesAsset {
@@ -78,6 +103,15 @@ impl NotesAsset {
                 problems.push(Problem::error(&note.id, "a note needs text"));
             }
         }
+        let mut voice_ids = BTreeSet::new();
+        for line in &self.voice {
+            if !valid_id(&line.id) || !voice_ids.insert(line.id.as_str()) {
+                problems.push(Problem::error(&line.id, "voice ids are valid ids, unique"));
+            }
+            if line.text.is_empty() {
+                problems.push(Problem::error(&line.id, "a voice line needs text"));
+            }
+        }
         problems
     }
 
@@ -87,6 +121,11 @@ impl NotesAsset {
             let id = note.id.clone();
             note.title.assign_key(|| format!("note.{id}.title"));
             note.text.assign_key(|| format!("note.{id}"));
+        }
+        for line in &mut self.voice {
+            let id = line.id.clone();
+            line.heading.assign_key(|| format!("voice.{id}.heading"));
+            line.text.assign_key(|| format!("voice.{id}"));
         }
     }
 }
@@ -103,6 +142,12 @@ pub enum EntryRef {
     },
     Note {
         note: String,
+    },
+    /// Something the Voice announced, with the facts its text names as they were then.
+    Voice {
+        line: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        values: BTreeMap<String, Value>,
     },
 }
 
@@ -144,6 +189,20 @@ impl Journal {
             obscured: false,
         });
         Some(sequence)
+    }
+
+    /// Add an entry even when the same one is there (the Voice may say the same thing twice). Returns its sequence.
+    pub fn push(&mut self, entry: EntryRef, at_ms: u64) -> u64 {
+        let sequence = self.next;
+        self.next += 1;
+        self.entries.push(JournalEntry {
+            sequence,
+            entry,
+            at_ms,
+            read: false,
+            obscured: false,
+        });
+        sequence
     }
 
     #[must_use]

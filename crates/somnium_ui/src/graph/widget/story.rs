@@ -768,18 +768,27 @@ impl GraphEditor {
                     .map_or_else(|| quest.to_owned(), |q| story.text(&q.asset.title, None))
             };
             let notice = match &event {
-                StoryEvent::QuestStarted { quest } => Some(("QUEST STARTED", title(quest))),
-                StoryEvent::QuestCompleted { quest } => Some(("QUEST COMPLETED", title(quest))),
-                StoryEvent::QuestFailed { quest } => Some(("QUEST FAILED", title(quest))),
+                StoryEvent::QuestStarted { quest } => {
+                    Some(("QUEST STARTED".to_owned(), title(quest)))
+                }
+                StoryEvent::QuestCompleted { quest } => {
+                    Some(("QUEST COMPLETED".to_owned(), title(quest)))
+                }
+                StoryEvent::QuestFailed { quest } => {
+                    Some(("QUEST FAILED".to_owned(), title(quest)))
+                }
                 StoryEvent::ObjectiveDone { quest, objective } => story
                     .objectives(quest)
                     .into_iter()
                     .find(|o| o.id == *objective)
-                    .map(|o| ("OBJECTIVE DONE", o.text)),
+                    .map(|o| ("OBJECTIVE DONE".to_owned(), o.text)),
+                StoryEvent::Voice { sequence, .. } => {
+                    story.voice_view(*sequence).map(|v| (v.heading, v.text))
+                }
                 _ => None,
             };
             if let Some((heading, text)) = notice {
-                preview.notices.push((heading.to_owned(), text));
+                preview.notices.push((heading, text));
             }
             let line = match event {
                 StoryEvent::FactChanged { fact, new, .. } => format!("{fact} = {new}"),
@@ -802,6 +811,7 @@ impl GraphEditor {
                     format!("{quest}/{objective} failed")
                 }
                 StoryEvent::JournalAdded { sequence } => format!("journal entry {sequence}"),
+                StoryEvent::Voice { line, .. } => format!("the Voice: {line}"),
                 StoryEvent::JournalObscured { note, obscured } => {
                     format!("{note} {}", if obscured { "obscured" } else { "restored" })
                 }
@@ -1744,7 +1754,10 @@ mod tests {
         }
         let o2 = dialogue::find_node(&editor.surface().graph, "o2").unwrap();
         assert_eq!(editor.surface().selection.ids(), [o2]);
-        assert!(editor.authoring.story.game_view, "on before any play-through exists");
+        assert!(
+            editor.authoring.story.game_view,
+            "on before any play-through exists"
+        );
         let mut msg = UiMessage::new(
             widget.handle,
             MessageDirection::ToWidget,
@@ -1753,10 +1766,16 @@ mod tests {
         editor.handle_routed_message(&mut widget, &mut msg, &mut Vec::new());
         let mut sources = StorySources::default();
         sources.add_file("story.somstory", MANIFEST);
-        sources.add_file("intro.somdialogue", &saved(&mut editor, &widget, true).unwrap());
+        sources.add_file(
+            "intro.somdialogue",
+            &saved(&mut editor, &widget, true).unwrap(),
+        );
         editor.surface_mut().selection.clear();
         editor.start_preview(&widget, Arc::new(StoryDatabase::build(sources).unwrap().0));
-        assert!(matches!(beat(&editor), Beat::Choices { .. }), "the script went on past n1");
+        assert!(
+            matches!(beat(&editor), Beat::Choices { .. }),
+            "the script went on past n1"
+        );
         assert!(editor.authoring.story.script.is_empty());
     }
 

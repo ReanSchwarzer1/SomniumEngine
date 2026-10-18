@@ -14,7 +14,7 @@ use crate::dialogue::{CheckDef, Dialogue, NodeDef};
 use crate::manifest::{Side, parse_color};
 use crate::story::{Story, StoryEvent};
 use crate::value::{FactType, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Non-presenting nodes one move may pass through before it is called a loop.
@@ -94,7 +94,7 @@ pub enum Beat {
 }
 
 /// How a check went, for the presenter's feedback.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub node: String,
     pub passed: bool,
@@ -112,6 +112,69 @@ struct Frame {
 struct Menu {
     options: Vec<(String, bool)>,
     timeout: Option<(u64, String)>,
+}
+
+/// What a mid-scene save holds of a conversation. Goes in `SaveGame::state` under [`ConversationSave::KEY`],
+/// beside the story's own save.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSave {
+    pub root: String,
+    pub dialogue: String,
+    pub node: String,
+    /// Calls to return from: `(dialogue, where to go on)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<(String, Vec<String>)>,
+    pub at: SavedBeat,
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<CheckResult>,
+    /// The presenter's log before the line on screen ([`crate::Presenter::history_for_save`]); the game fills it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::presenter::HistoryEntry>,
+}
+
+/// What the saved conversation was showing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SavedBeat {
+    Line,
+    /// A menu: the options it was opened with (a timeout's too) and how long it had been up.
+    Menu {
+        options: Vec<String>,
+        #[serde(default)]
+        elapsed_ms: u64,
+    },
+    Wait,
+}
+
+impl ConversationSave {
+    /// The key in `SaveGame::state`.
+    pub const KEY: &'static str = "story_conversation";
+
+    /// Put this save into a game's save state (an object; created when null).
+    pub fn write_into(&self, state: &mut serde_json::Value) -> Result<(), String> {
+        if state.is_null() {
+            *state = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let object = state
+            .as_object_mut()
+            .ok_or("the game's save state is not an object")?;
+        object.insert(
+            Self::KEY.to_owned(),
+            serde_json::to_value(self).map_err(|e| e.to_string())?,
+        );
+        Ok(())
+    }
+
+    /// The conversation a save state holds, if one was going on when it was made.
+    pub fn read_from(state: &serde_json::Value) -> Result<Option<Self>, String> {
+        state
+            .get(Self::KEY)
+            .map(|value| serde_json::from_value(value.clone()).map_err(|e| e.to_string()))
+            .transpose()
+    }
 }
 
 /// One conversation in progress.
@@ -268,6 +331,136 @@ impl Conversation {
         self.dialogue = self.root.clone();
         self.follow(story, vec![handler]);
         !self.is_over()
+    }
+
+    // --- saving ----------------------------------------------------------------------------------------------
+
+    /// Where the conversation is, for a save made mid-scene; `None` once it has ended.
+    #[must_use]
+    pub fn save(&self) -> Option<ConversationSave> {
+        let at = match &self.beat {
+            Beat::Line(_) => SavedBeat::Line,
+            Beat::Choices { .. } => SavedBeat::Menu {
+                options: self.menu.as_ref().map_or_else(Vec::new, |menu| {
+                    menu.options
+                        .iter()
+                        .map(|(id, _)| id.clone())
+                        .chain(menu.timeout.iter().map(|(_, id)| id.clone()))
+                        .collect()
+                }),
+                elapsed_ms: self.menu_elapsed_ms,
+            },
+            Beat::Wait { .. } => SavedBeat::Wait,
+            Beat::End { .. } => return None,
+        };
+        Some(ConversationSave {
+            root: self.root.clone(),
+            dialogue: self.dialogue.clone(),
+            node: self.node.clone(),
+            stack: self
+                .stack
+                .iter()
+                .map(|f| (f.dialogue.clone(), f.next.clone()))
+                .collect(),
+            at,
+            interrupted: self.interrupted,
+            last_check: self.last_check.clone(),
+            history: Vec::new(),
+        })
+    }
+
+    /// Stand where `save` stood, over a story loaded from the same save. Nothing is entered again, so no effect
+    /// runs twice: the beat is rebuilt as it was (in the language now loaded) and the menu offers what it offered.
+    /// An error means the content changed under the save; the story's own state still loads, without the scene.
+    pub fn restore(story: &mut Story, save: &ConversationSave) -> Result<Self, String> {
+        let db = Arc::clone(story.database());
+        let dialogue = db
+            .dialogue(&save.dialogue)
+            .ok_or_else(|| format!("the saved scene's dialogue {} is gone", save.dialogue))?;
+        if db.dialogue(&save.root).is_none() {
+            return Err(format!("the saved scene's dialogue {} is gone", save.root));
+        }
+        let mut conversation = Self {
+            root: save.root.clone(),
+            dialogue: save.dialogue.clone(),
+            node: save.node.clone(),
+            stack: save
+                .stack
+                .iter()
+                .map(|(dialogue, next)| Frame {
+                    dialogue: dialogue.clone(),
+                    next: next.clone(),
+                })
+                .collect(),
+            beat: Beat::End {
+                result: String::new(),
+            },
+            menu: None,
+            menu_elapsed_ms: 0,
+            interrupted: save.interrupted,
+            last_check: save.last_check.clone(),
+        };
+        let gone = || {
+            format!(
+                "the saved scene's node {}/{} is gone",
+                save.dialogue, save.node
+            )
+        };
+        match &save.at {
+            SavedBeat::Line => {
+                let Some(NodeDef::Line(line)) = dialogue.node(&save.node).map(|n| &n.def) else {
+                    return Err(gone());
+                };
+                conversation.beat =
+                    Beat::Line(conversation.line_beat(story, &db, &save.dialogue, line));
+            }
+            SavedBeat::Wait => {
+                if !matches!(
+                    dialogue.node(&save.node).map(|n| &n.def),
+                    Some(NodeDef::Action(_))
+                ) {
+                    return Err(gone());
+                }
+                conversation.beat = Beat::Wait {
+                    dialogue: save.dialogue.clone(),
+                    node: save.node.clone(),
+                };
+            }
+            SavedBeat::Menu {
+                options,
+                elapsed_ms,
+            } => {
+                if options.iter().any(|o| dialogue.node(o).is_none()) {
+                    return Err(format!(
+                        "an option of the saved menu in {} is gone",
+                        save.dialogue
+                    ));
+                }
+                conversation.open_menu(story, dialogue, options);
+                if conversation.is_over() {
+                    return Err(format!(
+                        "the saved menu in {} has nothing left to take",
+                        save.dialogue
+                    ));
+                }
+                conversation.menu_elapsed_ms = *elapsed_ms;
+            }
+        }
+        Ok(conversation)
+    }
+
+    /// The line on screen, or the one a menu stands under: what a presenter shows again after a load, before the
+    /// menu. Built fresh; nothing is entered.
+    #[must_use]
+    pub fn current_line(&self, story: &Story) -> Option<LineBeat> {
+        if let Beat::Line(line) = &self.beat {
+            return Some(line.clone());
+        }
+        let db = Arc::clone(story.database());
+        let NodeDef::Line(line) = &db.dialogue(&self.dialogue)?.node(&self.node)?.def else {
+            return None;
+        };
+        Some(self.line_beat(story, &db, &self.dialogue, line))
     }
 
     // --- walking ---------------------------------------------------------------------------------------------

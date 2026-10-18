@@ -52,6 +52,17 @@ pub struct Speaker {
     pub language: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// On the journal's People page once met. Off for the player, the narrator, a voice on the wind.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub journal: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// The manifest.
@@ -271,6 +282,7 @@ mod tests {
             color: "red".into(),
             language: "klingon".into(),
             note: String::new(),
+            journal: true,
         });
         manifest.expressions = vec!["neutral".into()];
         manifest.languages = vec!["tyffiran".into()];

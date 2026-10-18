@@ -186,6 +186,7 @@ pub struct StoryDatabase {
     quests: BTreeMap<String, Quest>,
     bark_sets: BTreeMap<String, BarkSet>,
     notes: BTreeMap<String, NoteDef>,
+    voice: BTreeMap<String, crate::journal::VoiceDef>,
     files: BTreeMap<String, String>,
 }
 
@@ -239,6 +240,7 @@ impl StoryDatabase {
             quests: BTreeMap::new(),
             bark_sets: BTreeMap::new(),
             notes: BTreeMap::new(),
+            voice: BTreeMap::new(),
             files: BTreeMap::new(),
         };
         let manifest = database.manifest.clone();
@@ -369,6 +371,14 @@ impl StoryDatabase {
                     database.notes.insert(note.id.clone(), note);
                 }
             }
+            for line in asset.voice {
+                if let Some(clash) = claim(&mut database.files, format!("voice {}", line.id), &file)
+                {
+                    problems.push(Problem::error(&line.id, clash));
+                } else {
+                    database.voice.insert(line.id.clone(), line);
+                }
+            }
             report(&file, name, problems);
         }
         let cross = database.cross_check();
@@ -418,6 +428,16 @@ impl StoryDatabase {
 
     pub fn notes(&self) -> impl Iterator<Item = &NoteDef> {
         self.notes.values()
+    }
+
+    /// A line the Voice can say.
+    #[must_use]
+    pub fn voice_line(&self, id: &str) -> Option<&crate::journal::VoiceDef> {
+        self.voice.get(id)
+    }
+
+    pub fn voice_lines(&self) -> impl Iterator<Item = &crate::journal::VoiceDef> {
+        self.voice.values()
     }
 
     /// The file an asset came from (`dialogue mireille_intro` -> `dialogue/mireille_intro.somdialogue`).
@@ -480,6 +500,10 @@ impl StoryDatabase {
         for note in self.notes.values() {
             add(&note.title);
             add(&note.text);
+        }
+        for line in self.voice.values() {
+            add(&line.heading);
+            add(&line.text);
         }
         table
     }
@@ -681,6 +705,26 @@ impl StoryDatabase {
                 ));
             }
         }
+        for line in self.voice.values() {
+            let asset = format!("voice {}", line.id);
+            let mut problems = Vec::new();
+            for text in [&line.heading, &line.text] {
+                self.check_text(
+                    text,
+                    &mut |at: &str, m: String| problems.push((at.to_owned(), m)),
+                    &line.id,
+                );
+            }
+            if !line.voice.is_empty() && !safe_asset_path(&line.voice) {
+                problems.push((
+                    line.id.clone(),
+                    format!("voice {} is not a content path", line.voice),
+                ));
+            }
+            for (at, message) in problems {
+                issues.push(self.issue(Severity::Error, &asset, &at, message));
+            }
+        }
         issues
     }
 
@@ -771,6 +815,11 @@ impl StoryDatabase {
                 ("journal" | "journal_obscure" | "journal_restore", [Some(n)]) => {
                     if !self.notes.contains_key(n.as_str()) {
                         messages.push(format!("{name}('{n}'): no such note"));
+                    }
+                }
+                ("voice", [Some(v)]) => {
+                    if !self.voice.contains_key(v.as_str()) {
+                        messages.push(format!("voice('{v}'): no such voice line"));
                     }
                 }
                 _ => {}

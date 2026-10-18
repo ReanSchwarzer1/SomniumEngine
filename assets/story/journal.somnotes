@@ -10,5 +10,13 @@
       "text": "Oren's grandmother said a lit window is a promise that someone is awake and watching.",
       "tier": "retold"
     }
+  ],
+  "voice": [
+    {
+      "id": "lamps_burning",
+      "category": "quest",
+      "heading": "STREET LAMPS",
+      "text": "All {lamps.lit} lamps burn again."
+    }
   ]
 }

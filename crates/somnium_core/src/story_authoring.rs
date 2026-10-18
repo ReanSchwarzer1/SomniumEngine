@@ -370,12 +370,13 @@ mod tests {
     const DIALOGUE: &str = r#"{"version": 1, "id": "intro", "nodes": [
         {"type": "line", "id": "n1", "speaker": "mira", "text": "Hello.", "effects": "met.mira = true"}]}"#;
 
-    fn project() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "somnium-story-authoring-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+    /// One fixed folder per test, overwritten each run: nothing is ever deleted (Rimeborn RULES 13).
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("somnium-story-authoring-{name}"))
+    }
+
+    fn project(name: &str) -> PathBuf {
+        let root = scratch(name);
         let story = root.join("story");
         std::fs::create_dir_all(&story).unwrap();
         std::fs::write(story.join("t.somstory"), MANIFEST).unwrap();
@@ -385,7 +386,7 @@ mod tests {
 
     #[test]
     fn an_edit_is_checked_against_the_whole_project() {
-        let content = project();
+        let content = project("edit");
         let root = story_root(&content);
         assert!(root.ends_with("story"));
         let edited = DIALOGUE.replace("\"mira\", \"text\"", "\"nobody\", \"text\"");
@@ -414,12 +415,11 @@ mod tests {
             "{}",
             clean.status
         );
-        let _ = std::fs::remove_dir_all(content);
     }
 
     #[test]
     fn the_story_query_reads_lints_and_plays() {
-        let content = project();
+        let content = project("query");
         let root = story_root(&content);
         let overview = query(&root, &json!({})).unwrap();
         assert_eq!(overview["dialogues"][0]["id"], "intro");
@@ -442,7 +442,81 @@ mod tests {
         let strings = query(&root, &json!({"operation": "strings"})).unwrap();
         assert_eq!(strings["table"]["strings"]["dlg.intro.n1"], "Hello.");
         assert!(query(&root, &json!({"operation": "dance"})).is_err());
-        let _ = std::fs::remove_dir_all(content);
+    }
+
+    /// A story saved to an engine save slot in the middle of a scene loads saying and showing exactly what it did:
+    /// facts, quests and their markers, what was heard, the journal with its people and the Voice's log, the scene
+    /// and the presenter's log.
+    #[test]
+    fn a_story_saved_to_a_slot_mid_scene_loads_saying_and_showing_the_same() {
+        use crate::save_game::{SaveGame, SaveSlots};
+        use somnium_story::{Beat, Conversation, ConversationSave, Presenter, StorySave};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/story");
+        let (database, _) = StoryDatabase::load_dir(&root).unwrap_or_else(|i| panic!("{i:?}"));
+        let database = Arc::new(database);
+        let mut story = Story::new(Arc::clone(&database), 3);
+        let mut presenter = Presenter::default();
+        let mut talk = Conversation::start(&mut story, "lamplighter", "").unwrap();
+        let show = |talk: &Conversation, presenter: &mut Presenter| match talk.beat() {
+            Beat::Line(line) => presenter.show_line(line.clone(), None),
+            Beat::Choices { choices, .. } => presenter.show_choices(choices.clone()),
+            _ => {}
+        };
+        show(&talk, &mut presenter);
+        while !matches!(talk.beat(), Beat::Choices { .. }) {
+            talk.advance(&mut story).unwrap();
+            show(&talk, &mut presenter);
+        }
+        let Beat::Choices { choices, .. } = talk.beat().clone() else {
+            unreachable!()
+        };
+        let help = choices.iter().position(|c| c.node == "help").unwrap();
+        talk.choose(&mut story, help).unwrap();
+        show(&talk, &mut presenter);
+        story.set("lamps.lit", 3).unwrap();
+        assert!(
+            story
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, StoryEvent::Voice { .. })),
+            "the lamps objective's on_done had the Voice speak"
+        );
+
+        let mut save = SaveGame::new(1);
+        story.save().write_into(&mut save.state).unwrap();
+        let mut scene = talk.save().unwrap();
+        scene.history = presenter.history_for_save();
+        scene.write_into(&mut save.state).unwrap();
+        let slots = SaveSlots::new(scratch("slots"));
+        slots.write("act_one", &save).unwrap();
+        let back = slots.read("act_one").unwrap();
+
+        let (mut loaded, notes) = Story::load(
+            Arc::clone(&database),
+            &StorySave::read_from(&back.state).unwrap().unwrap(),
+        )
+        .unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        let saved_scene = ConversationSave::read_from(&back.state).unwrap().unwrap();
+        let again = Conversation::restore(&mut loaded, &saved_scene).unwrap();
+        let mut shown = Presenter::default();
+        shown.restore_history(saved_scene.history.clone());
+        show(&again, &mut shown);
+
+        assert_eq!(again.beat(), talk.beat(), "the same line on screen");
+        assert_eq!(
+            shown.history(),
+            presenter.history(),
+            "the same log behind it"
+        );
+        let view = loaded.journal_view();
+        assert_eq!(view, story.journal_view());
+        assert_eq!(view.voice.len(), 1);
+        assert_eq!(view.voice[0].text, "All 3 lamps burn again.");
+        assert!(view.people.iter().any(|p| p.id == "oren"));
+        assert_eq!(loaded.markers(), story.markers());
+        assert_eq!(loaded.save(), story.save());
+        assert!(loaded.drain_events().is_empty(), "loading ran nothing");
     }
 
     /// The sample `hello_engine` ships must stay clean and playable down every road.

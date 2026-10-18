@@ -509,6 +509,192 @@ fn saves_round_trip_through_the_game_state_and_replay_identically() {
     );
 }
 
+/// Save `story` and `talk` through a game's save state as text, and load both back.
+fn reload(story: &Story, talk: &Conversation) -> (Story, Conversation) {
+    let mut state = serde_json::Value::Null;
+    story.save().write_into(&mut state).unwrap();
+    talk.save().unwrap().write_into(&mut state).unwrap();
+    let state: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+    let (mut loaded, notes) = Story::load(
+        Arc::clone(story.database()),
+        &StorySave::read_from(&state).unwrap().unwrap(),
+    )
+    .unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    let saved = crate::ConversationSave::read_from(&state).unwrap().unwrap();
+    let talk = Conversation::restore(&mut loaded, &saved).unwrap();
+    (loaded, talk)
+}
+
+#[test]
+fn a_scene_saved_mid_menu_or_mid_call_reloads_showing_and_going_on_the_same() {
+    // In a menu, after the menu's line ran its effects (a quest started) and a once-choice was taken.
+    let mut story = story();
+    let mut talk = Conversation::start(&mut story, "foreman", "").unwrap();
+    for _ in 0..2 {
+        talk.advance(&mut story).unwrap();
+    }
+    talk.choose(&mut story, 0).unwrap();
+    for _ in 0..2 {
+        talk.advance(&mut story).unwrap();
+    }
+    assert!(!choices(&talk).iter().any(|(id, _)| id == "ask_pay"));
+    story.drain_events();
+    let (mut loaded, mut again) = reload(&story, &talk);
+    assert_eq!(
+        again.beat(),
+        talk.beat(),
+        "the same menu, the once-choice still gone"
+    );
+    assert_eq!(
+        again.current_line(&loaded).map(|l| l.text),
+        Some("Well?".to_owned()),
+        "the line the menu stands under, for the presenter"
+    );
+    assert!(
+        loaded.drain_events().is_empty(),
+        "nothing ran again on load"
+    );
+    for (s, t) in [(&mut story, &mut talk), (&mut loaded, &mut again)] {
+        let bluff = choices(t).iter().position(|(id, _)| id == "bluff").unwrap();
+        t.choose(s, bluff).unwrap();
+    }
+    assert_eq!(again.beat(), talk.beat(), "the seeded roll lands the same");
+    assert_eq!(again.last_check(), talk.last_check());
+
+    // Inside a called dialogue, then at a wait.
+    let mut story = self::story();
+    let mut talk = Conversation::start(&mut story, "caller", "").unwrap();
+    talk.advance(&mut story).unwrap();
+    let (mut loaded, mut again) = reload(&story, &talk);
+    assert_eq!(
+        (line(&again).dialogue.as_str(), line(&again).node.as_str()),
+        ("aside", "n1")
+    );
+    for (s, t) in [(&mut story, &mut talk), (&mut loaded, &mut again)] {
+        t.advance(s).unwrap();
+        t.advance(s).unwrap();
+    }
+    assert!(
+        matches!(again.beat(), Beat::Wait { node, .. } if node == "a1"),
+        "the call returned"
+    );
+    let (mut loaded, mut again) = reload(&loaded, &again);
+    again.resume(&mut loaded).unwrap();
+    talk.resume(&mut story).unwrap();
+    assert_eq!(again.beat(), talk.beat());
+
+    // A finished scene saves nothing; a scene whose node was cut does not load, and says so.
+    talk.advance(&mut story).unwrap();
+    assert!(talk.is_over() && talk.save().is_none());
+    let mut cut = again.save().unwrap();
+    cut.node = "gone".into();
+    assert!(Conversation::restore(&mut loaded, &cut).is_err());
+}
+
+#[test]
+fn the_presenter_log_saves_without_the_line_on_screen() {
+    let mut story = story();
+    let mut talk = Conversation::start(&mut story, "caller", "").unwrap();
+    let mut presenter = crate::Presenter::default();
+    presenter.show_line(line(&talk).clone(), None);
+    talk.advance(&mut story).unwrap();
+    presenter.show_line(line(&talk).clone(), None);
+    let saved = presenter.history_for_save();
+    assert_eq!(
+        saved.len(),
+        1,
+        "the line on screen is shown again on load, not saved twice"
+    );
+    let mut back = crate::Presenter::default();
+    back.restore_history(saved);
+    back.show_line(line(&talk).clone(), None);
+    assert_eq!(back.history(), presenter.history());
+}
+
+fn with_voice() -> Story {
+    let mut sources = content();
+    sources.add_file(
+        "notes/voice.somnotes",
+        r#"{"version": 1, "id": "voice", "voice": [
+            {"id": "purse", "category": "skill", "heading": "PURSE COUNTED",
+             "text": "Confirmed. You hold {gold} crowns."}]}"#,
+    );
+    let (database, _) = StoryDatabase::build(sources).unwrap_or_else(|i| panic!("{i:?}"));
+    Story::new(Arc::new(database), 7)
+}
+
+#[test]
+fn the_voice_logs_what_it_said_as_it_said_it_and_the_log_saves() {
+    let mut story = with_voice();
+    story.run("gold = 12; voice('purse')").unwrap();
+    let events = story.drain_events();
+    let Some(StoryEvent::Voice { sequence, line }) = events
+        .iter()
+        .find(|e| matches!(e, StoryEvent::Voice { .. }))
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(line, "purse");
+    let said = story.voice_view(*sequence).unwrap();
+    assert_eq!(
+        (said.heading.as_str(), said.text.as_str()),
+        ("PURSE COUNTED", "Confirmed. You hold 12 crowns.")
+    );
+    story.set("gold", 40).unwrap();
+    assert_eq!(
+        story.voice_view(*sequence).unwrap().text,
+        "Confirmed. You hold 12 crowns.",
+        "the log reads as it was said"
+    );
+    story.voice("purse").unwrap();
+    let view = story.journal_view();
+    assert_eq!(
+        view.voice
+            .iter()
+            .map(|v| v.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Confirmed. You hold 12 crowns.",
+            "Confirmed. You hold 40 crowns."
+        ],
+        "said twice, logged twice, oldest first"
+    );
+    assert!(view.notes.is_empty() && view.voice.iter().all(|v| !v.read));
+    let (loaded, _) = Story::load(Arc::clone(story.database()), &story.save()).unwrap();
+    assert_eq!(loaded.journal_view(), view);
+    assert!(story.voice("nobody").is_err());
+
+    let mut sources = content();
+    sources.add_file(
+        "dialogue/bad.somdialogue",
+        r#"{"version": 1, "id": "bad", "nodes": [{"type": "action", "id": "a", "effects": "voice('nope')"}]}"#,
+    );
+    let issues = StoryDatabase::build(sources).unwrap_err();
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("no such voice line")),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn people_join_the_journal_when_heard_or_written_about() {
+    let mut story = story();
+    assert!(story.journal_view().people.is_empty());
+    let mut talk = Conversation::start(&mut story, "foreman", "").unwrap();
+    talk.advance(&mut story).unwrap();
+    let people = story.journal_view().people;
+    assert_eq!(people.len(), 1, "{people:?}");
+    assert_eq!(
+        (people[0].id.as_str(), people[0].lines_heard),
+        ("foreman", 2)
+    );
+    assert!(!people[0].name.is_empty());
+}
+
 #[test]
 fn a_save_over_changed_content_drops_what_is_gone() {
     let mut story = story();

@@ -22,7 +22,8 @@
           "id": "light",
           "text": "Relight the street lamps",
           "count": { "fact": "lamps.lit", "target": 3 },
-          "marker": { "anchor": "bridge_lamp", "radius": 3.0 }
+          "marker": { "anchor": "bridge_lamp", "radius": 3.0 },
+          "on_done": "voice('lamps_burning')"
         },
         {
           "id": "dawn",

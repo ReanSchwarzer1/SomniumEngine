@@ -37,7 +37,7 @@ pub mod story;
 pub mod text;
 pub mod value;
 
-pub use conversation::{Beat, ChoiceBeat, Conversation, LineBeat};
+pub use conversation::{Beat, ChoiceBeat, Conversation, ConversationSave, LineBeat, SavedBeat};
 pub use database::{Issue, Severity, StoryDatabase, StorySources};
 pub use dialogue::DialogueAsset;
 pub use expr::{CommandDef, Condition, Context, Effects, Env, ExprError, ParamType};

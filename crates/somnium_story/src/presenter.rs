@@ -75,7 +75,7 @@ pub struct Portrait {
 }
 
 /// One line in the history log.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     pub speaker: String,
     pub name: String,
@@ -600,6 +600,30 @@ impl Presenter {
     #[must_use]
     pub fn history(&self) -> &VecDeque<HistoryEntry> {
         &self.history
+    }
+
+    /// The log for a mid-scene save: everything before the line on screen, which showing it again after the load
+    /// puts back ([`crate::ConversationSave::history`]).
+    #[must_use]
+    pub fn history_for_save(&self) -> Vec<HistoryEntry> {
+        let mut history: Vec<HistoryEntry> = self.history.iter().cloned().collect();
+        let on_screen = self.line.as_ref().is_some_and(|line| {
+            history
+                .last()
+                .is_some_and(|last| !last.choice && last.text == line.text.display)
+        });
+        if on_screen {
+            history.pop();
+        }
+        history
+    }
+
+    /// Put a saved log back, before showing the saved scene's line.
+    pub fn restore_history(&mut self, history: Vec<HistoryEntry>) {
+        self.history = history.into();
+        while self.history.len() > self.settings.history_limit.max(1) {
+            self.history.pop_front();
+        }
     }
 
     #[must_use]
