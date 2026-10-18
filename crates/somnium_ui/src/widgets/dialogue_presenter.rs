@@ -299,8 +299,18 @@ impl DialoguePresenter {
                         area.h * 0.82,
                     );
                     let alpha = if portrait.active { 210 } else { 120 };
+                    // A dark card tinted toward the speaker, nearly opaque like the art it stands in for.
+                    let base = theme.semantic.surface.raised.bytes();
+                    let tint =
+                        |i: usize| ((u16::from(base[i]) * 3 + u16::from(colour[i])) / 4) as u8;
+                    let fill = [
+                        tint(0),
+                        tint(1),
+                        tint(2),
+                        if portrait.active { 245 } else { 200 },
+                    ];
                     ctx.push_primitive(
-                        Primitive::fill(card, theme::with_alpha(colour, alpha / 3))
+                        Primitive::fill(card, fill)
                             .with_radius(card.w * 0.18)
                             .with_border(2.0 * layout.unit, theme::with_alpha(colour, alpha)),
                         None,
@@ -343,6 +353,10 @@ impl DialoguePresenter {
         let theme = theme::active();
         let unit = layout.unit;
         let panel = layout.dialogue_box;
+        // A menu with no line before it (a scene that opens on a choice) shows no empty box.
+        let Some(line) = self.model.line() else {
+            return;
+        };
         ctx.push_primitive(
             Primitive::fill(
                 panel,
@@ -355,9 +369,6 @@ impl DialoguePresenter {
             ),
             None,
         );
-        let Some(line) = self.model.line() else {
-            return;
-        };
         if !line.name.is_empty() {
             let px = 26.0 * unit;
             let w = ctx.font_atlas.measure_text(&line.name, px, self.font_id).x + 44.0 * unit;

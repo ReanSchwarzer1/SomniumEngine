@@ -2371,6 +2371,49 @@ impl UiManager {
                     }
                 }
             }
+            // A dialogue or quest file on the graph, as Open loads it: `story:<path>`, then `|from=<node>` selects a
+            // node as Find does, `|game-view` turns the Game View on and `|play` presses Play, in the order given.
+            // `|choose=0,2` takes those choices as soon as the play-through starts.
+            story if story.starts_with("story:") => {
+                let mut spec = raw.trim()["story:".len()..].split('|');
+                let path = spec.next().unwrap_or_default().trim().to_owned();
+                let catalogue = if path.ends_with(".somquest") {
+                    crate::graph::quest::CATALOGUE
+                } else {
+                    crate::graph::dialogue::CATALOGUE
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(json) => self.open_story_document(catalogue, &json, Some(&path)),
+                    Err(error) => warn!("SOMNIUM_AUDIT_UI_STATE story {path}: {error}"),
+                }
+                for option in spec.map(str::trim) {
+                    match option {
+                        "game-view" => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::PreviewGameView(true),
+                        )),
+                        "play" => self.request_graph_document(true, false),
+                        choose if choose.starts_with("choose=") => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::PreviewScript(
+                                choose["choose=".len()..]
+                                    .split(',')
+                                    .filter_map(|i| i.trim().parse().ok())
+                                    .map(crate::graph::PreviewInput::Choose)
+                                    .collect(),
+                            ),
+                        )),
+                        from if from.starts_with("from=") => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::RevealNode(from["from=".len()..].trim().to_owned()),
+                        )),
+                        other => warn!("SOMNIUM_AUDIT_UI_STATE story option {other:?} ignored"),
+                    }
+                }
+            }
             // Any surface a command opens: `cmd:editor.workspace.animation`, several joined by `+`.
             commands if commands.starts_with("cmd:") => {
                 for id in commands["cmd:".len()..].split('+').map(str::trim).filter(|id| !id.is_empty()) {
@@ -12152,6 +12195,8 @@ impl UiManager {
 
     /// Show (or, with `None` or an end, close) the dialogue graph's Game View.
     fn show_story_game_view(&mut self, beat: Option<somnium_story::Beat>) {
+        // UI blends in linear light, so the editor needs a heavy dim before the presenter reads as in front.
+        const GAME_VIEW_BACKDROP: u8 = 215;
         use crate::widgets::dialogue_presenter::{DialoguePresenterBuilder, DialoguePresenterMessage as P};
         let handle = match self.story_presenter {
             Some(handle) => handle,
@@ -12170,12 +12215,12 @@ impl UiManager {
         };
         match beat {
             Some(somnium_story::Beat::Line(line)) => {
-                send(&mut self.native_ui, P::SetBackdrop(160));
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
                 send(&mut self.native_ui, P::ShowLine { beat: line, display: None });
                 self.native_ui.set_focus(handle);
             }
             Some(somnium_story::Beat::Choices { choices, timeout_ms, .. }) => {
-                send(&mut self.native_ui, P::SetBackdrop(160));
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
                 send(&mut self.native_ui, P::ShowChoices(choices));
                 send(&mut self.native_ui, P::SetTimeLeft(timeout_ms.map(|ms| (ms, ms))));
                 self.native_ui.set_focus(handle);

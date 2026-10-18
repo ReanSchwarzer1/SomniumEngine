@@ -48,8 +48,6 @@ pub(super) struct Preview {
     setup: String,
     setup_edit: Option<String>,
     followed: Option<NodeId>,
-    /// Show the play-through in the game's dialogue presenter over the editor.
-    game_view: bool,
     /// Quest news for the Game View's notices, `(heading, text)`, not yet sent.
     notices: Vec<(String, String)>,
 }
@@ -65,6 +63,10 @@ pub(super) struct StoryTools {
     last_setup: String,
     /// What the Game View was last sent, so a beat is sent once.
     sent: Option<Beat>,
+    /// Show play-throughs in the game's dialogue presenter over the editor; it stays on across replays.
+    pub(super) game_view: bool,
+    /// Moves to make as soon as the next play-through starts (a capture script's choices).
+    pub(super) script: Vec<PreviewInput>,
 }
 
 /// What the Game View's presenter asked of the play-through.
@@ -714,12 +716,6 @@ impl GraphEditor {
             setup,
             setup_edit: None,
             followed: None,
-            game_view: self
-                .authoring
-                .story
-                .preview
-                .as_ref()
-                .is_some_and(|p| p.game_view),
             notices: Vec::new(),
         };
         Self::run_preview(&mut preview);
@@ -738,6 +734,9 @@ impl GraphEditor {
         self.authoring.error = preview.error.is_some();
         self.authoring.story.last_setup.clone_from(&preview.setup);
         self.authoring.story.preview = Some(preview);
+        for input in std::mem::take(&mut self.authoring.story.script) {
+            self.preview_input(widget, input);
+        }
         self.follow_preview(widget);
     }
 
@@ -867,12 +866,13 @@ impl GraphEditor {
 
     /// Tell the host what the Game View should show, when that changed.
     pub(super) fn emit_story_beat(&mut self, widget: &Widget, emit: &mut Vec<UiMessage>) {
+        let game_view = self.authoring.story.game_view;
         let beat = self
             .authoring
             .story
             .preview
             .as_ref()
-            .filter(|p| p.game_view)
+            .filter(|_| game_view)
             .and_then(|p| p.conversation.as_ref())
             .map(|c| c.beat().clone());
         if beat != self.authoring.story.sent {
@@ -885,7 +885,6 @@ impl GraphEditor {
         }
         // After the beat, so the notices stack over the presenter the beat made.
         if let Some(preview) = self.authoring.story.preview.as_mut() {
-            let game_view = preview.game_view;
             for (heading, text) in preview.notices.drain(..) {
                 if game_view {
                     emit.push(UiMessage::new(
@@ -915,11 +914,7 @@ impl GraphEditor {
                 }
             }
             PreviewInput::Choose(index) => self.preview_act(widget, |c, s| c.choose(s, index)),
-            PreviewInput::Leave => {
-                if let Some(preview) = self.authoring.story.preview.as_mut() {
-                    preview.game_view = false;
-                }
-            }
+            PreviewInput::Leave => self.authoring.story.game_view = false,
         }
     }
 
@@ -1030,9 +1025,7 @@ impl GraphEditor {
                 self.commit_literal(widget, emit);
                 let [game_view, restart, stop] = Self::preview_buttons(widget);
                 if game_view.contains(*pos) {
-                    if let Some(preview) = self.authoring.story.preview.as_mut() {
-                        preview.game_view = !preview.game_view;
-                    }
+                    self.authoring.story.game_view = !self.authoring.story.game_view;
                 } else if restart.contains(*pos) {
                     if let Some(preview) = self.authoring.story.preview.as_mut() {
                         Self::run_preview(preview);
@@ -1314,7 +1307,7 @@ impl GraphEditor {
             theme.semantic.text.primary.bytes(),
         );
         for (rect, label) in Self::preview_buttons(widget).into_iter().zip([
-            if preview.game_view {
+            if self.authoring.story.game_view {
                 "Game View ✓"
             } else {
                 "Game View"
@@ -1739,6 +1732,35 @@ mod tests {
     }
 
     #[test]
+    fn messages_reveal_a_node_by_id_and_turn_the_game_view_on() {
+        use crate::node::Control;
+        let (mut editor, mut widget) = editor();
+        for message in [
+            GraphEditorMessage::RevealNode("o2".into()),
+            GraphEditorMessage::PreviewGameView(true),
+        ] {
+            let mut msg = UiMessage::new(widget.handle, MessageDirection::ToWidget, message);
+            editor.handle_routed_message(&mut widget, &mut msg, &mut Vec::new());
+        }
+        let o2 = dialogue::find_node(&editor.surface().graph, "o2").unwrap();
+        assert_eq!(editor.surface().selection.ids(), [o2]);
+        assert!(editor.authoring.story.game_view, "on before any play-through exists");
+        let mut msg = UiMessage::new(
+            widget.handle,
+            MessageDirection::ToWidget,
+            GraphEditorMessage::PreviewScript(vec![PreviewInput::Next]),
+        );
+        editor.handle_routed_message(&mut widget, &mut msg, &mut Vec::new());
+        let mut sources = StorySources::default();
+        sources.add_file("story.somstory", MANIFEST);
+        sources.add_file("intro.somdialogue", &saved(&mut editor, &widget, true).unwrap());
+        editor.surface_mut().selection.clear();
+        editor.start_preview(&widget, Arc::new(StoryDatabase::build(sources).unwrap().0));
+        assert!(matches!(beat(&editor), Beat::Choices { .. }), "the script went on past n1");
+        assert!(editor.authoring.story.script.is_empty());
+    }
+
+    #[test]
     fn problems_mark_their_nodes_until_the_next_edit() {
         let (mut editor, _) = editor();
         editor.set_story_problems(&[
@@ -1788,7 +1810,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert!(beats(&mut editor).is_empty(), "the Game View is off");
-        editor.authoring.story.preview.as_mut().unwrap().game_view = true;
+        editor.authoring.story.game_view = true;
         let first = beats(&mut editor);
         assert!(matches!(first.as_slice(), [Some(Beat::Line(l))] if l.node == "n1"));
         assert!(

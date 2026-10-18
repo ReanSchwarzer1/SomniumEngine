@@ -155,6 +155,12 @@ pub enum GraphEditorMessage {
     PreviewNotice { heading: String, text: String },
     /// To the control: the Game View presenter's player moved the play-through.
     PreviewInput(story::PreviewInput),
+    /// To the control: turn the Game View on or off, as its button does.
+    PreviewGameView(bool),
+    /// To the control: select the story node with this id and bring it into view, as Find does.
+    RevealNode(String),
+    /// To the control: moves for the next play-through to make as soon as it starts.
+    PreviewScript(Vec<story::PreviewInput>),
 }
 
 impl GraphEditorMessage {
@@ -1382,6 +1388,16 @@ impl Control for GraphEditor {
                 }
                 GraphEditorMessage::StoryPreview(database) => self.start_preview(widget, database),
                 GraphEditorMessage::PreviewInput(input) => self.preview_input(widget, input),
+                GraphEditorMessage::PreviewGameView(on) => self.authoring.story.game_view = on,
+                GraphEditorMessage::PreviewScript(script) => self.authoring.story.script = script,
+                GraphEditorMessage::RevealNode(id) => {
+                    let graph = &self.surface().graph;
+                    if let Some(node) =
+                        super::dialogue::find_node(graph, &id).or_else(|| super::quest::find_node(graph, &id))
+                    {
+                        self.reveal(widget, node);
+                    }
+                }
                 GraphEditorMessage::PreviewBeat(_)
                 | GraphEditorMessage::PreviewNotice { .. }
                 | GraphEditorMessage::Changed(_)
