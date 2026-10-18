@@ -627,7 +627,7 @@ fn status_line(ui: &mut UserInterface, parent: NodeHandle, status: AuthoringStat
     line
 }
 
-fn section_header(ui: &mut UserInterface, parent: NodeHandle, icon: IconId, title: &str, count: usize) -> NodeHandle {
+pub(crate) fn section_header(ui: &mut UserInterface, parent: NodeHandle, icon: IconId, title: &str, count: usize) -> NodeHandle {
     let header = row(ui, parent, Thickness::new(6.0, 10.0, 6.0, 2.0));
     glyph(ui, header, icon, 14.0, theme::active().semantic.text.muted.bytes());
     ui.add_node(
@@ -653,7 +653,7 @@ fn column(ui: &mut UserInterface, parent: NodeHandle) -> NodeHandle {
     )
 }
 
-fn row(ui: &mut UserInterface, parent: NodeHandle, margin: Thickness) -> NodeHandle {
+pub(crate) fn row(ui: &mut UserInterface, parent: NodeHandle, margin: Thickness) -> NodeHandle {
     ui.add_node(
         StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT).with_margin(margin))
             .with_orientation(Orientation::Horizontal)
@@ -662,7 +662,7 @@ fn row(ui: &mut UserInterface, parent: NodeHandle, margin: Thickness) -> NodeHan
     )
 }
 
-fn glyph(ui: &mut UserInterface, parent: NodeHandle, icon: IconId, size: f32, tint: [u8; 4]) -> NodeHandle {
+pub(crate) fn glyph(ui: &mut UserInterface, parent: NodeHandle, icon: IconId, size: f32, tint: [u8; 4]) -> NodeHandle {
     ui.add_node(
         ImageBuilder::new(
             WidgetBuilder::new()
@@ -677,7 +677,7 @@ fn glyph(ui: &mut UserInterface, parent: NodeHandle, icon: IconId, size: f32, ti
     )
 }
 
-fn label(ui: &mut UserInterface, parent: NodeHandle, text: &str, role: TextRole) -> NodeHandle {
+pub(crate) fn label(ui: &mut UserInterface, parent: NodeHandle, text: &str, role: TextRole) -> NodeHandle {
     ui.add_node(
         TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::axes(6.0, 2.0)))
             .with_text(text)
@@ -689,7 +689,7 @@ fn label(ui: &mut UserInterface, parent: NodeHandle, text: &str, role: TextRole)
 }
 
 /// A button with its glyph before its words.
-fn icon_button(
+pub(crate) fn icon_button(
     ui: &mut UserInterface,
     parent: NodeHandle,
     icon: IconId,

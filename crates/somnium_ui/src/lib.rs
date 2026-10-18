@@ -422,6 +422,18 @@ pub struct TerrainInspectorState {
     pub damp_tint: f32,
 }
 
+/// One entity's glyph in the viewport (Phase ALYX-J): where it stands, in the view's normalised device coordinates
+/// (x right, y up), what it is, and how strongly to draw it (it fades with distance).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportIcon {
+    pub ndc: [f32; 2],
+    pub icon: crate::icons::IconId,
+    /// The entity's index, for selecting it.
+    pub entity: u32,
+    pub selected: bool,
+    pub fade: f32,
+}
+
 /// What the Animation dock's header says about the rig being previewed (Phase ALYX-G).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationTransport {
@@ -746,6 +758,8 @@ struct EditorLayout {
     /// The context bar's view-mode button and its label (the mode in force).
     view_mode_button: NodeHandle,
     view_mode_label: NodeHandle,
+    /// The click-through layer holding the entity glyphs.
+    viewport_icons: NodeHandle,
     /// The floating Tools strip: move, rotate, scale, then focus.
     tools_overlay: NodeHandle,
     transform_tools: [NodeHandle; 3],
@@ -941,6 +955,9 @@ enum LogView {
 
 pub struct UiManager {
     authoring_panel: Option<crate::authoring_panel::AuthoringPanel>,
+    /// The welcome screen, built the first time it is shown.
+    welcome: Option<crate::editor::welcome::WelcomeScreen>,
+    welcome_open: bool,
     authoring_tool_mode: crate::editor::tool_context::ToolMode,
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
@@ -1047,6 +1064,9 @@ pub struct UiManager {
     animation_tab: usize,
     /// The dock has the whole viewport.
     animation_expanded: bool,
+    /// The expand state the dock's height last followed, and a glide in progress (from, to, started).
+    animation_dock_expanded_shown: bool,
+    animation_dock_glide: Option<(f32, f32, std::time::Instant)>,
     /// What the dock's header last showed.
     animation_transport: Option<AnimationTransport>,
     animation_readout: String,
@@ -1195,11 +1215,17 @@ pub struct UiManager {
     snap_overflow: NodeHandle,
     view_mode_button: NodeHandle,
     view_mode_label: NodeHandle,
+    viewport_icons: NodeHandle,
+    /// The glyph buttons built so far (button, image), reused frame to frame, and what they last showed.
+    viewport_icon_pool: Vec<(NodeHandle, NodeHandle)>,
+    viewport_icons_shown: Vec<ViewportIcon>,
     tools_overlay: NodeHandle,
     transform_tools: [NodeHandle; 3],
     focus_tool: NodeHandle,
     /// The transform tool the strip last showed as on.
     gizmo_mode_shown: Option<u8>,
+    /// The launch splash while it is up: its node, when it went up, and when it was told to finish.
+    splash: Option<(NodeHandle, std::time::Instant, Option<std::time::Instant>)>,
     /// Components a designer may add, (stable id, display name).
     component_catalogue: Vec<(String, String)>,
     time_cluster: NodeHandle,
@@ -1839,6 +1865,8 @@ impl UiManager {
             inspector_stack: layout.inspector_stack,
             persona: layout.persona,
             authoring_panel: None,
+            welcome: None,
+            welcome_open: false,
             authoring_tool_mode: crate::editor::tool_context::ToolMode::Select,
             details_empty: layout.details_empty,
             outliner_empty: layout.outliner_empty,
@@ -1897,6 +1925,8 @@ impl UiManager {
             animation_dock: layout.animation_dock,
             animation_tab: 0,
             animation_expanded: false,
+            animation_dock_expanded_shown: false,
+            animation_dock_glide: None,
             animation_transport: None,
             animation_readout: String::new(),
             animation_playhead_sent: f32::NAN,
@@ -2004,10 +2034,14 @@ impl UiManager {
             snap_overflow: layout.snap_overflow,
             view_mode_button: layout.view_mode_button,
             view_mode_label: layout.view_mode_label,
+            viewport_icons: layout.viewport_icons,
+            viewport_icon_pool: Vec::new(),
+            viewport_icons_shown: Vec::new(),
             tools_overlay: layout.tools_overlay,
             transform_tools: layout.transform_tools,
             focus_tool: layout.focus_tool,
             gizmo_mode_shown: None,
+            splash: None,
             component_catalogue: Vec::new(),
             time_cluster: layout.time_cluster,
             time_label: layout.time_label,
@@ -2295,10 +2329,41 @@ impl UiManager {
                 self.scene_dirty = true;
                 self.prompt_unsaved_new();
             }
-            // The Materials workspace with one material selected, as a Content Drawer click selects it.
+            // The Materials workspace with one material selected, as a Content Drawer click selects it. After the
+            // path, `|shape=<0-2>`, `|spin=<0|1>` and `|preset=<index>` press the preview's buttons, in that order, and
+            // `|filter=<text>` types into the Details search (as `persona-search` does) and `|reveal=<field>` scrolls
+            // that Material row into view once it exists, to bring rows into frame.
             material if material.starts_with("material:") => {
                 self.set_workspace(crate::workspace::Workspace::Materials);
-                self.select_content(std::path::PathBuf::from(raw.trim()["material:".len()..].trim()), false);
+                let mut spec = raw.trim()["material:".len()..].split('|');
+                self.select_content(std::path::PathBuf::from(spec.next().unwrap_or_default().trim()), false);
+                for option in spec {
+                    use crate::editor_event::MaterialStudioEvent as Studio;
+                    if let Some(("reveal", field)) = option.trim().split_once('=') {
+                        self.persona.tool_panel.studio.reveal =
+                            Some(format!("somnium.asset.Material/{}", field.trim()));
+                        continue;
+                    }
+                    if let Some(("filter", text)) = option.trim().split_once('=') {
+                        self.inspector_filter = text.trim().into();
+                        self.native_ui.send(UiMessage::new(
+                            self.inspector_search,
+                            MessageDirection::ToWidget,
+                            SearchBoxMessage::SetText(self.inspector_filter.clone()),
+                        ));
+                        continue;
+                    }
+                    let event = match option.trim().split_once('=') {
+                        Some(("shape", v)) => v.trim().parse().ok().map(Studio::Shape),
+                        Some(("spin", v)) => Some(Studio::Spin(v.trim() != "0")),
+                        Some(("preset", v)) => v.trim().parse().ok().map(Studio::Preset),
+                        _ => None,
+                    };
+                    match event {
+                        Some(event) => self.editor_events.push_back(EditorEvent::MaterialStudio(event)),
+                        None => warn!("SOMNIUM_AUDIT_UI_STATE material option {option:?} ignored"),
+                    }
+                }
             }
             // Any surface a command opens: `cmd:editor.workspace.animation`, several joined by `+`.
             commands if commands.starts_with("cmd:") => {
@@ -3787,6 +3852,7 @@ impl UiManager {
                 ));
             }
             self.close_all_menus();
+            self.close_welcome();
         }
     }
 
@@ -3974,6 +4040,10 @@ impl UiManager {
         // open one (the project picker) but never the other way round.
         if self.preferences_open {
             self.toggle_preferences();
+            return true;
+        }
+        if self.welcome_open {
+            self.close_welcome();
             return true;
         }
         // Modal name prompts share the same focus trap as the unsaved prompt.
@@ -4448,6 +4518,62 @@ impl UiManager {
         self.preferences_open
     }
 
+    /// Show the welcome screen with this Recent Projects list, or refresh the list when it is already showing.
+    pub fn show_welcome(&mut self, projects: &[crate::editor::welcome::WelcomeProject]) {
+        let root = self.native_ui.root();
+        let screen = self
+            .welcome
+            .get_or_insert_with(|| crate::editor::welcome::WelcomeScreen::build(&mut self.native_ui, root));
+        screen.set_projects(&mut self.native_ui, projects);
+        let (overlay, focus) = (screen.overlay, screen.open_project);
+        if !self.welcome_open {
+            self.welcome_open = true;
+            self.native_ui
+                .send(UiMessage::new(overlay, MessageDirection::ToWidget, PopupMessage::Open));
+            self.enter_modal_focus(overlay, focus);
+        } else if !self.native_ui.is_under(self.native_ui.focused(), overlay) {
+            // Remove took the focused row with it: the keyboard goes back to Open Project….
+            self.native_ui.set_focus(focus);
+            self.native_ui
+                .send(UiMessage::new(focus, MessageDirection::ToWidget, WidgetMessage::Focus));
+        }
+        self.native_ui.invalidate_ancestors(overlay);
+    }
+
+    /// Put the welcome screen away.
+    pub fn close_welcome(&mut self) {
+        let Some(overlay) = self.welcome.as_ref().map(|screen| screen.overlay) else {
+            return;
+        };
+        if !std::mem::take(&mut self.welcome_open) {
+            return;
+        }
+        self.native_ui
+            .send(UiMessage::new(overlay, MessageDirection::ToWidget, PopupMessage::Close));
+        self.exit_modal_focus(overlay);
+        self.native_ui.invalidate_ancestors(overlay);
+    }
+
+    /// Whether the welcome screen is showing.
+    #[must_use]
+    pub fn welcome_open(&self) -> bool {
+        self.welcome_open
+    }
+
+    fn welcome_action(&mut self, action: crate::editor::welcome::WelcomeAction) {
+        use crate::editor::welcome::WelcomeAction as W;
+        match action {
+            W::Open(path) => self.editor_events.push_back(EditorEvent::OpenProject(path)),
+            W::Forget(path) => self.editor_events.push_back(EditorEvent::ForgetRecentProject(path)),
+            W::OpenPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
+            W::Help(page) => {
+                self.close_welcome();
+                self.toggle_help(Some(page));
+            }
+            W::Close => self.close_welcome(),
+        }
+    }
+
     /// The settings panels core should publish, filtered by the search box.
     ///
     /// Filtering here rather than in core keeps the query where the box is,
@@ -4915,6 +5041,138 @@ impl UiManager {
             .invalidate_ancestors(self.outliner_menu_popup);
     }
 
+    /// Put the launch splash over everything, saying `status`. Above every panel and popup, and it takes the pointer
+    /// until it has gone, so nothing half-built can be clicked.
+    pub fn begin_splash(&mut self, status: &str) {
+        use crate::widgets::splash::{SplashBuilder, SplashMessage};
+        if self.splash.is_none() {
+            let root = self.native_ui.root();
+            let node = self.native_ui.add_node(
+                SplashBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_status(status)
+                    .with_font_id(self.font_id)
+                    .build(),
+                root,
+            );
+            self.splash = Some((node, std::time::Instant::now(), None));
+            // Modal while it is up: keys go nowhere underneath, and the viewport's overlays (the axis widget, the
+            // statistics) do not paint over it.
+            self.native_ui.enter_modal(node, node);
+        }
+        if let Some((node, _, _)) = self.splash {
+            let reduced = self.native_ui.draw_ctx.motion.reduced_motion();
+            for message in [SplashMessage::Status(status.to_owned()), SplashMessage::ReducedMotion(reduced)] {
+                self.native_ui
+                    .send(UiMessage::new(node, MessageDirection::ToWidget, message));
+            }
+        }
+    }
+
+    /// Loading is done: the splash finishes its intro, then turns away and fades.
+    pub fn finish_splash(&mut self) {
+        if let Some((node, _, finish)) = self.splash.as_mut() {
+            let node = *node;
+            finish.get_or_insert_with(std::time::Instant::now);
+            self.native_ui.send(UiMessage::new(
+                node,
+                MessageDirection::ToWidget,
+                crate::widgets::splash::SplashMessage::Finish,
+            ));
+        }
+    }
+
+    /// Once a frame: drop the splash once it has finished leaving.
+    pub fn update_splash(&mut self) {
+        let Some((node, born, finish)) = self.splash else { return };
+        // Anything opened since (the welcome screen, a recovery prompt) goes under the splash until it has gone.
+        self.native_ui.bring_to_front(node);
+        if crate::widgets::splash::exit_progress(born, finish, std::time::Instant::now()) >= 1.0 {
+            self.native_ui.exit_modal(node);
+            self.native_ui.remove_node(node);
+            self.splash = None;
+        }
+    }
+
+    /// Whether the pointer is over the 3D view itself, not a panel or a control floating on it.
+    #[must_use]
+    pub fn pointer_over_viewport(&self) -> bool {
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        hit == self.viewport_handle
+            || (hit.is_none()
+                && self
+                    .native_ui
+                    .screen_bounds(self.viewport_handle)
+                    .contains(self.native_ui.cursor_pos))
+    }
+
+    /// Place the entity glyphs. The same list as last frame does nothing, so a still camera costs no layout.
+    pub fn set_viewport_icons(&mut self, icons: Vec<ViewportIcon>) {
+        if icons == self.viewport_icons_shown {
+            return;
+        }
+        const SIZE: f32 = 26.0;
+        let bounds = self.native_ui.screen_bounds(self.viewport_icons);
+        let t = theme::active();
+        while self.viewport_icon_pool.len() < icons.len() {
+            let button = self.native_ui.add_node(
+                ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(SIZE)
+                        .with_height(SIZE)
+                        .with_background(theme::with_alpha(t.semantic.surface.window.bytes(), 0xC8)),
+                )
+                .with_hover_animation(false)
+                .build(),
+                self.viewport_icons,
+            );
+            let image = self.native_ui.add_node(
+                ImageBuilder::new(
+                    WidgetBuilder::new()
+                        .with_horizontal_alignment(crate::types::HorizontalAlignment::Center)
+                        .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+                )
+                .with_icon(crate::icons::IconId::Light)
+                .with_size(16.0)
+                .with_tint(t.semantic.text.primary.bytes())
+                .build(),
+                button,
+            );
+            self.viewport_icon_pool.push((button, image));
+        }
+        for (index, &(button, image)) in self.viewport_icon_pool.iter().enumerate() {
+            let Some(icon) = icons.get(index) else {
+                self.native_ui.set_visibility(button, false);
+                continue;
+            };
+            let previous = self.viewport_icons_shown.get(index);
+            self.native_ui.set_visibility(button, true);
+            let x = (icon.ndc[0] * 0.5 + 0.5) * bounds.w - SIZE * 0.5;
+            let y = (0.5 - icon.ndc[1] * 0.5) * bounds.h - SIZE * 0.5;
+            self.native_ui
+                .set_desired_position(button, glam::Vec2::new(x.round(), y.round()));
+            if previous.is_none_or(|p| p.icon != icon.icon) {
+                self.native_ui
+                    .send(crate::widgets::image::ImageMessage::set_icon(image, icon.icon));
+            }
+            if previous.is_none_or(|p| p.fade != icon.fade || p.selected != icon.selected) {
+                let base = if icon.selected {
+                    t.semantic.accent.default.bytes()
+                } else {
+                    t.semantic.text.primary.bytes()
+                };
+                let alpha = (f32::from(base[3]) * icon.fade.clamp(0.25, 1.0)) as u8;
+                self.native_ui.send(UiMessage::new(
+                    image,
+                    MessageDirection::ToWidget,
+                    crate::widgets::image::ImageMessage::SetTint([base[0], base[1], base[2], alpha]),
+                ));
+                self.native_ui
+                    .send(ButtonMessage::set_selected(button, icon.selected));
+            }
+        }
+        self.viewport_icons_shown = icons;
+    }
+
     /// Light the transform tool in force on the Tools strip: 0 move, 1 rotate, 2 scale.
     pub fn set_gizmo_mode(&mut self, mode: u8) {
         if self.gizmo_mode_shown == Some(mode) {
@@ -5009,6 +5267,17 @@ impl UiManager {
         }
         if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
             return false;
+        }
+        if let Some(slot) = self
+            .viewport_icon_pool
+            .iter()
+            .position(|(button, _)| *button == msg.destination)
+        {
+            if let Some(icon) = self.viewport_icons_shown.get(slot) {
+                self.editor_events
+                    .push_back(EditorEvent::SelectEntity(Some(icon.entity)));
+            }
+            return true;
         }
         if let Some(tool) = self.transform_tools.iter().position(|h| *h == msg.destination) {
             self.run_command_id(["editor.gizmo.translate", "editor.gizmo.rotate", "editor.gizmo.scale"][tool]);
@@ -5297,14 +5566,9 @@ impl UiManager {
                 self.persona.tool_panel.host,
                 shown != ToolMode::Select || !enabled,
             );
-            self.chrome_layout.tools = if shown.hosts_details()
-            {
-                320.0
-            } else if visible {
-                280.0
-            } else {
-                48.0
-            };
+            // Materials opens widest, for its preview; a width the designer dragged to in a mode is kept for it.
+            self.chrome_layout.tools =
+                self.persona.tool_panel.tools_width(shown, visible, self.window_size.0 as f32);
             self.chrome_layout.viewport = (self.window_size.0 as f32
                 - self.chrome_layout.tools
                 - self.chrome_layout.details
@@ -5408,6 +5672,8 @@ impl UiManager {
             }
             A::OpenPreferences => self.toggle_preferences(),
             A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
+            A::OpenWelcome => self.editor_events.push_back(EditorEvent::OpenWelcome),
+            A::SaveProjectThumbnail => self.editor_events.push_back(EditorEvent::SaveProjectThumbnail),
             A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
             A::PasteClipboard => self.editor_events.push_back(EditorEvent::PasteClipboard),
             A::SelectAll => self.editor_events.push_back(EditorEvent::SelectAll),
@@ -5907,6 +6173,7 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+        self.refresh_asset_pickers();
     }
 
     /// Whether a panel is currently living in its own OS window.
@@ -7885,14 +8152,9 @@ impl UiManager {
                 shown != ToolMode::Select || !authoring_visible,
             );
             self.native_ui.set_visibility(self.persona.tools, visible);
-            self.chrome_layout.tools = if shown.hosts_details()
-            {
-                320.0
-            } else if visible {
-                280.0
-            } else {
-                48.0
-            };
+            // Materials opens widest, for its preview; a width the designer dragged to in a mode is kept for it.
+            self.chrome_layout.tools =
+                self.persona.tool_panel.tools_width(shown, visible, self.window_size.0 as f32);
             self.chrome_layout.viewport = (self.window_size.0 as f32
                 - self.chrome_layout.tools
                 - self.chrome_layout.details
@@ -8604,6 +8866,7 @@ impl UiManager {
             if let Some(SplitterMessage::Changed(size)) = msg.data::<SplitterMessage>() {
                 if msg.destination == self.inner_h {
                     self.chrome_layout.tools = *size;
+                    self.persona.tool_panel.remember_tools_width(self.authoring_tool_mode, *size);
                 } else if msg.destination == self.content_split_h {
                     // The splitter reports the viewport pane; persist the
                     // *column* it implies, because that is what survives a
@@ -8650,6 +8913,10 @@ impl UiManager {
             }
             if let Some(event) = self.persona.tool_panel.event(&msg) {
                 self.editor_events.push_back(event);
+                continue;
+            }
+            if let Some(action) = self.welcome.as_ref().and_then(|screen| screen.event(&msg)) {
+                self.welcome_action(action);
                 continue;
             }
             if let Some(panel) = &mut self.authoring_panel {
@@ -11603,12 +11870,37 @@ impl UiManager {
         if viewport <= 0.0 {
             return;
         }
-        let height = if self.animation_expanded {
+        let target = if self.animation_expanded {
             viewport
         } else {
             (viewport * crate::editor::shell::ANIMATION_DOCK_SHARE)
                 .clamp(240.0, (viewport - 120.0).max(240.0))
                 .round()
+        };
+        // Expanding and giving the viewport back glide (Phase ALYX-J), on the same Easy Ease as the splash; a window
+        // resize, or reduced motion, just lands.
+        let now = std::time::Instant::now();
+        let current = self.native_ui.nodes.try_borrow(self.animation_workspace.transmute()).map_or(target, |n| n.widget.height);
+        let toggled = self.animation_dock_expanded_shown != self.animation_expanded;
+        if toggled && current.is_finite() && !self.native_ui.draw_ctx.motion.reduced_motion() {
+            self.animation_dock_glide = Some((current, target, now));
+        }
+        self.animation_dock_expanded_shown = self.animation_expanded;
+        let height = match self.animation_dock_glide {
+            Some((from, to, start)) if to == target => {
+                let t = (now - start).as_secs_f32() / 0.24;
+                if t >= 1.0 {
+                    self.animation_dock_glide = None;
+                    target
+                } else {
+                    let eased = crate::widgets::splash::ease_progress(0.0, 0.33, 0.0, 0.75, f64::from(t)) as f32;
+                    (from + (to - from) * eased).round()
+                }
+            }
+            _ => {
+                self.animation_dock_glide = None;
+                target
+            }
         };
         self.native_ui.set_height(self.animation_workspace, height);
     }

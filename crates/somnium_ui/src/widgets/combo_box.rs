@@ -35,6 +35,10 @@ pub enum ComboBoxMessage {
 pub struct ComboBox {
     pub items: Vec<String>,
     pub selected: usize,
+    /// Asset files aligned with `items`, when the combo picks an asset; what `swatch` shows.
+    pub asset_paths: Vec<Option<std::path::PathBuf>>,
+    /// An [`AssetSwatch`] beside the combo that shows the chosen asset's picture, or `NONE`.
+    pub swatch: NodeHandle,
     /// See [`super::MIXED_PLACEHOLDER`]. Cleared on the first choice.
     pub mixed: bool,
     pub open: bool,
@@ -42,6 +46,16 @@ pub struct ComboBox {
     pub px: f32,
     pub popup: NodeHandle,
     pub list: NodeHandle,
+}
+
+impl ComboBox {
+    /// Show the chosen asset (none while the row is mixed) on the swatch, if there is one.
+    fn show_on_swatch(&self, emit: &mut Vec<UiMessage>) {
+        if self.swatch.is_some() {
+            let path = if self.mixed { None } else { self.asset_paths.get(self.selected).cloned().flatten() };
+            emit.push(UiMessage::new(self.swatch, MessageDirection::ToWidget, AssetSwatchMessage::SetAsset(path)));
+        }
+    }
 }
 
 impl Control for ComboBox {
@@ -119,7 +133,15 @@ impl Control for ComboBox {
         if let Some(crate::message::MixedValue(mixed)) = msg.data::<crate::message::MixedValue>() {
             if !self.open {
                 self.mixed = *mixed;
+                self.show_on_swatch(emit);
             }
+            msg.handled = true;
+            return;
+        }
+        if let Some(ComboBoxMessage::SetAssetPaths(paths)) = msg.data::<ComboBoxMessage>() {
+            // From the list beside it (see `ComboDropdown`); not passed back, which would loop.
+            self.asset_paths = paths.clone();
+            self.show_on_swatch(emit);
             msg.handled = true;
             return;
         }
@@ -140,6 +162,7 @@ impl Control for ComboBox {
                         ComboBoxMessage::SetSelected(self.selected),
                     ));
                 }
+                self.show_on_swatch(emit);
             }
             msg.handled = true;
             return;
@@ -240,6 +263,8 @@ impl Control for ComboBox {
 pub struct ComboBoxBuilder {
     widget: WidgetBuilder,
     mixed: bool,
+    asset_paths: Vec<Option<std::path::PathBuf>>,
+    swatch: NodeHandle,
     items: Vec<String>,
     selected: usize,
     font_id: u8,
@@ -257,12 +282,24 @@ impl ComboBoxBuilder {
     pub fn new(widget: WidgetBuilder) -> Self {
         Self {
             mixed: false,
+            asset_paths: Vec::new(),
+            swatch: NodeHandle::NONE,
             widget,
             items: Vec::new(),
             selected: 0,
             font_id: 0,
             px: 12.0,
         }
+    }
+    /// The asset each item stands for, for the swatch.
+    pub fn with_asset_paths(mut self, paths: impl IntoIterator<Item = Option<std::path::PathBuf>>) -> Self {
+        self.asset_paths = paths.into_iter().collect();
+        self
+    }
+    /// An [`AssetSwatch`] to keep showing the chosen asset's picture.
+    pub fn with_swatch(mut self, swatch: NodeHandle) -> Self {
+        self.swatch = swatch;
+        self
     }
     pub fn with_items(mut self, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.items = items.into_iter().map(Into::into).collect();
@@ -281,6 +318,8 @@ impl ComboBoxBuilder {
             self.widget.build(),
             Box::new(ComboBox {
                 mixed: self.mixed,
+                asset_paths: self.asset_paths,
+                swatch: self.swatch,
                 items: self.items,
                 selected: self.selected,
                 open: false,
@@ -382,10 +421,9 @@ impl Control for ComboDropdown {
             let text_x = if let Some(Some(path)) = self.asset_paths.get(i) {
                 let icon = Rect::new(row.x + 3.0, row.y + 2.0, 20.0, 20.0);
                 if let Some(uv) = ctx.thumbnails.uv(path) {
-                    ctx.push_primitive(
-                        crate::primitive::Primitive::textured(icon, uv, [255; 4]),
-                        Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),
-                    );
+                    let mut picture = crate::primitive::Primitive::textured(icon, uv, [255; 4]);
+                    picture.flags |= crate::primitive::FLAG_SRGB_TEXELS;
+                    ctx.push_primitive(picture, Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID));
                 }
                 row.x + 28.0
             } else {
@@ -444,6 +482,14 @@ impl Control for ComboDropdown {
         }
         if let Some(ComboBoxMessage::SetAssetPaths(paths)) = msg.data::<ComboBoxMessage>() {
             self.asset_paths = paths.clone();
+            // The combo's swatch follows the same list (a choice added after the picker was built).
+            if self.combo.is_some() {
+                emit.push(UiMessage::new(
+                    self.combo,
+                    MessageDirection::ToWidget,
+                    ComboBoxMessage::SetAssetPaths(paths.clone()),
+                ));
+            }
             msg.handled = true;
             return;
         }
@@ -548,13 +594,139 @@ impl ComboDropdownBuilder {
     }
 }
 
+/// The picture beside an asset picker: the chosen asset's thumbnail (asked for when first drawn), or `icon` while
+/// there is none. A texture slot's swatch shows the texture it holds.
+pub struct AssetSwatch {
+    pub asset: Option<std::path::PathBuf>,
+    pub icon: IconId,
+    pub size: f32,
+    /// Drawn in a sunken well (a slot), or bare (a chip's picture).
+    pub framed: bool,
+}
+
+/// Change the asset an [`AssetSwatch`] shows; its combo sends this whenever the choice changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssetSwatchMessage {
+    SetAsset(Option<std::path::PathBuf>),
+}
+
+impl Control for AssetSwatch {
+    fn role(&self) -> crate::a11y::Role {
+        crate::a11y::Role::Image
+    }
+
+    fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
+        Vec2::splat(self.size)
+    }
+
+    fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+        let b = widget.screen_bounds();
+        let side = self.size.min(b.w).min(b.h);
+        let rect = Rect::new(b.x + (b.w - side) * 0.5, b.y + (b.h - side) * 0.5, side, side);
+        let t = theme::active();
+        let inner = if self.framed {
+            // A sunken well, flat: the picture is the subject, not the frame.
+            let mut frame = crate::style::button(crate::style::VisualState::rest());
+            frame.background = t.semantic.surface.canvas.bytes();
+            frame.gradient = None;
+            frame.elevation = None;
+            frame.border = t.semantic.border.default.bytes();
+            frame.border_thickness = t.geometry.stroke_hairline;
+            ctx.push_paint(rect, &frame);
+            Rect::new(rect.x + 2.0, rect.y + 2.0, (rect.w - 4.0).max(0.0), (rect.h - 4.0).max(0.0))
+        } else {
+            rect
+        };
+        if let Some(path) = self.asset.as_deref() {
+            match ctx.thumbnails.uv(path) {
+                Some(uv) => {
+                    // The thumbnail's texels are sRGB colour: decoded, so the slot shows the texture's own colours.
+                    let mut quad = crate::primitive::Primitive::textured(inner, uv, [255; 4]);
+                    quad.flags |= crate::primitive::FLAG_SRGB_TEXELS;
+                    ctx.push_primitive(quad, Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID));
+                    return;
+                }
+                // Asked for once; a texture that has no preview stays on the icon.
+                None => ctx.thumbnails.request(path, true),
+            }
+        }
+        let glyph = Rect::new(inner.x + inner.w * 0.25, inner.y + inner.h * 0.25, inner.w * 0.5, inner.h * 0.5);
+        let (uv, tex) = self.icon.draw_quad(glyph);
+        ctx.push_textured_rect(glyph, uv, t.semantic.text.disabled.bytes(), tex);
+    }
+
+    fn handle_routed_message(&mut self, _widget: &mut Widget, msg: &mut UiMessage, _emit: &mut Vec<UiMessage>) {
+        if let Some(AssetSwatchMessage::SetAsset(path)) = msg.data::<AssetSwatchMessage>() {
+            self.asset = path.clone();
+            msg.handled = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A texture slot's swatch follows its picker: a model refresh, a mixed selection, and a choice the list learned
+    /// after it was built.
+    #[test]
+    fn the_swatch_follows_the_pickers_choice() {
+        let mut ui = crate::ui::UserInterface::new(400.0, 300.0);
+        let root = ui.root();
+        let swatch = ui.add_node(
+            UiNode::new(WidgetBuilder::new().build(), Box::new(AssetSwatch { asset: None, icon: IconId::Texture, size: 40.0, framed: true })),
+            root,
+        );
+        let paths = vec![None, Some(std::path::PathBuf::from("a.png")), Some(std::path::PathBuf::from("b.png"))];
+        let combo = ui.add_node(
+            ComboBoxBuilder::new(WidgetBuilder::new())
+                .with_items(["None", "a", "b"])
+                .with_asset_paths(paths.clone())
+                .with_swatch(swatch)
+                .build(),
+            root,
+        );
+        let list = ui.add_node(
+            ComboDropdownBuilder::new(WidgetBuilder::new()).with_items(["None", "a", "b"]).with_asset_paths(paths).with_combo(combo).build(),
+            root,
+        );
+        ui.send(ComboBoxMessage::bind_popup(combo, NodeHandle::NONE, list));
+        // What the swatch shows, read back as the thumbnail it asks the cache for when drawn.
+        let shown = |ui: &mut crate::ui::UserInterface| {
+            ui.update();
+            ui.update();
+            ui.draw_ctx.thumbnails.clear();
+            let node = ui.nodes.borrow(swatch.transmute());
+            node.control.draw(&node.widget, &mut ui.draw_ctx);
+            ["a.png", "b.png"]
+                .iter()
+                .position(|p| ui.draw_ctx.thumbnails.state(std::path::Path::new(p)).is_some())
+        };
+        ui.send(ComboBoxMessage::set_selected(combo, 2));
+        assert_eq!(shown(&mut ui), Some(1), "a refresh to b shows b");
+        ui.send(UiMessage::new(combo, MessageDirection::ToWidget, crate::message::MixedValue(true)));
+        assert_eq!(shown(&mut ui), None, "a mixed row shows no texture");
+        ui.send(UiMessage::new(combo, MessageDirection::ToWidget, crate::message::MixedValue(false)));
+        ui.send(ComboBoxMessage::set_selected(combo, 1));
+        assert_eq!(shown(&mut ui), Some(0));
+        // The list learns a fourth choice after it was built; the swatch can show it.
+        let items: Vec<String> = ["None", "x", "y", "b"].map(String::from).to_vec();
+        ui.send(UiMessage::new(combo, MessageDirection::ToWidget, ComboBoxMessage::SetItems(items)));
+        ui.send(UiMessage::new(
+            list,
+            MessageDirection::ToWidget,
+            ComboBoxMessage::SetAssetPaths(vec![None, None, None, Some(std::path::PathBuf::from("b.png"))]),
+        ));
+        ui.update();
+        ui.send(ComboBoxMessage::set_selected(combo, 3));
+        assert_eq!(shown(&mut ui), Some(1));
+    }
+
     #[test]
     fn selection_stays_in_range() {
         let cb = ComboBox {
+            asset_paths: Vec::new(),
+            swatch: NodeHandle::NONE,
             mixed: false,
             items: vec!["AgX".into(), "ACES".into(), "Reinhard".into()],
             selected: 0,

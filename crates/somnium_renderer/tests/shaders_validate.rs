@@ -80,6 +80,7 @@ fn every_composed_root_validates() {
         "postprocess.wgsl",
         "game_highlight.wgsl",
         "game_highlight_mask.wgsl",
+        "editor_glow.wgsl",
         "classify.wgsl",
         "clipmap_gen.wgsl",
         "volumetric.wgsl",
@@ -102,6 +103,8 @@ fn every_composed_root_validates() {
         "skinning.wgsl",
         // D2: the small forward capture (a pocket mirror's picture).
         "scene_capture.wgsl",
+        // The editor's preview studio (a material's turning sphere, an asset's thumbnail).
+        "preview_studio.wgsl",
     ] {
         check(root, &shaders.source_or_panic(root));
     }

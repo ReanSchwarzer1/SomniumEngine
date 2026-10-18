@@ -8,7 +8,7 @@
 > are ideas only (their licences); Godot, Fyrox, O3DE, Stride, Esoterica, Overload and the other MIT/Apache engines in
 > `Downloads\GE\example_repo` may be studied and translated with attribution.
 >
-> **Status:** A–I and M in tree 2026-10-18 (uncommitted); welcome screen and the E follow-ups open. One track at a time, each shown in a native capture before the next.
+> **Status:** A–I and M in tree 2026-10-18 (uncommitted), the welcome screen and the E follow-ups with them. One track at a time, each shown in a native capture before the next.
 > **Asked for by the developer, 18 Oct 2026:** "make the engine look more modern and usable ... lots of stuff that
 > other modern engines have for qol or ui/ux, Somnium doesn't have ... the animation window is unusable, the material
 > window is tacky, the mcp window can be better, more settings and preferences etc., better content browser, more
@@ -96,8 +96,10 @@ Records per track go in `phase ALYX/`. This table is updated as each lands.
 | C Authoring panel | in tree, seen | same |
 | D Preferences | in tree, seen (rail clicks untried by hand) | same |
 | M MCP for agents (added at the developer's request) | in tree; adapter tested, editor side unit-tested | same |
-| E Material editor | in tree, seen; GPU live preview, texture slots and presets still open | [E](<phase ALYX/ALYX-E.md>) |
+| E Material editor | in tree, seen; live preview drawn by the renderer (sphere, cube, plane, turntable, drag to turn; 0.05 ms), wider Materials column, texture slots with thumbnails, six undoable presets; nothing clicked by hand | [E](<phase ALYX/ALYX-E.md>) |
 | F Content browser | in tree, seen; tree, chips, quick actions, footer, Copy Path / Duplicate / Recycle Bin | [F](<phase ALYX/ALYX-F.md>) |
 | G Animation editor | in tree, seen; dock under the viewport, tabs, transport, scrub, Animation tools mode, readable timeline and nodes, frame-all | [G](<phase ALYX/ALYX-G.md>) |
 | H Viewport toolbar | in tree, seen; Tools strip (move/rotate/scale/focus, lit by gizmo mode), View Mode button and menu | [H, I](<phase ALYX/ALYX-H_I.md>) |
-| I The rest | in tree, seen; Add Component, component glyphs and Remove, ungrouped fields first; log/history/outliner found already done; welcome screen open | same |
+| I The rest | in tree, seen; Add Component, component glyphs and Remove, ungrouped fields first; log/history/outliner found already done | same |
+| J Editor polish (asked for 18 Oct) | in tree; selection/hover glow, viewport entity glyphs, studio tiles for models, launch splash, dock glide | [J](<phase ALYX/ALYX-J.md>) |
+| I Welcome screen | in tree, seen; recent projects (picture, folder, when opened, missing state, remove), Open Project…, every Help topic, File > Welcome and File > Save Project Thumbnail; no New Project, the engine cannot make one; the start with no project not yet seen | [welcome](<phase ALYX/ALYX-welcome.md>) |

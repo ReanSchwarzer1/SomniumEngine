@@ -14,6 +14,7 @@ This window stays inside the editor. Press **F1** or the **?** button to open it
   World cache is **off by default** — it adds bounce lighting, it does not speed the frame up.
 - Import glTF/GLB with **File → Import Model**.
 - Open a game directory with **File → Open Project**. Its `game.project.json` and optional `editor.launch.json` retain the game's own content roots and component schemas.
+- **File → Welcome** lists the projects this machine has opened, newest first; click one to open it in its own editor. A project whose folder has gone is marked, and the button at the end of its row takes it off the list (the folder is never touched). **File → Save Project Thumbnail** makes the view the open project's picture there (`thumbnail.png` in the project folder).
 - Find **Interaction Demo** and **Animated Mesh Preview** in Hello Engine's left **Game / Authoring** panel. Their source, playback, contact and preview controls live in Details. See [automation and projects](automation.md).
 - Browse project files in the **Content Drawer** along the bottom. **Game / Maps** holds Coastal and Island; double-click a map to load it.
 - Sculpt terrain from the left **Sculpt** strip once a terrain is selected (F6).

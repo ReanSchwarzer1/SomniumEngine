@@ -290,6 +290,139 @@ impl<G: GameApp> Engine<G> {
             .ok_or("Create an animation rig first, or select one in the Outliner".into())
     }
 
+    /// Phase ALYX-J: tell the renderer what glows. The selection and, separately, what a click would select now;
+    /// each with every entity under it, since selecting a house means its walls and windows. Nothing in Play.
+    pub(super) fn update_editor_highlight(&mut self) {
+        let editing = !self.play_session_active;
+        let over = editing
+            && self.ui_manager.as_ref().is_some_and(|ui| {
+                ui.pointer_over_viewport() && !ui.viewport_camera_active()
+            });
+        let busy = self.marquee.is_some()
+            || self.gizmo_drag.is_some()
+            || self.terrain_edit_active
+            || self.foliage_paint_active
+            || self.vertex_paint_active;
+        if !over || busy {
+            self.hovered_entity = None;
+        } else if self.hover_pick_due
+            && self.hover_picked_at.elapsed() >= std::time::Duration::from_millis(50)
+        {
+            self.hover_pick_due = false;
+            self.hover_picked_at = std::time::Instant::now();
+            self.hovered_entity = self.entities_under_cursor().into_iter().next();
+        }
+        self.hovered_entity = self.hovered_entity.filter(|e| self.world.is_alive(*e));
+        let (selected, hovered) = if editing {
+            let selected = subtree(&self.world, self.selection.as_slice());
+            let hovered = self
+                .hovered_entity
+                .filter(|e| !selected.contains(&e.index()))
+                .map(|e| subtree(&self.world, &[e]))
+                .unwrap_or_default();
+            (selected, hovered)
+        } else {
+            Default::default()
+        };
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_editor_highlight(selected, hovered);
+        }
+    }
+
+    /// Phase ALYX-J: a glyph where each entity with nothing to see stands (lights, sound, particles, decals,
+    /// navigation, the sky and weather), nearest 96 within 150 m, fading with distance. Not in Play.
+    pub(super) fn submit_viewport_icons(&mut self) {
+        use somnium_ui::icons::IconId;
+        let mut icons = Vec::new();
+        if !self.play_session_active
+            && let Some(renderer) = self.renderer.as_ref()
+        {
+            let view_proj = renderer.picking_view_proj();
+            let camera = renderer.camera_pos;
+            let selected: std::collections::HashSet<u32> =
+                self.selection.as_slice().iter().map(|e| e.index()).collect();
+            let world = &self.world;
+            let mut found: Vec<(f32, somnium_ui::ViewportIcon)> = Vec::new();
+            let mut place = |entity: Entity, icon: IconId| {
+                if crate::is_hidden(world, entity)
+                    || world.get::<crate::MeshComponent>(entity).is_some()
+                    || world.get::<crate::ImportedMesh>(entity).is_some()
+                {
+                    return;
+                }
+                let Some(matrix) = entity_world_matrix(world, entity) else {
+                    return;
+                };
+                let position = matrix.w_axis.truncate();
+                let distance = (position - camera).length();
+                let clip = view_proj * position.extend(1.0);
+                if distance > 150.0 || clip.w <= 0.05 {
+                    return;
+                }
+                let ndc = clip.truncate().truncate() / clip.w;
+                if ndc.x.abs() > 1.02 || ndc.y.abs() > 1.02 {
+                    return;
+                }
+                let fade = 1.0 - ((distance - 60.0) / 90.0).clamp(0.0, 1.0);
+                found.push((
+                    distance,
+                    somnium_ui::ViewportIcon {
+                        ndc: ndc.to_array(),
+                        icon,
+                        entity: entity.index(),
+                        selected: selected.contains(&entity.index()),
+                        fade: (fade * 20.0).round() / 20.0,
+                    },
+                ));
+            };
+            for entity in world.entities_with::<LightComponent>() {
+                let icon = match world.get::<LightComponent>(entity).map(|l| l.light_type) {
+                    Some(LightType::Directional) => IconId::DirectionalLight,
+                    Some(LightType::Spot | LightType::Tube) => IconId::SpotLight,
+                    _ => IconId::PointLight,
+                };
+                place(entity, icon);
+            }
+            for entity in world.entities_with::<crate::AudioEmitterComponent>() {
+                place(entity, IconId::Audio);
+            }
+            for entity in world.entities_with::<crate::ParticleEmitter>() {
+                place(entity, IconId::Particle);
+            }
+            for entity in world.entities_with::<crate::decal::DecalComponent>() {
+                place(entity, IconId::Texture);
+            }
+            for entity in world.entities_with::<crate::ai::NavigationProfile>() {
+                place(entity, IconId::NavMesh);
+            }
+            for entity in world.entities_with::<crate::ai::NavigationLink>() {
+                place(entity, IconId::Route);
+            }
+            for entity in world.entities_with::<crate::sky::SkyComponent>() {
+                place(entity, IconId::World);
+            }
+            for entity in world.entities_with::<crate::weather::WeatherComponent>() {
+                place(entity, IconId::Weather);
+            }
+            for entity in world.entities_with::<crate::PostProcessComponent>() {
+                place(entity, IconId::PostFx);
+            }
+            found.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // One glyph per entity, the first kind found; nearest last so it draws on top.
+            let mut seen = std::collections::HashSet::new();
+            icons = found
+                .into_iter()
+                .filter(|(_, icon)| seen.insert(icon.entity))
+                .take(96)
+                .map(|(_, icon)| icon)
+                .collect();
+            icons.reverse();
+        }
+        if let Some(ui) = self.ui_manager.as_mut() {
+            ui.set_viewport_icons(icons);
+        }
+    }
+
     /// Components a designer may add from Details: everything registered except identity, hierarchy, settings
     /// singletons and the editor's own bookkeeping.
     pub(super) fn addable_components(&self) -> Vec<(String, String)> {
@@ -365,6 +498,21 @@ impl<G: GameApp> Engine<G> {
             status: settings.status.clone(),
         })
     }
+}
+
+/// Each root and every entity under it, by index: what a selection means on screen.
+fn subtree(world: &World, roots: &[Entity]) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack: Vec<Entity> = roots.to_vec();
+    while let Some(entity) = stack.pop() {
+        if !world.is_alive(entity) || !out.insert(entity.index()) {
+            continue;
+        }
+        if let Some(children) = world.get::<crate::Children>(entity) {
+            stack.extend_from_slice(&children.entities[..usize::from(children.count).min(children.entities.len())]);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

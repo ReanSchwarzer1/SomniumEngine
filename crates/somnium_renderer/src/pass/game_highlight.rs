@@ -285,6 +285,11 @@ impl GameHighlightPass {
         }
     }
 
+    /// The coverage recorded by the last [`Self::record_mask`], for a composite of someone else's (the editor glow).
+    pub fn mask_view(&self) -> Option<&wgpu::TextureView> {
+        self.mask.as_ref().map(|(_, view)| view)
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         let extent = [width.max(1), height.max(1)];
         if extent != self.extent {

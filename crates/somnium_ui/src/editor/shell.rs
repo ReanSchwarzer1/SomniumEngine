@@ -653,6 +653,19 @@ pub(crate) fn build_editor_layout(
     // profiler controls sit next to the thing they change. Being a child of
     // the viewport also means it is hit-tested normally while the transparent
     // region around it still passes clicks through to the 3D pick.
+    // Phase ALYX-J: entities with nothing to see (lights, sound, particles, decals, volumes) get their glyph where
+    // they stand, and a click on it selects them. First among the viewport's children, so every other overlay
+    // covers it; click-through, so the scene between the glyphs still takes the pointer.
+    let viewport_icons = ui.add_node(
+        crate::widgets::canvas::CanvasBuilder::new(
+            WidgetBuilder::new()
+                .with_background(theme::TRANSPARENT)
+                .with_hit_self(false),
+        )
+        .build(),
+        viewport_handle,
+    );
+
     let vp_bar = BorderBuilder::new(
         WidgetBuilder::new()
             .with_height(theme::active().density.toolbar)
@@ -2317,6 +2330,7 @@ pub(crate) fn build_editor_layout(
         snap_overflow,
         view_mode_button,
         view_mode_label,
+        viewport_icons,
         tools_overlay,
         transform_tools,
         focus_tool,

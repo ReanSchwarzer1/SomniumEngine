@@ -294,6 +294,12 @@ impl Persona {
         });
         body
     }
+    /// The row for `component/field` (the schema's stable names), if Details shows one.
+    #[must_use]
+    pub fn row_handle(&self, key: &str) -> Option<NodeHandle> {
+        self.rows.iter().find(|row| row.key == key).map(|row| row.handle)
+    }
+
     pub fn register(
         &mut self,
         ui: &mut UserInterface,

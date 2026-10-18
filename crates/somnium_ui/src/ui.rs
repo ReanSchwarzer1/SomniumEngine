@@ -918,7 +918,10 @@ impl UserInterface {
             Ok(n) => n,
             Err(_) => return IH::NONE,
         };
-        if node.widget.clip_bounds.contains(pt) && node.widget.screen_bounds().contains(pt) {
+        if node.widget.hit_self
+            && node.widget.clip_bounds.contains(pt)
+            && node.widget.screen_bounds().contains(pt)
+        {
             handle
         } else {
             IH::NONE
@@ -1859,6 +1862,17 @@ impl UserInterface {
     /// its identity and every map keyed on it, every binding, every open
     /// gesture, stays valid across the move. Refuses a cycle, because a node
     /// made to contain its own ancestor is a layout that does not terminate.
+    /// Move `handle` to the end of its parent's children: drawn last, hit first.
+    pub fn bring_to_front(&mut self, handle: NodeHandle) {
+        let parent = self.parent(handle);
+        if parent.is_none() || self.children(parent).last() == Some(&handle) {
+            return;
+        }
+        if self.unlink(handle).is_some() {
+            self.link_at(handle, parent, usize::MAX);
+        }
+    }
+
     pub fn reparent(&mut self, handle: NodeHandle, new_parent: NodeHandle) -> bool {
         if handle.is_none() || new_parent.is_none() || handle == new_parent {
             return false;

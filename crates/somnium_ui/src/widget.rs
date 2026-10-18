@@ -39,6 +39,9 @@ pub struct Widget {
     pub enabled: bool,
     pub clip_to_bounds: bool,
     pub hit_test_visibility: bool,
+    /// Whether this node itself takes the pointer. `false` makes a click-through overlay: its children are still hit
+    /// tested, the empty space between them falls through to whatever is underneath (Phase ALYX-J).
+    pub hit_self: bool,
     pub z_index: usize,
     /// Hover label shown by the shell after `theme::TOOLTIP_DELAY_MS`.
     pub tooltip: String,
@@ -80,6 +83,7 @@ impl Default for Widget {
             enabled: true,
             clip_to_bounds: true,
             hit_test_visibility: true,
+            hit_self: true,
             z_index: 0,
             tooltip: String::new(),
             parent: NodeHandle::NONE,
@@ -196,6 +200,11 @@ impl WidgetBuilder {
 
     pub fn with_hit_test_visibility(mut self, v: bool) -> Self {
         self.widget.hit_test_visibility = v;
+        self
+    }
+    /// `false`: the node's children take clicks, the node itself does not.
+    pub fn with_hit_self(mut self, v: bool) -> Self {
+        self.widget.hit_self = v;
         self
     }
 

@@ -324,6 +324,10 @@ pub enum CommandAction {
     ContentRefresh,
     OpenPreferences,
     OpenProjectPicker,
+    /// Show the welcome screen: recent projects, Open Project and Help.
+    OpenWelcome,
+    /// Save the viewport's picture as the open project's thumbnail.
+    SaveProjectThumbnail,
     /// Select a named debug visualisation. Mutually exclusive with the others.
     SetDebugView(&'static str),
     /// Flip one named renderer pipeline switch.
@@ -1175,12 +1179,32 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.file.welcome",
+            "Welcome",
+            "File",
+            None,
+            "Show the welcome screen: recent projects, Open Project and Help.",
+            A::OpenWelcome,
+            FILE,
+            always
+        ),
+        command!(
             "editor.file.open_project",
             "Open Project...",
             "File",
             None,
             "Choose a different project folder to work in.",
             A::OpenProjectPicker,
+            FILE,
+            always
+        ),
+        command!(
+            "editor.file.save_thumbnail",
+            "Save Project Thumbnail",
+            "File",
+            None,
+            "Save the viewport's picture as this project's thumbnail on the welcome screen.",
+            A::SaveProjectThumbnail,
             FILE,
             always
         ),
@@ -2305,6 +2329,8 @@ pub fn icon_for(id: &str) -> crate::icons::IconId {
     match id {
         "editor.scene.new" => I::NewAsset,
         "editor.scene.open" | "editor.file.open_project" => I::FolderOpen,
+        "editor.file.welcome" => I::Home,
+        "editor.file.save_thumbnail" => I::Screenshot,
         "editor.scene.save" => I::Save,
         "editor.asset.import_model" => I::Import,
         "editor.asset.new_material" => I::MaterialBall,

@@ -122,6 +122,7 @@ impl Shaders {
             "dream_lens.wgsl",
             "game_highlight.wgsl",
             "game_highlight_mask.wgsl",
+            "editor_glow.wgsl",
             "grid.wgsl",
             "gtao.wgsl",
             "hextile.wgsl",
@@ -162,6 +163,7 @@ impl Shaders {
             "water_reflection.wgsl",
             "water_spectrum.wgsl",
             "wind.wgsl",
+            "preview_studio.wgsl",
         );
         // SAFETY: this is a checked-in Somnium-authored artifact produced by
         // the pinned Slang compiler. `tools/slangcook/run.py --check` recooks

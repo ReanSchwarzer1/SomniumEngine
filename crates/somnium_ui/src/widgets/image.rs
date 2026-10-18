@@ -45,10 +45,11 @@ impl Control for Image {
         // A ready preview wins; the tint is dropped with it, because a
         // thumbnail carries real colour and tinting it would wash it out.
         if let Some(uv) = self.asset.as_deref().and_then(|p| ctx.thumbnails.uv(p)) {
-            ctx.push_primitive(
-                crate::primitive::Primitive::textured(rect, uv, [255, 255, 255, 255]),
-                Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID),
-            );
+            // Every preview cell holds sRGB colour (decoded images, the studio renders, the material ball): decode it,
+            // or the swapchain's own encode shows it brighter and greyer than it is.
+            let mut picture = crate::primitive::Primitive::textured(rect, uv, [255, 255, 255, 255]);
+            picture.flags |= crate::primitive::FLAG_SRGB_TEXELS;
+            ctx.push_primitive(picture, Some(crate::thumbnail::THUMBNAIL_ATLAS_TEXTURE_ID));
             return;
         }
         let (uv, tex) = self.icon.draw_quad(rect);
@@ -61,9 +62,16 @@ impl Control for Image {
         msg: &mut UiMessage,
         _emit: &mut Vec<UiMessage>,
     ) {
-        if let Some(ImageMessage::SetIcon(icon)) = msg.data::<ImageMessage>() {
-            self.icon = *icon;
-            msg.handled = true;
+        match msg.data::<ImageMessage>() {
+            Some(ImageMessage::SetIcon(icon)) => {
+                self.icon = *icon;
+                msg.handled = true;
+            }
+            Some(ImageMessage::SetTint(tint)) => {
+                self.tint = *tint;
+                msg.handled = true;
+            }
+            None => {}
         }
     }
 }
@@ -72,6 +80,7 @@ impl Control for Image {
 #[derive(Clone, Copy, Debug)]
 pub enum ImageMessage {
     SetIcon(IconId),
+    SetTint([u8; 4]),
 }
 
 impl ImageMessage {

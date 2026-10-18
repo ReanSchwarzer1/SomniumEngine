@@ -683,10 +683,10 @@ fn mebibytes(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// Project phases and their codenames belong in code and records, never in what a designer reads (the developer,
     /// 18 Oct 2026: "that will confuse designers").
-    const CODENAMES: &[&str] = &[
+    pub(crate) const CODENAMES: &[&str] = &[
         "Phase ", "phase ", "MORROWIND", "PERSONA", "TSUSHIMA", "CONTROL-", "DOOM-", "KENSHI", "STALKER", "DREAMS",
         "TALOS", "PORTAL-", "HALCYON", "Zeta", "Hades", "ALYX",
     ];
@@ -702,6 +702,11 @@ mod tests {
         }
         for command in crate::commands::registry().commands() {
             shown.extend([command.label, command.help, command.category]);
+        }
+        // The material editor's preview controls and presets.
+        shown.extend(crate::editor::material_studio::STUDIO_TEXT);
+        for preset in somnium_asset::material::MATERIAL_PRESETS {
+            shown.extend([preset.name, preset.description]);
         }
         for text in shown {
             for name in CODENAMES {

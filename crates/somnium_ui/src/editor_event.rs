@@ -129,6 +129,19 @@ pub enum VertexPaintEvent {
     AutoWeather,
 }
 
+/// The material preview's controls and the material presets. Core owns the preview and the material.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaterialStudioEvent {
+    /// Show the material on the sphere (0), the cube (1) or the plane (2).
+    Shape(u8),
+    /// Turn it on its turntable, or hold it still.
+    Spin(bool),
+    /// A drag across the preview turned it by this many radians.
+    Turn(f32),
+    /// Apply `somnium_asset::material::MATERIAL_PRESETS[index]` to the material being edited: one undo step.
+    Preset(usize),
+}
+
 /// Brush/runtime controls which deliberately remain outside component schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FoliageBrushField {
@@ -347,6 +360,15 @@ pub enum EditorEvent {
     },
     /// Ask for a different project folder — the 27-G picker, unblocked.
     OpenProjectPicker,
+    /// Show the welcome screen. The host reads the Recent Projects list afresh and answers with
+    /// `UiManager::show_welcome`.
+    OpenWelcome,
+    /// Open this project folder, from the Recent Projects list, in its own editor.
+    OpenProject(std::path::PathBuf),
+    /// Take this folder off the Recent Projects list. The folder itself is not touched.
+    ForgetRecentProject(std::path::PathBuf),
+    /// Save the viewport's picture as the open project's `thumbnail.png`, the picture the welcome screen shows.
+    SaveProjectThumbnail,
     /// Select a named debug visualisation. `"lit"` returns to the ordinary
     /// image, which is why the code that used to mean "off" needs no special
     /// case.
@@ -462,6 +484,8 @@ pub enum EditorEvent {
     },
     /// The Vertex Paint tool (mode, brush, channel and paint actions).
     VertexPaint(VertexPaintEvent),
+    /// The material preview and presets (the Material panel).
+    MaterialStudio(MaterialStudioEvent),
     /// Select a terrain sculpt/paint tool (Phase 14F). Index maps to
     /// `BrushMode`: 0 Raise, 1 Lower, 2 Smooth, 3 Flatten, 4 Noise, 5 Paint.
     SetTerrainTool(u8),

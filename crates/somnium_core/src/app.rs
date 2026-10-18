@@ -1078,6 +1078,8 @@ pub struct Engine<G: GameApp> {
     preview_ready: std::collections::VecDeque<(std::path::PathBuf, Vec<u8>)>,
     /// Loaded authored material documents, keyed by durable content identity.
     material_asset_target: Option<(somnium_asset::database::AssetId, somnium_ecs::Entity)>,
+    /// The Material panel's live preview and presets (`app_material_studio.rs`).
+    material_studio: material_studio_host::MaterialStudio,
     material_documents:
         std::collections::HashMap<somnium_asset::database::AssetId, MaterialDocument>,
     /// Runtime pool slots reconstructed from material asset ids.
@@ -1139,6 +1141,10 @@ pub struct Engine<G: GameApp> {
     camera_pose_request: Option<(glam::Vec3, f32, f32)>,
     /// Entities under the cursor, newest piercing menu first.
     piercing_candidates: Vec<somnium_ecs::entity::Entity>,
+    /// Phase ALYX-J: what a click would select right now, picked when the pointer has moved, at most every 50 ms.
+    hovered_entity: Option<Entity>,
+    hover_pick_due: bool,
+    hover_picked_at: std::time::Instant,
     /// When the next interval autosave is due.
     autosave: crate::autosave::AutosaveClock,
     /// A recoverable autosave found at launch, until the person answers.
@@ -1745,6 +1751,7 @@ impl<G: GameApp + 'static> Engine<G> {
             preview_jobs: std::collections::HashMap::new(),
             preview_ready: std::collections::VecDeque::new(),
             material_asset_target: None,
+            material_studio: Default::default(),
             material_documents: std::collections::HashMap::new(),
             material_runtime: std::collections::HashMap::new(),
             material_textures: std::collections::HashMap::new(),
@@ -1764,6 +1771,9 @@ impl<G: GameApp + 'static> Engine<G> {
             orbit_selection: false,
             camera_pose_request: None,
             piercing_candidates: Vec::new(),
+            hovered_entity: None,
+            hover_pick_due: false,
+            hover_picked_at: std::time::Instant::now(),
             autosave: crate::autosave::AutosaveClock::new(autosave_interval),
             pending_recovery: None,
             recent_scenes: crate::settings::load_recent_scenes(),
@@ -3999,6 +4009,16 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 // folder nobody looks in.
                 self.check_crash_recovery();
 
+                // Phase ALYX-J: the editor's splash goes up before the game's content loads, which blocks, so the
+                // window shows the mark and what is happening rather than nothing.
+                if !self.config.player_mode
+                    && let (Some(ui), Some(renderer), Some(render_ctx)) =
+                        (self.ui_manager.as_mut(), self.renderer.as_mut(), self.render_ctx.as_ref())
+                {
+                    ui.begin_splash(&format!("Opening {}", self.config.window_title));
+                    renderer.render(render_ctx, ui, &window);
+                }
+
                 let mut ctx = EngineContext::new(
                     &self.time,
                     &self.config,
@@ -4029,6 +4049,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         ui.set_immersive(true);
                     }
                     self.handle_editor_event(EditorEvent::PlaySimulation);
+                } else {
+                    // Recent Projects gains this project, or, with none open, the welcome screen shows.
+                    self.welcome_at_startup();
+                }
+                if let Some(ui) = self.ui_manager.as_mut() {
+                    ui.finish_splash();
                 }
             }
             Err(err) => {
@@ -4094,6 +4120,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // Always track cursor position (needed for gizmo picking every frame).
         if let WindowEvent::CursorMoved { position, .. } = &event {
             self.cursor_pos = (position.x as f32, position.y as f32);
+            self.hover_pick_due = true;
             if let Some(band) = self.marquee.as_mut() {
                 band.current = self.cursor_pos;
             }
@@ -5317,6 +5344,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 );
                 ui.set_viewport_drop_probe(drop_probe_entity, drop_probe_hit);
                 ui.set_fps(self.time.fps());
+                ui.update_splash();
                 // Phase 26-Zeta: the status bar is an instrument panel, so it
                 // gets the same per-frame facts the Outliner does.
                 ui.set_status_stats(tree.len(), self.time.fps());
@@ -5674,6 +5702,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.submit_audio_gizmos();
             self.submit_spline_gizmos();
         }
+        self.update_editor_highlight();
+        self.submit_viewport_icons();
 
         self.zone_end();
         // ── Day cycle (CONTROL-L), then post-processing (Phase 15A1) ─────────
@@ -5697,6 +5727,8 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // editor's swapchain. Held across the whole frame and handed to the
         // window it came from below, which draws the context bar over it and
         // presents it.
+        // The Material panel's live preview, drawn by the renderer with the scene.
+        self.drive_material_preview();
         let scene_frame = self.acquire_floating_viewport();
         let scene_target = scene_frame
             .as_ref()
@@ -7076,6 +7108,7 @@ impl<G: GameApp> Engine<G> {
         use somnium_ui::editor::tool_context::{ToolContext, ToolMode};
         let brush = self.vertex_paint_brush;
         ToolContext {
+            material_preview: self.material_studio.state(),
             paint_reason: self.vertex_paint_target().err().map(str::to_owned),
             paint_brush: [brush.radius, brush.strength, brush.falloff],
             paint_flags: [
@@ -10648,11 +10681,18 @@ impl<G: GameApp> Engine<G> {
                 };
                 let result = self.open_editor_project(&folder);
                 if let Some(ui) = self.ui_manager.as_mut() {
+                    if result.is_ok() {
+                        ui.close_welcome();
+                    }
                     ui.push_toast(
                         &result.unwrap_or_else(|e| format!("Project could not open: {e}")),
                     );
                 }
             }
+            EditorEvent::OpenWelcome => self.show_welcome(),
+            EditorEvent::OpenProject(folder) => self.open_recent_project(&folder),
+            EditorEvent::ForgetRecentProject(folder) => self.forget_recent_project(&folder),
+            EditorEvent::SaveProjectThumbnail => self.save_project_thumbnail(),
 
             EditorEvent::SetDebugView(id) => {
                 let Some(view) = somnium_ui::debug::debug_view(id) else {
@@ -12590,6 +12630,7 @@ impl<G: GameApp> Engine<G> {
                 );
             }
             EditorEvent::VertexPaint(event) => self.handle_vertex_paint_event(event),
+            EditorEvent::MaterialStudio(event) => self.handle_material_studio_event(event),
             EditorEvent::ToggleFoliageErase => {
                 self.foliage_erase = !self.foliage_erase;
             }
@@ -14130,10 +14171,16 @@ mod designer;
 #[path = "app_authoring.rs"]
 mod authoring_host;
 
+#[path = "app_welcome.rs"]
+mod welcome_host;
+
 #[path = "app_import_cache.rs"]
 mod import_cache;
 
 #[path = "app_play_input.rs"]
 mod play_input;
+
+#[path = "app_material_studio.rs"]
+mod material_studio_host;
 
 include!("app_project_foliage.rs");

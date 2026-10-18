@@ -35,6 +35,8 @@ const FLAG_INSET:    u32 = 16u;
 const FLAG_GRADIENT: u32 = 32u;
 const FLAG_EMBOSS: u32 = 64u;
 const FLAG_DITHER: u32 = 128u;
+// `primitive::FLAG_SRGB_TEXELS`: the texture's RGB is sRGB colour, decoded like the colour fields.
+const FLAG_SRGB_TEXELS: u32 = 65536u;
 
 struct Globals {
     proj: mat4x4<f32>,
@@ -250,7 +252,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // intended; the exponent thins them back. 1.0 is a no-op.
             alpha = alpha * pow(clamp(tex.a, 0.0, 1.0), globals.text_gamma);
         } else {
-            rgb   = rgb * tex.rgb;
+            let texel = select(tex.rgb, decode_srgb(tex.rgb), (flags & FLAG_SRGB_TEXELS) != 0u);
+            rgb   = rgb * texel;
             alpha = alpha * tex.a;
         }
     }

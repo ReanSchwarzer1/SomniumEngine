@@ -395,6 +395,14 @@ pub struct SomniumRenderer {
     game_highlight_pass: crate::pass::game_highlight::GameHighlightPass,
     game_highlight_style: Option<crate::pass::game_highlight::HighlightStyle>,
     game_highlight_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
+    /// Phase ALYX-J: the editor's selection and hover glow. Two masks made the way the game highlight makes its own,
+    /// and the entities (by index) each one covers.
+    editor_selection_mask: crate::pass::game_highlight::GameHighlightPass,
+    editor_hover_mask: crate::pass::game_highlight::GameHighlightPass,
+    editor_glow_pass: crate::pass::editor_glow::EditorGlowPass,
+    editor_selected: std::collections::HashSet<u32>,
+    editor_hovered: std::collections::HashSet<u32>,
+    pub editor_glow_style: crate::pass::editor_glow::GlowStyle,
 
     /// Phase 11.5J: GPU particle billboard pass.
     particle_pass: ParticlePass,
@@ -613,6 +621,8 @@ pub struct SomniumRenderer {
     transparent_pass: crate::pass::transparent::TransparentPass,
     /// D2: a small forward view of the scene into a texture (`request_capture`).
     scene_capture: crate::pass::scene_capture::SceneCapturePass,
+    /// The editor's preview studio: small lit renders beside the level (`studio_*`).
+    preview_studio: crate::pass::preview_studio::PreviewStudio,
     /// Blended draws submitted this frame (routed automatically by material).
     transparent_queue: Vec<DrawCommand>,
     /// Per-material flag: true when the material is alpha-blended. Lets
@@ -997,6 +1007,15 @@ impl SomniumRenderer {
             &ctx.device, &shaders, &global_pool.layout, ctx.config.format,
             ctx.config.width, ctx.config.height,
         );
+        let editor_mask = || {
+            crate::pass::game_highlight::GameHighlightPass::new(
+                &ctx.device, &shaders, &global_pool.layout, ctx.config.format,
+                ctx.config.width, ctx.config.height,
+            )
+        };
+        let (editor_selection_mask, editor_hover_mask) = (editor_mask(), editor_mask());
+        let editor_glow_pass =
+            crate::pass::editor_glow::EditorGlowPass::new(&ctx.device, &shaders, ctx.config.format);
 
         // Phase 11B: Shadow atlas and comparison sampler.
         // Shading pass output format is now Rgba16Float (HDR target).
@@ -1095,6 +1114,14 @@ impl SomniumRenderer {
             &ibl_pass.cube_view,
             &ibl_pass.sampler,
             &atmosphere_pass,
+        );
+
+        let preview_studio = crate::pass::preview_studio::PreviewStudio::new(
+            &ctx.device,
+            &shaders,
+            &global_pool.layout,
+            &ibl_pass.cube_view,
+            &ibl_pass.sampler,
         );
 
         let texture_pool = TexturePool::new(&ctx.device);
@@ -1310,11 +1337,18 @@ impl SomniumRenderer {
             game_highlight_pass,
             game_highlight_style: None,
             game_highlight_draws: std::collections::HashSet::new(),
+            editor_selection_mask,
+            editor_hover_mask,
+            editor_glow_pass,
+            editor_selected: std::collections::HashSet::new(),
+            editor_hovered: std::collections::HashSet::new(),
+            editor_glow_style: Default::default(),
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
             transparent_pass,
             scene_capture,
+            preview_studio,
             transparent_queue: Vec::new(),
             material_blend: Vec::new(),
             material_double_sided: Vec::new(),
@@ -1489,6 +1523,43 @@ impl SomniumRenderer {
         let index = self.add_texture(ctx, texture.create_view(&wgpu::TextureViewDescriptor::default())) as i32;
         self.dynamic_textures.insert(index, texture);
         index
+    }
+
+    /// A new preview-studio target, `size` texels square (`pass::preview_studio`).
+    pub fn studio_target(&mut self, ctx: &RenderContext, size: u32) -> crate::pass::preview_studio::StudioTargetId {
+        self.preview_studio.create_target(&ctx.device, size)
+    }
+
+    /// A studio target's picture as the UI binds it: 8-bit, sRGB-encoded bytes.
+    #[must_use]
+    pub fn studio_view(&self, id: crate::pass::preview_studio::StudioTargetId) -> Option<wgpu::TextureView> {
+        self.preview_studio.view(id)
+    }
+
+    /// A studio target's resolved texture, for a copy out.
+    #[must_use]
+    pub fn studio_texture(&self, id: crate::pass::preview_studio::StudioTargetId) -> Option<&wgpu::Texture> {
+        self.preview_studio.texture(id)
+    }
+
+    /// Draw `request` into studio target `id` this frame (before the UI, so the UI shows it the same frame).
+    pub fn studio_render(
+        &mut self,
+        id: crate::pass::preview_studio::StudioTargetId,
+        request: crate::pass::preview_studio::StudioRequest,
+    ) {
+        self.preview_studio.queue(id, request);
+    }
+
+    /// A built-in studio shape as a draw of `material_id` standing at `model`; None if the geometry pool is full.
+    pub fn studio_shape(
+        &mut self,
+        ctx: &RenderContext,
+        shape: crate::pass::preview_studio::StudioShape,
+        material_id: u32,
+        model: glam::Mat4,
+    ) -> Option<crate::pass::preview_studio::StudioDraw> {
+        self.preview_studio.shape_draw(&mut self.geometry, &ctx.queue, shape, material_id, model)
     }
 
     /// D2: draw `request` this frame into the scene capture (`pass::scene_capture`) and return the bindless slot a
@@ -2543,6 +2614,17 @@ impl SomniumRenderer {
     /// Clear the selection outline (call when nothing is selected or selection has no mesh).
     pub fn clear_outline(&mut self) {
         self.outline_entity = None;
+    }
+
+    /// The entities (by index) the editor shows as selected and as under the pointer. Their visible draws glow:
+    /// matched by the entity index every scene submitter puts in the low 32 bits of the sort key.
+    pub fn set_editor_highlight(
+        &mut self,
+        selected: std::collections::HashSet<u32>,
+        hovered: std::collections::HashSet<u32>,
+    ) {
+        self.editor_selected = selected;
+        self.editor_hovered = hovered;
     }
 
     /// Select game feedback independently of the editor's selected entity.
@@ -3775,6 +3857,19 @@ impl SomniumRenderer {
             );
             self.profiler.end(&mut encoder);
         }
+        // The editor's preview studio: after the scene (its materials and environment are this frame's), before the UI.
+        if self.preview_studio.has_pending() {
+            self.profiler.begin(&mut encoder, "Preview studio");
+            let blend = &self.material_blend;
+            self.preview_studio.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                &|material| blend.get(material as usize).copied().unwrap_or(false),
+            );
+            self.profiler.end(&mut encoder);
+        }
 
         // FSR 3 frame generation: the frame between the last picture and this one
         // lands in the swap chain image the UI and the present below use.
@@ -4707,6 +4802,26 @@ impl SomniumRenderer {
             );
             (style, members, transparent)
         }).filter(|(_, members, transparent)| members.iter().any(|m| *m != 0) || !transparent.is_empty());
+        // The editor's glow, by entity. Terrain chunks are keyed by their vertex offset, not an entity: never them.
+        let editor_glow_frame = {
+            let terrain = &self.terrain_lod_by_vertex;
+            let members = |entities: &std::collections::HashSet<u32>| {
+                (!entities.is_empty())
+                    .then(|| {
+                        crate::pass::editor_glow::entity_members(
+                            &self.draw_queue,
+                            self.shadow_only_queue.len(),
+                            &self.transparent_queue,
+                            entities,
+                            |offset| terrain.contains_key(&offset),
+                        )
+                    })
+                    .filter(|(members, transparent)| {
+                        members.iter().any(|m| *m != 0) || !transparent.is_empty()
+                    })
+            };
+            (members(&self.editor_selected), members(&self.editor_hovered))
+        };
 
         self.profiler.cpu_begin("Indirect args");
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
@@ -6531,6 +6646,36 @@ impl SomniumRenderer {
                 *style, if debugging { Default::default() } else { self.grading },
                 if fsr_ok { [self.ldr_width, self.ldr_height] } else { [self.render_width, self.render_height] },
                 [0.0; 2], slot as usize,
+            );
+            self.profiler.end(&mut encoder);
+        }
+
+        if self.editor_overlays_enabled
+            && (editor_glow_frame.0.is_some() || editor_glow_frame.1.is_some())
+        {
+            self.profiler.begin(&mut encoder, "Editor glow");
+            for (mask, frame) in [
+                (&mut self.editor_selection_mask, &editor_glow_frame.0),
+                (&mut self.editor_hover_mask, &editor_glow_frame.1),
+            ] {
+                if let Some((members, transparent)) = frame {
+                    mask.resize(self.render_width, self.render_height);
+                    mask.record_mask(
+                        &ctx.device, &ctx.queue, &mut encoder, &self.global_pool.bind_group,
+                        &self.vis_pass.view, &self.vis_pass.depth_view, members, transparent, slot as usize,
+                    );
+                }
+            }
+            self.editor_glow_pass.composite(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                output_extent,
+                view.rect,
+                editor_glow_frame.0.as_ref().and(self.editor_selection_mask.mask_view()),
+                editor_glow_frame.1.as_ref().and(self.editor_hover_mask.mask_view()),
+                self.editor_glow_style,
             );
             self.profiler.end(&mut encoder);
         }
