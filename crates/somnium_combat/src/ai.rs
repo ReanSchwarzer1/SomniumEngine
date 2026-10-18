@@ -1846,11 +1846,16 @@ fn reflex(
         let Some((left, dir, reach, serial)) = other.windup else {
             continue;
         };
-        if !w.hostile(me.id, other.id) || !knows(other.id) {
-            continue;
-        }
+        // The reach first: asking whose side someone is on costs more.
         let to_me = flat(me.position - other.position);
         if to_me.length() > reach + me.radius || dir.dot(to_me.normalize_or_zero()) < 0.5 {
+            continue;
+        }
+        if !w
+            .relations
+            .hostile((me.id, me.team), (other.id, other.team))
+            || !knows(other.id)
+        {
             continue;
         }
         if mind.reacted.contains(&(other.id, serial)) {
