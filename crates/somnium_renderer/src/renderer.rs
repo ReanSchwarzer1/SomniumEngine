@@ -3212,16 +3212,35 @@ impl SomniumRenderer {
     /// blend).
     pub fn set_instance_batch(&mut self, id: u64, batch: &crate::instance_batch::InstanceBatch) {
         let mut slots = Vec::with_capacity(batch.parts.len() * batch.placements.len());
+        let mut traced = Vec::new();
         for part in &batch.parts {
             if self.material_blend.get(part.material_id as usize).copied().unwrap_or(false) {
                 continue;
             }
             let bounds = self.geometry.mesh_aabb(part.vertex_offset);
+            // Copies the top level may trace: their mesh has a bottom level and they are as big as anything traced.
+            if self.raytrace_pass.supported() && self.raytrace_pass.has_blas(part.vertex_offset) {
+                let half = bounds.map(|(min, max)| (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5);
+                for (k, &placement) in batch.placements.iter().enumerate() {
+                    let model = placement * part.local;
+                    let radius = half.map_or(f32::MAX, |half| model.transform_vector3(half).length());
+                    if radius >= TLAS_MIN_RADIUS {
+                        traced.push(crate::instance_batch::TracedCopy {
+                            slot: u32::try_from(slots.len() + k).unwrap_or(u32::MAX),
+                            vertex_offset: part.vertex_offset,
+                            model,
+                            shadow: traces_shadow(part.casts_shadow, radius),
+                            near: part.near,
+                            far: part.far,
+                        });
+                    }
+                }
+            }
             slots.extend(
                 batch.placements.iter().map(|&placement| crate::instance_batch::GpuSlot::new(part, placement, bounds)),
             );
         }
-        self.instance_batches.set(id, slots);
+        self.instance_batches.set(id, slots, traced);
     }
 
     /// Remove instance batch `id`. Returns whether there was one.
@@ -5591,7 +5610,7 @@ impl SomniumRenderer {
             let geometry = &self.geometry;
             let raytrace = &self.raytrace_pass;
             let first_person = &self.first_person_casters;
-            let instances: Vec<(u32, u32, glam::Mat4, bool)> = self
+            let mut instances: Vec<(u32, u32, glam::Mat4, bool)> = self
                 .draw_queue
                 .iter()
                 .enumerate()
@@ -5631,6 +5650,15 @@ impl SomniumRenderer {
                     })
                 })
                 .collect();
+            if batches_live {
+                // The nearest batched copies, after every submitted draw: past the top level's cap the build drops from
+                // the end, so they never push a submitted draw out unless the distance budget below chooses so.
+                let mut copies = Vec::new();
+                self.instance_batches.traced_near(self.camera_pos, BATCH_RT_REACH, &mut copies);
+                instances.extend(nearest_tlas_instances(copies, BATCH_RT_COPIES, self.camera_pos, |offset| {
+                    geometry.mesh_aabb(offset)
+                }));
+            }
             let capacity = self.raytrace_pass.capacity() as usize;
             let instances = if self.tlas_distance_budget && instances.len() > capacity {
                 nearest_tlas_instances(instances, capacity, self.camera_pos, |offset| geometry.mesh_aabb(offset))
@@ -7908,6 +7936,11 @@ fn mix_shadow_caster_revision(hash: &mut u64, command: &DrawCommand) {
 
 /// World-space bounding radius below which a draw stays out of the TLAS (metres).
 const TLAS_MIN_RADIUS: f32 = 1.0;
+
+/// Horizontal metres from the eye within which instance batches' copies are traced (`instance_batch.rs`), and how
+/// many at most: near foliage shadows traced lights and shows in reflections; beyond, a copy is raster-only.
+const BATCH_RT_REACH: f32 = 60.0;
+const BATCH_RT_COPIES: usize = 2048;
 
 /// Metres from the eye within which a skinned character is traced, its bottom level rebuilt from each frame's pose.
 const POSED_RT_REACH: f32 = 30.0;

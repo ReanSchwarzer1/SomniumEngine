@@ -58,8 +58,8 @@ fn expand_writes_arguments_instances_and_bounds_and_a_removed_batch_draws_nothin
     let (device, queue) = gpu::device();
     let shaders = crate::shaders::Shaders::new();
     let mut batches = InstanceBatches::default();
-    batches.set(1, slots(&part(36, 0.0), &[0.0, 5.0, 10.0]));
-    batches.set(2, slots(&part(72, 40.0), &[20.0, 30.0]));
+    batches.set(1, slots(&part(36, 0.0), &[0.0, 5.0, 10.0]), Vec::new());
+    batches.set(2, slots(&part(72, 40.0), &[20.0, 30.0]), Vec::new());
     batches.flush(&device, &queue, &shaders);
     (batches.instance_base, batches.arg_base) = (16, 8);
     let instances = buffer(&device, 32 * std::mem::size_of::<GpuInstanceData>() as u64);
@@ -107,7 +107,7 @@ fn shadow_cull_keeps_the_casters_inside_each_redrawn_cascade() {
     let mut quiet = part(36, 0.0);
     quiet.casts_shadow = false;
     list.extend(slots(&quiet, &[1.0]));
-    batches.set(1, list);
+    batches.set(1, list, Vec::new());
     batches.flush(&device, &queue, &shaders);
     batches.instance_base = 64;
     let box_planes: [[f32; 4]; 6] = [
@@ -155,7 +155,7 @@ fn a_copy_too_small_at_its_distance_casts_no_shadow() {
     let shaders = crate::shaders::Shaders::new();
     let mut batches = InstanceBatches::default();
     // Unit boxes (radius ~1.7) 2 m and 8 m from the eye; a threshold of 0.5 keeps only the nearer.
-    batches.set(1, slots(&part(36, 0.0), &[2.0, 8.0]));
+    batches.set(1, slots(&part(36, 0.0), &[2.0, 8.0]), Vec::new());
     batches.flush(&device, &queue, &shaders);
     let open: [[f32; 4]; 6] = [[0.0, 0.0, 0.0, 1.0]; 6];
     let mut encoder = device.create_command_encoder(&Default::default());

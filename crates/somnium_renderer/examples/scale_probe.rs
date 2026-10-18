@@ -9,7 +9,7 @@
 //! cargo run --release -p somnium_renderer --example scale_probe -- 5000 20000 50000 100000 180000
 //! ```
 //!
-//! `SCALE_PROBE_BATCH=1` sets the same instances once, as instance batches (one per 96 m cell and mesh), instead of
+//! `SCALE_PROBE_RT=1` gives the meshes bottom levels, so the frame traces them. `SCALE_PROBE_BATCH=1` sets the same instances once, as instance batches (one per 96 m cell and mesh), instead of
 //! submitting them every frame. `SOMNIUM_CAPTURE_PNG=<file>` with `SOMNIUM_CAPTURE_FRAME=<n>` writes frame n, to
 //! compare the two ways by eye.
 //!
@@ -132,6 +132,18 @@ impl Probe {
                 wood,
             ),
         ];
+        // `SCALE_PROBE_RT=1`: bottom levels for the three meshes, so the top level (and traced batch copies) has them.
+        if std::env::var("SCALE_PROBE_RT").as_deref() == Ok("1") {
+            for ((alloc, _), vertices) in meshes.iter().zip([cube_v.len(), sphere_v.len(), cyl_v.len()]) {
+                renderer.raytrace_pass.register_mesh(
+                    &ctx.device,
+                    alloc.vertex_offset,
+                    vertices as u32,
+                    alloc.index_offset,
+                    alloc.index_count,
+                );
+            }
+        }
         println!("adapter: {}", ctx.adapter.get_info().name);
         println!(
             "gpu-driven: {}, counted draws: {}",

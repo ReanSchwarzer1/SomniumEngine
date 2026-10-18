@@ -10,8 +10,11 @@
 //! like any other draw. A second dispatch (`shadow_cull`) finds the shadow casters in each cascade being redrawn. The
 //! CPU pays per batch set or removed, not per copy per frame.
 //!
-//! What a batch does not have, so what stays with `submit`: ray-traced shadows, reflections and GI (no TLAS
-//! instances), the mesh SDF, virtual shadow pages (cascades only), motion of its own (copies stand still; wind still
+//! Ray tracing: the copies within 60 m of the eye whose mesh has a bottom level join the top level each frame
+//! (nearest first, at most 2,048, after every submitted draw), so near foliage still shadows traced lights, bounces
+//! light and shows in a reflection. Farther copies are raster-only.
+//!
+//! What a batch does not have, so what stays with `submit`: ray tracing past that reach, the mesh SDF, virtual shadow pages (cascades only), motion of its own (copies stand still; wind still
 //! sways them), vertex paint, the game and editor highlights, reflection captures, and back-face culling: batches
 //! draw two-sided, as foliage does.
 
@@ -42,6 +45,28 @@ pub struct InstanceBatch {
     pub parts: Vec<BatchPart>,
     /// World transforms, one per copy.
     pub placements: Vec<Mat4>,
+}
+
+/// A copy whose mesh has a bottom level: what the top level needs to trace it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TracedCopy {
+    /// Its slot within its batch.
+    pub slot: u32,
+    pub vertex_offset: u32,
+    pub model: Mat4,
+    /// It stops shadow rays (the renderer's `traces_shadow`).
+    pub shadow: bool,
+    /// Its part's horizontal draw band: traced only where it is drawn.
+    pub near: f32,
+    pub far: f32,
+}
+
+/// A batch's traced copies and the horizontal box their origins span.
+struct Traced {
+    start: u32,
+    copies: Vec<TracedCopy>,
+    lo: [f32; 2],
+    hi: [f32; 2],
 }
 
 /// One copy of one part, as `instance_batch.wgsl` reads it.
@@ -304,6 +329,7 @@ pub struct BatchShadowDraws<'a> {
 #[derive(Default)]
 pub(crate) struct InstanceBatches {
     batches: crate::fast_hash::FastMap<u64, (u32, u32)>,
+    traced: crate::fast_hash::FastMap<u64, Traced>,
     ranges: SlotRanges,
     pending: Vec<Write>,
     revision: u64,
@@ -317,8 +343,9 @@ pub(crate) struct InstanceBatches {
 }
 
 impl InstanceBatches {
-    /// Replace batch `id` with `slots` (empty removes it). Uploaded on the next [`Self::flush`].
-    pub(crate) fn set(&mut self, id: u64, slots: Vec<GpuSlot>) {
+    /// Replace batch `id` with `slots` (empty removes it), `traced` naming those of them the top level may trace.
+    /// Uploaded on the next [`Self::flush`].
+    pub(crate) fn set(&mut self, id: u64, slots: Vec<GpuSlot>, traced: Vec<TracedCopy>) {
         self.remove(id);
         if slots.is_empty() {
             return;
@@ -326,6 +353,15 @@ impl InstanceBatches {
         let len = u32::try_from(slots.len()).unwrap_or(u32::MAX);
         let start = self.ranges.alloc(len);
         self.batches.insert(id, (start, len));
+        if !traced.is_empty() {
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for copy in &traced {
+                let at = copy.model.w_axis;
+                lo = [lo[0].min(at.x), lo[1].min(at.z)];
+                hi = [hi[0].max(at.x), hi[1].max(at.z)];
+            }
+            self.traced.insert(id, Traced { start, copies: traced, lo, hi });
+        }
         self.pending.push(Write::Slots(start, slots));
         self.revision = self.revision.wrapping_add(1);
     }
@@ -334,6 +370,7 @@ impl InstanceBatches {
         let Some((start, len)) = self.batches.remove(&id) else {
             return false;
         };
+        self.traced.remove(&id);
         self.ranges.release(start, len);
         self.pending.push(Write::Free(start, len));
         self.revision = self.revision.wrapping_add(1);
@@ -512,6 +549,27 @@ impl InstanceBatches {
         self.shadow_culled = Some(compact);
     }
 
+    /// The traced copies within `reach` horizontal metres of `eye` whose part is drawn at that distance, as the top
+    /// level's `(instance index, vertex offset, model, stops shadow rays)`, appended to `out`.
+    pub(crate) fn traced_near(&self, eye: glam::Vec3, reach: f32, out: &mut Vec<(u32, u32, Mat4, bool)>) {
+        let (ex, ez) = (eye.x, eye.z);
+        for traced in self.traced.values() {
+            let dx = (traced.lo[0] - ex).max(ex - traced.hi[0]).max(0.0);
+            let dz = (traced.lo[1] - ez).max(ez - traced.hi[1]).max(0.0);
+            if dx * dx + dz * dz > reach * reach {
+                continue;
+            }
+            for copy in &traced.copies {
+                let at = copy.model.w_axis;
+                let d2 = (at.x - ex) * (at.x - ex) + (at.z - ez) * (at.z - ez);
+                if d2 > reach * reach || (copy.far > 0.0 && d2 > copy.far * copy.far) || d2 < copy.near * copy.near {
+                    continue;
+                }
+                out.push((self.instance_base + traced.start + copy.slot, copy.vertex_offset, copy.model, copy.shadow));
+            }
+        }
+    }
+
     /// The shadow draws [`Self::record_shadow_cull`] made this frame, if it ran.
     pub(crate) fn shadow_draws(&self) -> Option<BatchShadowDraws<'_>> {
         let compact = self.shadow_culled?;
@@ -580,10 +638,10 @@ mod tests {
             shadow_far: 0.0,
         };
         let slot = GpuSlot::new(&part, Mat4::IDENTITY, Some(([0.0; 3], [1.0; 3])));
-        batches.set(7, vec![slot; 100]);
-        batches.set(8, vec![slot; 50]);
+        batches.set(7, vec![slot; 100], Vec::new());
+        batches.set(8, vec![slot; 50], Vec::new());
         assert_eq!(batches.slot_end(), 150);
-        batches.set(7, vec![slot; 20]);
+        batches.set(7, vec![slot; 20], Vec::new());
         // The first 20 of 7's old range, then 8's.
         assert_eq!(batches.batches[&7], (0, 20));
         assert_eq!(batches.slot_end(), 150);
@@ -592,6 +650,43 @@ mod tests {
         batches.clear();
         assert!(batches.is_empty());
         assert_eq!(batches.batch_count(), 0);
+    }
+
+    #[test]
+    fn near_copies_are_traced_where_they_are_drawn() {
+        let mut batches = InstanceBatches::default();
+        let part = BatchPart {
+            vertex_offset: 4,
+            index_offset: 0,
+            index_count: 3,
+            material_id: 0,
+            local: Mat4::IDENTITY,
+            near: 0.0,
+            far: 0.0,
+            casts_shadow: true,
+            shadow_far: 0.0,
+        };
+        let copy = |slot: u32, x: f32, near: f32, far: f32| TracedCopy {
+            slot,
+            vertex_offset: 4,
+            model: Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
+            shadow: true,
+            near,
+            far,
+        };
+        let slot = GpuSlot::new(&part, Mat4::IDENTITY, None);
+        // One batch near the eye: a copy at 5 m, a far LOD (from 20 m) at 5 m, one at 80 m; a second batch 500 m away.
+        batches.set(1, vec![slot; 4], vec![copy(0, 5.0, 0.0, 0.0), copy(1, 5.0, 20.0, 0.0), copy(3, 80.0, 0.0, 0.0)]);
+        batches.set(2, vec![slot; 2], vec![copy(0, 500.0, 0.0, 0.0)]);
+        batches.instance_base = 1000;
+        let mut out = Vec::new();
+        batches.traced_near(glam::Vec3::ZERO, 60.0, &mut out);
+        let indices: Vec<u32> = out.iter().map(|t| t.0).collect();
+        assert_eq!(indices, [1000], "only the near copy drawn at its distance, at its instance");
+        batches.remove(1);
+        out.clear();
+        batches.traced_near(glam::Vec3::new(500.0, 0.0, 0.0), 60.0, &mut out);
+        assert_eq!(out.iter().map(|t| t.0).collect::<Vec<_>>(), [1004], "batch 2's slot after batch 1's four");
     }
 }
 
