@@ -40,7 +40,7 @@ use crate::{
     CombatQuery, CombatantId, DamageType, Relations, Resistances, Rng, TeamId, Vitals, WorldHit, ai,
 };
 use glam::Vec3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A body's size, for hurt volumes and movement.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1992,6 +1992,65 @@ impl CombatWorld {
             })
     }
 
+    /// [`CombatWorld::separation`] for many bodies at once, with the same bits
+    /// (the same terms summed in the same order), but from the bodies in the
+    /// neighbouring cells of a grid twice the largest radius wide instead of
+    /// from everyone: a crowd's pushes cost what is near each body.
+    #[must_use]
+    pub fn separations(&self, ids: &[CombatantId]) -> Vec<(CombatantId, Vec3)> {
+        // In id order, as `separation` folds them.
+        let others: Vec<&Combatant> = self
+            .combatants
+            .values()
+            .filter(|o| o.alive() && o.mount.is_none())
+            .collect();
+        // Two bodies push only when closer than their radii together.
+        let cell = self
+            .combatants
+            .values()
+            .map(|c| c.body.radius)
+            .fold(0.0f32, f32::max)
+            .mul_add(2.0, 1e-3)
+            .max(0.1);
+        let key = |p: Vec3| ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
+        let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, o) in others.iter().enumerate() {
+            grid.entry(key(o.position)).or_default().push(i);
+        }
+        let mut near = Vec::new();
+        ids.iter()
+            .map(|&id| {
+                let Some(me) = self.combatants.get(&id) else {
+                    return (id, Vec3::ZERO);
+                };
+                let (x, z) = key(me.position);
+                near.clear();
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        let at = (x.saturating_add(dx), z.saturating_add(dz));
+                        near.extend(grid.get(&at).into_iter().flatten().copied());
+                    }
+                }
+                near.sort_unstable();
+                near.dedup();
+                let push = near
+                    .iter()
+                    .map(|&i| others[i])
+                    .filter(|o| o.id != id)
+                    .fold(Vec3::ZERO, |push, o| {
+                        let d = flat(me.position - o.position);
+                        let (len, min) = (d.length(), me.body.radius + o.body.radius);
+                        if len < min && len > 1e-4 {
+                            push + d / len * (min - len) * 0.5
+                        } else {
+                            push
+                        }
+                    });
+                (id, push)
+            })
+            .collect()
+    }
+
     /// The first standing spell wall (stone, ice, force) that stops an upright
     /// capsule standing on `feet` (`radius`, overall `height`) moved by
     /// `delta`, for a host's controller to add to its own world. A wall raised
@@ -2061,7 +2120,8 @@ impl CombatWorld {
             })
             .collect();
         // Pushes from where everyone stood before anyone moved.
-        let pushes: Vec<Vec3> = bodies.iter().map(|b| self.separation(b.0)).collect();
+        let ids: Vec<CombatantId> = bodies.iter().map(|b| b.0).collect();
+        let pushes: Vec<Vec3> = self.separations(&ids).into_iter().map(|(_, push)| push).collect();
         for ((id, position, radius, alive), push) in bodies.iter().copied().zip(pushes) {
             let Some(c) = self.combatants.get(&id) else {
                 continue;
