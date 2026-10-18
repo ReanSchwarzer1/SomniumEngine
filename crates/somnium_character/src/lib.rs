@@ -15,7 +15,7 @@
 //!
 //! ```text
 //!            ┌── jump ──▶ Air ── lands ──▶ Ground
-//!  Ground ───┤── walks off an edge ──▶ Air
+//!  Ground ───┤── walks off an edge ──▶ Air (holding climb over a gap with ground across: a leap)
 //!            ├── pushes into a ledge it can reach ──▶ Mantle (vault ≤ 1.25 m, climb ≤ 2.3 m) ──▶ Ground
 //!            └── water deeper than the chest ──▶ Swim ── shore underfoot ──▶ Ground
 //!                                                  └── a bank it can reach ──▶ Mantle
@@ -145,12 +145,38 @@ pub struct Mantle {
     pub duration: f32,
 }
 
+/// Fraction of a mantle spent rising along the wall, hands on the edge; the
+/// rest carries the feet over the top.
+pub const MANTLE_LIFT: f32 = 0.65;
+
+/// Longest jump [`Controller::find_landing`] follows, seconds.
+pub const LEAP_SECONDS: f32 = 1.5;
+
 impl Mantle {
+    /// How far through the move, 0 at the start to 1 standing on top.
+    #[must_use]
+    pub fn progress(&self) -> f32 {
+        (self.t / self.duration.max(1e-3)).clamp(0.0, 1.0)
+    }
+
+    /// Seconds until the body stands on top.
+    #[must_use]
+    pub fn remaining(&self) -> f32 {
+        (self.duration - self.t).max(0.0)
+    }
+
+    /// Hands on the edge and rising, the feet not yet over the top: the body
+    /// can neither strike nor guard, and is easiest to knock off.
+    #[must_use]
+    pub fn vulnerable(&self) -> bool {
+        self.progress() < MANTLE_LIFT
+    }
+
     /// Feet position along the move: up the wall first, then over the top.
     #[must_use]
     pub fn position(&self) -> Vec3 {
-        let u = (self.t / self.duration.max(1e-3)).clamp(0.0, 1.0);
-        let lift = 0.65;
+        let u = self.progress();
+        let lift = MANTLE_LIFT;
         if u < lift {
             let k = u / lift;
             let k = k * k * (3.0 - 2.0 * k);
@@ -188,7 +214,11 @@ pub struct MoveInput {
     pub velocity: Vec3,
     /// Jump pressed: facing a reachable ledge it vaults or climbs instead.
     pub jump: bool,
-    /// Held: pushing into a reachable ledge mantles it (on foot, mid-air, swimming).
+    /// Held: pushing into a reachable ledge mantles it (on foot, mid-air,
+    /// swimming), and walking off an edge over a gap with ground to land on
+    /// across it ([`Controller::find_landing`]) leaps it. Water below an
+    /// edge is never leapt this way: it is dropped into, swum, and climbed
+    /// out of (press `jump` to jump it).
     pub climb: bool,
 }
 
@@ -414,6 +444,47 @@ impl Controller {
         })
     }
 
+    /// Where a jump from `feet` at the planar `velocity` comes down: walkable
+    /// ground no lower than a step below the take-off, found by sweeping the
+    /// capsule along the jump's arc for up to [`LEAP_SECONDS`]. None when the
+    /// arc meets a wall or a roof first, or falls past that height. A brain
+    /// can ask it too, to tell a gap it can leap from one it cannot.
+    #[must_use]
+    pub fn find_landing(&self, terrain: &impl Terrain, feet: Vec3, velocity: Vec3) -> Option<Vec3> {
+        let c = &self.config;
+        let mut v = Vec3::new(velocity.x, c.jump_speed, velocity.z);
+        if !v.is_finite() || Vec3::new(v.x, 0.0, v.z).length_squared() < 0.25 {
+            return None;
+        }
+        let lowest = feet.y - c.step;
+        let dt = 1.0 / 30.0;
+        let mut p = feet;
+        for _ in 0..(LEAP_SECONDS / dt) as usize {
+            let delta = v * dt;
+            if let Some(hit) = self.sweep(terrain, p, delta) {
+                let at = p + delta * hit.fraction;
+                return (v.y < 0.0 && self.walkable(hit.normal) && at.y >= lowest).then_some(at);
+            }
+            p += delta;
+            v.y -= c.gravity * dt;
+            if v.y < 0.0 && p.y < lowest {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The vault or climb under way, if any: its [`Mantle::progress`] and
+    /// [`Mantle::vulnerable`] are what a brain reads (a mantle, once begun,
+    /// always runs to its end).
+    #[must_use]
+    pub fn mantle(&self) -> Option<&Mantle> {
+        match &self.mode {
+            Mode::Mantle(m) => Some(m),
+            _ => None,
+        }
+    }
+
     fn start_mantle(&mut self, mantle: Mantle, events: &mut Vec<LocomotionEvent>) {
         events.push(LocomotionEvent::MantleStarted {
             kind: mantle.kind,
@@ -520,6 +591,21 @@ impl Controller {
             _ => {
                 self.mode = Mode::Air;
                 self.velocity.y = 0.0;
+                // Off an edge over a hole, holding climb, with ground to land
+                // on across it: leap the gap instead of dropping into it.
+                // Water below is dropped into (swum, then climbed out of).
+                let ahead = self.feet + horizontal.normalize_or_zero() * c.radius * 2.0;
+                let water = [self.feet, ahead]
+                    .iter()
+                    .any(|p| terrain.water_surface(p.x, p.z).is_some());
+                if input.climb
+                    && !water
+                    && self.probe_ground(terrain, self.feet, c.step).is_none()
+                    && self.find_landing(terrain, self.feet, horizontal).is_some()
+                {
+                    self.velocity.y = c.jump_speed;
+                    events.push(LocomotionEvent::Jumped);
+                }
             }
         }
         if let Some(depth) = self.depth(terrain)

@@ -6,6 +6,8 @@
 //! owns its execution state and blackboard.
 
 pub mod behavior;
+pub mod cover;
+pub mod formation;
 pub mod navigation;
 pub mod perception;
 pub mod script;

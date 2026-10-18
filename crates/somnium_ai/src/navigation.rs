@@ -457,12 +457,96 @@ pub struct OffMeshLink {
     /// Nonnegative additional traversal cost, in metres.
     pub cost: f32,
 }
+/// How a body crosses an off-mesh link, for the gameplay that moves it. Set
+/// per link with [`NavWorld::set_link_kind`]; unset is [`LinkKind::Auto`].
+/// Path costs do not depend on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkKind {
+    /// Decided by the rise from where the link is entered to where it is
+    /// left ([`LinkKind::resolve`]): up past [`LinkKind::LEVEL`] climbs, down
+    /// past it drops, level jumps.
+    #[default]
+    Auto,
+    /// Up a ledge or over a wall: run into it holding climb (a vault or a
+    /// climb).
+    Climb,
+    /// Across a gap (or a low wall), level or rising: leap from its edge.
+    Jump,
+    /// Down: walk off the edge.
+    Drop,
+    /// Into or out of water: in by dropping or wading in, out by climbing
+    /// the bank.
+    Swim,
+}
+
+impl LinkKind {
+    /// Rise or fall within which an [`LinkKind::Auto`] link counts as level.
+    pub const LEVEL: f32 = 0.5;
+
+    /// This kind for a link crossed from `from` to `to`, with
+    /// [`LinkKind::Auto`] decided by the rise; never `Auto`.
+    pub fn resolve(self, from: Vec3, to: Vec3) -> Self {
+        match self {
+            Self::Auto => {
+                let rise = to.y - from.y;
+                if rise > Self::LEVEL {
+                    Self::Climb
+                } else if rise < -Self::LEVEL {
+                    Self::Drop
+                } else {
+                    Self::Jump
+                }
+            }
+            kind => kind,
+        }
+    }
+}
+
+/// One stretch of a [`NavPath`], from a corner to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathLeg {
+    /// Where it starts.
+    pub from: Vec3,
+    /// Where it ends.
+    pub to: Vec3,
+    /// The off-mesh link it crosses and how (never [`LinkKind::Auto`]), or
+    /// `None` on the mesh.
+    pub link: Option<(u64, LinkKind)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavPath {
     pub points: Vec<Vec3>,
     pub links: Vec<u64>,
     /// Changes after install/unload; agents replan if their path is stale.
     pub revision: u64,
+}
+
+impl NavPath {
+    /// The path as legs, each marked when it crosses one of the path's
+    /// links: a leg whose ends sit within the link's radius of the link's
+    /// ends (either way for a bidirectional link). Gameplay walking the
+    /// corners reads how to cross each link from here.
+    pub fn legs(&self, nav: &NavWorld) -> Vec<PathLeg> {
+        let links: Vec<&OffMeshLink> = self.links.iter().filter_map(|id| nav.link(*id)).collect();
+        let near = |a: Vec3, b: Vec3, r: f32| a.distance(b) <= r + 1e-3;
+        self.points
+            .windows(2)
+            .map(|w| {
+                let (from, to) = (w[0], w[1]);
+                let link = links
+                    .iter()
+                    .find(|l| {
+                        (near(from, l.start, l.radius) && near(to, l.end, l.radius))
+                            || (l.bidirectional
+                                && near(from, l.end, l.radius)
+                                && near(to, l.start, l.radius))
+                    })
+                    .map(|l| (l.id, nav.link_kind(l.id).resolve(from, to)));
+                PathLeg { from, to, link }
+            })
+            .collect()
+    }
 }
 #[derive(Clone, Copy, Debug)]
 struct Edge {
@@ -478,6 +562,9 @@ pub struct NavWorld {
     polygons: Vec<NavPolygon>,
     adjacency: Vec<Vec<Edge>>,
     revision: u64,
+    /// By link id; kept when a link is removed and set again (an editor
+    /// re-syncing a moved link keeps its kind).
+    kinds: BTreeMap<u64, LinkKind>,
 }
 impl NavWorld {
     pub fn revision(&self) -> u64 {
@@ -538,6 +625,19 @@ impl NavWorld {
     /// An installed link, for a caller walking a [`NavPath`] that names it.
     pub fn link(&self, id: u64) -> Option<&OffMeshLink> {
         self.links.get(&id)
+    }
+    /// How the link `id` is crossed (before or after it is set);
+    /// [`LinkKind::Auto`] forgets it. Paths do not change.
+    pub fn set_link_kind(&mut self, id: u64, kind: LinkKind) {
+        if kind == LinkKind::Auto {
+            self.kinds.remove(&id);
+        } else {
+            self.kinds.insert(id, kind);
+        }
+    }
+    /// How the link `id` is crossed; [`LinkKind::Auto`] unless set.
+    pub fn link_kind(&self, id: u64) -> LinkKind {
+        self.kinds.get(&id).copied().unwrap_or_default()
     }
     fn nearest_index(&self, point: Vec3, max_distance: f32) -> Option<(usize, Vec3)> {
         if !point.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {

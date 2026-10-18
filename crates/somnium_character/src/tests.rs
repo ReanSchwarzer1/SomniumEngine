@@ -497,3 +497,151 @@ fn a_sledge_runs_downhill_steers_and_brakes() {
     run(&mut w, &t, walk(-1.5), 2.0);
     assert!((w.velocity.z + 1.5).abs() < 0.05, "{}", w.velocity);
 }
+
+/// Two platforms level with the start, `width` apart, over a pit three
+/// metres deep.
+fn gap(width: f32) -> Boxes {
+    Boxes::floor(-3.0)
+        .block(Vec3::new(-5.0, -3.0, -10.0), Vec3::new(5.0, 0.0, 0.0))
+        .block(
+            Vec3::new(-5.0, -3.0, width),
+            Vec3::new(5.0, 0.0, width + 8.0),
+        )
+}
+
+fn run_holding_climb(z: f32) -> MoveInput {
+    MoveInput {
+        velocity: Vec3::new(0.0, 0.0, z),
+        climb: true,
+        ..MoveInput::default()
+    }
+}
+
+#[test]
+fn holding_climb_leaps_a_gap_with_ground_across() {
+    let t = gap(2.0);
+    let mut c = at(0.0, 0.02, -3.0);
+    assert!(
+        c.find_landing(&t, Vec3::ZERO, Vec3::Z * 3.6).is_some(),
+        "a landing across"
+    );
+    let events = run(&mut c, &t, run_holding_climb(3.6), 2.5);
+    assert!(events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    assert!(
+        c.grounded() && c.feet.y.abs() < 0.05 && c.feet.z > 2.0,
+        "landed across: {} {:?}",
+        c.feet,
+        c.mode
+    );
+}
+
+#[test]
+fn without_climb_or_ground_in_reach_it_drops_into_the_gap() {
+    let mut c = at(0.0, 0.02, -3.0);
+    let events = run(&mut c, &gap(2.0), walk(3.6), 2.5);
+    assert!(!events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    assert!(c.feet.y < -2.9, "in the pit: {}", c.feet);
+    let wide = gap(6.0);
+    let mut c = at(0.0, 0.02, -3.0);
+    assert!(c.find_landing(&wide, Vec3::ZERO, Vec3::Z * 3.6).is_none());
+    let events = run(&mut c, &wide, run_holding_climb(3.6), 2.5);
+    assert!(!events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    assert!(c.feet.y < -2.9, "too wide to leap: {}", c.feet);
+}
+
+#[test]
+fn a_step_down_is_walked_not_leapt() {
+    let t = Boxes::floor(-0.38).block(Vec3::new(-5.0, -0.38, -10.0), Vec3::new(5.0, 0.0, 0.0));
+    let mut c = at(0.0, 0.02, -3.0);
+    let events = run(&mut c, &t, run_holding_climb(3.6), 2.0);
+    assert!(!events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    assert!(c.grounded() && (c.feet.y + 0.38).abs() < 0.05, "{}", c.feet);
+}
+
+#[test]
+fn a_mantle_reports_its_progress_and_its_vulnerable_lift() {
+    let ledge = Boxes::floor(0.0).block(Vec3::new(-3.0, 0.0, 1.0), Vec3::new(3.0, 2.0, 4.0));
+    let mut c = at(0.0, 0.02, 0.0);
+    assert!(c.mantle().is_none());
+    let hold = MoveInput {
+        velocity: Vec3::Z * 2.0,
+        climb: true,
+        ..MoveInput::default()
+    };
+    let mut seen: Vec<(f32, f32, bool)> = Vec::new();
+    for _ in 0..180 {
+        c.step(DT, &hold, &ledge);
+        if let Some(m) = c.mantle() {
+            seen.push((m.progress(), m.remaining(), m.vulnerable()));
+        }
+        if !seen.is_empty() && c.mantle().is_none() {
+            break;
+        }
+    }
+    assert!(seen.len() > 20, "a climb of a second or so: {}", seen.len());
+    assert!(
+        seen.windows(2)
+            .all(|w| w[1].0 >= w[0].0 && w[1].1 <= w[0].1),
+        "{seen:?}"
+    );
+    assert!(
+        seen[0].0 < 0.1 && seen[0].2,
+        "begins hanging, vulnerable: {:?}",
+        seen[0]
+    );
+    let last = seen.last().unwrap();
+    assert!(last.0 > 0.9 && !last.2, "ends over the top: {last:?}");
+    assert!(c.mantle().is_none() && c.grounded());
+}
+
+/// A channel of deep water three metres wide (within a leap) between banks
+/// level with the start: dropped into and swum whether or not climb is held
+/// (water is entered by dropping in) and climbed out of holding climb; only
+/// a pressed jump clears it.
+#[test]
+fn a_channel_is_dropped_into_and_swum_unless_jumped() {
+    let t = Boxes::floor(-2.0)
+        .block(Vec3::new(-10.0, -2.0, -10.0), Vec3::new(10.0, 0.0, 0.0))
+        .block(Vec3::new(-10.0, -2.0, 3.0), Vec3::new(10.0, 0.0, 13.0))
+        .pool([-10.0, 0.0], [10.0, 3.0], -0.1);
+    let probe = at(0.0, 0.0, 0.0);
+    assert!(
+        probe
+            .find_landing(&t, Vec3::new(0.0, 0.0, -0.2), Vec3::Z * 3.6)
+            .is_some(),
+        "a leap would reach the far bank"
+    );
+    for input in [walk(3.6), run_holding_climb(3.6)] {
+        let mut c = at(0.0, 0.02, -2.0);
+        let mut events = run(&mut c, &t, input, 1.5);
+        events.extend(run(&mut c, &t, run_holding_climb(2.0), 4.0));
+        assert!(
+            events.contains(&LocomotionEvent::EnteredWater),
+            "{events:?}"
+        );
+        assert!(!events.contains(&LocomotionEvent::Jumped), "{events:?}");
+        assert!(
+            events.contains(&LocomotionEvent::LeftWater) && started(&events).is_some(),
+            "{events:?}"
+        );
+        assert!(
+            c.grounded() && c.feet.y.abs() < 0.05 && c.feet.z > 3.0,
+            "{}",
+            c.feet
+        );
+    }
+    // A jump pressed at the bank's edge clears it.
+    let mut c = at(0.0, 0.02, -2.0);
+    let mut events = Vec::new();
+    while c.feet.z < -0.25 {
+        events.extend(c.step(DT, &walk(3.6), &t));
+    }
+    events.extend(press_jump(&mut c, &t, Vec3::Z * 3.6));
+    events.extend(run(&mut c, &t, walk(3.6), 1.5));
+    assert!(events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    assert!(
+        !events.contains(&LocomotionEvent::EnteredWater),
+        "{events:?}"
+    );
+    assert!(c.grounded() && c.feet.z > 3.0, "{}", c.feet);
+}
