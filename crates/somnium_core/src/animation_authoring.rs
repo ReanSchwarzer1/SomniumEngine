@@ -336,6 +336,10 @@ struct BoundAnimation {
 #[derive(Default)]
 pub struct AnimationAuthoringSystem {
     states: HashMap<Entity, BoundAnimation>,
+    /// Where Animation LOD measures from (the camera), if anywhere.
+    viewer: Option<Vec3>,
+    /// Seconds each LOD-thinned rig is owed.
+    owed: HashMap<Entity, f32>,
 }
 
 fn source_settings(mut settings: AnimationAuthoring) -> AnimationAuthoring {
@@ -615,6 +619,12 @@ impl AnimationAuthoringSystem {
             settings.status = "Ready".into();
         }
     }
+    /// Where [`crate::animation_lod::AnimationLod`] measures from: the camera.
+    /// `None` evaluates every rig every frame.
+    pub fn set_viewer(&mut self, viewer: Option<Vec3>) {
+        self.viewer = viewer.filter(|v| v.is_finite());
+    }
+
     /// Advance live authored rigs and return named gameplay/sound hooks. The app
     /// may route the returned events; Details always displays the last event.
     pub fn update(
@@ -640,9 +650,33 @@ impl AnimationAuthoringSystem {
         for entity in removed {
             self.reset(world, physics.as_deref_mut(), entity);
             self.states.remove(&entity);
+            self.owed.remove(&entity);
         }
         let mut fired = Vec::new();
         for entity in entities {
+            // Animation LOD (opt-in): far rigs less often and without the
+            // detail, culled ones not at all; skipped time is owed. A rig not
+            // yet built is built once whatever the distance.
+            let mut dt = delta_seconds;
+            let mut detail = true;
+            if let Some(lod) = world
+                .get::<crate::animation_lod::AnimationLod>(entity)
+                .copied()
+                .filter(|l| l.enabled)
+                && let Some(viewer) = self.viewer
+                && self.states.contains_key(&entity)
+            {
+                let at = entity_matrix(world, entity, None).map_or(viewer, |m| m.w_axis.truncate());
+                let owed = self.owed.entry(entity).or_insert(0.0);
+                *owed += delta_seconds;
+                match lod.step(at.distance(viewer), owed) {
+                    crate::animation_lod::AnimationStep::Evaluate { seconds, detail: d } => {
+                        dt = seconds;
+                        detail = d;
+                    }
+                    crate::animation_lod::AnimationStep::Wait => continue,
+                }
+            }
             let settings = world.get::<AnimationAuthoring>(entity).unwrap().clone();
             let authored = source_settings(settings.clone());
             let rebuild = self
@@ -696,15 +730,19 @@ impl AnimationAuthoringSystem {
                 let _ = p.destroy_ragdoll(id);
             }
             state.authored = authored;
-            let result = advance_rig(
-                state,
-                world,
-                physics.as_deref_mut(),
-                jobs,
-                entity,
-                &settings,
-                delta_seconds,
-            );
+            let lean;
+            let run = if detail {
+                &settings
+            } else {
+                lean = AnimationAuthoring {
+                    ik_weight: 0.0,
+                    foot_ik: false,
+                    look_weight: 0.0,
+                    ..settings.clone()
+                };
+                &lean
+            };
+            let result = advance_rig(state, world, physics.as_deref_mut(), jobs, entity, run, dt);
             let fields = world.get_mut::<AnimationAuthoring>(entity).unwrap();
             match result {
                 Ok(events) => {

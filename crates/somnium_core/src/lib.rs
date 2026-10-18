@@ -2936,5 +2936,6 @@ impl somnium_ecs::Component for AssetEditSession {}
 
 /// Native animation preview controls, visible rigs and runtime clip binding.
 pub mod animation_authoring;
+pub mod animation_lod;
 
 mod prefab_details;
