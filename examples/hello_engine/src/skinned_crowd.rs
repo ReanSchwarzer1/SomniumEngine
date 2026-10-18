@@ -11,7 +11,10 @@
 //! for it. With **LOD 1** and **LOD 2** set (the same skeleton and clips, fewer
 //! triangles: WS3's `<name>_lod1.glb`, `<name>_lod2.glb`), a body draws them
 //! beyond their distances, switching a couple of metres past each line and
-//! back a couple short of it so a body on the line does not flicker.
+//! back a couple short of it so a body on the line does not flicker. A count
+//! budget caps the dear levels whatever the distances: only the nearest 24
+//! bodies draw LOD 0 and the next 96 LOD 1 (the renderer skins about 2 M
+//! vertices, WS3's crowd contract), so a packed market stays inside it.
 //!
 //! A **Skinned Socket** (`hello.SkinnedSocket`) on an entity under a Skinned
 //! Body makes it follow one of the body's joints (`weapon_r`, `sheath`,
@@ -71,7 +74,7 @@ impl Default for SkinnedBody {
             time: 0.0,
             lod1: AssetId::NONE,
             lod2: AssetId::NONE,
-            lod1_beyond: 25.0,
+            lod1_beyond: 20.0,
             lod2_beyond: 60.0,
         }
     }
@@ -202,6 +205,9 @@ struct Body {
     /// The source of the level it draws now.
     source: AssetId,
     level: usize,
+    /// Its posed vertices were refused (the skinned budget is full): when to
+    /// ask again.
+    retry: Option<Instant>,
     /// Its posed copy of each shared mesh, while within the cull distance.
     skins: Vec<(AnimatedMeshId, u32)>,
     clock: f32,
@@ -304,6 +310,24 @@ fn levels(b: &SkinnedBody) -> Vec<AssetId> {
                 .take_while(|id| *id != AssetId::NONE),
         )
         .collect()
+}
+
+/// The most bodies drawing LOD 0, and LOD 1, the nearest first.
+const LOD0_MOST: usize = 24;
+const LOD1_MOST: usize = 96;
+
+/// The finest level the count budget allows the `rank`-th nearest body: LOD 0
+/// for the nearest [`LOD0_MOST`], LOD 1 for the next [`LOD1_MOST`], LOD 2 for
+/// the rest. A body keeps a finer level two places past its line, so two
+/// neighbours at the line do not trade every frame.
+fn budget_level(rank: usize, current: usize) -> usize {
+    let lines = [LOD0_MOST, LOD0_MOST + LOD1_MOST];
+    let want = lines.iter().filter(|line| rank >= **line).count();
+    if want > current && current < lines.len() && rank < lines[current] + 2 {
+        current
+    } else {
+        want
+    }
 }
 
 /// Metres past a line before a body switches level (and short of it before it
@@ -464,6 +488,17 @@ impl SkinnedBodies {
         }
         let started = Instant::now();
         let (mut drawn, mut sampled) = (0, 0);
+        // Nearest first, for the count budget.
+        let mut order: Vec<(f32, Entity)> = wanted
+            .iter()
+            .map(|(e, _, m)| (m.w_axis.truncate().distance(camera), *e))
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let rank: HashMap<Entity, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, (_, e))| (*e, i))
+            .collect();
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
@@ -473,7 +508,9 @@ impl SkinnedBodies {
                 current,
                 [settings.lod1_beyond, settings.lod2_beyond],
                 ids.len(),
-            );
+            )
+            .max(budget_level(rank[&e], current))
+            .min(ids.len() - 1);
             let id = ids[level];
             if !self.shared.contains_key(&id) {
                 if self.failed.contains_key(&id) {
@@ -515,6 +552,7 @@ impl SkinnedBodies {
                 Body {
                     source: id,
                     level,
+                    retry: None,
                     skins: Vec::new(),
                     clock: settings.time,
                     owed: 0.0,
@@ -535,6 +573,9 @@ impl SkinnedBodies {
                 continue;
             }
             if body.skins.is_empty() {
+                if body.retry.is_some_and(|at| Instant::now() < at) {
+                    continue;
+                }
                 for (index, rest, _) in &shared.meshes {
                     let mesh = &shared.asset.scene.meshes[*index];
                     let skin = mesh.skin.as_ref().expect("kept only skinned meshes");
@@ -549,15 +590,20 @@ impl SkinnedBodies {
                     ) {
                         Ok(posed) => body.skins.push(posed),
                         Err(error) => {
-                            warn!(%error, "skinned body could not be posed");
+                            // Once, not every frame: it asks again in a second.
+                            if body.retry.is_none() {
+                                warn!(%error, "skinned body could not be posed");
+                            }
                             break;
                         }
                     }
                 }
                 if body.skins.len() != shared.meshes.len() {
                     unregister(r, body);
+                    body.retry = Some(Instant::now() + std::time::Duration::from_secs(1));
                     continue;
                 }
+                body.retry = None;
             }
             let due = matches!(
                 self.lod.step(distance, &mut body.owed),
@@ -704,6 +750,7 @@ mod tests {
             Body {
                 source,
                 level: 0,
+                retry: None,
                 skins: Vec::new(),
                 clock: 0.5,
                 owed: 0.0,
@@ -719,6 +766,22 @@ mod tests {
         assert!(at(socket).abs_diff_eq(expected, 1e-5));
         let below = expected * Mat4::from_translation(Vec3::new(0.0, -0.2, 0.0));
         assert!(at(pommel).abs_diff_eq(below, 1e-5), "the subtree follows");
+    }
+
+    /// The count budget: the nearest 24 at LOD 0, the next 96 at LOD 1, the
+    /// rest at LOD 2, with two places of slack before a body is moved coarser.
+    #[test]
+    fn the_budget_keeps_the_dear_levels_for_the_nearest() {
+        assert_eq!(budget_level(0, 0), 0);
+        assert_eq!(budget_level(23, 0), 0);
+        assert_eq!(budget_level(24, 1), 1, "past the line, already coarser");
+        assert_eq!(budget_level(24, 0), 0, "within the slack");
+        assert_eq!(budget_level(26, 0), 1);
+        assert_eq!(budget_level(119, 1), 1);
+        assert_eq!(budget_level(121, 1), 1, "within the slack");
+        assert_eq!(budget_level(122, 1), 2);
+        assert_eq!(budget_level(5, 2), 0, "nearer is finer at once");
+        assert_eq!(budget_level(500, 0), 2);
     }
 
     /// Levels switch past each line with some slack either way, and never to
@@ -746,4 +809,3 @@ mod tests {
         assert_eq!(levels(&body).len(), 1, "LOD 2 without LOD 1 is not used");
     }
 }
-

@@ -56,7 +56,8 @@ Measured in a release build (the 150-home village, 344 agents): life costs about
 - **Skinned Body** draws a skinned glTF at its entity, playing a clip on the body's own clock. Its **Time** says where in the clip it starts, so a crowd is not in step.
   - A file is read once however many bodies use it.
   - Far bodies are posed less often. Past 160 m they are not drawn and cost the GPU nothing.
-  - **LOD 1** and **LOD 2** (lighter files with the same skeleton and clips) draw beyond their distances.
+  - **LOD 1** and **LOD 2** (lighter files with the same skeleton and clips) draw beyond their distances (20 m and 60 m by default).
+  - However close they stand, only the nearest 24 bodies draw full detail and the next 96 LOD 1, so a packed market stays inside the renderer's skinning budget.
 - **Skinned Socket**, on an entity under a Skinned Body, makes that entity follow one of the body's joints (`weapon_r`, `sheath`, `back`). The entity's own Transform is its offset from the joint. Put a sword under it and the sword stays in the hand.
 
 ## For captures
