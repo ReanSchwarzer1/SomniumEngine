@@ -961,7 +961,7 @@ struct Host<'a, Q: CombatQuery> {
 
 impl<Q: CombatQuery> Host<'_, Q> {
     fn find(&self, id: CombatantId) -> Option<&Seen> {
-        self.view.iter().find(|s| s.id == id)
+        find(self.view, id)
     }
 
     fn target(&self) -> Option<Seen> {
@@ -1056,12 +1056,12 @@ impl<Q: CombatQuery> Host<'_, Q> {
         }
         // Keep clear of friends, unless crossing a link (a leap goes straight).
         for s in self.view {
-            if leg.is_some() || s.id == self.me.id || !(self.allied)(s.id) {
+            if leg.is_some() || s.id == self.me.id {
                 continue;
             }
             let away = flat(self.me.position - s.position);
             let d = away.length();
-            if d < 1.6 && d > 1e-3 {
+            if d < 1.6 && d > 1e-3 && (self.allied)(s.id) {
                 dir += away / d * (1.6 - d) * 0.8;
             }
         }
@@ -1280,10 +1280,12 @@ impl<Q: CombatQuery> Host<'_, Q> {
                 let hurt = self
                     .view
                     .iter()
-                    .filter(|s| (self.allied)(s.id) && s.health < 0.5)
                     .filter(|s| {
-                        flat(s.position - self.me.position).length() <= asset.default_measure.range
+                        s.health < 0.5
+                            && flat(s.position - self.me.position).length()
+                                <= asset.default_measure.range
                     })
+                    .filter(|s| (self.allied)(s.id))
                     .min_by(|a, b| a.health.total_cmp(&b.health));
                 match hurt {
                     Some(s) => Bearing::Target(s.id),
@@ -1339,7 +1341,7 @@ impl<Q: CombatQuery> Host<'_, Q> {
         let threats: Vec<Vec3> = self
             .view
             .iter()
-            .filter(|s| (self.hostile)(s.id) && s.position.distance(self.me.position) < 30.0)
+            .filter(|s| s.position.distance(self.me.position) < 30.0 && (self.hostile)(s.id))
             .map(|s| s.position)
             .collect();
         if threats.is_empty() {
@@ -1917,6 +1919,13 @@ fn reflex(
     false
 }
 
+/// Someone in a snapshot (it is in id order).
+fn find(view: &[Seen], id: CombatantId) -> Option<&Seen> {
+    view.binary_search_by_key(&id, |s| s.id)
+        .ok()
+        .map(|i| &view[i])
+}
+
 /// Every brain's step: perceive (at ten hertz), react, decide.
 pub(crate) fn think(
     w: &mut CombatWorld,
@@ -1939,7 +1948,7 @@ pub(crate) fn think(
     let mut rng = std::mem::replace(&mut w.rng, Rng::new(1));
     let mut tactics = std::mem::take(&mut w.tactics);
     for id in ids {
-        let Some(me) = view.iter().find(|s| s.id == id).copied() else {
+        let Some(me) = find(&view, id).copied() else {
             continue;
         };
         let Some(mut brain) = w.combatant_mut(id).and_then(|c| c.brain.take()) else {
