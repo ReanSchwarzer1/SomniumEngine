@@ -125,6 +125,7 @@ pub mod lod_group;
 pub mod weather;
 /// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.
 pub mod world_partition;
+pub mod physics_handover;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
