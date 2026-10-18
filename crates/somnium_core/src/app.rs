@@ -9030,8 +9030,10 @@ impl<G: GameApp> Engine<G> {
             }
             // `SOMNIUM_FOLIAGE_BATCHES=1`: this terrain's foliage as instance batches, one per ground cell and kind,
             // set as cells come within reach, and each copy's parts chosen by distance on the GPU
-            // (`foliage_batches.rs`). Not with a falloff curve, which scales every copy every frame.
-            if batched && lod_falloff.is_empty() {
+            // (`foliage_batches.rs`). Not with a falloff curve, which scales every copy every frame. The painted
+            // instances then skip the per-instance loop below; anything else it draws still goes through it.
+            let painted_batched = batched && lod_falloff.is_empty();
+            if painted_batched {
                 let piece = |p: &FoliagePart| crate::foliage_batches::Piece {
                     vertex_offset: p.vertex_offset,
                     index_offset: p.index_offset,
@@ -9071,13 +9073,12 @@ impl<G: GameApp> Engine<G> {
                     &parts,
                 );
                 counts.submitted_instances = counts.submitted_instances.saturating_add(copies);
-                continue;
             }
             // Only the ground cells within the farthest kind's reach are visited.
             let reach_sq = kinds.iter().map(|k| kind_cull[*k as usize]).fold(0.0_f32, f32::max);
             let reach = if reach_sq >= f32::MAX { f32::INFINITY } else { reach_sq.sqrt() };
             self.foliage_visit.clear();
-            if let Some(grid) = self.foliage_grids.get(&terrain_id) {
+            if let Some(grid) = self.foliage_grids.get(&terrain_id).filter(|_| !painted_batched) {
                 grid.visit([camera_local.x, camera_local.z], reach, |i| self.foliage_visit.push(i));
             }
             let focus_local = crate::ground_cover::view_focus(
