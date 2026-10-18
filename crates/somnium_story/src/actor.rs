@@ -4,7 +4,7 @@
 //! Promoted from The Somnus Fracture's story actor, which did all of this inside one game's renderer. Here it is the
 //! part every game shares and nothing renders: a [`Director`] fed the conversation's beats and the story's commands,
 //! answering per cast id with an [`ActorState`] the game's animation layer (or a script, through the engine's
-//! `somnium.StoryActor` component) applies to the character: blend in the talk clip while `talking`, open the jaw by
+//! `somnium.CastMember` component) applies to the character: blend in the talk clip while `talking`, open the jaw by
 //! `jaw`, close the lids by `lids`, aim the head at `look`, play `gesture`, walk to `mark`.
 //!
 //! Scenes direct actors with three commands a game declares in its manifest (the director reads them by name from

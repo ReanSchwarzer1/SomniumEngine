@@ -42,7 +42,7 @@ Select a node to edit it in the inspector on the right. Long text has room there
 
 ## Story actors
 
-Add **Story Actor** to a character and set **Speaker** to its id in the manifest's cast. During a scene the game updates the read-only Performance fields: talking, jaw, lids, expression, look, gesture and mark. When **Drive Look** is on, a rig's Look At turns to whoever the scene says. Scripts can read the Performance fields.
+Add **Cast Member** to a character and set **Speaker** to its id in the manifest's cast. During a scene the game updates the read-only Performance fields: talking, jaw, lids, expression, look, gesture and mark. When **Drive Look** is on, a rig's Look At turns to whoever the scene says. Scripts can read the Performance fields.
 
 ## Tools and automation
 

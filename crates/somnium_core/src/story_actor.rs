@@ -1,10 +1,13 @@
-//! `somnium.StoryActor`: a character in the story's cast, performing what the story's
+//! `somnium.CastMember`: a character in the story's cast, performing what the story's
 //! [`Director`](somnium_story::actor::Director) says.
 //!
 //! The game owns the story and its director; each frame it calls [`sync`] and the component's
 //! read-only outputs (talking, jaw, lids, expression, gesture, mark, look) follow, for the Details
 //! panel and scripts. A rig with an `Animation` component on the same entity also gets its Look At
 //! aimed, when `drive_look` is on. Only what changed is written.
+//!
+//! Not `StoryActor`: scripts reach a component by the last part of its id, and The Somnus Fracture's
+//! `tsf.StoryActor` already answers to `storyActor`.
 
 use crate::Name;
 use somnium_ecs::{Component, Entity, FieldFlags, TypeRegistry, World, component_schema};
@@ -12,7 +15,7 @@ use somnium_story::actor::{Director, Look};
 
 /// A cast member on an entity: its settings, and the director's performance as read-only outputs.
 #[derive(Clone, Debug, PartialEq)]
-pub struct StoryActorComponent {
+pub struct CastMemberComponent {
     /// The cast id in the story manifest.
     pub speaker: String,
     /// Aim the rig's Look At (an `Animation` component on this entity) where the director says.
@@ -35,9 +38,9 @@ pub struct StoryActorComponent {
     pub mark: String,
 }
 
-impl Component for StoryActorComponent {}
+impl Component for CastMemberComponent {}
 
-impl Default for StoryActorComponent {
+impl Default for CastMemberComponent {
     fn default() -> Self {
         Self {
             speaker: String::new(),
@@ -54,11 +57,11 @@ impl Default for StoryActorComponent {
     }
 }
 
-/// Register `somnium.StoryActor`.
+/// Register `somnium.CastMember`.
 pub fn register(registry: &mut TypeRegistry) {
     let out = FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ);
     registry.register(component_schema! {
-        StoryActorComponent as "somnium.StoryActor", display "Story Actor", version 1,
+        CastMemberComponent as "somnium.CastMember", display "Cast Member", version 1,
         fields {
             speaker { group: "Cast", doc: "The cast id in the story manifest (`cast[].id`)." },
             drive_look { group: "Look", doc: "Aim this entity's Animation Look At at whom the scene says." },
@@ -78,7 +81,7 @@ pub fn register(registry: &mut TypeRegistry) {
 /// (`Look::Player`, `Look::Mark`) for the Look At; other actors are found by their speaker.
 pub fn sync(world: &mut World, director: &Director, target: impl Fn(&Look) -> Option<Entity>) {
     let actors: Vec<(Entity, String)> = world
-        .iter_with::<StoryActorComponent>()
+        .iter_with::<CastMemberComponent>()
         .map(|(entity, actor)| (entity, actor.speaker.clone()))
         .collect();
     for (entity, speaker) in &actors {
@@ -90,7 +93,7 @@ pub fn sync(world: &mut World, director: &Director, target: impl Fn(&Look) -> Op
             Look::Player => "player".to_owned(),
             Look::Actor(id) | Look::Mark(id) => id.clone(),
         };
-        let next = StoryActorComponent {
+        let next = CastMemberComponent {
             talking: state.talking,
             jaw_open: state.jaw,
             lids_shut: state.lids,
@@ -99,13 +102,13 @@ pub fn sync(world: &mut World, director: &Director, target: impl Fn(&Look) -> Op
             gesture: state.gesture.clone().unwrap_or_default(),
             mark: state.mark.clone().unwrap_or_default(),
             ..world
-                .get::<StoryActorComponent>(*entity)
+                .get::<CastMemberComponent>(*entity)
                 .cloned()
                 .unwrap_or_default()
         };
         let (drive, weight) = (next.drive_look, next.look_weight);
-        if world.get::<StoryActorComponent>(*entity) != Some(&next) {
-            if let Some(actor) = world.get_mut::<StoryActorComponent>(*entity) {
+        if world.get::<CastMemberComponent>(*entity) != Some(&next) {
+            if let Some(actor) = world.get_mut::<CastMemberComponent>(*entity) {
                 *actor = next;
             }
         }
@@ -149,9 +152,9 @@ mod tests {
 
     fn actor(world: &mut World, speaker: &str) -> Entity {
         world.spawn((
-            StoryActorComponent {
+            CastMemberComponent {
                 speaker: speaker.into(),
-                ..StoryActorComponent::default()
+                ..CastMemberComponent::default()
             },
             AnimationAuthoring::default(),
         ))
@@ -186,7 +189,7 @@ mod tests {
         director.tick(100);
         let place = |look: &Look| (*look == Look::Player).then_some(player);
         sync(&mut world, &director, place);
-        let o = world.get::<StoryActorComponent>(oren).unwrap();
+        let o = world.get::<CastMemberComponent>(oren).unwrap();
         assert!(o.talking && o.jaw_open > 0.0 && o.expression == "tired" && o.gesture == "point");
         assert_eq!(o.look_at, "player");
         assert_eq!(
@@ -194,7 +197,7 @@ mod tests {
             player
         );
         assert_eq!(
-            world.get::<StoryActorComponent>(wren).unwrap().look_at,
+            world.get::<CastMemberComponent>(wren).unwrap().look_at,
             "oren"
         );
         assert_eq!(
@@ -207,7 +210,7 @@ mod tests {
         director.tick(1000);
         sync(&mut world, &director, place);
         let ids = [
-            ComponentId::of::<StoryActorComponent>(),
+            ComponentId::of::<CastMemberComponent>(),
             ComponentId::of::<AnimationAuthoring>(),
         ];
         let settled = world.change_signature(&ids);

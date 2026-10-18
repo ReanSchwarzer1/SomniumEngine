@@ -1790,7 +1790,7 @@ reference across files.
   are, and `strings()` exports them.
 
 The engine side is `somnium_ui`'s `DialoguePresenter` and `NoticeStack` widgets,
-the graph catalogues and `somnium_core`'s `somnium.StoryActor` component. The
+the graph catalogues and `somnium_core`'s `somnium.CastMember` component. The
 game owns the `Story`, sends beats and ticks, and applies the effects. Quest
 markers are in game metres, by anchor or region-local position. See
 [the story systems record](<dev records/STORY_SYSTEMS_2026-10-18.md>).
