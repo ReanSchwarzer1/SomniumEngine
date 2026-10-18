@@ -5,6 +5,7 @@ members = [
     "crates/somnium_ecs",
     "crates/somnium_anim",
     "crates/somnium_ai",
+    "crates/somnium_combat",
     "crates/somnium_i18n",
     "crates/somnium_input",
     "crates/somnium_jobs",
@@ -54,6 +55,7 @@ somnium_core     = { path = "crates/somnium_core" }
 somnium_ecs      = { path = "crates/somnium_ecs" }
 somnium_anim     = { path = "crates/somnium_anim" }
 somnium_ai       = { path = "crates/somnium_ai" }
+somnium_combat   = { path = "crates/somnium_combat" }
 somnium_i18n     = { path = "crates/somnium_i18n" }
 somnium_input    = { path = "crates/somnium_input" }
 somnium_jobs     = { path = "crates/somnium_jobs" }

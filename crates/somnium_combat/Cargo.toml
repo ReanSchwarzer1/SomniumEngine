@@ -1,0 +1,21 @@
+[package]
+name = "somnium_combat"
+description = "Deterministic real-time combat: hits, damage, status, weapons, spells with environment reactions, combat AI and mouse-and-keyboard input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Animation events drive hit windows; the ragdoll ramp feeds `blend_ragdoll`.
+somnium_anim = { workspace = true }
+# Behaviour trees, perception and navigation for combat AI.
+somnium_ai = { workspace = true }
+# The combat action map (rebindable) and the cursor-to-ground aim.
+somnium_input = { workspace = true }
+# Authored components and their Details schemas.
+somnium_ecs = { workspace = true }
