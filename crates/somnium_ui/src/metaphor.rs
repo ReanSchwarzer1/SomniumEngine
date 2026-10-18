@@ -14,6 +14,7 @@ pub const HELP_WATER: &str = include_str!("../../../docs/editor/water.md");
 pub const HELP_LIGHTING: &str = include_str!("../../../docs/editor/lighting.md");
 pub const HELP_MORROWIND: &str = include_str!("../../../docs/editor/morrowind.md");
 pub const HELP_SCRIPTING: &str = include_str!("../../../docs/editor/scripting.md");
+pub const HELP_STORY: &str = include_str!("../../../docs/editor/story.md");
 
 pub fn help_page(id: u8) -> &'static str {
     match id {
@@ -27,6 +28,7 @@ pub fn help_page(id: u8) -> &'static str {
         8 => HELP_LIGHTING,
         9 => HELP_SCRIPTING,
         10 => HELP_MORROWIND,
+        11 => HELP_STORY,
         _ => HELP_WELCOME,
     }
 }
@@ -44,6 +46,7 @@ pub fn help_titles() -> &'static [&'static str] {
         "Lighting",
         "Scripting",
         "Designer Tools",
+        "Story",
     ]
 }
 
@@ -313,7 +316,9 @@ mod tests {
     fn help_pages_are_nonempty() {
         assert!(HELP_WELCOME.contains("Somnium"));
         assert!(HELP_SHORTCUTS.contains("Ctrl+Space"));
-        assert_eq!(help_titles().len(), 11);
+        assert_eq!(help_titles().len(), 12);
+        assert_eq!(help_page(11), HELP_STORY);
+        assert!(HELP_STORY.contains("Game View") && HELP_STORY.contains("game metres"));
         assert_eq!(help_page(10), HELP_MORROWIND);
         assert!(
             help_blocks(10)

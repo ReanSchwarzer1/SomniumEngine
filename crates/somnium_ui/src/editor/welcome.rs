@@ -561,6 +561,7 @@ fn topic_icon(title: &str) -> IconId {
         "Lighting" => IconId::Light,
         "Scripting" => IconId::Script,
         "Designer Tools" => IconId::Prefab,
+        "Story" => IconId::User,
         _ => IconId::Docs,
     }
 }

@@ -23,7 +23,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
-| Workspace | 17 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
+| Workspace | 18 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
 | Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests. Not regenerated since: the generator now also counts `.claude/worktrees/` copies and must exclude them first |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
@@ -702,6 +702,7 @@ name is a mnemonic, not a claim of similarity.
 | `somnium_physics` | Safe Jolt-facing bodies, shapes, contacts, layers, world |
 | `somnium_physics_sys` | Raw Jolt FFI and C++ build boundary |
 | `somnium_voxel` | Voxel chunks, generation, edits, meshing, LOD |
+| `somnium_story` | World-state facts, condition and effect language, quests, dialogue, barks, journal, presenter and actor models; no rendering |
 
 ### Dependency layers
 
@@ -1582,6 +1583,10 @@ In tree:
   transforms, camera presets, bookmarks, and view modes.
 - Curve and gradient values with native editors and undo.
 - Node graph and timeline substrates with material and animation catalogues.
+- Dialogue and quest catalogues on the same graph surface: the JSON asset is the
+  source of truth and the graph a lossless view; Check against the whole
+  project, Find, Play from the selected node, and a Game View in the game's
+  presenter (Help → Story).
 - Play, pause, and stop transport at the shell level.
 - Scene open/save routing, unknown-data retention, autosave, and recovery.
 
@@ -1762,6 +1767,33 @@ Skinning writes into the same geometry pool everything else lives in, before
 culling, which is what keeps the renderer's seam unchanged: it draws posed
 vertices the same way it draws static ones. Graph and machine versions reject
 stale live instances rather than indexing a replacement definition.
+
+### Story
+
+`somnium_story` holds the story's state and rules and draws nothing. A project's
+`.somstory` manifest declares typed facts (bool, int, text, enum, set; `rep.*`
+families), the cast, truth tiers, commands and languages. Dialogue
+(`.somdialogue`), quests (`.somquest`), barks (`.sombarks`) and notes
+(`.somnotes`) are JSON assets, built into one `StoryDatabase` that checks every
+reference across files.
+
+- Conditions and effects are one-line text, type-checked against the schema
+  with byte-offset errors.
+- `Story` owns the world state, quest log, visit counts, journal, seeded RNG and
+  clock. After every change it settles quests step by step (budgeted, with loop
+  detection) and queues `StoryEvent`s for the game.
+- `Conversation` walks a dialogue as beats (line, choices, wait, end), with
+  gated and rolled checks, timed menus and interruption.
+- `Presenter` is the light-novel model (typewriter, auto, skip, history, inline
+  cues). `Director` is the actor model (talk, jaw, blink, look, gesture, mark).
+- Saves go through `SaveGame.state["story"]`. Lines get i18n keys from where they
+  are, and `strings()` exports them.
+
+The engine side is `somnium_ui`'s `DialoguePresenter` and `NoticeStack` widgets,
+the graph catalogues and `somnium_core`'s `somnium.StoryActor` component. The
+game owns the `Story`, sends beats and ticks, and applies the effects. Quest
+markers are in game metres, by anchor or region-local position. See
+[the story systems record](<dev records/STORY_SYSTEMS_2026-10-18.md>).
 
 ### Physics and characters
 
