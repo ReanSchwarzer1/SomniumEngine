@@ -31,7 +31,9 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::{Value, json};
 use somnium_ai::dormancy::{Change, Dormancy, DormancySettings, GroupId};
-use somnium_ai::navigation::{BakeInput, BakeSettings, Bounds, NavWorld, OffMeshLink};
+use somnium_ai::navigation::{
+    BakeInput, BakeSettings, Bounds, NavTile, NavWorld, OffMeshLink, heightfield,
+};
 use somnium_asset::database::AssetId;
 use somnium_character::{
     Contact, Controller, ControllerConfig, LocomotionEvent, MantleKind, Mode, MoveInput, Terrain,
@@ -1019,6 +1021,55 @@ fn encounter_extent(kind: &str) -> f32 {
 /// sixty times a second).
 const TEND_EVERY: f32 = 0.5;
 
+/// The cells of a woken encounter's navigation patch, metres: open land,
+/// where the voxel bake's quarter metre would be thousands of times more.
+const PATCH_CELL: f32 = 2.0;
+/// How far past an encounter's own extent its patch reaches: room to chase.
+const PATCH_REACH: f32 = 32.0;
+/// The middle of a patch's cell id, apart from any baked tile's.
+const PATCH_LAYER: i64 = 1 << 40;
+
+/// The navigation patch round a woken encounter, where no navmesh was baked:
+/// the ground's height every [`PATCH_CELL`] metres from a cast down through
+/// physics (terrain, rocks and roofs alike: a roof stands too high above the
+/// street to join it), deep water left out.
+fn patch(
+    physics: &somnium_physics::world::PhysicsWorld,
+    water: &[Pool],
+    id: GroupId,
+    at: Vec3,
+    extent: f32,
+) -> Option<NavTile> {
+    let query = JoltQuery(physics);
+    let pools = JoltTerrain { physics, water };
+    let half = extent + PATCH_REACH;
+    let snap = |v: f32| (v / PATCH_CELL).floor() * PATCH_CELL;
+    let (x0, z0) = (snap(at.x - half), snap(at.z - half));
+    let side = ((2.0 * half) / PATCH_CELL).ceil() * PATCH_CELL + PATCH_CELL;
+    let ground = |x: f32, z: f32| {
+        let (top, bottom) = (Vec3::new(x, at.y + 60.0, z), Vec3::new(x, at.y - 60.0, z));
+        let y = query
+            .sweep(top, bottom, 0.05)
+            .map(|h| top.y + (bottom.y - top.y) * h.fraction - 0.05)?;
+        let deep = pools.water_surface(x, z).is_some_and(|w| w > y + 0.5);
+        (!deep).then_some(y)
+    };
+    heightfield(
+        [i64::from(id.0), PATCH_LAYER, 0],
+        Bounds {
+            min: [x0, at.y - 61.0, z0],
+            max: [x0 + side, at.y + 61.0, z0 + side],
+        },
+        BakeSettings {
+            voxel_size: PATCH_CELL,
+            agent_radius: 0.35,
+            ..BakeSettings::default()
+        },
+        ground,
+    )
+    .ok()
+}
+
 /// A scene encounter while Play runs: what it is, who of it is left once it
 /// has woken and slept again, and while it is awake what it made.
 #[derive(Clone, Debug, Default)]
@@ -1202,6 +1253,15 @@ fn wake(
             .collect();
         solids = solid_bodies(physics, boxes);
         stand(physics, run, &members);
+        // Its own ground to path on, where the scene baked none.
+        if run.nav.is_none() || run.patched {
+            if let Some(tile) = patch(physics, &run.water, id, at, encounter_extent(&record.kind)) {
+                run.nav
+                    .get_or_insert_with(NavWorld::default)
+                    .stream_in(tile);
+                run.patched = true;
+            }
+        }
     }
     tracing::info!(
         "Combat Encounter {} ({}) woke at {at}: {} fighters",
@@ -1277,6 +1337,11 @@ fn sleep(
         for b in solids {
             physics.destroy_body(b);
         }
+    }
+    if run.patched
+        && let Some(nav) = run.nav.as_mut()
+    {
+        nav.stream_out([i64::from(id.0), PATCH_LAYER, 0]);
     }
 }
 
@@ -1435,6 +1500,8 @@ struct Run {
     encounters: Option<Dormancy<Encounter>>,
     /// Seconds since the encounters were last tended.
     tended: f32,
+    /// `nav` holds woken encounters' patches (no navmesh was baked).
+    patched: bool,
     readouts: HashMap<Entity, (i32, i32, i32, &'static str)>,
 }
 
@@ -2075,6 +2142,7 @@ fn build(world: &World) -> Option<Run> {
         marks: BTreeMap::new(),
         encounters: None,
         tended: 0.0,
+        patched: false,
         readouts: HashMap::new(),
     })
 }
@@ -4202,6 +4270,77 @@ mod tests {
             let walking = time(&mut run);
             println!("{count} bodies: idle {idle:.3} ms a step, walking {walking:.3} ms a step");
         }
+    }
+
+    /// Where the scene baked no navmesh, a woken camp gets a patch of ground
+    /// to path on (two-metre cells from casts down through physics): round a
+    /// house, not through it. Asleep again, its patch goes.
+    #[test]
+    fn a_woken_camp_paths_round_a_house_on_its_patch() {
+        let mut world = World::new();
+        let root = world.spawn((
+            Name::new("Scene"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        fighter(
+            &mut world,
+            root,
+            "Protagonist",
+            Vec3::new(-30.0, 0.0, 0.0),
+            Vec3::X,
+            CombatantComponent::protagonist(),
+        );
+        world.spawn((
+            Name::new("Camp"),
+            Transform::default(),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "bandits".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        assert!(run.nav.is_none(), "no solids, nothing baked");
+        run.encounters = Some(encounters_asleep(&world));
+        let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
+        let house = Vec3::new(20.0, 3.0, 0.0);
+        solid_bodies(
+            &mut physics,
+            vec![
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(300.0, 1.0, 300.0),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, -0.5, 0.0),
+                ),
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(8.0, 6.0, 12.0),
+                    Quat::IDENTITY,
+                    house,
+                ),
+            ],
+        );
+        let started = std::time::Instant::now();
+        tend_encounters(&mut world, Some(&mut physics), &mut run, f32::INFINITY);
+        let built = started.elapsed();
+        let nav = run.nav.as_ref().expect("a patch");
+        assert_eq!(nav.cells().count(), 1);
+        let path = nav
+            .path(Vec3::new(5.0, 0.0, 0.0), Vec3::new(34.0, 0.0, 0.0), 1.0)
+            .expect("round the house");
+        let inside = |p: &Vec3| (p.x - house.x).abs() < 4.0 && p.z.abs() < 6.0;
+        assert!(
+            path.points.iter().all(|p| !inside(p) && p.y.abs() < 0.1),
+            "{:?}",
+            path.points
+        );
+        println!("patch woken and built in {built:?}");
+        // Away: asleep, and its patch gone.
+        let hero = run.player.expect("the protagonist");
+        run.world.combatant_mut(hero).unwrap().position = Vec3::new(-400.0, 0.0, 0.0);
+        tend_encounters(&mut world, Some(&mut physics), &mut run, f32::INFINITY);
+        assert_eq!(run.nav.as_ref().map(|n| n.cells().count()), Some(0));
     }
 
     /// A pack and a camp placed apart (as across Tyffir): each builds only
