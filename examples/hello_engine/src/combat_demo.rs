@@ -54,12 +54,13 @@ const PARKED: Vec3 = Vec3::new(0.0, -10_000.0, 0.0);
 const PROJECTILES: usize = 40;
 const WALLS: usize = 6;
 const BLOOMS: usize = 4;
+const RING_BEADS: usize = 16;
 const WAVE_BEADS: usize = 10;
 const WAVES: usize = 2;
 const FIRES: usize = 24;
 const BURSTS: usize = 12;
 const DECALS: usize = 14;
-const LOG_LINES: usize = 7;
+const LOG_LINES: usize = 6;
 
 fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
@@ -287,8 +288,8 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         },
     )));
     // A three-quarter view over the field; the isometric rig replaces it.
-    let eye = Vec3::new(0.0, 21.0, -20.0);
-    let camera_world = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, 2.0), Vec3::Y).inverse();
+    let eye = Vec3::new(0.0, 26.0, -26.0);
+    let camera_world = Mat4::look_at_rh(eye, Vec3::new(0.0, 0.0, 0.5), Vec3::Y).inverse();
     let (_, rotation, _) = camera_world.to_scale_rotation_translation();
     out.push(world.spawn((
         Name::new("Combat Camera"),
@@ -460,6 +461,8 @@ struct Pools {
     projectiles: Vec<(Entity, &'static str)>,
     walls: Vec<(Entity, &'static str)>,
     blooms: Vec<(Entity, &'static str)>,
+    /// Which bloom a ring's beads belong to has nothing to do with order here:
+    /// ring `i` is beads `i * RING_BEADS ..`.
     beads: Vec<Entity>,
     fires: Vec<(Entity, bool)>,
     bursts: Vec<Entity>,
@@ -471,6 +474,8 @@ struct Pools {
 
 struct Run {
     world: CombatWorld,
+    /// Parent of every entity Play spawns (pools, ground tiles).
+    effects: Option<Entity>,
     bodies: BTreeMap<CombatantId, Entity>,
     /// Each body's world size as authored (a fighter's cylinder, a mount's box).
     dims: BTreeMap<CombatantId, Vec3>,
@@ -494,48 +499,71 @@ struct Hud {
     hotbar: NodeHandle,
     log: NodeHandle,
     shown: [String; 3],
+    /// The viewport rectangle (logical x, y, w, h) the panels were laid out in.
+    rect: (u32, u32, u32, u32),
 }
 
 impl Hud {
-    fn new() -> Self {
+    /// Panels placed inside the editor's viewport: in Play the editor keeps
+    /// its docks, and the game canvas covers the whole window.
+    fn new(rect: (u32, u32, u32, u32)) -> Self {
         use somnium_ui::types::{HorizontalAlignment as H, Thickness, VerticalAlignment as V};
         use somnium_ui::widget::WidgetBuilder;
         use somnium_ui::widgets::{border::BorderBuilder, text::TextBuilder};
+        let (vx, vy, vw, vh) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
         let mut canvas = UiCanvas::new(1280.0, 720.0);
         let font = canvas.font_id();
         let ui = canvas.ui_mut();
         let root = ui.root();
-        let panel = |ui: &mut somnium_ui::ui::UserInterface, w: f32, h: f32, ha: H, va: V| {
+        let panel = |ui: &mut somnium_ui::ui::UserInterface, x: f32, y: f32, w: f32, h: f32| {
             let p = BorderBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(w)
+                    .with_width(w.max(40.0))
                     .with_height(h)
-                    .with_horizontal_alignment(ha)
-                    .with_vertical_alignment(va)
-                    .with_margin(Thickness::uniform(18.0))
+                    .with_horizontal_alignment(H::Left)
+                    .with_vertical_alignment(V::Top)
+                    .with_margin(Thickness {
+                        left: x.max(0.0),
+                        top: y.max(0.0),
+                        right: 0.0,
+                        bottom: 0.0,
+                    })
                     .with_background([12, 14, 18, 200])
                     .with_foreground(somnium_ui::theme::BORDER_DARK),
             )
             .with_stroke_thickness(Thickness::uniform(1.0))
             .build();
             let p = ui.add_node(p, root);
-            let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(10.0)))
+            let text = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(8.0)))
                 .with_text("")
                 .with_font_id(font)
-                .with_font_size(14.0)
+                .with_font_size(13.0)
+                .with_wrap(true)
                 .with_color(somnium_ui::theme::TEXT_PRIMARY)
                 .build();
             ui.add_node(text, p)
         };
-        let vitals = panel(ui, 360.0, 128.0, H::Left, V::Bottom);
-        let hotbar = panel(ui, 700.0, 76.0, H::Center, V::Bottom);
-        let log = panel(ui, 380.0, 150.0, H::Right, V::Top);
+        let gap = 10.0;
+        let vitals_w = 330.0f32.min(vw * 0.45);
+        let vitals = panel(ui, vx + gap, vy + vh - gap - 112.0, vitals_w, 112.0);
+        let hotbar_w = (vw - vitals_w - 3.0 * gap).max(120.0);
+        let hotbar = panel(
+            ui,
+            vx + vitals_w + 2.0 * gap,
+            vy + vh - gap - 112.0,
+            hotbar_w,
+            112.0,
+        );
+        let log_w = 330.0f32.min(vw * 0.5);
+        // Below the viewport's own toolbar row.
+        let log = panel(ui, vx + vw - gap - log_w, vy + 48.0, log_w, 140.0);
         Self {
             canvas,
             vitals,
             hotbar,
             log,
             shown: Default::default(),
+            rect,
         }
     }
 
@@ -677,6 +705,7 @@ impl CombatDemo {
             let run = self.run.as_mut().expect("just built");
             run.colliders = colliders(ctx);
             spawn_pools(ctx.world, run);
+            group_under_effects(ctx.world, run);
             run.log.push_back(
                 "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk".into(),
             );
@@ -762,11 +791,15 @@ impl CombatDemo {
     }
 
     /// HUD text (once a frame, before the UI is drawn).
-    pub fn render(&mut self, _ctx: &mut EngineContext) {
+    pub fn render(&mut self, ctx: &mut EngineContext) {
         let Some(run) = &self.run else {
             return;
         };
-        let hud = self.hud.get_or_insert_with(Hud::new);
+        let rect = ctx.ui.viewport_physical_rect(1.0);
+        if self.hud.as_ref().is_none_or(|h| h.rect != rect) {
+            self.hud = Some(Hud::new(rect));
+        }
+        let hud = self.hud.as_mut().expect("just built");
         let (vitals, hotbar) = player_lines(run);
         hud.set(0, vitals);
         hud.set(1, hotbar);
@@ -928,6 +961,7 @@ fn build(world: &World) -> Option<Run> {
         });
     Some(Run {
         world: combat,
+        effects: None,
         bodies,
         dims,
         player,
@@ -986,6 +1020,13 @@ fn pooled(world: &mut World, run: &mut Run, name: String, kind: MeshKind, mat: &
 }
 
 fn spawn_pools(world: &mut World, run: &mut Run) {
+    let effects = world.spawn((
+        Name::new("Combat (runtime)"),
+        Transform::default(),
+        WorldTransform::identity(),
+    ));
+    run.spawned.push(effects);
+    run.effects = Some(effects);
     for i in 0..PROJECTILES {
         let e = pooled(
             world,
@@ -1006,12 +1047,12 @@ fn spawn_pools(world: &mut World, run: &mut Run) {
         );
         run.pools.walls.push((e, "stone"));
     }
-    for i in 0..BLOOMS {
+    for i in 0..BLOOMS * RING_BEADS {
         let e = pooled(
             world,
             run,
             format!("Combat bloom {i}"),
-            MeshKind::Cylinder,
+            MeshKind::Sphere,
             "fire",
         );
         run.pools.blooms.push((e, "fire"));
@@ -1120,6 +1161,18 @@ fn spawn_pools(world: &mut World, run: &mut Run) {
         ));
         run.spawned.push(e);
         run.tiles.insert((tx, tz), (e, s));
+    }
+}
+
+/// Hang every runtime entity under the one root (at the origin, so local is world).
+fn group_under_effects(world: &mut World, run: &Run) {
+    let Some(root) = run.effects else {
+        return;
+    };
+    for &e in &run.spawned {
+        if e != root {
+            let _ = world.insert_component(e, Parent { entity: root });
+        }
     }
 }
 
@@ -1336,8 +1389,8 @@ fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
                 burst(ctx.world, run, *point, *element, false, 12);
                 if normal.y > 0.5 {
                     match element {
-                        Some(Element::Flame) => mark(ctx.world, run, *point, 1.2, "ash"),
-                        Some(Element::Frost) => mark(ctx.world, run, *point, 1.2, "ice"),
+                        Some(Element::Flame) => mark(ctx.world, run, *point, 1.6, "scorch"),
+                        Some(Element::Frost) => mark(ctx.world, run, *point, 1.6, "frostmark"),
                         _ => {}
                     }
                 }
@@ -1357,8 +1410,8 @@ fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
                 48,
             );
             match element {
-                Element::Flame => mark(ctx.world, run, *at, radius * 2.0, "ash"),
-                Element::Frost => mark(ctx.world, run, *at, radius * 2.0, "ice"),
+                Element::Flame => mark(ctx.world, run, *at, radius * 2.4, "scorch"),
+                Element::Frost => mark(ctx.world, run, *at, radius * 2.4, "frostmark"),
                 _ => {}
             }
         }
@@ -1574,17 +1627,19 @@ fn write_scene(ctx: &mut EngineContext, run: &mut Run) {
             look.map_or(Look::Hidden, |l| l.0),
         );
     }
-    // Blooms gathering: a disc on the ground where it will burst.
+    // Blooms gathering: a ring of beads on the ground where it will burst.
     let blooms = run.world.blooms();
     for (i, (entity, slot)) in pools.blooms.iter_mut().enumerate() {
-        let look = blooms.get(i).map(|b| {
-            let at = Vec3::new(b.center.x, run.floor + 0.05, b.center.z);
+        let (ring, bead) = (i / RING_BEADS, i % RING_BEADS);
+        let look = blooms.get(ring).map(|b| {
+            let a = bead as f32 / RING_BEADS as f32 * std::f32::consts::TAU;
+            let at = Vec3::new(
+                b.center.x + a.cos() * b.radius,
+                run.floor + 0.12,
+                b.center.z + a.sin() * b.radius,
+            );
             (
-                Look::Shown(
-                    at,
-                    Quat::IDENTITY,
-                    Vec3::new(b.radius * 2.0, 0.04, b.radius * 2.0),
-                ),
+                Look::Shown(at, Quat::IDENTITY, Vec3::splat(0.22)),
                 element_material(b.element),
             )
         });
@@ -1748,6 +1803,47 @@ fn player_lines(run: &Run) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every material the sandbox names exists, and the round marks point at
+    /// the smoke sprite by the engine's own asset id.
+    #[test]
+    fn the_sandbox_materials_load_and_the_marks_are_round() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/materials/combat");
+        for name in [
+            "floor",
+            "party",
+            "raider",
+            "skin",
+            "dark",
+            "water",
+            "ice",
+            "grass",
+            "snow",
+            "ash",
+            "stone",
+            "fire",
+            "gale",
+            "force",
+            "mending",
+            "frost",
+            "hide",
+            "scorch",
+            "frostmark",
+        ] {
+            let asset = somnium_asset::material::load_material(dir.join(format!("{name}.sommat")))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            if matches!(name, "scorch" | "frostmark") {
+                assert_eq!(
+                    asset.albedo_map,
+                    AssetId::from_relative_path(std::path::Path::new(
+                        "textures/particles/smoke_01.png"
+                    )),
+                    "{name} uses the soft round sprite"
+                );
+            }
+        }
+    }
 
     /// The preset builds a fight the combat world accepts, and the fight runs
     /// headless through the same `build` Play uses.
