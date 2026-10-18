@@ -18,7 +18,8 @@ Each home houses a household, and each trade has its keeper.
 | What | Does |
 |---|---|
 | Walk past villagers | Those standing turn to look at you. A game plays its greeting barks here. |
-| B | Rings the alarm bell where you stand. Everyone within 80 m runs home and stays in for 45 seconds, beasts bolt to the far side of their pen, and carts stop. A game rings it from its fights. |
+| B | Rings the alarm bell where you stand. Everyone within 80 m runs home and stays in for 45 seconds, beasts bolt to the far side of their pen, and carts stop. |
+| A fight | Wherever a **Combatant** in the scene loses health, everyone within 60 m runs home. |
 
 Neighbours idling at the same spot (the well, the green, the market) pair off and talk, facing each other.
 
@@ -44,7 +45,7 @@ Simulation LOD measures from the camera:
 
 Only the nearest 160 villagers, 48 beasts and 16 carts out of doors get a body. A town of any size costs the same number of entities.
 
-The MCP authoring state's `life` entry reports the counts, the step and write times, how many bodies are held, and how many villagers have greeted you. The log repeats the times every ten seconds.
+The MCP authoring state's `life` entry reports the counts, the step and write times, how many bodies are held, and how many villagers have greeted you, and how many fights rang the alarm. The log repeats the times every ten seconds.
 
 Measured in a release build (the 150-home village, 344 agents): life costs about 0.1 ms of a 5 ms frame. A 400-home town over a whole day averages 0.035 ms a tick.
 
