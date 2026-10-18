@@ -472,6 +472,36 @@ fn villagers_notice_the_player_passing_once_a_minute() {
 }
 
 #[test]
+fn villagers_walk_round_the_player_not_through() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = w.add_place(village(Vec3::ZERO));
+    w.populate(place, 9);
+    // The player stands in the middle of the main lane all day.
+    let player = Vec3::new(-20.0, 0.0, 0.0);
+    let mut clear = true;
+    let mut brushed = 0;
+    day(&mut w, 6.0, 12.0, 0.0, &[player], |_, _| {});
+    for _ in 0..2000 {
+        w.step(DT, Clock::at(12.0), &[player], &Flat);
+        brushed += w.keep_clear(player, 0.7);
+        clear &= w
+            .villagers()
+            .iter()
+            .filter(|v| v.visible)
+            .all(|v| flat(v.position, player) >= 0.7 - 1e-4);
+    }
+    assert!(clear, "nobody stands in the player");
+    assert!(brushed > 0, "people came by and went round");
+    // And everyone still gets where they were going.
+    let farmers_in_field = w
+        .villagers()
+        .iter()
+        .filter(|v| v.role == Role::Farmer)
+        .all(|v| v.activity != Activity::Farm || !v.visible || v.position.z > 30.0);
+    assert!(farmers_in_field);
+}
+
+#[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());
     let at = Vec3::new(500.0, 0.0, 0.0);

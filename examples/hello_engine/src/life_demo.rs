@@ -31,7 +31,7 @@
 //! home and stays in for 45 seconds, beasts bolt, carts stop
 //! (`LifeWorld::alarm`; a game rings it from its fights). Walk past villagers
 //! and those standing turn to look at you (`LifeWorld::notice`; a game plays
-//! greeting barks for them).
+//! greeting barks for them); nobody walks through you (`LifeWorld::keep_clear`).
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
@@ -1073,6 +1073,7 @@ impl LifeDemo {
             &Flat,
         );
         if let Some(at) = focus.first() {
+            run.life.keep_clear(*at, 0.7);
             run.greeted += run.life.notice(*at, 3.5).len();
         }
         let t1 = Instant::now();

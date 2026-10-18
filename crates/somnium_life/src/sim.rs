@@ -333,6 +333,40 @@ impl LifeWorld {
         noticed
     }
 
+    /// Keep people and beasts out of a disc on the ground (the player, a
+    /// fire): those near enough to see who stand in it step out to its edge,
+    /// and those walking through it brush round it. Call after
+    /// [`LifeWorld::step`]; returns how many moved.
+    pub fn keep_clear(&mut self, at: Vec3, radius: f32) -> usize {
+        let out = |position: &mut Vec3, facing: Vec3| {
+            let off = Vec3::new(position.x - at.x, 0.0, position.z - at.z);
+            let d = off.length();
+            if d >= radius {
+                return false;
+            }
+            // Dead centre: step aside, to the right of where it faces.
+            let away = if d > 1e-3 {
+                off / d
+            } else {
+                Vec3::new(-facing.z, 0.0, facing.x)
+            };
+            *position = Vec3::new(at.x, position.y, at.z) + away * radius;
+            true
+        };
+        let mut moved = 0;
+        for v in &mut self.villagers {
+            if v.visible && v.tier == Tier::Near && out(&mut v.position, v.facing) {
+                moved += 1;
+            }
+        }
+        for b in &mut self.beasts {
+            if b.tier == Tier::Near && out(&mut b.position, b.facing) {
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     /// Near villagers idling at the same outdoor spot pair off and talk,
     /// facing each other; the rest go back to what they were doing.
     fn converse(&mut self) {
