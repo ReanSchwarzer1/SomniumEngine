@@ -231,6 +231,11 @@ pub struct LifeWorld {
     /// routine changes the hour for half a town at once, the rest set off a
     /// tick or two later instead of the frame hitching.
     pub paths_per_tick: usize,
+    /// How fast villagers walk and run, metres a second: match them to the
+    /// game's walk and run clips (their root speed) so feet do not slide.
+    pub walk_speed: f32,
+    /// See `walk_speed`; running from an alarm.
+    pub run_speed: f32,
     places: Vec<Placed>,
     villagers: Vec<Villager>,
     beasts: Vec<Beast>,
@@ -250,6 +255,8 @@ impl LifeWorld {
         Self {
             lod,
             paths_per_tick: 24,
+            walk_speed: WALK,
+            run_speed: RUN,
             places: Vec::new(),
             villagers: Vec::new(),
             beasts: Vec::new(),
@@ -761,13 +768,14 @@ impl LifeWorld {
             }
         }
         let mut paths = self.paths_per_tick;
+        let pace = (self.walk_speed, self.run_speed);
         for who in chosen {
             match who {
                 Who::Villager(i) => {
                     let v = &mut self.villagers[i];
                     let owed = std::mem::take(&mut v.owed);
                     if let Some(p) = places.get(v.place) {
-                        v.advance(p, clock, ground, owed, now, &mut paths);
+                        v.advance(p, clock, ground, owed, now, &mut paths, pace);
                     }
                 }
                 Who::Beast(i) => {
@@ -868,6 +876,7 @@ impl Villager {
         dt: f32,
         now: f64,
         paths: &mut usize,
+        (walk, run): (f32, f32),
     ) {
         let place = &placed.place;
         let fleeing = now < self.flee_until;
@@ -890,7 +899,7 @@ impl Villager {
             }
             self.target = target;
         }
-        let mut walked = dt * if fleeing { RUN } else { WALK };
+        let mut walked = dt * if fleeing { run } else { walk };
         loop {
             match &mut self.doing {
                 Doing::Walking { path, next, to } => {
