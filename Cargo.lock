@@ -1626,6 +1626,7 @@ dependencies = [
  "somnium_anim",
  "somnium_asset",
  "somnium_audio",
+ "somnium_character",
  "somnium_combat",
  "somnium_core",
  "somnium_ecs",
@@ -3883,6 +3884,14 @@ dependencies = [
  "glam 0.29.3",
  "kira",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "somnium_character"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "somnium_anim",
 ]
 
 [[package]]

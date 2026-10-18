@@ -16,6 +16,11 @@
 //! to slow time. The AI fights on its own. Water freezes, grass burns, wind
 //! carries the fire. The dead fall as Jolt ragdolls.
 //!
+//! The protagonist walks on `somnium_character`'s controller through Jolt:
+//! run (hold Shift) into the low wall to vault it, into the ledge to climb
+//! it, over the basin's wall to drop into deep water and swim, and into the
+//! wall again to climb out.
+//!
 //! The camera is a fixed scene camera on purpose: the isometric rig is the
 //! engine lead's (Rimeborn workstream 0). Editor overlays are off in Play, so
 //! everything shown is scene content: pooled meshes for missiles, walls,
@@ -24,6 +29,9 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
+use somnium_character::{
+    Contact, Controller, ControllerConfig, LocomotionEvent, MantleKind, Mode, MoveInput, Terrain,
+};
 use somnium_combat::ai::Archetype;
 use somnium_combat::components::{CombatSurfaceComponent, CombatantComponent, WindVolumeComponent};
 use somnium_combat::environment::{EnvironmentField, Surface, WindVolume};
@@ -276,6 +284,75 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         );
         out.push(e);
     }
+    // A traversal course for the controller: a wall to vault, a ledge to
+    // climb, and a walled basin of deep water to swim in.
+    let stone = |world: &mut World, name: &str, at: Vec3, scale: Vec3| {
+        let e = block(world, root, name, at, scale, MeshKind::Cube, "stone");
+        let _ = world.insert_component(
+            e,
+            CombatSurfaceComponent {
+                surface: Surface::Stone as u32,
+                round: false,
+                solid: true,
+            },
+        );
+        e
+    };
+    out.push(stone(
+        world,
+        "Low wall",
+        Vec3::new(9.0, 0.5, -8.0),
+        Vec3::new(0.3, 1.0, 3.0),
+    ));
+    out.push(stone(
+        world,
+        "Ledge",
+        Vec3::new(13.0, 1.0, -8.0),
+        Vec3::new(3.0, 2.0, 3.0),
+    ));
+    for (name, at, scale) in [
+        (
+            "Basin wall (north)",
+            Vec3::new(12.5, 0.8, -11.65),
+            Vec3::new(7.0, 1.6, 0.3),
+        ),
+        (
+            "Basin wall (south)",
+            Vec3::new(12.5, 0.8, -15.85),
+            Vec3::new(7.0, 1.6, 0.3),
+        ),
+        (
+            "Basin wall (west)",
+            Vec3::new(9.15, 0.8, -13.75),
+            Vec3::new(0.3, 1.6, 3.9),
+        ),
+        (
+            "Basin wall (east)",
+            Vec3::new(15.85, 0.8, -13.75),
+            Vec3::new(0.3, 1.6, 3.9),
+        ),
+    ] {
+        out.push(stone(world, name, at, scale));
+    }
+    // Water is a non-solid water surface; its top is the water line.
+    let basin = block(
+        world,
+        root,
+        "Basin water",
+        Vec3::new(12.5, 1.48, -13.75),
+        Vec3::new(6.4, 0.04, 3.9),
+        MeshKind::Cube,
+        "water",
+    );
+    let _ = world.insert_component(
+        basin,
+        CombatSurfaceComponent {
+            surface: Surface::Water as u32,
+            round: false,
+            solid: false,
+        },
+    );
+    out.push(basin);
     out.push(world.spawn((
         Name::new("Draught"),
         Transform::from_translation(Vec3::new(4.0, 1.0, 3.0)),
@@ -449,6 +526,59 @@ impl CombatQuery for JoltQuery<'_> {
     }
 }
 
+/// A water surface's footprint: centre, half size, round, height of the line.
+#[derive(Clone, Copy)]
+struct Pool {
+    centre: Vec2,
+    half: Vec2,
+    round: bool,
+    line: f32,
+}
+
+/// The world as the protagonist's controller sees it: upright capsules swept
+/// through Jolt, and the scene's water surfaces.
+struct JoltTerrain<'a> {
+    physics: &'a somnium_physics::world::PhysicsWorld,
+    water: &'a [Pool],
+}
+
+impl Terrain for JoltTerrain<'_> {
+    fn sweep(&self, feet: Vec3, delta: Vec3, radius: f32, height: f32) -> Option<Contact> {
+        let half = (height * 0.5 - radius).max(0.001);
+        let hit = self
+            .physics
+            .cast_capsule(somnium_physics::animation::CapsuleSweep {
+                position: feet + Vec3::Y * (half + radius),
+                rotation: Quat::IDENTITY,
+                displacement: delta,
+                half_height: half,
+                radius,
+                ignore_body: None,
+            })
+            .ok()??;
+        Some(Contact {
+            fraction: hit.fraction,
+            normal: hit.normal,
+        })
+    }
+
+    fn water_surface(&self, x: f32, z: f32) -> Option<f32> {
+        let p = Vec2::new(x, z);
+        self.water
+            .iter()
+            .filter(|w| {
+                let d = p - w.centre;
+                if w.round {
+                    d.length() <= w.half.max_element()
+                } else {
+                    d.abs().cmple(w.half).all()
+                }
+            })
+            .map(|w| w.line)
+            .reduce(f32::max)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
     Hidden,
@@ -480,6 +610,10 @@ struct Run {
     /// Each body's world size as authored (a fighter's cylinder, a mount's box).
     dims: BTreeMap<CombatantId, Vec3>,
     player: Option<CombatantId>,
+    /// The protagonist's locomotion (vault, climb, swim); the others keep the
+    /// combat world's own motion.
+    walker: Option<Controller>,
+    water: Vec<Pool>,
     camera: Option<Entity>,
     restore: Vec<(Entity, Transform)>,
     colliders: Vec<BodyId>,
@@ -707,7 +841,7 @@ impl CombatDemo {
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
             run.log.push_back(
-                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk".into(),
+                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk; run into walls to climb".into(),
             );
         }
     }
@@ -783,6 +917,7 @@ impl CombatDemo {
         let nav = &ctx.navigation.cells.world;
         let nav = nav.cells().next().is_some().then_some(nav);
         run.world.step(dt, &JoltQuery(ctx.physics), nav);
+        walk(ctx, run, dt);
         let events = run.world.drain_events();
         for event in &events {
             react(ctx, run, event);
@@ -834,9 +969,17 @@ impl CombatDemo {
                 })
             })
             .collect();
+        let locomotion = run.walker.as_ref().map(|w| match w.mode {
+            Mode::Ground => "ground",
+            Mode::Air => "air",
+            Mode::Mantle(m) if m.kind == MantleKind::Vault => "vault",
+            Mode::Mantle(_) => "climb",
+            Mode::Swim => "swim",
+        });
         json!({
             "running": true,
             "time": run.world.time(),
+            "locomotion": locomotion,
             "fighters": fighters,
             "log": run.log,
         })
@@ -959,12 +1102,37 @@ fn build(world: &World) -> Option<Run> {
                 .get::<Name>(*e)
                 .is_some_and(|n| n.as_str() == "Combat Camera")
         });
+    let water = surfaces
+        .iter()
+        .filter(|(_, s)| s.surface() == Surface::Water && !s.solid)
+        .map(|(m, s)| {
+            let (scale, _, centre) = m.to_scale_rotation_translation();
+            Pool {
+                centre: Vec2::new(centre.x, centre.z),
+                half: Vec2::new(scale.x, scale.z).abs() * 0.5,
+                round: s.round,
+                line: centre.y + scale.y.abs() * 0.5,
+            }
+        })
+        .collect();
+    let walker = player.and_then(|p| combat.combatant(p)).map(|c| {
+        Controller::new(
+            ControllerConfig {
+                radius: c.body.radius,
+                height: c.body.height,
+                ..ControllerConfig::default()
+            },
+            c.position + Vec3::Y * 0.02,
+        )
+    });
     Some(Run {
         world: combat,
         effects: None,
         bodies,
         dims,
         player,
+        walker,
+        water,
         camera,
         restore,
         colliders: Vec::new(),
@@ -976,6 +1144,60 @@ fn build(world: &World) -> Option<Run> {
         log: VecDeque::new(),
         readouts: HashMap::new(),
     })
+}
+
+/// The protagonist's feet from the controller, after the combat step decided
+/// where it wants to go. Running into a ledge vaults or climbs it.
+fn walk(ctx: &mut EngineContext, run: &mut Run, dt: f32) {
+    let (Some(id), Some(walker)) = (run.player, run.walker.as_mut()) else {
+        return;
+    };
+    let Some(c) = run.world.combatant(id) else {
+        return;
+    };
+    if c.mount.is_some() || !c.alive() {
+        // The mount carries the rider; the dead are the ragdoll's.
+        walker.feet = c.position;
+        walker.velocity = Vec3::ZERO;
+        walker.mode = Mode::Air;
+        return;
+    }
+    let input = MoveInput {
+        velocity: if c.intent.rooted {
+            Vec3::ZERO
+        } else {
+            c.intent.velocity
+        },
+        jump: false,
+        climb: c.intent.sprinting,
+    };
+    let terrain = JoltTerrain {
+        physics: ctx.physics,
+        water: &run.water,
+    };
+    let events = walker.step(dt, &input, &terrain);
+    let (feet, velocity) = (walker.feet, walker.velocity);
+    if let Some(c) = run.world.combatant_mut(id) {
+        c.position = feet;
+        c.velocity = velocity;
+    }
+    for event in events {
+        let line = match event {
+            LocomotionEvent::MantleStarted {
+                kind: MantleKind::Vault,
+                height,
+                ..
+            } => format!("Vaulted {height:.1} m"),
+            LocomotionEvent::MantleStarted { height, .. } => format!("Climbed {height:.1} m"),
+            LocomotionEvent::EnteredWater => "Swimming".into(),
+            LocomotionEvent::LeftWater => "Out of the water".into(),
+            LocomotionEvent::Landed { speed } if speed > 6.0 => {
+                format!("Hard landing ({speed:.1} m/s)")
+            }
+            _ => continue,
+        };
+        log(run, line);
+    }
 }
 
 /// Static Jolt boxes for solid surfaces (the floor, pillars), so ragdolls
@@ -1847,6 +2069,99 @@ mod tests {
 
     /// The preset builds a fight the combat world accepts, and the fight runs
     /// headless through the same `build` Play uses.
+    #[test]
+    fn the_course_is_vaulted_climbed_and_swum() {
+        use somnium_character::boxes::{Boxes, Solid, Water};
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let run = build(&world).expect("a fight");
+        // The boxes `colliders` gives Jolt, and the basin's water.
+        let mut terrain = Boxes::default();
+        for (e, s) in world.iter_with::<CombatSurfaceComponent>() {
+            if s.solid {
+                let (scale, rotation, center) =
+                    world_matrix(&world, e).to_scale_rotation_translation();
+                terrain.solids.push(Solid {
+                    center,
+                    half: scale.abs() * 0.5,
+                    rotation,
+                });
+            }
+        }
+        for w in run.water.iter().filter(|w| !w.round) {
+            terrain.water.push(Water {
+                min: (w.centre - w.half).to_array(),
+                max: (w.centre + w.half).to_array(),
+                surface: w.line,
+            });
+        }
+        let mut walker = run.walker.clone().expect("the protagonist walks");
+        let go = |walker: &mut Controller, velocity: Vec3, seconds: f32| {
+            let input = MoveInput {
+                velocity,
+                jump: false,
+                climb: true,
+            };
+            let mut events = Vec::new();
+            for _ in 0..(seconds * 60.0) as usize {
+                events.extend(walker.step(1.0 / 60.0, &input, &terrain));
+            }
+            events
+        };
+        let kinds = |events: &[LocomotionEvent]| -> Vec<MantleKind> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    LocomotionEvent::MantleStarted { kind, .. } => Some(*kind),
+                    _ => None,
+                })
+                .collect()
+        };
+        // East over the low wall and up the ledge.
+        // The preset stands on its root, 5 cm up.
+        walker.feet = Vec3::new(6.0, run.floor + 0.02, -8.0);
+        walker.mode = Mode::Air;
+        let events = go(&mut walker, Vec3::X * 4.0, 3.0);
+        assert_eq!(
+            kinds(&events),
+            [MantleKind::Vault, MantleKind::Climb],
+            "{events:?}"
+        );
+        assert!(
+            walker.grounded() && (walker.feet.y - run.floor - 2.0).abs() < 0.05,
+            "{:?} {:?}",
+            walker.feet,
+            walker.mode
+        );
+        // South over the basin's wall, into deep water, across and out.
+        walker.feet = Vec3::new(12.5, run.floor + 0.02, -9.5);
+        walker.mode = Mode::Air;
+        // (Until it stands outside: the arena's edge is not far beyond.)
+        let mut events = Vec::new();
+        for _ in 0..600 {
+            events.extend(go(&mut walker, Vec3::Z * -3.5, 1.0 / 60.0));
+            if events.contains(&LocomotionEvent::LeftWater)
+                && walker.grounded()
+                && (walker.feet.y - run.floor).abs() < 0.05
+            {
+                break;
+            }
+        }
+        assert!(
+            events.contains(&LocomotionEvent::EnteredWater),
+            "{events:?}"
+        );
+        assert!(events.contains(&LocomotionEvent::LeftWater), "{events:?}");
+        assert_eq!(kinds(&events).len(), 2, "over the wall and out: {events:?}");
+        assert!(
+            walker.grounded() && walker.feet.z < -16.0 && (walker.feet.y - run.floor).abs() < 0.05,
+            "{:?} {:?} {events:?}",
+            walker.feet,
+            walker.mode
+        );
+    }
+
     #[test]
     fn the_sandbox_builds_and_fights_without_a_window() {
         let mut world = World::new();
