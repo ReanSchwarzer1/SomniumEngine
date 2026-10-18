@@ -161,7 +161,8 @@ fn beast(
 /// walk for a blow on the unaware; at night (Time of Day) they see a third as
 /// far. Untick the floor to drop it on terrain: Play stands everyone on the
 /// ground. `only` ("wolves" or "bandits") builds just the pack or the camp,
-/// round the position.
+/// round the position; `facing` turns the whole layout (the pack lies ahead
+/// and to the left of a Wilds facing +Z).
 fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     let at = origin(args)?;
     let floor = args.get("floor").and_then(Value::as_bool).unwrap_or(true);
@@ -173,9 +174,17 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         .get("encounter")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let facing = args
+        .get("facing")
+        .and_then(|f| serde_json::from_value::<[f32; 3]>(f.clone()).ok())
+        .map_or(Vec3::Z, Vec3::from_array);
     let root = world.spawn((
         Name::new("Combat Wilds"),
-        Transform::from_translation(at),
+        Transform {
+            translation: at,
+            rotation: yaw(facing),
+            ..Default::default()
+        },
         WorldTransform::identity(),
     ));
     let mut out = vec![root];
@@ -957,19 +966,15 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
 /// scene's own camera and protagonist kept): the entities made, for Stop to
 /// take away.
 fn expand_encounters(world: &mut World) -> Vec<Entity> {
-    let wanted: Vec<(Vec3, CombatEncounterComponent)> = world
+    let wanted: Vec<(Mat4, CombatEncounterComponent)> = world
         .iter_with::<CombatEncounterComponent>()
         .filter(|(_, c)| c.enabled)
-        .map(|(e, c)| {
-            (
-                world_matrix(world, e).transform_point3(Vec3::ZERO),
-                c.clone(),
-            )
-        })
+        .map(|(e, c)| (world_matrix(world, e), c.clone()))
         .collect();
     let mut made = Vec::new();
-    for (at, encounter) in wanted {
-        match build_encounter(world, &encounter.kind, at, encounter.floor) {
+    for (m, encounter) in wanted {
+        let (at, facing) = (m.transform_point3(Vec3::ZERO), m.transform_vector3(Vec3::Z));
+        match build_encounter(world, &encounter.kind, at, facing, encounter.floor) {
             Ok(entities) => made.extend(entities),
             Err(e) => tracing::warn!("Combat Encounter at {at}: {e}"),
         }
@@ -977,14 +982,21 @@ fn expand_encounters(world: &mut World) -> Vec<Entity> {
     made
 }
 
-/// One encounter of `kind` built at `at`, without a camera or protagonist.
+/// One encounter of `kind` built at `at` and turned to `facing`, without a
+/// camera or protagonist.
 fn build_encounter(
     world: &mut World,
     kind: &str,
     at: Vec3,
+    facing: Vec3,
     floor: bool,
 ) -> Result<Vec<Entity>, String> {
-    let mut args = json!({"position": [at.x, at.y, at.z], "floor": floor, "encounter": true});
+    let mut args = json!({
+        "position": [at.x, at.y, at.z],
+        "facing": [facing.x, facing.y, facing.z],
+        "floor": floor,
+        "encounter": true,
+    });
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
         part @ ("wolves" | "bandits") => args["only"] = json!(part),
@@ -1013,12 +1025,16 @@ const TEND_EVERY: f32 = 0.5;
 struct Encounter {
     kind: String,
     floor: bool,
+    /// Its entity's forward: the layout turns with it.
+    facing: Vec3,
     /// Survivors by name, with their health, after its first sleep; `None`
     /// before it ever woke (everyone).
     left: Option<Vec<(String, f32)>>,
-    /// Awake: its entities, fighters and colliders.
+    /// Awake: its entities, fighters (and where each stood when it woke)
+    /// and colliders.
     entities: Vec<Entity>,
     members: Vec<CombatantId>,
+    starts: Vec<Vec3>,
     solids: Vec<BodyId>,
 }
 
@@ -1027,13 +1043,14 @@ fn encounters_asleep(world: &World) -> Dormancy<Encounter> {
     let mut set = Dormancy::new(DormancySettings::default());
     for (e, c) in world.iter_with::<CombatEncounterComponent>() {
         if c.enabled {
-            let at = world_matrix(world, e).transform_point3(Vec3::ZERO);
+            let m = world_matrix(world, e);
             set.add(
-                at,
+                m.transform_point3(Vec3::ZERO),
                 encounter_extent(&c.kind),
                 Encounter {
                     kind: c.kind.clone(),
                     floor: c.floor,
+                    facing: m.transform_vector3(Vec3::Z),
                     ..Encounter::default()
                 },
             );
@@ -1104,7 +1121,8 @@ fn wake(
         // Cleared: nobody left to wake.
         return;
     }
-    let made = build_encounter(world, &record.kind, at, record.floor).unwrap_or_default();
+    let made =
+        build_encounter(world, &record.kind, at, record.facing, record.floor).unwrap_or_default();
     somnium_core::propagate_transforms(world);
     let mut left = record.left.clone();
     let mut members = Vec::new();
@@ -1193,9 +1211,14 @@ fn wake(
     );
     run.spawned.extend(made.iter().copied());
     run.colliders.extend(solids.iter().copied());
+    let starts = members
+        .iter()
+        .map(|m| run.world.combatant(*m).map_or(at, |c| c.position))
+        .collect();
     if let Some(record) = run.encounters.as_mut().and_then(|set| set.data_mut(id)) {
         record.entities = made;
         record.members = members;
+        record.starts = starts;
         record.solids = solids;
     }
 }
@@ -1213,22 +1236,26 @@ fn sleep(
     };
     let entities = std::mem::take(&mut record.entities);
     let members = std::mem::take(&mut record.members);
+    let starts = std::mem::take(&mut record.starts);
     let solids = std::mem::take(&mut record.solids);
     let was_built = !members.is_empty();
     tracing::info!("Combat Encounter {} fell asleep", id.0);
+    // Who is left, and how far they went since they woke: the record follows
+    // them on the ground, and the layout is rebuilt round it next time.
     let alive: Vec<(String, f32, Vec3)> = members
         .iter()
-        .filter_map(|m| run.world.combatant(*m))
-        .filter(|c| c.alive())
-        .map(|c| (c.name.clone(), c.vitals.health.current, c.position))
+        .zip(&starts)
+        .filter_map(|(m, start)| Some((run.world.combatant(*m)?, *start)))
+        .filter(|(c, _)| c.alive())
+        .map(|(c, start)| (c.name.clone(), c.vitals.health.current, c.position - start))
         .collect();
     if let Some(set) = run.encounters.as_mut() {
         if was_built && let Some(record) = set.data_mut(id) {
             record.left = Some(alive.iter().map(|a| (a.0.clone(), a.1)).collect());
         }
-        if !alive.is_empty() {
-            let centre = alive.iter().map(|a| a.2).sum::<Vec3>() / alive.len() as f32;
-            set.move_to(id, centre);
+        if let (false, Some(at)) = (alive.is_empty(), set.position(id)) {
+            let went = alive.iter().map(|a| a.2).sum::<Vec3>() / alive.len() as f32;
+            set.move_to(id, at + Vec3::new(went.x, 0.0, went.z));
         }
     }
     for m in &members {
@@ -3912,6 +3939,97 @@ mod tests {
         ));
         somnium_core::propagate_transforms(&mut off);
         assert!(expand_encounters(&mut off).is_empty());
+    }
+
+    /// An encounter turned a quarter turn lays its pack and camp out turned
+    /// with it, awake at Play or woken later.
+    #[test]
+    fn an_encounter_turns_with_its_entity() {
+        let at = Vec3::new(10.0, 0.0, -40.0);
+        let turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let den = at + turn * Vec3::new(14.0, 0.0, 18.0);
+        let scene = |hero: bool| {
+            let mut world = World::new();
+            if hero {
+                let root = world.spawn((
+                    Name::new("Scene"),
+                    Transform::default(),
+                    WorldTransform::identity(),
+                ));
+                fighter(
+                    &mut world,
+                    root,
+                    "Protagonist",
+                    at,
+                    Vec3::X,
+                    CombatantComponent::protagonist(),
+                );
+            }
+            world.spawn((
+                Name::new("Turned"),
+                Transform {
+                    translation: at,
+                    rotation: turn,
+                    ..Default::default()
+                },
+                WorldTransform::identity(),
+                CombatEncounterComponent::default(),
+            ));
+            somnium_core::propagate_transforms(&mut world);
+            world
+        };
+        let alpha = |run: &Run| {
+            run.world
+                .combatants()
+                .find(|c| c.name == "Rime wolf (alpha)")
+                .map(|c| c.position)
+                .expect("the alpha")
+        };
+        // Built at Play.
+        let mut world = scene(false);
+        expand_encounters(&mut world);
+        somnium_core::propagate_transforms(&mut world);
+        let run = build(&world).expect("a fight");
+        assert!(alpha(&run).distance(den) < 0.5, "{} not {den}", alpha(&run));
+        // Woken from sleep.
+        let mut world = scene(true);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        assert!(alpha(&run).distance(den) < 0.5, "{} not {den}", alpha(&run));
+        // Asleep and woken twice where nobody went: the camp stays put.
+        let hero = run.player.expect("the protagonist");
+        let go = |run: &mut Run, world: &mut World, p: Vec3| {
+            run.world.combatant_mut(hero).unwrap().position = p;
+            tend_encounters(world, None, run, f32::INFINITY);
+        };
+        for _ in 0..2 {
+            go(&mut run, &mut world, at + Vec3::X * 400.0);
+            go(&mut run, &mut world, at);
+        }
+        assert!(
+            alpha(&run).distance(den) < 0.5,
+            "drifted to {}",
+            alpha(&run)
+        );
+        // Everyone ten metres east before it sleeps: it wakes ten metres east.
+        let ids: Vec<CombatantId> = run
+            .world
+            .combatants()
+            .filter(|c| c.id != hero)
+            .map(|c| c.id)
+            .collect();
+        for id in ids {
+            run.world.combatant_mut(id).unwrap().position += Vec3::X * 10.0;
+        }
+        go(&mut run, &mut world, at + Vec3::X * 400.0);
+        go(&mut run, &mut world, at);
+        let east = den + Vec3::X * 10.0;
+        assert!(
+            alpha(&run).distance(east) < 0.5,
+            "{} not {east}",
+            alpha(&run)
+        );
     }
 
     /// A pack and a camp placed apart (as across Tyffir): each builds only
