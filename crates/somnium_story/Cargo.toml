@@ -1,0 +1,17 @@
+[package]
+name        = "somnium_story"
+description = "World state, quests, dialogue, barks and the journal for story-driven games on the Somnium Engine."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+
+# Data and rules only, like `somnium_i18n` and `somnium_ai`: no renderer, no widgets, no ECS. A quest or a
+# conversation is checked, played and saved the same way by the game, the editor, an MCP agent and a test. The
+# editor's graph catalogues and the presenter widget live in `somnium_ui`, which depends on this crate (the same
+# direction as `somnium_ai`'s behaviour trees).
+[dependencies]
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+somnium_i18n = { workspace = true }

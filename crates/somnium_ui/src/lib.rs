@@ -38,6 +38,7 @@ pub mod thumbnail;
 pub mod timeline;
 pub mod types;
 pub mod typography;
+pub mod vector_glyph;
 pub mod ui;
 /// MORROWIND-J step 2: a panel living in its own OS window.
 /// `wgpu`, as this crate sees it.
@@ -970,6 +971,13 @@ pub struct UiManager {
     /// Wall clock of the previous `end_frame`, for the motion delta. `None`
     /// until the first frame, which therefore advances nothing.
     last_frame_at: Option<std::time::Instant>,
+    /// The dialogue graph's Game View: the game's presenter over the editor, made on first use.
+    story_presenter: Option<NodeHandle>,
+    /// The Game View's quest notices, over the presenter.
+    story_notices: Option<NodeHandle>,
+    /// The game's journal screen over the editor, for a play-through's story, and whether it is open.
+    story_journal: Option<NodeHandle>,
+    story_journal_open: bool,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -1857,6 +1865,10 @@ impl UiManager {
             physical_size: (size.width, size.height),
             ui_scale,
             last_frame_at: None,
+            story_presenter: None,
+            story_notices: None,
+            story_journal: None,
+            story_journal_open: false,
             native_ui,
             ui_pass,
             font_id,
@@ -2365,6 +2377,54 @@ impl UiManager {
                     }
                 }
             }
+            // A dialogue or quest file on the graph, as Open loads it: `story:<path>`, then `|from=<node>` selects a
+            // node as Find does, `|game-view` turns the Game View on and `|play` presses Play, in the order given.
+            // `|choose=0,2` takes those choices as soon as the play-through starts, and `|journal` then opens the
+            // game's journal on it.
+            story if story.starts_with("story:") => {
+                let mut spec = raw.trim()["story:".len()..].split('|');
+                let path = spec.next().unwrap_or_default().trim().to_owned();
+                let catalogue = if path.ends_with(".somquest") {
+                    crate::graph::quest::CATALOGUE
+                } else {
+                    crate::graph::dialogue::CATALOGUE
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(json) => self.open_story_document(catalogue, &json, Some(&path)),
+                    Err(error) => warn!("SOMNIUM_AUDIT_UI_STATE story {path}: {error}"),
+                }
+                let mut script = Vec::new();
+                for option in spec.map(str::trim) {
+                    match option {
+                        "journal" => script.push(crate::graph::PreviewInput::Journal),
+                        "game-view" => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::PreviewGameView(true),
+                        )),
+                        "play" => self.request_graph_document(true, false),
+                        choose if choose.starts_with("choose=") => script.extend(
+                            choose["choose=".len()..]
+                                .split(',')
+                                .filter_map(|i| i.trim().parse().ok())
+                                .map(crate::graph::PreviewInput::Choose),
+                        ),
+                        from if from.starts_with("from=") => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::RevealNode(from["from=".len()..].trim().to_owned()),
+                        )),
+                        other => warn!("SOMNIUM_AUDIT_UI_STATE story option {other:?} ignored"),
+                    }
+                }
+                if !script.is_empty() {
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewScript(script),
+                    ));
+                }
+            }
             // Any surface a command opens: `cmd:editor.workspace.animation`, several joined by `+`.
             commands if commands.starts_with("cmd:") => {
                 for id in commands["cmd:".len()..].split('+').map(str::trim).filter(|id| !id.is_empty()) {
@@ -2635,6 +2695,20 @@ impl UiManager {
             // A stalled frame (breakpoint, minimised window) must not teleport
             // every track to its end state.
             self.native_ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+            if let Some(presenter) = self.story_presenter {
+                self.native_ui.send(UiMessage::new(
+                    presenter,
+                    MessageDirection::ToWidget,
+                    crate::widgets::dialogue_presenter::DialoguePresenterMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
+            if let Some(notices) = self.story_notices {
+                self.native_ui.send(UiMessage::new(
+                    notices,
+                    MessageDirection::ToWidget,
+                    crate::widgets::notice_stack::NoticeMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
         }
         self.last_frame_at = Some(now);
 
@@ -8757,6 +8831,54 @@ impl UiManager {
                 }
                 continue;
             }
+            if let Some(crate::graph::GraphEditorMessage::PreviewBeat(beat)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_game_view(beat.clone());
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::PreviewJournal(view)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_journal(view.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::journal_screen::JournalMessage::Output(output)) =
+                msg.data::<crate::widgets::journal_screen::JournalMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    if *output == crate::widgets::journal_screen::JournalOutput::Closed {
+                        self.story_journal_open = false;
+                        self.native_ui.set_focus(self.animation_graph_editor);
+                    }
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewJournalOutput(output.clone()),
+                    ));
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::PreviewNotice { heading, text }) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_notice(heading.clone(), text.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::dialogue_presenter::DialoguePresenterMessage::Output(output)) =
+                msg.data::<crate::widgets::dialogue_presenter::DialoguePresenterMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.story_presenter_output(output.clone());
+                }
+                continue;
+            }
             if matches!(
                 msg.data::<crate::graph::GraphEditorMessage>(),
                 Some(
@@ -11983,10 +12105,29 @@ impl UiManager {
                     "Behavior graph: edit tasks, then Save Authoring Graph"
                 });
             }
+            A::Dialogue | A::Quest => {
+                self.set_graph_only_layout(true);
+                let surface = if action == A::Dialogue {
+                    crate::graph::dialogue::default_surface()
+                } else {
+                    crate::graph::quest::default_surface()
+                };
+                self.native_ui.send(UiMessage::new(
+                    self.animation_graph_editor,
+                    MessageDirection::ToWidget,
+                    crate::graph::GraphEditorMessage::ActivateSurface(surface),
+                ));
+                self.set_workspace(Workspace::Animation);
+                self.push_toast(if action == A::Dialogue {
+                    "Dialogue graph: write lines and choices, then Check and Play"
+                } else {
+                    "Quest graph: wire stages, objectives and journal lines, then Check"
+                });
+            }
             A::Open => self
                 .editor_events
                 .push_back(EditorEvent::OpenAuthoringGraph),
-            A::Save | A::Preview | A::Apply => self.native_ui.send(UiMessage::new(
+            A::Save | A::Preview | A::Apply | A::Play => self.native_ui.send(UiMessage::new(
                 self.animation_graph_editor,
                 MessageDirection::ToWidget,
                 crate::graph::GraphEditorMessage::RequestDocument {
@@ -12059,6 +12200,176 @@ impl UiManager {
         ));
         self.set_workspace(Workspace::Animation);
         Ok(())
+    }
+
+    /// Open a story asset (`*.somdialogue`, `*.somquest`) on the graph control. The control keeps what the graph
+    /// does not draw (text keys, forms) so saving back is lossless.
+    pub fn open_story_document(&mut self, catalogue: &str, json: &str, source: Option<&str>) {
+        self.set_graph_only_layout(true);
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::OpenStory {
+                catalogue: catalogue.to_owned(),
+                json: json.to_owned(),
+                source: source.map(str::to_owned),
+            },
+        ));
+        self.set_workspace(Workspace::Animation);
+    }
+
+    /// Ask the graph control for its document (a story graph converts to its asset): Save, Preview/Check or
+    /// Apply/Play, the same as the toolbar.
+    pub fn request_graph_document(&mut self, apply: bool, preview: bool) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::RequestDocument { apply, preview },
+        ));
+    }
+
+    /// Show (or, with `None` or an end, close) the dialogue graph's Game View.
+    fn show_story_game_view(&mut self, beat: Option<somnium_story::Beat>) {
+        // UI blends in linear light, so the editor needs a heavy dim before the presenter reads as in front.
+        const GAME_VIEW_BACKDROP: u8 = 215;
+        use crate::widgets::dialogue_presenter::{DialoguePresenterBuilder, DialoguePresenterMessage as P};
+        let handle = match self.story_presenter {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = DialoguePresenterBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_presenter = Some(handle);
+                handle
+            }
+        };
+        let send = |ui: &mut UserInterface, message: P| {
+            ui.send(UiMessage::new(handle, MessageDirection::ToWidget, message));
+        };
+        match beat {
+            Some(somnium_story::Beat::Line(line)) => {
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
+                send(&mut self.native_ui, P::ShowLine { beat: line, display: None });
+                self.native_ui.set_focus(handle);
+            }
+            Some(somnium_story::Beat::Choices { choices, timeout_ms, .. }) => {
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
+                send(&mut self.native_ui, P::ShowChoices(choices));
+                send(&mut self.native_ui, P::SetTimeLeft(timeout_ms.map(|ms| (ms, ms))));
+                self.native_ui.set_focus(handle);
+            }
+            // An action holding for the game: the line stays up; the panel's Space resumes it.
+            Some(somnium_story::Beat::Wait { .. }) => {}
+            Some(somnium_story::Beat::End { .. }) | None => {
+                send(&mut self.native_ui, P::Close);
+                send(&mut self.native_ui, P::SetBackdrop(0));
+                self.native_ui.set_focus(self.animation_graph_editor);
+                if let Some(notices) = self.story_notices {
+                    self.native_ui.send(UiMessage::new(
+                        notices,
+                        MessageDirection::ToWidget,
+                        crate::widgets::notice_stack::NoticeMessage::Clear,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The game's journal screen over the editor, on a play-through's journal (opened, or kept open and refreshed).
+    fn show_story_journal(&mut self, view: somnium_story::story::JournalView) {
+        use crate::widgets::journal_screen::{JournalMessage, JournalScreenBuilder};
+        let handle = match self.story_journal {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = JournalScreenBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_journal = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::SetView(view)));
+        if !std::mem::replace(&mut self.story_journal_open, true) {
+            self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::Open(true)));
+            self.native_ui.set_focus(handle);
+        }
+    }
+
+    /// A quest notice in the Game View, the way a game's notices would show it.
+    fn show_story_notice(&mut self, heading: String, text: String) {
+        use crate::widgets::notice_stack::{Notice, NoticeMessage, NoticeStackBuilder};
+        let handle = match self.story_notices {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = NoticeStackBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_notices = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(
+            handle,
+            MessageDirection::ToWidget,
+            NoticeMessage::Push(Notice {
+                category: "quest".into(),
+                heading,
+                text,
+                hold_ms: None,
+            }),
+        ));
+    }
+
+    /// The Game View's player moved: drive the play-through on the graph.
+    fn story_presenter_output(&mut self, output: somnium_story::PresenterOutput) {
+        use crate::graph::PreviewInput;
+        use somnium_story::PresenterOutput as O;
+        let input = match output {
+            O::Next => PreviewInput::Next,
+            O::Chose(index) => PreviewInput::Choose(index),
+            O::Back => PreviewInput::Leave,
+            O::PlayVoice(_) => {
+                // No voice in the editor's preview: the line has finished speaking at once.
+                if let Some(presenter) = self.story_presenter {
+                    self.native_ui.send(UiMessage::new(
+                        presenter,
+                        MessageDirection::ToWidget,
+                        crate::widgets::dialogue_presenter::DialoguePresenterMessage::VoiceFinished,
+                    ));
+                }
+                return;
+            }
+            O::StopVoice => return,
+        };
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::PreviewInput(input),
+        ));
+    }
+
+    /// Mark the problems a project-wide story check found on the open graph.
+    pub fn set_story_problems(&mut self, problems: Vec<(String, String, bool)>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryProblems(problems),
+        ));
+    }
+
+    /// Play the open dialogue from its selected node over `database`.
+    pub fn start_story_preview(&mut self, database: std::sync::Arc<somnium_story::StoryDatabase>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryPreview(database),
+        ));
     }
 
     /// Retain the source file in the document owner after a successful open/save.

@@ -19,6 +19,18 @@ fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| error(format!("{key} required")))
 }
 const MAX_BYTES: usize = 512 * 1024;
+/// Content assets the document API reads and writes, besides a game's registered JSON documents.
+const ENGINE_EXTENSIONS: &[&str] = &[
+    "somui",
+    "somgraph",
+    "somtimeline",
+    "luau",
+    "somstory",
+    "somdialogue",
+    "somquest",
+    "sombarks",
+    "somnotes",
+];
 
 /// The panel can use the last completed scan; explicit document requests stay fresh.
 /// At most one scan runs per session, with no filesystem work or waiting on the UI thread.
@@ -203,13 +215,10 @@ impl DocumentSession {
         let game_document =
             relative.starts_with(&self.project.manifest.documents) && extension == Some("json");
         let engine_document = relative.starts_with(&self.project.manifest.content)
-            && matches!(
-                extension,
-                Some("somui" | "somgraph" | "somtimeline" | "luau")
-            );
+            && matches!(extension, Some(extension) if ENGINE_EXTENSIONS.contains(&extension));
         if !game_document && !engine_document {
             return Err(error(
-                "Only registered JSON documents or .somui/.somgraph/.somtimeline content assets are accessible",
+                "Only registered JSON documents or .somui/.somgraph/.somtimeline/.luau and story (.somstory, .somdialogue, .somquest, .sombarks, .somnotes) content assets are accessible",
             ));
         }
         self.project.resolve(relative).map_err(error)
@@ -286,7 +295,7 @@ impl DocumentSession {
                     visit(&path, project, out, depth + 1, job)?;
                 } else if matches!(
                     path.extension().and_then(|s| s.to_str()),
-                    Some("json" | "somui" | "somgraph" | "somtimeline" | "luau")
+                    Some(e) if e == "json" || ENGINE_EXTENSIONS.contains(&e)
                 ) {
                     out.push(json!({"path":relative}));
                 }
@@ -316,7 +325,7 @@ impl DocumentSession {
                 v["path"].as_str().is_some_and(|p| {
                     matches!(
                         Path::new(p).extension().and_then(|s| s.to_str()),
-                        Some("somui" | "somgraph" | "somtimeline" | "luau")
+                        Some(e) if ENGINE_EXTENSIONS.contains(&e)
                     )
                 })
             }));

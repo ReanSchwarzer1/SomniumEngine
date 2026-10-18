@@ -728,7 +728,8 @@ impl<G: GameApp> Engine<G> {
                     "designer":{"tools":["navigation_bake","navigation_clear","behavior_edit","animation_rig","animation_reset","animation_reload","animation_events","animation_save_events","save_play","load_play"],"owner":"native designer handlers; bake completion in NavigationProfile status/pending_cells"},
                     "scripts":{"operations":["attach","detach","reorder","enabled","number","bool","reload"],"source":"validated Luau document publication and exact-byte undo"},
                     "materials":"material_open -> reflected native material draft -> material_save; native dirty/GPU path",
-                    "documents":["somui","somgraph","somtimeline","luau","registered game JSON"],
+                    "documents":["somui","somgraph","somtimeline","luau","somstory","somdialogue","somquest","sombarks","somnotes","registered game JSON"],
+                    "story":{"query":"authoring_query kind story: operation overview | schema | lint | check (document_type, content, path) | simulate (dialogue, entry, choices, setup, seed, max_beats) | strings | search (text)","write":"document plan/commit on .somdialogue/.somquest/.sombarks/.somnotes/.somstory; check with kind story operation check first","editor":"graph_open on a .somdialogue/.somquest; graph_preview is Check, graph_apply is Play, graph_save writes the asset"},
                     "spatial":{"queries":["pick","clearance","bookmarks"],"actions":["camera","bookmark"],"limits":"picking uses native proxy bounds; clearance uses registered physics colliders"},
                     "project":"native File > Open Project or open_project; game launcher preserves private schemas",
                     "renderer_controls":"terrain_settings / foliage_settings query and native value updates with expected_value; session preview scope",
@@ -833,6 +834,8 @@ impl<G: GameApp> Engine<G> {
                 }
                 "documents" => host.documents.list().unwrap_or_else(|e| e.json()),
                 "document" => host.documents.query(&params).unwrap_or_else(|e| e.json()),
+                "story" => crate::story_authoring::query(&self.story_root(), &params)
+                    .unwrap_or_else(|e| fail("story_error", e)),
                 "scene" => host
                     .session
                     .query(&mut self.world, &params)
@@ -997,7 +1000,12 @@ impl<G: GameApp> Engine<G> {
             }
             "graph_open"=>{
                 let path=Path::new(required(params,"path")?);
-                if !path.starts_with(&host.project.manifest.content)||path.extension().and_then(|v|v.to_str())!=Some("somgraph"){return Err("graph needs .somgraph under project content".into());}
+                if path.starts_with(&host.project.manifest.content)&&crate::story_authoring::catalogue_for(path).is_some(){
+                    let source=host.project.resolve(path)?;
+                    self.open_story_file(&source)?;
+                    return Ok(json!({"ok":true,"status":"queued","path":path}));
+                }
+                if !path.starts_with(&host.project.manifest.content)||path.extension().and_then(|v|v.to_str())!=Some("somgraph"){return Err("graph needs .somgraph, .somdialogue or .somquest under project content".into());}
                 let source=host.project.resolve(path)?;
                 let json=std::fs::read_to_string(&source).map_err(|e|e.to_string())?;
                 let catalogue=serde_json::from_str::<Value>(&json).map_err(|e|e.to_string())?["catalogue"].as_str().ok_or("graph catalogue absent")?.to_owned();
@@ -1010,6 +1018,18 @@ impl<G: GameApp> Engine<G> {
                 let q=self.ui_manager.as_mut().ok_or("editor unavailable")?.authoring_editor("graph",&json!({"operation":"query"}))?;
                 if params["expected_view"]!=q["view_token"]{return Err("graph changed; query its current view before applying".into());}
                 let doc=q["document"].to_string();let catalogue=q["document"]["catalogue"].as_str().ok_or("graph catalogue missing")?;
+                if crate::story_authoring::is_story_catalogue(catalogue){
+                    // The control converts its graph to the asset (keeping text keys), so the save goes through it.
+                    if kind=="graph_save"{
+                        let p=Path::new(required(params,"path")?);
+                        let wanted=crate::story_authoring::extension_for(catalogue);
+                        if !p.starts_with(&host.project.manifest.content)||p.extension().and_then(|v|v.to_str())!=Some(wanted){return Err(format!("save requires .{wanted} under content"));}
+                        let resolved=host.project.resolve(p)?;
+                        self.ui_manager.as_mut().ok_or("editor unavailable")?.set_authoring_graph_source(&resolved.to_string_lossy());
+                    }
+                    self.ui_manager.as_mut().ok_or("editor unavailable")?.request_graph_document(kind!="graph_save",kind=="graph_preview");
+                    return Ok(json!({"ok":true,"status":"queued: the result shows in the graph footer and the log; read problems with authoring_query kind story operation check"}));
+                }
                 let path=if kind=="graph_save" {let p=Path::new(required(params,"path")?);if !p.starts_with(&host.project.manifest.content)||p.extension().and_then(|v|v.to_str())!=Some("somgraph"){return Err("save requires .somgraph under content".into());}Some(host.project.resolve(p)?)}else{None};
                 let status=self.apply_authoring_graph(catalogue,&doc,kind!="graph_save",kind=="graph_preview",path.as_ref().map(|p|p.to_str().ok_or("invalid path")).transpose()?)?;
                 host.session.observe(&mut self.world);

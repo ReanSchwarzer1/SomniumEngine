@@ -76,6 +76,8 @@ pub mod fallback;
 pub mod ime;
 pub mod localize;
 pub mod markup;
+/// Rich text laid out in lines, with a reveal limit for typewriters.
+pub mod rich;
 /// MORROWIND-G item 1: rasterising a glyph the shaper chose.
 pub mod raster;
 /// MORROWIND-G item 1: turning a string into positioned glyphs.
@@ -193,6 +195,11 @@ pub struct StyledRun {
     /// which is what lets a caret step over a sprite as one unit and a
     /// selection include it.
     pub sprite: Option<String>,
+    /// A face the game registered by name (`[face=ladder]`): an invented script, a hand. `None` inherits.
+    ///
+    /// Distinct from [`Self::role`], which picks among the engine's own UI faces: a game's script font is not
+    /// one of those, and a closed enum cannot name it.
+    pub face: Option<String>,
     /// Resolved writing direction.
     pub direction: Direction,
 }
@@ -208,6 +215,7 @@ impl Default for StyledRun {
             motion: Motion::None,
             link: None,
             sprite: None,
+            face: None,
             direction: Direction::Ltr,
         }
     }

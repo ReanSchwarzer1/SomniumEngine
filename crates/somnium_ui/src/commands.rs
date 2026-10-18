@@ -989,6 +989,26 @@ fn declarations() -> Vec<Command> {
             always
         ),
         command!(
+            "editor.authoring.dialogue",
+            "Dialogue Graph",
+            "Graph",
+            None,
+            "Write a dialogue: lines, choices, checks and branches on the graph surface.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Dialogue),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.authoring.quest",
+            "Quest Graph",
+            "Graph",
+            None,
+            "Build a quest: stages, objectives and journal lines on the graph surface.",
+            A::GraphTool(crate::editor_event::GraphToolAction::Quest),
+            CREATE,
+            always
+        ),
+        command!(
             "editor.authoring.open",
             "Open Authoring Graph",
             "Graph",
@@ -2408,6 +2428,8 @@ pub fn icon_for(id: &str) -> crate::icons::IconId {
         "editor.save.load" => I::FolderOpen,
         "editor.save.thumbnail" => I::Screenshot,
         "editor.behavior.edit" | "editor.authoring.behavior" => I::BehaviorTree,
+        "editor.authoring.dialogue" => I::User,
+        "editor.authoring.quest" => I::Map,
         "editor.authoring.open" => I::FolderOpen,
         "editor.authoring.save" => I::Save,
         "editor.authoring.apply" => I::Check,

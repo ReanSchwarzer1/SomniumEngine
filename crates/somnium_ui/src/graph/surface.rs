@@ -145,6 +145,24 @@ impl GraphSurface {
         created
     }
 
+    /// Add a node already named (a story node's id), as one undo step.
+    pub fn add_named(&mut self, archetype: &str, at: Vec2, title: impl Into<String>) -> Option<NodeId> {
+        let title = title.into();
+        let mut created = None;
+        self.history
+            .apply(&mut self.graph, "Add Graph Node", |graph| {
+                created = graph.add(&self.catalogue, archetype, at);
+                if let Some(id) = created {
+                    graph.node_mut(id).expect("just added").title.clone_from(&title);
+                }
+                created.is_some()
+            });
+        if let Some(id) = created {
+            self.selection.select_only(id);
+        }
+        created
+    }
+
     /// Commit one unconnected input's authored value as a single undo step.
     ///
     /// Literal text deliberately remains feature-neutral here: the catalogue
@@ -182,6 +200,22 @@ impl GraphSurface {
                     return false;
                 }
                 node.literals.insert(pin, value);
+                true
+            })
+    }
+
+    /// Rename a node (its header; story graphs use it as the node's id) as one undo step.
+    pub fn set_title(&mut self, node: NodeId, title: impl Into<String>) -> bool {
+        let title = title.into();
+        self.history
+            .apply(&mut self.graph, "Rename Graph Node", |graph| {
+                let Some(node) = graph.node_mut(node) else {
+                    return false;
+                };
+                if node.title == title {
+                    return false;
+                }
+                node.title = title;
                 true
             })
     }

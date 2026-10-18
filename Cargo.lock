@@ -3933,6 +3933,7 @@ dependencies = [
  "somnium_renderer",
  "somnium_script",
  "somnium_script_luau",
+ "somnium_story",
  "somnium_ui",
  "thiserror 2.0.18",
  "tracing",
@@ -4037,6 +4038,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "somnium_story"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "somnium_i18n",
+]
+
+[[package]]
 name = "somnium_ui"
 version = "0.1.0"
 dependencies = [
@@ -4054,6 +4064,7 @@ dependencies = [
  "somnium_asset",
  "somnium_ecs",
  "somnium_shader",
+ "somnium_story",
  "tracing",
  "unicode-bidi",
  "wgpu",

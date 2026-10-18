@@ -201,6 +201,20 @@ export type SomniumCombatant = {
 	leader: boolean,
 }
 
+--- `somnium.CastMember` (schema version 1).
+export type SomniumCastMember = {
+	speaker: string,
+	drive_look: boolean,
+	look_weight: number,
+	talking: boolean, -- engine-owned; reading only
+	jaw_open: number, -- engine-owned; reading only
+	lids_shut: number, -- engine-owned; reading only
+	expression: string, -- engine-owned; reading only
+	look_at: string, -- engine-owned; reading only
+	gesture: string, -- engine-owned; reading only
+	mark: string, -- engine-owned; reading only
+}
+
 --- `somnium.Decal` (schema version 1).
 export type SomniumDecal = {
 	enabled: boolean,
@@ -769,6 +783,7 @@ export type SelfComponents = {
 	blockout: SomniumBlockout?,
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
+	castMember: SomniumCastMember?,
 	combatSurface: SomniumCombatSurface?,
 	combatant: SomniumCombatant?,
 	decal: SomniumDecal?,

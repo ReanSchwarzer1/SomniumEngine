@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "id": "relight_lamps",
+  "title": "Relight the Lamps",
+  "summary": "Oren the lamplighter needs three street lamps burning before the watch's morning round.",
+  "category": "side",
+  "giver": "oren",
+  "stages": [
+    {
+      "id": "lamps",
+      "journal": [
+        { "id": "j1", "text": "Oren says someone is stealing the lamp oil. Three lamps on his street are dark.", "tier": "witnessed" }
+      ],
+      "objectives": [
+        {
+          "id": "flint",
+          "text": "Take the flint from the box by the fountain",
+          "done_when": "'flint' in wren.items",
+          "marker": { "anchor": "fountain_box", "radius": 2.0 }
+        },
+        {
+          "id": "light",
+          "text": "Relight the street lamps",
+          "count": { "fact": "lamps.lit", "target": 3 },
+          "marker": { "anchor": "bridge_lamp", "radius": 3.0 },
+          "on_done": "voice('lamps_burning')"
+        },
+        {
+          "id": "dawn",
+          "text": "Before the morning round",
+          "timer_ms": 600000,
+          "on_expire": "fail",
+          "optional": true
+        }
+      ],
+      "next": [
+        { "when": "failed('relight_lamps', 'dawn')", "to": "too_late" },
+        { "to": "report" }
+      ]
+    },
+    {
+      "id": "report",
+      "journal": [{ "id": "j1", "text": "All three lamps burn again.", "tier": "measured" }],
+      "objectives": [
+        {
+          "id": "tell",
+          "text": "Tell Oren",
+          "done_when": "visited('lamplighter/thanks') > 0",
+          "marker": { "anchor": "oren", "radius": 3.0, "arrive": false }
+        }
+      ],
+      "next": [{ "to": "done" }]
+    },
+    {
+      "id": "done",
+      "journal": [{ "id": "j1", "text": "Oren swears he'll find whoever has been taking the oil.", "tier": "witnessed" }],
+      "end": "complete"
+    },
+    {
+      "id": "too_late",
+      "journal": [
+        { "id": "j1", "text": "Dawn came with the street still dark. The watch fined Oren anyway.", "tier": "retold" }
+      ],
+      "end": "fail"
+    }
+  ],
+  "on_complete": "oren.trust += 2; rep.lamplighters += 5"
+}

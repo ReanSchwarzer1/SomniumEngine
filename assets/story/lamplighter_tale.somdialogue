@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "lamplighter_tale",
+  "title": "Why the lamps are lit (called from the lamplighter)",
+  "nodes": [
+    {
+      "type": "line",
+      "id": "t1",
+      "speaker": "oren",
+      "expression": "thinking",
+      "text": "Before the lamps, the street belonged to whatever walked it after dark.",
+      "next": ["t2"]
+    },
+    {
+      "type": "line",
+      "id": "t2",
+      "speaker": "oren",
+      "text": "My grandmother said a lit window is a promise. Someone is awake. Someone is watching.",
+      "effects": "heard.lamp_story = true; journal('lamp_promise')",
+      "next": ["t3"]
+    },
+    { "type": "end", "id": "t3" }
+  ]
+}

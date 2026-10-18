@@ -695,6 +695,7 @@ pub fn component_registry() -> TypeRegistry {
     registry.register(light_schema());
     registry.register(material_schema());
     crate::animation_authoring::register(&mut registry);
+    crate::story_actor::register(&mut registry);
     registry.register(component_schema! {
         crate::ImportedMesh as "somnium.ImportedMesh", display "Imported Mesh Source", version 1,
         fields {
@@ -1556,7 +1557,7 @@ mod tests {
     #[test]
     fn every_built_in_schema_registers_without_a_clash() {
         let registry = component_registry();
-        assert_eq!(registry.len(), 48);
+        assert_eq!(registry.len(), 49);
         let names: Vec<_> = registry.iter().map(|s| s.stable_id.as_str()).collect();
         assert_eq!(
             names,
@@ -1568,6 +1569,7 @@ mod tests {
                 "somnium.Blockout",
                 "somnium.BuoyantVessel",
                 "somnium.CameraSettings",
+                "somnium.CastMember",
                 "somnium.Cutaway",
                 "somnium.CutawayViewer",
                 "somnium.Decal",

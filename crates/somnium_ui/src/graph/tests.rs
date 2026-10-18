@@ -1253,3 +1253,77 @@ fn frame_all_brings_a_far_node_into_view() {
         );
     }
 }
+
+fn story_like_catalogue() -> Catalogue {
+    let flow = PinType::Opaque("test.flow");
+    let mut catalogue = Catalogue::new("test.story");
+    catalogue.register(
+        NodeArchetype::new("line", "Line", "Story")
+            .with_input(PinArchetype::new("In", flow).many())
+            .with_input(PinArchetype::new("Voice", PinType::Opaque("test.text")).with_default("").detail())
+            .with_input(PinArchetype::new("Text", PinType::Opaque("test.text")).with_default("").multiline())
+            .with_output(PinArchetype::new("Next", flow))
+            .with_width(300),
+    );
+    catalogue
+}
+
+#[test]
+fn a_many_input_takes_several_sources_once_each() {
+    let catalogue = story_like_catalogue();
+    let mut graph = Graph::new();
+    let a = graph.add(&catalogue, "line", Vec2::ZERO).unwrap();
+    let b = graph.add(&catalogue, "line", Vec2::ZERO).unwrap();
+    let c = graph.add(&catalogue, "line", Vec2::ZERO).unwrap();
+    graph.connect(&catalogue, PinRef::output(a, 0), PinRef::input(c, 0)).unwrap();
+    graph.connect(&catalogue, PinRef::output(b, 0), PinRef::input(c, 0)).unwrap();
+    assert_eq!(
+        graph.connect(&catalogue, PinRef::output(a, 0), PinRef::input(c, 0)),
+        Err(ConnectError::InputOccupied),
+        "the same wire twice"
+    );
+    let (_, displaced) = graph
+        .reconnect(&catalogue, PinRef::output(a, 0), PinRef::input(b, 0))
+        .unwrap();
+    assert_eq!(displaced, None, "a many input displaces nothing");
+    assert_eq!(graph.connections().len(), 3);
+    assert_eq!(
+        graph.connect(&catalogue, PinRef::output(c, 0), PinRef::input(a, 1)),
+        Err(ConnectError::TypeMismatch {
+            from: PinType::Opaque("test.flow"),
+            to: PinType::Opaque("test.text")
+        })
+    );
+}
+
+#[test]
+fn detail_pins_take_no_row_and_cannot_be_wired() {
+    let catalogue = story_like_catalogue();
+    let archetype = catalogue.get("line").unwrap();
+    assert_eq!(archetype.input_row(0), Some(0));
+    assert_eq!(archetype.input_row(1), None);
+    assert_eq!(archetype.input_row(2), Some(1));
+    assert_eq!(archetype.body_rows(), 2);
+    assert!(archetype.wants_inspector());
+    let mut graph = Graph::new();
+    let node = graph.add(&catalogue, "line", Vec2::ZERO).unwrap();
+    let layout = geometry::layout_node(graph.node(node).unwrap(), &catalogue).unwrap();
+    assert_eq!(layout.bounds.w, 300.0);
+    assert!(layout.pin(PinRef::input(node, 1)).is_none());
+    assert_eq!(
+        layout.pin(PinRef::input(node, 2)).unwrap().position.y - layout.pin(PinRef::input(node, 0)).unwrap().position.y,
+        24.0,
+        "the multiline pin sits on the second row"
+    );
+}
+
+#[test]
+fn renaming_a_node_is_one_undo_step() {
+    let mut surface = super::GraphSurface::new(story_like_catalogue());
+    let node = surface.add("line", Vec2::ZERO).unwrap();
+    assert!(surface.set_title(node, "greeting"));
+    assert!(!surface.set_title(node, "greeting"), "unchanged is not a step");
+    assert_eq!(surface.graph.node(node).unwrap().title, "greeting");
+    assert!(surface.undo());
+    assert_eq!(surface.graph.node(node).unwrap().title, "");
+}

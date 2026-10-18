@@ -757,6 +757,12 @@ pub enum GraphToolAction {
     Preview,
     /// Compile the active graph and apply it to the selected scene source.
     Apply,
+    /// Open a dialogue starter document.
+    Dialogue,
+    /// Open a quest starter document.
+    Quest,
+    /// Check the open dialogue against the project and play it from the selected node.
+    Play,
 }
 
 /// Designer actions whose implementation belongs to the engine host.

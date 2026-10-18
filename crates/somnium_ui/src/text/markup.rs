@@ -30,6 +30,7 @@
 //! [size=18] [/size]        size in logical pixels
 //! [font=mono] [/font]      a FontRole by name
 //! [link=id] [/link]        makes the run interactive
+//! [face=name] [/face]      a face the game registered by name: an invented script, a handwriting
 //! [wave=2,3] [/wave]       amplitude px, frequency Hz
 //! [shake=1.5] [/shake]     amplitude px
 //! [sprite=name]            self-closing; occupies one placeholder character
@@ -98,6 +99,7 @@ struct Style {
     decoration: Decoration,
     motion: Motion,
     link: Option<String>,
+    face: Option<String>,
 }
 
 /// Parse markup into plain text plus the runs that style it.
@@ -128,6 +130,7 @@ pub fn parse(markup: &str) -> Result<(String, Vec<StyledRun>), MarkupError> {
                 motion: style.motion,
                 link: style.link.clone(),
                 sprite: None,
+                face: style.face.clone(),
                 direction: Direction::Ltr,
             });
         }
@@ -216,6 +219,7 @@ pub fn parse(markup: &str) -> Result<(String, Vec<StyledRun>), MarkupError> {
                 motion: style.motion,
                 link: style.link.clone(),
                 sprite: Some(value.to_string()),
+                face: style.face.clone(),
                 direction: Direction::Ltr,
             });
             run_start = text.len();
@@ -295,6 +299,10 @@ fn apply(style: &mut Style, name: &str, value: Option<&str>) -> bool {
         },
         "font" => match value.and_then(parse_role) {
             Some(role) => style.role = Some(role),
+            None => return false,
+        },
+        "face" => match value.filter(|v| !v.is_empty()) {
+            Some(face) => style.face = Some(face.to_string()),
             None => return false,
         },
         "link" => match value.filter(|v| !v.is_empty()) {
