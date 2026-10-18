@@ -378,7 +378,7 @@ export type SomniumLightFlicker = {
 --- `somnium.Livestock` (schema version 1).
 export type SomniumLivestock = {
 	enabled: boolean,
-	kind: number --[[ Sheep | Cow | Goat | Pig | Hen ]],
+	kind: number --[[ Sheep | Cow | Goat | Pig | Hen | Dog ]],
 }
 
 --- `somnium.LodGroup` (schema version 1).
