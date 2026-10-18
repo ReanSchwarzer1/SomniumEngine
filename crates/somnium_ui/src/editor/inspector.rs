@@ -112,9 +112,9 @@ pub(crate) fn build_inspector(
     let post_census_toggle = check(ui, diagnostics, "Pixel census", font_id);
     let post_bins_toggle = check(ui, diagnostics, "Shade bins", font_id);
 
-    let dreams_section = section(ui, parent, "DREAMS Sampling");
+    let dreams_section = section(ui, parent, "Temporal Sampling");
     let dreams_grain_toggle = check(ui, dreams_section, "Shared grain", font_id);
-    let dreams_stf_toggle = check(ui, dreams_section, "Terrain STF", font_id);
+    let dreams_stf_toggle = check(ui, dreams_section, "Terrain stochastic filtering", font_id);
 
     let terrain_section = section(ui, parent, "Terrain Tools");
     let terrain_paint_toggle = check(ui, terrain_section, "Layer paint", font_id);
@@ -282,6 +282,12 @@ pub(crate) fn build_generated_details(
     let mut collection_actions = HashMap::new();
 
     presentation.begin();
+    if presentation.entity_details && !panels.is_empty() {
+        // First in Details, where Unity and Unreal both put it: adding comes before scrolling.
+        let add = crate::editor::persona::icon_action(ui, root, crate::icons::IconId::Add, "Add Component");
+        ui.nodes.borrow_mut(add.transmute()).widget.margin = Thickness::new(8.0, 6.0, 8.0, 2.0);
+        presentation.add_component = add;
+    }
     // Identity is already sticky above the scroll area. Keep editable Name
     // metadata available after authored properties, rather than repeating it first.
     let ordered = panels
@@ -310,33 +316,57 @@ pub(crate) fn build_generated_details(
         );
         if let Some(path) = panel.preview_path.clone() {
             ui.draw_ctx.thumbnails.request(&path, true);
+            // A framed stage for the preview, centred, at twice the cell so it reads as the material and not as an
+            // icon (Phase ALYX-E).
+            let stage = ui.add_node(
+                crate::widgets::border::BorderBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(152.0)
+                        .with_margin(Thickness::axes(8.0, 6.0))
+                        .with_background(theme::active().semantic.surface.canvas.bytes())
+                        .with_foreground(theme::active().semantic.border.subtle.bytes()),
+                )
+                .with_stroke_thickness(Thickness::uniform(theme::active().geometry.stroke_hairline))
+                .build(),
+                section_root,
+            );
             let preview = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(96.0)
-                    .with_height(96.0)
-                    .with_margin(Thickness::uniform(8.0)),
+                    .with_width(128.0)
+                    .with_height(128.0)
+                    .with_horizontal_alignment(crate::types::HorizontalAlignment::Center)
+                    .with_vertical_alignment(crate::types::VerticalAlignment::Center),
             )
             .with_asset(path)
-            .with_size(96.0)
+            .with_size(128.0)
             .build();
-            ui.add_node(preview, section_root);
+            ui.add_node(preview, stage);
         }
-        let mut last_group = None;
-        let mut group_root = section_root;
-        for model in &panel.rows {
-            if model.group != last_group {
-                group_root = if let Some(group) = model.group {
-                    presentation.section(
-                        ui,
-                        section_root,
-                        format!("{}/group/{group}", panel.component),
-                        group,
-                    )
-                } else {
-                    section_root
-                };
-                last_group = model.group;
-            }
+        // Each group once: a group that comes back later in the schema joins its first section rather than opening
+        // a second one with the same name (materials showed "Surface" twice).
+        let mut group_roots: Vec<(&'static str, NodeHandle)> = Vec::new();
+        let ordered_rows = panel
+            .rows
+            .iter()
+            .filter(|row| row.group.is_none())
+            .chain(panel.rows.iter().filter(|row| row.group.is_some()));
+        for model in ordered_rows {
+            let group_root = match model.group {
+                Some(group) => match group_roots.iter().find(|(name, _)| *name == group) {
+                    Some(&(_, root)) => root,
+                    None => {
+                        let root = presentation.section(
+                            ui,
+                            section_root,
+                            format!("{}/group/{group}", panel.component),
+                            group,
+                        );
+                        group_roots.push((group, root));
+                        root
+                    }
+                },
+                None => section_root,
+            };
             let row = PropertyRowBuilder::new(
                 WidgetBuilder::new()
                     .with_clip_to_bounds(false)

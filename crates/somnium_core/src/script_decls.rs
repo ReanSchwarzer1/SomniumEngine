@@ -71,7 +71,7 @@ export type Vec3 = vector
 --- Linear RGB.
 export type Color = vector
 
---- CONTROL-K. One key of an authored curve. Read-only from a script: the
+--- One key of an authored curve. Read-only from a script: the
 --- editor authors curves, and a script that assigned a table back would be
 --- rejected by the field's declared type rather than silently accepted.
 export type CurveKey = {
@@ -82,7 +82,7 @@ export type CurveKey = {
     interpolation: string,
 }
 
---- CONTROL-K. One stop of an authored colour ramp. Read-only, as above.
+--- One stop of an authored colour ramp. Read-only, as above.
 export type GradientStop = { t: number, color: Color, alpha: number }
 
 ";

@@ -19,13 +19,14 @@ static DEBUG: std::sync::LazyLock<u32> =
     std::sync::LazyLock::new(|| std::env::var("SOMNIUM_PATH_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
 /// The a-trous steps: three passes, 1, 2 and 4 pixels apart.
 const STEPS: [u32; 3] = [1, 2, 4];
-/// Reflections: the roughest surface that traces one (path_denoise.wgsl fades it out over the last 30%), and the history a
-/// reflection keeps (short: it moves across the surface as the eye does, which the surface's motion cannot follow).
-const REFLECT_MAX_ROUGH: f32 = 0.5;
+/// Reflections: the roughest surface that traces one by default (path_denoise.wgsl fades it out over the last 30%),
+/// and the history a reflection keeps (short: it moves across the surface as the eye does, which the surface's motion
+/// cannot follow).
+pub const REFLECT_MAX_ROUGH: f32 = 0.5;
 const REFLECT_HISTORY: f32 = 8.0;
-static REFLECT_ROUGH: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-    std::env::var("SOMNIUM_RT_REFLECT_ROUGH").ok().and_then(|v| v.parse().ok()).unwrap_or(REFLECT_MAX_ROUGH)
-});
+/// `SOMNIUM_RT_REFLECT_ROUGH=1` (review only) overrides the authored limit: every surface traces its reflection.
+static REFLECT_ROUGH: std::sync::LazyLock<Option<f32>> =
+    std::sync::LazyLock::new(|| std::env::var("SOMNIUM_RT_REFLECT_ROUGH").ok().and_then(|v| v.parse().ok()));
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -131,6 +132,8 @@ pub struct PathTracerPass {
     pub bounces: u32,
     /// Ray-traced reflections only (mode 1), when the whole picture is not being traced.
     pub reflections: bool,
+    /// The roughest surface that traces a reflection in mode 1, 0..=1 (Post Processing's authored limit).
+    pub reflection_roughness: f32,
     /// The mode last recorded: a change throws the history away.
     mode: u32,
 }
@@ -232,6 +235,7 @@ impl PathTracerPass {
             enabled: false,
             bounces: 3,
             reflections: false,
+            reflection_roughness: REFLECT_MAX_ROUGH,
             mode: 0,
         }
     }
@@ -375,6 +379,7 @@ impl PathTracerPass {
             return;
         }
         let mode = u32::from(!self.enabled);
+        let max_rough = REFLECT_ROUGH.unwrap_or(self.reflection_roughness).clamp(0.0, 1.0);
         if mode != std::mem::replace(&mut self.mode, mode) {
             self.reset = true;
         }
@@ -391,8 +396,7 @@ impl PathTracerPass {
                 firefly: 1.0e9,
                 env_intensity: 1.0,
                 mode,
-                // `SOMNIUM_RT_REFLECT_ROUGH=1` (review only): every surface traces its reflection, to see the mode work.
-                max_rough: *REFLECT_ROUGH,
+                max_rough,
                 _pad: [0; 2],
             }),
         );
@@ -447,7 +451,7 @@ impl PathTracerPass {
                     max_history: if mode == 1 { REFLECT_HISTORY } else { MAX_HISTORY },
                     sigma_light: SIGMA_LIGHT,
                     // Mode 1 carries its roughness limit: 1 + limit (path_denoise.wgsl fades reflections out below it).
-                    _pad: [*DEBUG as f32, if mode == 1 { 1.0 + *REFLECT_ROUGH } else { 0.0 }],
+                    _pad: [*DEBUG as f32, if mode == 1 { 1.0 + max_rough } else { 0.0 }],
                 }),
             );
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {

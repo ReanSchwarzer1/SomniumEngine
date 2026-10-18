@@ -16,9 +16,9 @@ use crate::widgets::curve_editor::{CurveEditorBuilder, CurveEditorMessage};
 use glam::Vec2;
 use somnium_ecs::curve::{Curve, CurveKey};
 
-const LABEL_WIDTH: f32 = 152.0;
-const RULER_HEIGHT: f32 = 28.0;
-const GROUP_HEIGHT: f32 = 22.0;
+const LABEL_WIDTH: f32 = 168.0;
+const RULER_HEIGHT: f32 = 30.0;
+const GROUP_HEIGHT: f32 = 24.0;
 const TRACK_HEIGHT: f32 = 34.0;
 const CURVE_HEIGHT: f32 = 118.0;
 
@@ -290,13 +290,22 @@ pub struct TimelineEditor {
 }
 
 impl TimelineEditor {
-    fn timeline_bounds(widget: &Widget) -> Rect {
+    /// The curve strip is for a channel's keys; with no channel to show it folds away and the lanes take its room.
+    fn curve_height(&self) -> f32 {
+        if self.surface.selected_curve().is_some() {
+            CURVE_HEIGHT
+        } else {
+            0.0
+        }
+    }
+
+    fn timeline_bounds(&self, widget: &Widget) -> Rect {
         let bounds = widget.screen_bounds();
         Rect::new(
             bounds.x,
             bounds.y,
             bounds.w,
-            (bounds.h - CURVE_HEIGHT).max(RULER_HEIGHT),
+            (bounds.h - self.curve_height()).max(RULER_HEIGHT),
         )
     }
 
@@ -459,43 +468,88 @@ impl TimelineEditor {
 
     fn draw_ruler(&self, widget: &Widget, ctx: &mut DrawingContext) {
         let theme = crate::theme::active();
-        let bounds = Self::timeline_bounds(widget);
+        let bounds = self.timeline_bounds(widget);
         let left = Self::content_left(widget);
         ctx.push_rect_filled(
             Rect::new(bounds.x, bounds.y, bounds.w, RULER_HEIGHT),
             theme.semantic.surface.header.bytes(),
         );
+        ctx.push_rect_filled(
+            Rect::new(bounds.x, bounds.y + RULER_HEIGHT - 1.0, bounds.w, 1.0),
+            theme.semantic.border.subtle.bytes(),
+        );
+        ctx.push_text(
+            "Tracks",
+            Vec2::new(bounds.x + 10.0, bounds.y + 9.0),
+            self.font_id,
+            11.0,
+            theme.semantic.text.muted.bytes(),
+        );
         let seconds_per_major =
-            (80.0 / self.surface.view.pixels_per_second).max(self.surface.view.snap.max(0.001));
+            (90.0 / self.surface.view.pixels_per_second).max(self.surface.view.snap.max(0.001));
         let power = 10.0_f32.powf(seconds_per_major.log10().floor());
         let major = [1.0, 2.0, 5.0, 10.0]
             .into_iter()
             .map(|step| step * power)
             .find(|step| *step >= seconds_per_major)
             .unwrap_or(10.0 * power);
-        let first = (self.surface.view.origin / major).floor() * major;
+        let minor = major / 5.0;
+        ctx.push_clip_rect(Rect::new(left, bounds.y, (bounds.w - LABEL_WIDTH).max(0.0), RULER_HEIGHT));
+        let first = (self.surface.view.origin / minor).floor() * minor;
+        let mut step = 0;
         let mut time = first.max(0.0);
-        while time <= self.surface.document().duration() {
+        while time <= self.surface.document().duration() + minor * 0.5 {
             let x = self.surface.view.time_to_x(time, left);
             if x > bounds.x + bounds.w {
                 break;
             }
-            if x >= left {
-                ctx.push_rect_filled(
-                    Rect::new(x, bounds.y + RULER_HEIGHT - 8.0, 1.0, 8.0),
-                    theme.semantic.border.default.bytes(),
-                );
+            let is_major = ((time / major).round() * major - time).abs() < minor * 0.25;
+            let tick = if is_major { 10.0 } else { 4.0 };
+            ctx.push_rect_filled(
+                Rect::new(x, bounds.y + RULER_HEIGHT - 1.0 - tick, 1.0, tick),
+                if is_major {
+                    theme.semantic.border.default.bytes()
+                } else {
+                    theme.semantic.border.subtle.bytes()
+                },
+            );
+            if is_major {
                 ctx.push_text(
-                    &format!("{time:.2}"),
-                    Vec2::new(x + 3.0, bounds.y + 6.0),
+                    &seconds_label(time, major),
+                    Vec2::new(x + 4.0, bounds.y + 6.0),
                     self.font_id,
-                    8.0,
-                    theme.semantic.text.muted.bytes(),
+                    10.0,
+                    theme.semantic.text.secondary.bytes(),
                 );
             }
-            time += major;
+            step += 1;
+            time = first.max(0.0) + step as f32 * minor;
         }
+        ctx.pop_clip_rect();
     }
+}
+
+/// A ruler figure as a person writes it: "2 s", "0.5 s", "0.25 s", to the precision the spacing needs.
+fn seconds_label(time: f32, major: f32) -> String {
+    let places = if major >= 1.0 {
+        0
+    } else if major >= 0.1 {
+        1
+    } else {
+        2
+    };
+    format!("{time:.places$} s")
+}
+
+/// A key on a track: a diamond, as in every editor a designer has used.
+fn key_diamond(centre: Vec2, radius: f32) -> crate::path::Path {
+    let mut path = crate::path::Path::new();
+    path.move_to(centre + Vec2::new(0.0, -radius))
+        .line_to(centre + Vec2::new(radius, 0.0))
+        .line_to(centre + Vec2::new(0.0, radius))
+        .line_to(centre + Vec2::new(-radius, 0.0))
+        .close();
+    path
 }
 
 impl Control for TimelineEditor {
@@ -527,13 +581,15 @@ impl Control for TimelineEditor {
 
     fn arrange_override(&self, widget: &Widget, ctx: &mut LayoutCtx, final_size: Vec2) -> Vec2 {
         if let Some(&curve) = widget.children.first() {
+            // Folded: parked under the control's foot, where its clip shows none of it and no click reaches it.
+            let height = self.curve_height();
             ctx.arrange_child(
                 curve,
                 Rect::new(
                     widget.actual_local_position.x,
-                    widget.actual_local_position.y + (final_size.y - CURVE_HEIGHT).max(0.0),
+                    widget.actual_local_position.y + (final_size.y - height).max(0.0),
                     final_size.x,
-                    CURVE_HEIGHT.min(final_size.y),
+                    if height > 0.0 { height.min(final_size.y) } else { CURVE_HEIGHT },
                 ),
             );
         }
@@ -541,88 +597,131 @@ impl Control for TimelineEditor {
     }
 
     fn draw(&self, widget: &Widget, ctx: &mut DrawingContext) {
+        use crate::shaped::ShapedInstance;
         let theme = crate::theme::active();
-        let bounds = Self::timeline_bounds(widget);
+        let bounds = self.timeline_bounds(widget);
         let left = Self::content_left(widget);
+        // A key at nought sits on the column's edge: let the lanes reach a few pixels under it so it is whole.
+        let lane = Rect::new(left - 6.0, bounds.y, (bounds.w - LABEL_WIDTH + 6.0).max(0.0), bounds.h);
         ctx.push_rect_filled(bounds, theme.semantic.surface.canvas.bytes());
+        // The names column, set apart from the lanes so a track's name never sits on its keys.
+        ctx.push_rect_filled(
+            Rect::new(bounds.x, bounds.y, LABEL_WIDTH, bounds.h),
+            theme.semantic.surface.panel.bytes(),
+        );
         self.draw_ruler(widget, ctx);
 
+        let document = self.surface.document();
         let mut y = bounds.y + RULER_HEIGHT;
-        for group in self.surface.document().groups() {
+        for group in document.groups() {
             ctx.push_rect_filled(
                 Rect::new(bounds.x, y, bounds.w, GROUP_HEIGHT),
                 theme.semantic.surface.header.bytes(),
             );
             ctx.push_text(
                 &group.title,
-                Vec2::new(bounds.x + 8.0, y + 5.0),
+                Vec2::new(bounds.x + 10.0, y + 6.0),
                 self.font_id,
-                9.0,
+                11.0,
                 theme.semantic.text.secondary.bytes(),
             );
             y += GROUP_HEIGHT;
         }
-        for track in self.surface.document().tracks() {
+        for (row, track) in document.tracks().iter().enumerate() {
             if y + TRACK_HEIGHT > bounds.y + bounds.h {
                 break;
             }
-            ctx.push_rect_filled(
-                Rect::new(bounds.x, y, bounds.w, TRACK_HEIGHT),
-                theme.semantic.surface.raised.bytes(),
-            );
+            let fill = if row % 2 == 0 {
+                theme.semantic.surface.raised.bytes()
+            } else {
+                theme.semantic.surface.panel.bytes()
+            };
+            ctx.push_rect_filled(Rect::new(left, y, lane.w, TRACK_HEIGHT), fill);
             ctx.push_rect_filled(
                 Rect::new(bounds.x, y + TRACK_HEIGHT - 1.0, bounds.w, 1.0),
                 theme.semantic.border.subtle.bytes(),
             );
+            ctx.push_clip_rect(Rect::new(bounds.x, y, LABEL_WIDTH - 8.0, TRACK_HEIGHT));
             ctx.push_text(
                 &track.title,
-                Vec2::new(bounds.x + 8.0, y + 10.0),
+                Vec2::new(bounds.x + 10.0, y + 10.0),
                 self.font_id,
-                9.0,
+                12.0,
                 theme.semantic.text.primary.bytes(),
             );
-            for clip in self
-                .surface
-                .document()
-                .media()
-                .iter()
-                .filter(|clip| clip.track == track.id)
-            {
+            ctx.pop_clip_rect();
+            ctx.push_clip_rect(lane);
+            for clip in document.media().iter().filter(|clip| clip.track == track.id) {
                 let x = self.surface.view.time_to_x(clip.start, left);
                 let w = clip.duration * self.surface.view.pixels_per_second;
                 let rect = Rect::new(x, y + 4.0, w.max(3.0), TRACK_HEIGHT - 8.0);
-                ctx.push_rect_filled(rect, theme.semantic.accent.default.bytes());
+                ctx.push_round_rect(rect, theme.geometry.radius_input, theme.semantic.accent.default.bytes());
+                ctx.push_clip_rect(rect);
                 ctx.push_text(
                     &clip.source,
-                    Vec2::new(rect.x + 5.0, rect.y + 7.0),
+                    Vec2::new(rect.x + 6.0, rect.y + 6.0),
                     self.font_id,
-                    8.0,
+                    11.0,
                     theme.semantic.text.inverse.bytes(),
                 );
+                ctx.pop_clip_rect();
             }
             for channel in &track.channels {
                 for key in channel.curve.keys() {
                     let x = self.surface.view.time_to_x(key.t, left);
-                    ctx.push_rect_filled(
-                        Rect::new(x - 2.5, y + TRACK_HEIGHT * 0.5 - 2.5, 5.0, 5.0),
-                        theme.semantic.status.warning.bytes(),
+                    ctx.push_path(
+                        &key_diamond(Vec2::new(x, y + TRACK_HEIGHT * 0.5), 5.0),
+                        ShapedInstance::identity(theme.semantic.status.warning.bytes()),
                     );
                 }
             }
+            ctx.pop_clip_rect();
             y += TRACK_HEIGHT;
         }
-        for marker in self.surface.document().markers() {
-            let x = self.surface.view.time_to_x(marker.time, left);
-            ctx.push_rect_filled(
-                Rect::new(x - 1.0, bounds.y + RULER_HEIGHT - 7.0, 3.0, 7.0),
-                theme.semantic.status.warning.bytes(),
+        // The column's edge.
+        ctx.push_rect_filled(
+            Rect::new(left - 1.0, bounds.y, 1.0, bounds.h),
+            theme.semantic.border.default.bytes(),
+        );
+        if document.tracks().is_empty() && document.groups().is_empty() {
+            ctx.push_text(
+                "No tracks yet. Choose Edit Events with a rig selected to see its markers here.",
+                Vec2::new(left + 16.0, bounds.y + RULER_HEIGHT + 16.0),
+                self.font_id,
+                12.0,
+                theme.semantic.text.muted.bytes(),
             );
         }
+
+        ctx.push_clip_rect(lane);
+        // Markers: a faint line down the lanes and a flag in the ruler.
+        for marker in document.markers() {
+            let x = self.surface.view.time_to_x(marker.time, left);
+            ctx.push_rect_filled(
+                Rect::new(x, bounds.y + RULER_HEIGHT, 1.0, (bounds.h - RULER_HEIGHT).max(0.0)),
+                theme.semantic.border.subtle.bytes(),
+            );
+            ctx.push_path(
+                &key_diamond(Vec2::new(x, bounds.y + RULER_HEIGHT - 6.0), 4.0),
+                ShapedInstance::identity(theme.semantic.status.warning.bytes()),
+            );
+        }
+        // The playhead, with its time on its head so nobody has to read it off the ruler.
         let playhead = self.surface.view.time_to_x(self.surface.playhead, left);
-        ctx.push_rect_filled(
-            Rect::new(playhead, bounds.y, 2.0, bounds.h),
-            theme.semantic.status.error.bytes(),
+        let colour = theme.semantic.status.error.bytes();
+        ctx.push_rect_filled(Rect::new(playhead - 1.0, bounds.y, 2.0, bounds.h), colour);
+        let label = format!("{:.2} s", self.surface.playhead);
+        let label_w = ctx.font_atlas.measure_text(&label, 10.0, self.font_id).x + 10.0;
+        let head = Rect::new((playhead - label_w * 0.5).max(left), bounds.y + 3.0, label_w, 16.0);
+        ctx.push_round_rect(head, theme.geometry.radius_input, colour);
+        ctx.push_text(
+            &label,
+            Vec2::new(head.x + 5.0, head.y + 2.0),
+            self.font_id,
+            10.0,
+            theme.semantic.text.inverse.bytes(),
         );
+        ctx.pop_clip_rect();
     }
 
     fn handle_routed_message(
@@ -654,7 +753,7 @@ impl Control for TimelineEditor {
         let Some(input) = message.data::<WidgetMessage>() else {
             return;
         };
-        let timeline = Self::timeline_bounds(widget);
+        let timeline = self.timeline_bounds(widget);
         match input {
             WidgetMessage::MouseDown { pos, button, .. }
                 if timeline.contains(*pos) && *button == MouseButton::Left =>
@@ -701,7 +800,7 @@ impl Control for TimelineEditor {
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
-        if Self::timeline_bounds(widget).contains(pos) {
+        if self.timeline_bounds(widget).contains(pos) {
             CursorKind::Pointer
         } else {
             CursorKind::Default

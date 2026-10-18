@@ -144,6 +144,43 @@ fn decode_material(path: &Path) -> Option<Vec<u8>> {
 /// never touches the live renderer.
 #[must_use]
 pub fn render_material_sphere(material: &MaterialAsset) -> Vec<u8> {
+    render_sphere(material, None)
+}
+
+/// [`prepare_preview`] for a material whose base colour is a texture, already found by the host (which knows asset
+/// ids; the worker does not). The sphere wears the texture, so a drawer of materials no longer looks like a drawer of
+/// identical white balls (Phase ALYX-E). Cached apart from the untextured cell.
+pub fn prepare_material_preview(
+    record: &AssetRecord,
+    cache_root: &Path,
+    albedo: &Path,
+) -> Result<Option<PreparedPreview>, String> {
+    let hash = &record.metadata.content_hash;
+    let cache_path = (!hash.is_empty()).then(|| cache_root.join(format!("{hash}-albedo.png")));
+    if let Some(path) = cache_path.as_deref() {
+        if let Some(rgba) = load_cell(path) {
+            return Ok(Some(PreparedPreview { rgba, from_disk_cache: true }));
+        }
+    }
+    let material = load_material(&record.absolute_path)?;
+    let rgba = match material.preview_png().and_then(|png| image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok()) {
+        Some(image) => fit_to_cell(image),
+        None => {
+            // A 128-texel copy is plenty for a 64-pixel ball and keeps the worker quick on 4K maps.
+            let texture = image::open(albedo).ok().map(|image| image.thumbnail(128, 128).to_rgba8());
+            render_sphere(&material, texture.as_ref())
+        }
+    };
+    if let Some(path) = cache_path.as_deref() {
+        let _ = fs::create_dir_all(cache_root);
+        let _ = image::save_buffer(path, &rgba, PREVIEW_CELL, PREVIEW_CELL, image::ColorType::Rgba8);
+    }
+    Ok(Some(PreparedPreview { rgba, from_disk_cache: false }))
+}
+
+/// The studio sphere, optionally wearing its base-colour texture (sRGB texels, taken to linear and multiplied by the
+/// base colour), mapped by longitude and latitude and repeated twice around.
+fn render_sphere(material: &MaterialAsset, albedo: Option<&image::RgbaImage>) -> Vec<u8> {
     let mut cell = vec![0_u8; (PREVIEW_CELL * PREVIEW_CELL * 4) as usize];
     let base = Vec3::from(material.base_color.0);
     let emission = Vec3::from(material.emissive.0) * material.emissive_intensity;
@@ -159,6 +196,18 @@ pub fn render_material_sphere(material: &MaterialAsset) -> Vec<u8> {
             }
             let pz = (0.82 - radius2).sqrt();
             let normal = Vec3::new(px, py, pz).normalize();
+            let base = match albedo {
+                Some(texture) => {
+                    let u = (0.5 + normal.x.atan2(normal.z) / std::f32::consts::TAU) * 2.0;
+                    let v = normal.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+                    let tx = ((u.rem_euclid(1.0) * texture.width() as f32) as u32).min(texture.width() - 1);
+                    let ty = ((v * texture.height() as f32) as u32).min(texture.height() - 1);
+                    let texel = texture.get_pixel(tx, ty).0;
+                    let linear = Vec3::new(texel[0] as f32, texel[1] as f32, texel[2] as f32) / 255.0;
+                    base * linear.powf(2.2)
+                }
+                None => base,
+            };
             let diffuse = normal.dot(light).max(0.0);
             let half = (light + view).normalize();
             let gloss = (1.0 - material.roughness).clamp(0.0, 1.0);
@@ -445,6 +494,17 @@ fn script_card() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_textured_material_wears_its_texture() {
+        let material = MaterialAsset::default();
+        let red = image::RgbaImage::from_pixel(4, 4, Rgba([220, 20, 20, 255]));
+        let plain = render_sphere(&material, None);
+        let worn = render_sphere(&material, Some(&red));
+        let centre = (((PREVIEW_CELL / 2) * PREVIEW_CELL + PREVIEW_CELL / 2) * 4) as usize;
+        assert!(worn[centre] > worn[centre + 1] * 3, "the ball should read red: {:?}", &worn[centre..centre + 3]);
+        assert_ne!(plain[centre..centre + 3], worn[centre..centre + 3]);
+    }
     use crate::database::{AssetId, AssetMetadata};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};

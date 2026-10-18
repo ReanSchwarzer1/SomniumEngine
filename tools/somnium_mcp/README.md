@@ -24,6 +24,43 @@ Successful execute/job results may carry `capture:{path,width,height,revision,fr
 
 For running gameplay, `authoring.execute` capture accepts explicit `live:true` without `expected_revision`. This read-only mode permits simulation revision changes between queueing and real PNG readback; the receipt records both revisions and the result declares `revision_policy:"live"`. Default captures remain strict. Set `include_editor:true` to include the game HUD. Discover the current `capture_schema` before use.
 
+## Version 0.2 (Phase ALYX-M, 18 Oct 2026)
+
+**Setting up a client.** The editor's Authoring panel has *Set up Claude Code*, *Claude Desktop*, *Cursor* and
+*VS Code*. Each writes this server's entry (paths only; the credential stays in the protected descriptor) into that
+client's own settings file, keeping everything else in it and a copy of the file beside it the first time
+(`*.json.somnium-backup`):
+
+| Client | File |
+|---|---|
+| Claude Code (project) | `<project>/.mcp.json` |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` |
+| Cursor | `%USERPROFILE%/.cursor/mcp.json` |
+| VS Code (project) | `<project>/.vscode/mcp.json` |
+
+*Copy setup command* puts the same command line on the clipboard for any other client.
+
+**Tools.** The seven authoring families are listed as `authoring_discover`, `authoring_query`, `authoring_plan`,
+`authoring_commit`, `authoring_execute`, `authoring_history` and `authoring_jobs` (some clients reject dots in tool
+names; the dotted names still work). Beside them:
+
+| Tool | What it does |
+|---|---|
+| `somnium_status` | Editing or playing, revision, entities, frame rate, camera, and the Output Log's warning and error counts |
+| `somnium_log` | The Output Log (`min`, `after` a line id for only new lines, `contains`, `limit`) |
+| `somnium_screenshot` | Captures the viewport, waits for the job, returns the PNG |
+| `somnium_commands` | Every editor command, and why one cannot run now |
+| `somnium_run_command` | Runs one editor command by id, as its menu item would |
+
+**Resources.** `somnium://status`, `somnium://log/problems`, `somnium://capabilities`, `somnium://commands`.
+
+**Prompts.** `look_around`, `fix_log_problems`, `block_out_space`.
+
+**Permissions.** Reading is always allowed. What an agent may change is the person's to decide, in Preferences >
+Agents or the panel's *Agents may* switches: editing (plans, commits, presets, strokes, graphs, commands), files
+(import, save, load, rename, preferences), Play (play, stop, step, input) and captures. A refused call fails with
+`permission_denied` and names the switch; the panel's activity feed shows every request, refused or not.
+
 ## Verification
 
 Protocol and error tests launch the real stdio adapter subprocess and verify unavailable-editor failures without pretending to exercise an engine:

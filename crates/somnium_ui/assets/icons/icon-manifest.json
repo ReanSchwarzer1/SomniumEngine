@@ -6,21 +6,165 @@
     "index_rule": "IconId order is append-only"
   },
   "icons": [
-    { "id": "sculpt-raise", "file": "somnium/sculpt-raise.svg", "runtime": "SculptRaise" },
-    { "id": "sculpt-lower", "file": "somnium/sculpt-lower.svg", "runtime": "SculptLower" },
-    { "id": "sculpt-smooth", "file": "somnium/sculpt-smooth.svg", "runtime": "SculptSmooth" },
-    { "id": "sculpt-flatten", "file": "somnium/sculpt-flatten.svg", "runtime": "SculptFlatten" },
-    { "id": "sculpt-noise", "file": "somnium/sculpt-noise.svg", "runtime": "SculptNoise" },
-    { "id": "paint-layer", "file": "somnium/paint-layer.svg", "runtime": "PaintLayer" },
-    { "id": "foliage-paint", "file": "somnium/foliage-paint.svg", "runtime": "FoliagePaint" },
-    { "id": "foliage-erase", "file": "somnium/foliage-erase.svg", "runtime": "FoliageErase" },
-    { "id": "foliage-single", "file": "somnium/foliage-single.svg", "runtime": "FoliageSingle" },
-    { "id": "water-body", "file": "somnium/water-body.svg", "runtime": "Water" },
-    { "id": "vessel", "file": "somnium/vessel.svg", "runtime": "Vessel" },
-    { "id": "voxel-terrain", "file": "somnium/voxel-terrain.svg", "runtime": "VoxelTerrain" },
-    { "id": "post-fx", "file": "somnium/post-fx.svg", "runtime": "PostFx" },
-    { "id": "light-probe", "file": "somnium/light-probe.svg", "runtime": "LightProbe" },
-    { "id": "material-graph", "file": "somnium/material-graph.svg", "runtime": "MaterialGraph" },
-    { "id": "ray-trace", "file": "somnium/ray-trace.svg", "runtime": "RayTrace" }
+    {
+      "id": "sculpt-raise",
+      "file": "somnium/sculpt-raise.svg",
+      "runtime": "SculptRaise"
+    },
+    {
+      "id": "sculpt-lower",
+      "file": "somnium/sculpt-lower.svg",
+      "runtime": "SculptLower"
+    },
+    {
+      "id": "sculpt-smooth",
+      "file": "somnium/sculpt-smooth.svg",
+      "runtime": "SculptSmooth"
+    },
+    {
+      "id": "sculpt-flatten",
+      "file": "somnium/sculpt-flatten.svg",
+      "runtime": "SculptFlatten"
+    },
+    {
+      "id": "sculpt-noise",
+      "file": "somnium/sculpt-noise.svg",
+      "runtime": "SculptNoise"
+    },
+    {
+      "id": "paint-layer",
+      "file": "somnium/paint-layer.svg",
+      "runtime": "PaintLayer"
+    },
+    {
+      "id": "foliage-paint",
+      "file": "somnium/foliage-paint.svg",
+      "runtime": "FoliagePaint"
+    },
+    {
+      "id": "foliage-erase",
+      "file": "somnium/foliage-erase.svg",
+      "runtime": "FoliageErase"
+    },
+    {
+      "id": "foliage-single",
+      "file": "somnium/foliage-single.svg",
+      "runtime": "FoliageSingle"
+    },
+    {
+      "id": "water-body",
+      "file": "somnium/water-body.svg",
+      "runtime": "Water"
+    },
+    {
+      "id": "vessel",
+      "file": "somnium/vessel.svg",
+      "runtime": "Vessel"
+    },
+    {
+      "id": "voxel-terrain",
+      "file": "somnium/voxel-terrain.svg",
+      "runtime": "VoxelTerrain"
+    },
+    {
+      "id": "post-fx",
+      "file": "somnium/post-fx.svg",
+      "runtime": "PostFx"
+    },
+    {
+      "id": "light-probe",
+      "file": "somnium/light-probe.svg",
+      "runtime": "LightProbe"
+    },
+    {
+      "id": "material-graph",
+      "file": "somnium/material-graph.svg",
+      "runtime": "MaterialGraph"
+    },
+    {
+      "id": "ray-trace",
+      "file": "somnium/ray-trace.svg",
+      "runtime": "RayTrace"
+    },
+    {
+      "id": "mcp-link",
+      "file": "somnium/mcp-link.svg",
+      "runtime": "McpLink"
+    },
+    {
+      "id": "state-machine",
+      "file": "somnium/state-machine.svg",
+      "runtime": "StateMachine"
+    },
+    {
+      "id": "blend-space",
+      "file": "somnium/blend-space.svg",
+      "runtime": "BlendSpace"
+    },
+    {
+      "id": "anim-clip",
+      "file": "somnium/anim-clip.svg",
+      "runtime": "AnimClip"
+    },
+    {
+      "id": "rig",
+      "file": "somnium/rig.svg",
+      "runtime": "Rig"
+    },
+    {
+      "id": "material-ball",
+      "file": "somnium/material-ball.svg",
+      "runtime": "MaterialBall"
+    },
+    {
+      "id": "wireframe",
+      "file": "somnium/wireframe.svg",
+      "runtime": "Wireframe"
+    },
+    {
+      "id": "light-cookie",
+      "file": "somnium/light-cookie.svg",
+      "runtime": "LightCookie"
+    },
+    {
+      "id": "picture-shift",
+      "file": "somnium/picture-shift.svg",
+      "runtime": "PictureShift"
+    },
+    {
+      "id": "nav-mesh",
+      "file": "somnium/nav-mesh.svg",
+      "runtime": "NavMesh"
+    },
+    {
+      "id": "texel-density",
+      "file": "somnium/texel-density.svg",
+      "runtime": "TexelDensity"
+    },
+    {
+      "id": "dream-lens",
+      "file": "somnium/dream-lens.svg",
+      "runtime": "DreamLens"
+    },
+    {
+      "id": "retro-picture",
+      "file": "somnium/retro-picture.svg",
+      "runtime": "RetroPicture"
+    },
+    {
+      "id": "lod",
+      "file": "somnium/lod.svg",
+      "runtime": "Lod"
+    },
+    {
+      "id": "frame-generation",
+      "file": "somnium/frame-generation.svg",
+      "runtime": "FrameGeneration"
+    },
+    {
+      "id": "path-trace",
+      "file": "somnium/path-trace.svg",
+      "runtime": "PathTrace"
+    }
   ]
 }

@@ -299,12 +299,20 @@ pub enum CommandAction {
     CreateEntity(CreateKind),
     DockContentDrawer,
     SetWorkspace(Workspace),
+    /// Show the Animation dock's Timeline (0) or State Machine (1), opening the workspace if need be.
+    ShowAnimationTab(u8),
     ResetWorkspace,
     ContentNewFolder,
     ContentNewScript,
     ContentNewMaterial,
     ContentRename,
     ContentShowInFolder,
+    /// Put the chosen item's full path on the clipboard.
+    ContentCopyPath,
+    /// Copy the chosen file or folder beside itself as "<name> copy".
+    ContentDuplicate,
+    /// Move the chosen file or folder to the Recycle Bin, where it can be restored.
+    ContentDelete,
     /// Open the chosen content item: a scene loads, a folder is entered,
     /// anything else goes to the external editor.
     ContentOpen,
@@ -805,6 +813,36 @@ fn declarations() -> Vec<Command> {
             A::DesignerTool(crate::editor_event::DesignerTool::AnimationReset),
             CREATE,
             selection
+        ),
+        command!(
+            "editor.animation.timeline",
+            "Show Animation Timeline",
+            "Designer",
+            None,
+            "Open the Animation workspace on its timeline: tracks, keys and the rig's clock.",
+            A::ShowAnimationTab(0),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.animation.state_machine",
+            "Show Animation State Machine",
+            "Designer",
+            None,
+            "Open the Animation workspace on its state machine: clips, states and the transitions between them.",
+            A::ShowAnimationTab(1),
+            CREATE,
+            always
+        ),
+        command!(
+            "editor.animation.play_pause",
+            "Play or Pause Animation",
+            "Designer",
+            None,
+            "Start or stop the selected rig's preview, or the scene's first rig when none is selected.",
+            A::DesignerTool(crate::editor_event::DesignerTool::AnimationPlayPause),
+            CREATE,
+            always
         ),
         command!(
             "editor.animation.reload",
@@ -1837,6 +1875,36 @@ fn declarations() -> Vec<Command> {
             content_target
         ),
         command!(
+            "editor.content.copy_path",
+            "Copy Path",
+            "Content",
+            None,
+            "Copy the chosen item's full path to the clipboard.",
+            A::ContentCopyPath,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.duplicate",
+            "Duplicate",
+            "Content",
+            None,
+            "Make a copy of the chosen file or folder beside it.",
+            A::ContentDuplicate,
+            CONTENT,
+            content_target
+        ),
+        command!(
+            "editor.content.delete",
+            "Move to Recycle Bin",
+            "Content",
+            None,
+            "Move the chosen file or folder to the Recycle Bin. Restore it from there if it was a mistake.",
+            A::ContentDelete,
+            CONTENT,
+            content_target
+        ),
+        command!(
             "editor.content.open",
             "Open",
             "Content",
@@ -2225,6 +2293,180 @@ pub fn command_score(command: &Command, query: &str, recency: u64) -> Option<i64
     let text = format!("{} {} {}", command.label, command.category, command.id);
     fuzzy_score(&text, &free)
         .map(|score| score + i64::try_from(recency.min(10_000)).unwrap_or(10_000))
+}
+
+/// The glyph that stands for a command wherever it is offered: menus, the palette, toolbars (Phase ALYX-B).
+///
+/// One table rather than a field on every `command!`, so a command without an entry still gets its category's glyph
+/// and the registry's 120-odd declarations stay as they are.
+#[must_use]
+pub fn icon_for(id: &str) -> crate::icons::IconId {
+    use crate::icons::IconId as I;
+    match id {
+        "editor.scene.new" => I::NewAsset,
+        "editor.scene.open" | "editor.file.open_project" => I::FolderOpen,
+        "editor.scene.save" => I::Save,
+        "editor.asset.import_model" => I::Import,
+        "editor.asset.new_material" => I::MaterialBall,
+        "editor.edit.undo" => I::Undo,
+        "editor.edit.redo" => I::Redo,
+        "editor.edit.delete" => I::Delete,
+        "editor.edit.duplicate" => I::Duplicate,
+        "editor.edit.copy" => I::Copy,
+        "editor.edit.paste" => I::Paste,
+        "editor.edit.select_all" => I::Select,
+        "editor.edit.rename" | "editor.content.rename" => I::Rename,
+        "editor.view.focus_selection" => I::Focus,
+        "editor.view.profiler" => I::Profiler,
+        "editor.view.content_drawer" | "editor.window.dock_content" => I::ContentDrawer,
+        "editor.view.shading_mode" => I::Lit,
+        "editor.viewport.immersive" => I::ImmersivePlay,
+        "editor.window.preferences" => I::Settings,
+        "editor.window.output_log" => I::OutputLog,
+        "editor.window.float_outliner" | "editor.window.float_details" | "editor.window.float_viewport"
+        | "editor.window.float_log" => I::Float,
+        "editor.window.default_layout" | "editor.workspace.reset" => I::Workspace,
+        "editor.window.localisation" => I::Language,
+        "editor.window.references" | "editor.content.references" => I::Link,
+        "editor.workspace.layout" => I::Cube,
+        "editor.workspace.terrain" => I::Landscape,
+        "editor.workspace.foliage" => I::Foliage,
+        "editor.workspace.lighting" => I::Light,
+        "editor.workspace.materials" => I::MaterialBall,
+        "editor.workspace.animation" => I::AnimClip,
+        "editor.workspace.debug" => I::Debug,
+        "editor.workspace.play" => I::Gamepad,
+        "editor.viewport.layout.single" => I::AppWindow,
+        "editor.viewport.layout.split_vertical" => I::PanelRight,
+        "editor.viewport.layout.split_horizontal" => I::PanelBottom,
+        "editor.viewport.layout.quad" => I::GridView,
+        "editor.search.commands" => I::Search,
+        "editor.help.index" => I::HelpCircle,
+        "editor.help.shortcuts" => I::Keyboard,
+        "editor.help.about" => I::Info,
+        "editor.script.reload" => I::Refresh,
+        "editor.simulation.play" => I::Play,
+        "editor.simulation.pause" => I::Pause,
+        "editor.simulation.step" => I::Step,
+        "editor.simulation.stop" => I::Stop,
+        "editor.gizmo.translate" => I::Translate,
+        "editor.gizmo.rotate" => I::Rotate,
+        "editor.gizmo.scale" => I::Scale,
+        "editor.terrain.edit" | "editor.create.terrain" | "editor.create.empty_terrain" => I::Landscape,
+        "editor.foliage.edit" => I::Foliage,
+        "editor.vertex_paint.edit" => I::Brush,
+        "editor.create.cube" | "editor.create.blockout" => I::Cube,
+        "editor.create.sphere" => I::Sphere,
+        "editor.create.plane" => I::Plane,
+        "editor.create.cylinder" => I::Cylinder,
+        "editor.create.directional_light" => I::DirectionalLight,
+        "editor.create.point_light" => I::PointLight,
+        "editor.create.spot_light" => I::SpotLight,
+        "editor.create.area_light" | "editor.create.disc_light" | "editor.create.tube_light" => I::Light,
+        "editor.create.particle" => I::Particle,
+        "editor.create.audio_emitter" | "editor.create.shoreline_audio" => I::Audio,
+        "editor.create.spline" => I::Curve,
+        "editor.create.lake" | "editor.create.ocean" | "editor.create.sea" | "editor.create.river" => I::Water,
+        "editor.create.voxel_terrain" => I::VoxelTerrain,
+        "editor.create.ui_canvas" => I::AppWindow,
+        "editor.create.environment" => I::Weather,
+        "editor.blockout.export" => I::Export,
+        "editor.create.navigation_link" => I::Route,
+        "editor.create.navigation_profile" | "editor.navigation.bake" => I::NavMesh,
+        "editor.navigation.clear" => I::Remove,
+        "editor.create.navigation_agent" => I::Locomotion,
+        "editor.create.navigation_obstacle" => I::Collider,
+        "editor.create.perception" => I::View,
+        "editor.create.scatter_settings" | "editor.authoring.scatter" => I::FoliageSingle,
+        "editor.create.save_settings" | "editor.save.play" => I::Save,
+        "editor.save.load" => I::FolderOpen,
+        "editor.save.thumbnail" => I::Screenshot,
+        "editor.behavior.edit" | "editor.authoring.behavior" => I::BehaviorTree,
+        "editor.authoring.open" => I::FolderOpen,
+        "editor.authoring.save" => I::Save,
+        "editor.authoring.apply" => I::Check,
+        "editor.animation.rig" => I::Rig,
+        "editor.animation.reset" => I::SkipBack,
+        "editor.animation.play_pause" => I::Play,
+        "editor.animation.timeline" => I::Keyframes,
+        "editor.animation.state_machine" => I::StateMachine,
+        "editor.animation.reload" => I::Refresh,
+        "editor.animation.events" => I::Keyframes,
+        "editor.animation.save_events" => I::Save,
+        "editor.prefab.create" | "editor.prefab.instantiate" => I::Prefab,
+        "editor.prefab.nest" => I::Layers,
+        "editor.prefab.enter" => I::Rename,
+        "editor.prefab.exit" => I::Back,
+        "editor.prefab.propagate" => I::Export,
+        "editor.prefab.revert" => I::Undo,
+        "editor.prefab.break_link" => I::Unlink,
+        "editor.content.new_folder" => I::NewFolder,
+        "editor.content.new_script" => I::Script,
+        "editor.content.show_in_folder" => I::ShowInExplorer,
+        "editor.content.open" => I::FolderOpen,
+        "editor.content.assign_to_selection" => I::Check,
+        "editor.content.refresh" => I::Refresh,
+        "editor.content.copy_path" => I::Copy,
+        "editor.content.duplicate" => I::Duplicate,
+        "editor.content.delete" => I::Delete,
+        other => match other.split('.').nth(1).unwrap_or("") {
+            "create" => I::Add,
+            "view" | "viewport" => I::View,
+            "window" | "workspace" => I::AppWindow,
+            "help" => I::HelpCircle,
+            _ => I::More,
+        },
+    }
+}
+
+/// Which section of its menu a command sits in: menus draw a hairline between sections and keep each section's
+/// commands together (Phase ALYX-B; Window had its float commands among workspaces and panels).
+#[must_use]
+pub fn menu_section(id: &str) -> &'static str {
+    match id {
+        _ if id.starts_with("editor.window.float_") => "float",
+        _ if id.starts_with("editor.viewport.layout.") => "viewports",
+        "editor.workspace.reset" | "editor.window.default_layout" => "layout",
+        _ if id.starts_with("editor.workspace.") => "workspaces",
+        _ if id.starts_with("editor.simulation.") => "simulation",
+        _ if id.starts_with("editor.prefab.") => "prefab",
+        _ if id.starts_with("editor.gizmo.") => "gizmo",
+        _ if id.starts_with("editor.create.navigation") || id.starts_with("editor.create.perception") => "navigation",
+        _ if id.starts_with("editor.create.") && id.contains("light") => "lights",
+        "editor.create.cube" | "editor.create.sphere" | "editor.create.plane" | "editor.create.cylinder"
+        | "editor.create.blockout" => "shapes",
+        "editor.create.lake" | "editor.create.ocean" | "editor.create.sea" | "editor.create.river"
+        | "editor.create.terrain" | "editor.create.empty_terrain" | "editor.create.voxel_terrain"
+        | "editor.create.environment" => "world",
+        _ if id.starts_with("editor.content.") => "content",
+        _ if id.starts_with("editor.edit.") => "edit",
+        _ if id.starts_with("editor.scene.") || id.starts_with("editor.file.") => "file",
+        _ => "general",
+    }
+}
+
+/// The order sections come in, whichever menu they are in: what is reached for most first (shapes and lights before
+/// navigation volumes; panels, then workspaces, before floating windows).
+const SECTION_ORDER: &[&str] = &[
+    "file", "edit", "shapes", "lights", "world", "content", "general", "workspaces", "viewports", "layout", "float",
+    "gizmo", "simulation", "navigation", "prefab",
+];
+
+/// A menu's commands in their sections: each section's commands together, in registry order within a section, the
+/// sections in [`SECTION_ORDER`].
+#[must_use]
+pub fn sectioned(commands: Vec<Command>) -> Vec<(&'static str, Vec<Command>)> {
+    let mut sections: Vec<(&'static str, Vec<Command>)> = Vec::new();
+    for command in commands {
+        let key = menu_section(command.id);
+        match sections.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push(command),
+            None => sections.push((key, vec![command])),
+        }
+    }
+    let rank = |key: &str| SECTION_ORDER.iter().position(|k| *k == key).unwrap_or(SECTION_ORDER.len());
+    sections.sort_by_key(|(key, _)| rank(key));
+    sections
 }
 
 #[cfg(test)]

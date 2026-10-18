@@ -323,6 +323,9 @@ pub struct SomniumRenderer {
     pub grading: crate::pass::postprocess::Grading,
     /// A transition over the whole picture, set by the game each frame it runs; none by default.
     pub picture_shift: crate::pass::postprocess::PictureShift,
+    /// The scene's authored picture shift (Post Processing), set by the engine each frame. Drawn only while the
+    /// game's own `picture_shift` is none.
+    pub authored_picture_shift: crate::pass::postprocess::PictureShift,
     /// View-projection without TAA's sub-pixel jitter, for reprojection.
     view_proj_unjittered: glam::Mat4,
     /// Current render target size, for computing the jitter offset.
@@ -565,9 +568,12 @@ pub struct SomniumRenderer {
     graphics_budget_override: Option<crate::quality::GraphicsBudget>,
     /// The real-time path tracer switched on whatever the scene authored (a game's experimental setting).
     pub path_tracing_requested: bool,
-    /// Ray-traced reflections on glossy surfaces (the path tracer's reflection mode; a game's setting, or
-    /// `SOMNIUM_RT_REFLECTIONS=1`). Never under the retro picture or while the whole frame is path traced.
+    /// Ray-traced reflections on glossy surfaces switched on whatever the scene authored (the path tracer's
+    /// reflection mode; a game's setting). Never under the retro picture or while the whole frame is path traced.
     pub traced_reflections_requested: bool,
+    /// Lens-flare strength a game asks for (its settings menu); the engine draws the larger of this and the
+    /// scene's authored `lens_flare`.
+    pub lens_flare_requested: f32,
     /// When true, a draw is expanded into one indirect argument per cluster so
     /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
     /// forces the whole-mesh path, for A/B measurement.
@@ -1258,6 +1264,7 @@ impl SomniumRenderer {
             exposure_compensation: 0.0,
             grading: crate::pass::postprocess::Grading::default(),
             picture_shift: Default::default(),
+            authored_picture_shift: Default::default(),
             sun_angular_radius: 0.004_654,
             view_proj_unjittered: glam::Mat4::IDENTITY,
             render_width: ctx.config.width,
@@ -1333,7 +1340,8 @@ impl SomniumRenderer {
             graphics_preset: crate::quality::GraphicsPreset::from_env(),
             graphics_budget_override: None,
             path_tracing_requested: false,
-            traced_reflections_requested: std::env::var("SOMNIUM_RT_REFLECTIONS").as_deref() == Ok("1"),
+            traced_reflections_requested: false,
+            lens_flare_requested: 0.0,
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             cpu_frustum_cull: !cpu_frustum_env_off(),
@@ -3892,7 +3900,7 @@ impl SomniumRenderer {
             if drawn == 0 && !self.game_ui_empty_warned {
                 self.game_ui_empty_warned = true;
                 tracing::warn!(
-                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
+                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      usually a missing draw call in the game's on_render_ui"
                 );
             }
         }
@@ -4950,7 +4958,7 @@ impl SomniumRenderer {
             // Phase DOOM-A: bracketed. This was one of the passes the §17.7
             // table listed as landing in `unattributed`, which is why the row
             // existed at all.
-            self.profiler.begin(&mut encoder, "Cull (phase 1)");
+            self.profiler.begin(&mut encoder, "Cull (pass 1)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -4969,7 +4977,7 @@ impl SomniumRenderer {
         }
 
         // ── 6. Visibility Pass (phase 1) ─────────────────────────────────────
-        self.profiler.begin(&mut encoder, "Visibility (phase 1)");
+        self.profiler.begin(&mut encoder, "Visibility (pass 1)");
         self.record_visibility(&mut encoder, true);
         self.profiler.end(&mut encoder);
 
@@ -4980,7 +4988,7 @@ impl SomniumRenderer {
 
         if cull_active {
             // ── 6.7 Cull phase 2 ─────────────────────────────────────────────
-            self.profiler.begin(&mut encoder, "Cull (phase 2)");
+            self.profiler.begin(&mut encoder, "Cull (pass 2)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -4998,12 +5006,12 @@ impl SomniumRenderer {
             }
 
             // ── 6.8 Visibility Pass (phase 2) — disocclusions ────────────────
-            self.profiler.begin(&mut encoder, "Visibility (phase 2)");
+            self.profiler.begin(&mut encoder, "Visibility (pass 2)");
             self.record_visibility(&mut encoder, false);
             self.profiler.end(&mut encoder);
 
             // ── 6.9 Final pyramid, for the next frame's phase 1 ──────────────
-            self.profiler.begin(&mut encoder, "Hi-Z (phase 2)");
+            self.profiler.begin(&mut encoder, "Hi-Z (pass 2)");
             self.hiz_pass.record(&mut encoder);
             self.profiler.end(&mut encoder);
         }
@@ -6419,7 +6427,13 @@ impl SomniumRenderer {
             } else {
                 self.grading
             },
-            if debugging { Default::default() } else { self.picture_shift },
+            if debugging {
+                Default::default()
+            } else if self.picture_shift.kind != 0 {
+                self.picture_shift
+            } else {
+                self.authored_picture_shift
+            },
             self.view_proj.inverse().to_cols_array(),
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let

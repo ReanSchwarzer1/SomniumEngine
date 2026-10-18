@@ -822,7 +822,14 @@ impl FrameCapture {
         }
         drop(data);
         staging.unmap();
-        match std::fs::write(path, encode_png(dw, dh, &rgb)) {
+        // A `.ppm` path (the engine's movie frames, `App::movie_frame`) is written raw: PNG's best deflate takes over a
+        // second a frame at 1440p.
+        let bytes = if path.ends_with(".ppm") {
+            [format!("P6\n{dw} {dh}\n255\n").into_bytes(), rgb].concat()
+        } else {
+            encode_png(dw, dh, &rgb)
+        };
+        match std::fs::write(path, bytes) {
             Ok(()) => tracing::info!("CAPTURE {what} png written to {path}"),
             Err(e) => tracing::error!("CAPTURE {what} png write to {path} failed: {e}"),
         }

@@ -485,7 +485,7 @@ fn apply_capture_camera_overrides(
                 None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
             }
         }
-        tracing::info!(view, "DOOM-A timing viewpoint");
+        tracing::info!(view, "Timing viewpoint");
     }
     if let Ok(view) = std::env::var("SOMNIUM_KIT_VIEW") {
         if let Some(terrain) = terrain {
@@ -2338,6 +2338,10 @@ impl GameApp for HelloGame {
                     // Hiding a light hides what it lights, not just its gizmo.
                     // One lookup per archetype, since most carry no flags.
                     let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
+                    // A failing fixture dims at submission (the authored light is untouched).
+                    let flicker_col = archetype.column_index(ComponentId::of::<
+                        somnium_core::light_flicker::LightFlickerComponent,
+                    >());
                     for row in 0..archetype.len() {
                         if let Some(col) = flags_col
                             && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
@@ -2422,28 +2426,14 @@ impl GameApp for HelloGame {
                             | LightType::Rect
                             | LightType::Disc
                             | LightType::Tube => {
-                                let l_type = match light.light_type {
-                                    LightType::Point => 0,
-                                    LightType::Spot => 1,
-                                    LightType::Rect => 2,
-                                    LightType::Disc => 3,
-                                    LightType::Tube => 4,
-                                    LightType::Directional => 0,
-                                };
-                                renderer.submit_local_light(
-                                    somnium_renderer::cluster::GpuLocalLight {
-                                        position_ws: transform.translation.to_array(),
-                                        range: light.range,
-                                        color: light.photometric_color().to_array(),
-                                        light_type: l_type,
-                                        // Spot/rect axis = travel direction. Unused for point lights.
-                                        direction_ws: forward.to_array(),
-                                        spot_cos_outer: light.outer_angle.cos(),
-                                        spot_cos_inner: light.inner_angle.cos(),
-                                        radius: light.source_radius,
-                                        _pad: [light.area_width, light.area_height],
-                                    },
-                                );
+                                let flicker = flicker_col.map_or(1.0, |col| {
+                                    unsafe { archetype.column(col).get::<somnium_core::light_flicker::LightFlickerComponent>(row) }
+                                        .factor(ctx.time.elapsed().as_secs_f32())
+                                });
+                                // Spot/rect axis = travel direction. A spot keeps its cookie.
+                                if let Some(lamp) = light.local_light(transform.translation, forward, flicker) {
+                                    renderer.submit_local_light(lamp);
+                                }
                             }
                         }
                     }
@@ -3188,7 +3178,7 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
         set.attach(attachment);
     }
 
-    info!("Phase 16-C: `Scripted Rotator` attached to {DEMO_SCRIPT_PATH} â€” press Play to run it");
+    info!("`Scripted Rotator` attached to {DEMO_SCRIPT_PATH} â€” press Play to run it");
 }
 
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”

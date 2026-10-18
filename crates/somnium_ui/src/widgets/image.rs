@@ -58,9 +58,26 @@ impl Control for Image {
     fn handle_routed_message(
         &mut self,
         _widget: &mut Widget,
-        _msg: &mut UiMessage,
+        msg: &mut UiMessage,
         _emit: &mut Vec<UiMessage>,
     ) {
+        if let Some(ImageMessage::SetIcon(icon)) = msg.data::<ImageMessage>() {
+            self.icon = *icon;
+            msg.handled = true;
+        }
+    }
+}
+
+/// Change what an image shows after it is built: a Play button that becomes Pause.
+#[derive(Clone, Copy, Debug)]
+pub enum ImageMessage {
+    SetIcon(IconId),
+}
+
+impl ImageMessage {
+    #[must_use]
+    pub fn set_icon(destination: crate::message::NodeHandle, icon: IconId) -> UiMessage {
+        UiMessage::new(destination, crate::message::MessageDirection::ToWidget, Self::SetIcon(icon))
     }
 }
 

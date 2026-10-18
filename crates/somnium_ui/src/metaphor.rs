@@ -461,18 +461,34 @@ pub enum ContentFilterKind {
     Scripts,
     Scenes,
     Audio,
+    Materials,
 }
 
 impl ContentFilterKind {
-    pub const ALL: [ContentFilterKind; 7] = [
+    pub const ALL: [ContentFilterKind; 8] = [
         ContentFilterKind::All,
         ContentFilterKind::Folders,
         ContentFilterKind::Models,
+        ContentFilterKind::Materials,
         ContentFilterKind::Textures,
         ContentFilterKind::Scripts,
         ContentFilterKind::Scenes,
         ContentFilterKind::Audio,
     ];
+
+    /// The chip's glyph (Phase ALYX-F).
+    pub const fn icon(self) -> IconId {
+        match self {
+            ContentFilterKind::All => IconId::GridView,
+            ContentFilterKind::Folders => IconId::Folder,
+            ContentFilterKind::Models => IconId::Mesh,
+            ContentFilterKind::Materials => IconId::Material,
+            ContentFilterKind::Textures => IconId::Texture,
+            ContentFilterKind::Scripts => IconId::Script,
+            ContentFilterKind::Scenes => IconId::Scene,
+            ContentFilterKind::Audio => IconId::Audio,
+        }
+    }
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -483,6 +499,7 @@ impl ContentFilterKind {
             ContentFilterKind::Scripts => "Scripts",
             ContentFilterKind::Scenes => "Scenes",
             ContentFilterKind::Audio => "Audio",
+            ContentFilterKind::Materials => "Materials",
         }
     }
 
@@ -498,6 +515,7 @@ impl ContentFilterKind {
             ContentFilterKind::Scripts => entry.icon == I::Script,
             ContentFilterKind::Scenes => entry.icon == I::Scene,
             ContentFilterKind::Audio => entry.icon == I::Audio,
+            ContentFilterKind::Materials => entry.icon == I::Material,
         }
     }
 }

@@ -10,6 +10,7 @@ pub enum ToolMode {
     Lighting,
     Materials,
     VertexPaint,
+    Animation,
 }
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ToolContext {
@@ -45,6 +46,7 @@ pub struct ToolPanel {
     pub properties: NodeHandle,
     lighting_actions: NodeHandle,
     material_actions: NodeHandle,
+    animation_actions: NodeHandle,
     pub commands: Vec<(NodeHandle, &'static str)>,
     fields: Vec<NodeHandle>,
     operation: NodeHandle,
@@ -53,9 +55,16 @@ pub struct ToolPanel {
     finish: NodeHandle,
     previous: Option<(ToolContext, ToolMode)>,
 }
+impl ToolMode {
+    /// Modes that take their components' Details into the tool panel.
+    #[must_use]
+    pub fn hosts_details(self) -> bool {
+        matches!(self, ToolMode::Lighting | ToolMode::Materials | ToolMode::Animation)
+    }
+}
 impl ToolPanel {
     pub fn build(ui: &mut UserInterface, parent: NodeHandle, font: u8) -> Self {
-        use crate::editor::persona::{action, combo};
+        use crate::editor::persona::{action, combo, icon_action};
         let stack = |ui: &mut UserInterface, parent| {
             ui.add_node(
                 StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
@@ -176,7 +185,7 @@ impl ToolPanel {
             ("Sun light", "editor.create.directional_light"),
             ("Area light", "editor.create.area_light"),
         ] {
-            commands.push((action(ui, lighting_actions, label, 140.0), id));
+            commands.push((icon_action(ui, lighting_actions, crate::commands::icon_for(id), label), id));
         }
         let material_actions = ui.add_node(
             crate::widgets::wrap_panel::WrapPanelBuilder::new(
@@ -186,14 +195,33 @@ impl ToolPanel {
             .build(),
             host,
         );
-        commands.push((
-            action(ui, material_actions, "New material", 140.0),
-            "editor.asset.new_material",
-        ));
-        commands.push((
-            action(ui, material_actions, "Save", 100.0),
-            "editor.scene.save",
-        ));
+        // New and Save, then what a designer does next with a material: put it on what is selected, or find its file.
+        for (icon, label, id) in [
+            (crate::icons::IconId::NewAsset, "New", "editor.asset.new_material"),
+            (crate::icons::IconId::Save, "Save", "editor.scene.save"),
+            (crate::icons::IconId::Check, "Assign to selection", "editor.content.assign_to_selection"),
+            (crate::icons::IconId::ShowInExplorer, "Show in Explorer", "editor.content.show_in_folder"),
+        ] {
+            commands.push((icon_action(ui, material_actions, icon, label), id));
+        }
+        // The rig's own verbs, in the order a designer reaches for them.
+        let animation_actions = ui.add_node(
+            crate::widgets::wrap_panel::WrapPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_gap(4.0, 4.0)
+            .build(),
+            host,
+        );
+        for id in [
+            "editor.animation.rig",
+            "editor.animation.events",
+            "editor.animation.save_events",
+            "editor.animation.reload",
+        ] {
+            let label = crate::commands::registry().get(id).map_or(id, |command| command.label);
+            commands.push((icon_action(ui, animation_actions, crate::commands::icon_for(id), label), id));
+        }
         let properties = stack(ui, host);
         let finish = action(ui, host, "Finish · return to Select", 0.0);
         Self {
@@ -209,6 +237,7 @@ impl ToolPanel {
             paint_actions,
             properties,
             lighting_actions,
+            animation_actions,
             material_actions,
             commands,
             fields,
@@ -235,7 +264,7 @@ impl ToolPanel {
             ToolMode::Landscape => state.landscape_reason.as_deref(),
             ToolMode::Foliage => state.foliage_reason.as_deref(),
             ToolMode::VertexPaint => state.paint_reason.as_deref(),
-            ToolMode::Select | ToolMode::Lighting | ToolMode::Materials => None,
+            ToolMode::Select | ToolMode::Lighting | ToolMode::Materials | ToolMode::Animation => None,
         };
         ui.send(TextMessage::set_text(
             self.title,
@@ -246,6 +275,7 @@ impl ToolPanel {
                 ToolMode::Lighting => "Lighting",
                 ToolMode::Materials => "Material",
                 ToolMode::VertexPaint => "Vertex Paint",
+                ToolMode::Animation => "Animation",
             },
         ));
         ui.send(TextMessage::set_text(
@@ -260,7 +290,8 @@ impl ToolPanel {
         ));
         ui.send(TextMessage::set_text(self.hint, reason.unwrap_or(match shown {
             ToolMode::Lighting => "Select a light or Environment to edit its lighting. Changes use the same Details and undo controls.",
-            ToolMode::Materials => "Select a material in the Content Drawer, or an object using one. Save writes the material asset. Material graphs are planned for a later phase.",
+            ToolMode::Materials => "Select a material in the Content Drawer, or an object using one. Save writes the material asset.",
+            ToolMode::Animation => "Select a rig, or create one. Play and scrub it in the dock under the viewport. Its settings are below.",
             ToolMode::Select => "Choose Landscape or Foliage in the toolbar.",
             ToolMode::Landscape => "Choose an operation, then drag on terrain. Esc cancels a stroke; Ctrl+Z undoes it.",
             ToolMode::Foliage if !state.foliage_visible => "Foliage is hidden. Enable Visible below before painting.",
@@ -269,10 +300,8 @@ impl ToolPanel {
         })));
         ui.set_visibility(self.lighting_actions, shown == ToolMode::Lighting);
         ui.set_visibility(self.material_actions, shown == ToolMode::Materials);
-        ui.set_visibility(
-            self.properties,
-            matches!(shown, ToolMode::Lighting | ToolMode::Materials),
-        );
+        ui.set_visibility(self.animation_actions, shown == ToolMode::Animation);
+        ui.set_visibility(self.properties, shown.hosts_details());
         ui.set_visibility(self.landscape, shown == ToolMode::Landscape);
         ui.set_visibility(self.foliage, shown == ToolMode::Foliage);
         ui.set_visibility(self.vertex_paint, shown == ToolMode::VertexPaint);

@@ -231,9 +231,9 @@ pub(crate) fn command_popup_items(
     let popup_h = ui.add_node(popup, root);
     let border = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_width(280.0)
+            .with_width(300.0)
             .with_max_size(glam::Vec2::new(
-                280.0,
+                300.0,
                 theme::active().density.row_tree * 16.0,
             ))
             .with_horizontal_alignment(HorizontalAlignment::Left)
@@ -256,26 +256,72 @@ pub(crate) fn command_popup_items(
         .build();
     let stack_h = ui.add_node(stack, scroll_h);
     let mut handles = Vec::with_capacity(commands.len());
-    for command in commands {
-        let btn = ButtonBuilder::new(
-            WidgetBuilder::new()
-                .with_height(theme::active().density.row_tree)
-                .with_background(theme::TRANSPARENT),
-        )
-        .build();
-        let bh = ui.add_node(btn, stack_h);
-        let lbl = TextBuilder::new(
-            WidgetBuilder::new()
-                .with_margin(Thickness::axes(8.0, 0.0))
-                .with_vertical_alignment(VerticalAlignment::Center),
-        )
-        .with_text(command.menu_label())
-        .with_font_size(12.0)
-        .with_font_id(font_id)
-        .with_color(theme::active().semantic.text.primary.bytes())
-        .build();
-        ui.add_node(lbl, bh);
-        handles.push((bh, command.id));
+    // Phase ALYX-B: each row is the command's glyph, its label, and its shortcut set flush right in the muted ink;
+    // the menu's sections are kept together and parted by a hairline.
+    let sections = crate::commands::sectioned(commands.into_iter().copied().collect());
+    for (index, (_, section)) in sections.into_iter().enumerate() {
+        if index > 0 {
+            let rule = BorderBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::NOCTURNE.geometry.stroke_hairline)
+                    .with_margin(Thickness::axes(10.0, 4.0))
+                    .with_hit_test_visibility(false)
+                    .with_background(theme::active().semantic.border.subtle.bytes())
+                    .with_foreground(theme::TRANSPARENT),
+            )
+            .with_stroke_thickness(Thickness::ZERO)
+            .build();
+            ui.add_node(rule, stack_h);
+        }
+        for command in section {
+            let btn = ButtonBuilder::new(
+                WidgetBuilder::new()
+                    .with_height(theme::active().density.row_tree)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .build();
+            let bh = ui.add_node(btn, stack_h);
+            let glyph = ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_horizontal_alignment(HorizontalAlignment::Left)
+                    .with_vertical_alignment(VerticalAlignment::Center)
+                    .with_margin(Thickness::new(10.0, 0.0, 0.0, 0.0))
+                    .with_hit_test_visibility(false),
+            )
+            .with_icon(crate::commands::icon_for(command.id))
+            .with_size(16.0)
+            .with_tint(theme::active().semantic.text.secondary.bytes())
+            .build();
+            ui.add_node(glyph, bh);
+            let lbl = TextBuilder::new(
+                WidgetBuilder::new()
+                    .with_margin(Thickness::new(34.0, 0.0, 0.0, 0.0))
+                    .with_vertical_alignment(VerticalAlignment::Center)
+                    .with_hit_test_visibility(false),
+            )
+            .with_text(command.label)
+            .with_font_size(12.0)
+            .with_font_id(font_id)
+            .with_color(theme::active().semantic.text.primary.bytes())
+            .build();
+            ui.add_node(lbl, bh);
+            if let Some(chord) = command.default_binding {
+                let keys = TextBuilder::new(
+                    WidgetBuilder::new()
+                        .with_horizontal_alignment(HorizontalAlignment::Right)
+                        .with_vertical_alignment(VerticalAlignment::Center)
+                        .with_margin(Thickness::new(0.0, 0.0, 12.0, 0.0))
+                        .with_hit_test_visibility(false),
+                )
+                .with_text(chord.to_string())
+                .with_font_size(11.0)
+                .with_font_id(font_id)
+                .with_color(theme::active().semantic.text.muted.bytes())
+                .build();
+                ui.add_node(keys, bh);
+            }
+            handles.push((bh, command.id));
+        }
     }
     (popup_h, stack_h, handles)
 }

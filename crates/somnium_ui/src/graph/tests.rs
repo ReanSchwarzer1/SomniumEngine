@@ -1223,3 +1223,33 @@ fn moving_a_group_moves_every_nested_member_and_serialises_membership() {
     let loaded = serial::from_json(&json, &catalogue).unwrap();
     assert_eq!(loaded.node(a).unwrap().group, Some(group));
 }
+
+#[test]
+fn frame_all_brings_a_far_node_into_view() {
+    let (catalogue, mut graph, _, output) = two_node_graph();
+    graph.node_mut(output).unwrap().position = Vec2::new(2400.0, 1600.0);
+    let mut ui = crate::ui::UserInterface::new(640.0, 360.0);
+    let editor = super::GraphEditorBuilder::new(
+        crate::widget::WidgetBuilder::new().with_width(640.0).with_height(360.0),
+        catalogue,
+    )
+    .with_graph(graph)
+    .build();
+    let editor = ui.add_node(editor, ui.root());
+    ui.perform_layout();
+    ui.send(crate::message::UiMessage::new(
+        editor,
+        crate::message::MessageDirection::ToWidget,
+        super::GraphEditorMessage::Command { id: "graph.frame_all".into(), paste_offset: Vec2::ZERO },
+    ));
+    ui.update();
+    ui.draw();
+    let nodes = graph_node_rects(&ui);
+    assert_eq!(nodes.len(), 2);
+    for node in nodes {
+        assert!(
+            node.x >= 0.0 && node.y >= 0.0 && node.x + node.w <= 640.0 && node.y + node.h <= 360.0,
+            "every node is on screen after framing: {node:?}"
+        );
+    }
+}

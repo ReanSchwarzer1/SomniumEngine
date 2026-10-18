@@ -576,6 +576,19 @@ impl AnimationAuthoringSystem {
         }
     }
     /// Rewind the rig, clear event counters and release its physical preview.
+    /// Length of the clip bound to `entity`, once its preview has been built.
+    #[must_use]
+    pub fn clip_length(&self, entity: Entity) -> Option<f32> {
+        self.states.get(&entity).map(|state| state.clip.duration())
+    }
+    /// Put the preview clock at `time` seconds; the next update evaluates the pose there.
+    pub fn scrub(&mut self, entity: Entity, time: f32) {
+        if let Some(state) = self.states.get_mut(&entity)
+            && time.is_finite()
+        {
+            state.time = time.max(0.0);
+        }
+    }
     pub fn reset(
         &mut self,
         world: &mut World,

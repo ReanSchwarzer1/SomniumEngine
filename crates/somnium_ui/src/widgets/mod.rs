@@ -22,6 +22,7 @@ pub mod image;
 pub mod menu;
 pub mod numeric_field;
 pub mod popup;
+pub mod profiler_view;
 pub mod property_row;
 pub mod scroll_viewer;
 pub mod search_box;

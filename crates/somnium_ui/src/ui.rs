@@ -523,6 +523,14 @@ impl UserInterface {
         handle_nh
     }
 
+    /// A node's children, in order (empty for a stale handle).
+    pub fn children(&self, handle: NodeHandle) -> Vec<NodeHandle> {
+        self.nodes
+            .try_borrow(to_ih(handle))
+            .map(|n| n.widget.children.clone())
+            .unwrap_or_default()
+    }
+
     pub fn remove_node(&mut self, handle: NodeHandle) {
         let handle_ih = to_ih(handle);
         // A stale generational handle must not erase a recycled node's motion.

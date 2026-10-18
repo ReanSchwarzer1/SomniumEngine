@@ -38,7 +38,7 @@ impl Control for StateSheet {
         ctx.push_rect_filled(b, t.semantic.surface.panel.bytes());
         label(
             ctx,
-            "Nocturne Atelier / PERSONA",
+            "Nocturne Atelier",
             32.0,
             24.0,
             TextRole::Title,

@@ -22,6 +22,25 @@ use somnium_anim::{CompareOp, Condition};
 
 mod authoring;
 
+/// A node's kind as a glyph and a colour, so a graph reads at a glance: clips, blends, states and the output each
+/// look like themselves. Kinds without one get a neutral band.
+fn node_kind(archetype: &str) -> (Option<crate::icons::IconId>, [u8; 4]) {
+    use crate::icons::IconId;
+    let s = &crate::theme::active().semantic;
+    match archetype {
+        "animation.clip" => (Some(IconId::AnimClip), s.accent.default.bytes()),
+        "animation.state" => (Some(IconId::StateMachine), s.status.success.bytes()),
+        "animation.output" => (Some(IconId::Rig), s.status.error.bytes()),
+        "animation.layer" | "animation.cache" => (Some(IconId::Layers), s.status.info.bytes()),
+        id if id.starts_with("animation.blend") => (Some(IconId::BlendSpace), s.status.info.bytes()),
+        id if id.starts_with("material.") => (Some(IconId::MaterialBall), s.accent.default.bytes()),
+        id if id.starts_with("behavior.") || id.starts_with("ai.") => {
+            (Some(IconId::Activity), s.status.warning.bytes())
+        }
+        _ => (None, s.border.strong.bytes()),
+    }
+}
+
 const PIN_GRAB: f32 = 9.0;
 const GRID_STEP: f32 = 32.0;
 const NODE_HEADER: f32 = 28.0;
@@ -29,8 +48,8 @@ const PIN_ROW: f32 = 24.0;
 const NODE_PADDING: f32 = 8.0;
 const LITERAL_LEFT: f32 = 78.0;
 const LITERAL_RIGHT: f32 = 8.0;
-const TRANSITION_LABEL_WIDTH: f32 = 176.0;
-const TRANSITION_LABEL_HEIGHT: f32 = 20.0;
+const TRANSITION_LABEL_WIDTH: f32 = 204.0;
+const TRANSITION_LABEL_HEIGHT: f32 = 22.0;
 const TRANSITION_PANEL_WIDTH: f32 = 292.0;
 const TRANSITION_PANEL_HEIGHT: f32 = 190.0;
 /// A single wheel line changes graph scale by ten percent. Routed wheel
@@ -330,6 +349,29 @@ impl GraphEditor {
         self.surface()
             .view
             .screen_to_graph(Self::local(widget, point) - self.authoring_offset())
+    }
+
+    /// Fit every node in view, centred, never larger than life (Home, as in other node editors).
+    fn frame_all(&mut self, widget: &Widget) {
+        let layouts = geometry::layout_nodes(&self.surface().graph, &self.surface().catalogue);
+        let Some(first) = layouts.first() else {
+            return;
+        };
+        let (mut min, mut max) = (first.bounds.pos(), first.bounds.pos() + first.bounds.size());
+        for layout in &layouts {
+            min = min.min(layout.bounds.pos());
+            max = max.max(layout.bounds.pos() + layout.bounds.size());
+        }
+        let canvas = widget.screen_bounds().size() - self.authoring_offset();
+        let room = canvas - Vec2::splat(64.0);
+        if room.x <= 0.0 || room.y <= 0.0 {
+            return;
+        }
+        let size = (max - min).max(Vec2::ONE);
+        let zoom = (room.x / size.x).min(room.y / size.y).clamp(geometry::GraphView::MIN_ZOOM, 1.0);
+        let view = &mut self.surface_mut().view;
+        view.zoom = zoom;
+        view.pan = canvas * 0.5 - (min + size * 0.5) * zoom;
     }
 
     fn screen_point(&self, widget: &Widget, point: Vec2) -> Vec2 {
@@ -914,9 +956,9 @@ impl Control for GraphEditor {
                             if condition_count == 1 { "" } else { "s" },
                             transition.sync_track.as_deref().unwrap_or("no sync")
                         ),
-                        Vec2::new(label.x + 6.0, label.y + 5.0),
+                        Vec2::new(label.x + 7.0, label.y + 5.0),
                         self.font_id,
-                        8.0,
+                        10.0,
                         theme.semantic.text.primary.bytes(),
                     );
                 }
@@ -961,12 +1003,28 @@ impl Control for GraphEditor {
                     .with_border(if selected || initial { 2.0 } else { 1.0 }, border),
                 None,
             );
+            // Nothing a node says may spill out of it; the pins, drawn after, sit on its edges.
+            ctx.push_clip_rect(node_bounds);
+            let zoom = surface.view.zoom;
             if !archetype.is_reroute {
-                let header_height = NODE_HEADER * surface.view.zoom;
+                let header_height = NODE_HEADER * zoom;
                 ctx.push_rect_filled(
                     Rect::new(node_bounds.x, node_bounds.y, node_bounds.w, header_height),
                     theme.semantic.surface.header.bytes(),
                 );
+                // What kind of node this is, before its name: a band of its kind's colour and its glyph.
+                let (glyph, band) = node_kind(&node.archetype);
+                ctx.push_rect_filled(
+                    Rect::new(node_bounds.x, node_bounds.y, node_bounds.w, 3.0 * zoom.max(0.75)),
+                    band,
+                );
+                let mut title_x = node_bounds.x + 9.0 * zoom;
+                if let Some(glyph) = glyph {
+                    let at = Rect::new(title_x, node_bounds.y + 7.0 * zoom, 15.0 * zoom, 15.0 * zoom);
+                    let (uv, texture) = glyph.draw_quad(at);
+                    ctx.push_textured_rect(at, uv, band, texture);
+                    title_x += 21.0 * zoom;
+                }
                 let title = if node.title.is_empty() {
                     archetype.title
                 } else {
@@ -974,9 +1032,9 @@ impl Control for GraphEditor {
                 };
                 ctx.push_text(
                     title,
-                    Vec2::new(node_bounds.x + 8.0, node_bounds.y + 7.0),
+                    Vec2::new(title_x, node_bounds.y + 7.0 * zoom),
                     self.font_id,
-                    11.0,
+                    12.0 * zoom,
                     theme.semantic.text.primary.bytes(),
                 );
             }
@@ -985,9 +1043,9 @@ impl Control for GraphEditor {
                     + (NODE_HEADER + NODE_PADDING + pin as f32 * PIN_ROW + 5.0) * surface.view.zoom;
                 ctx.push_text(
                     input.name,
-                    Vec2::new(node_bounds.x + 8.0 * surface.view.zoom, y),
+                    Vec2::new(node_bounds.x + 9.0 * zoom, y - 1.0 * zoom),
                     self.font_id,
-                    9.0 * surface.view.zoom,
+                    10.5 * zoom,
                     theme.semantic.text.secondary.bytes(),
                 );
                 let pin = pin as u16;
@@ -1019,23 +1077,26 @@ impl Control for GraphEditor {
                     let display = input
                         .unit
                         .map_or_else(|| value.to_owned(), |unit| format!("{value} {unit}"));
+                    ctx.push_clip_rect(field);
                     ctx.push_text(
                         &display,
-                        Vec2::new(field.x + 4.0, field.y + 4.0),
+                        Vec2::new(field.x + 5.0, field.y + 3.0 * zoom),
                         self.font_id,
-                        9.0 * surface.view.zoom,
+                        10.5 * zoom,
                         theme.semantic.text.primary.bytes(),
                     );
+                    ctx.pop_clip_rect();
                 }
             }
             for (pin, output) in archetype.outputs.iter().enumerate() {
                 let y = node_bounds.y
                     + (NODE_HEADER + NODE_PADDING + pin as f32 * PIN_ROW + 5.0) * surface.view.zoom;
+                let name_w = ctx.font_atlas.measure_text(output.name, 10.5 * zoom, self.font_id).x;
                 ctx.push_text(
                     output.name,
-                    Vec2::new(node_bounds.x + node_bounds.w - 56.0 * surface.view.zoom, y),
+                    Vec2::new(node_bounds.x + node_bounds.w - 12.0 * zoom - name_w, y - 1.0 * zoom),
                     self.font_id,
-                    9.0 * surface.view.zoom,
+                    10.5 * zoom,
                     theme.semantic.text.secondary.bytes(),
                 );
             }
@@ -1045,9 +1106,9 @@ impl Control for GraphEditor {
                 match element {
                     NodeElementArchetype::Label(label) => ctx.push_text(
                         label,
-                        Vec2::new(node_bounds.x + 8.0 * surface.view.zoom, y),
+                        Vec2::new(node_bounds.x + 9.0 * zoom, y),
                         self.font_id,
-                        8.0 * surface.view.zoom,
+                        10.0 * zoom,
                         theme.semantic.text.muted.bytes(),
                     ),
                     NodeElementArchetype::Separator => ctx.push_rect_filled(
@@ -1064,9 +1125,10 @@ impl Control for GraphEditor {
                     | NodeElementArchetype::Literal(_) => {}
                 }
             }
+            ctx.pop_clip_rect();
             for pin in layout.pins {
                 let centre = self.screen_point(widget, pin.position);
-                let circle = Path::circle(centre, 4.0);
+                let circle = Path::circle(centre, 4.5);
                 ctx.push_path(&circle, ShapedInstance::identity(pin_colour(pin.ty)));
             }
         }
@@ -1236,6 +1298,9 @@ impl Control for GraphEditor {
                     {
                         self.emit_changed(widget, emit);
                     }
+                }
+                GraphEditorMessage::Command { id, .. } if id == "graph.frame_all" => {
+                    self.frame_all(widget);
                 }
                 GraphEditorMessage::Command { id, paste_offset } => {
                     if self.surface_mut().dispatch_command(&id, paste_offset) {
@@ -1490,7 +1555,13 @@ impl Control for GraphEditor {
                 }
             }
             WidgetMessage::KeyDown(key, _) => {
-                if let Some(edit) = self.transition_edit.as_mut() {
+                if key == crate::message::KeyCode::Home
+                    && self.transition_edit.is_none()
+                    && self.literal_edit.is_none()
+                {
+                    self.frame_all(widget);
+                    msg.handled = true;
+                } else if let Some(edit) = self.transition_edit.as_mut() {
                     match key {
                         crate::message::KeyCode::Backspace => {
                             edit.replace_on_input = false;

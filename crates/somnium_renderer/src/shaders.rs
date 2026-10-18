@@ -371,6 +371,8 @@ mod tests {
             "wind.wgsl",
             "sky_eye.wgsl",
             "shading.wgsl",
+            // 17 Oct 2026: every spot cone's shape and cookie (small, bounded; no noise or parallax).
+            "spot_cookie.wgsl",
         ];
         expected.sort_unstable();
         assert_eq!(
@@ -400,6 +402,8 @@ mod tests {
             "sampling.wgsl",
             "atmosphere.wgsl",
             "terrain_splat_core.wgsl",
+            // The bounce light shapes spot cones like the raster does (17 Oct 2026); a few lines, no heavy modules.
+            "spot_cookie.wgsl",
         ];
         gi.sort_unstable();
         assert_eq!(

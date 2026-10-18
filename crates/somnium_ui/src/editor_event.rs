@@ -637,6 +637,16 @@ pub enum EditorEvent {
     ShowContentItemInFolder(String),
     /// Open an asset in its configured OS editor.
     EditContentAsset(String),
+    /// Add a component, by stable id, to the selected entity (one undo step).
+    AddComponent(String),
+    /// Remove a component, by stable id, from the selected entity (one undo step).
+    RemoveComponent(String),
+    /// Put the animation preview's clock at this many seconds (the timeline's playhead was dragged).
+    ScrubAnimation(f32),
+    /// Copy a content file or folder beside itself. `path` is absolute.
+    DuplicateContentItem(String),
+    /// Move a content file or folder to the Recycle Bin. `path` is absolute.
+    DeleteContentItem(String),
     /// Pull a panel out into its own OS window, or raise the one already
     /// showing it (MORROWIND-J step 2).
     ///
@@ -738,6 +748,8 @@ pub enum DesignerTool {
     AnimationRig,
     /// Rewind a preview and release its physical bodies.
     AnimationReset,
+    /// Start or stop the rig's preview clock.
+    AnimationPlayPause,
     /// Reload the event asset and preview clip.
     AnimationReload,
     /// Open or create the rig's event timeline.

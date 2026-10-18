@@ -78,13 +78,32 @@ describe the older systems these build on.
 | Scene capture | A second, cheap forward view (384²) into a bindless slot, for mirrors and screens; own frustum, sun, lamps, fog | `pass/scene_capture.rs`, `shaders/scene_capture.wgsl` | features record D2 |
 | FSR 3 | The upscaler (wgpu-ffx, AMD's SPIR-V) plus frame generation: AMD's FidelityFX 1.1.4 frame interpolation and optical flow translated to WGSL (`third_party/wgpu-ffx-fg`). Paced by split submits, the game UI drawn fresh over both frames | `pass/fsr.rs`, `pass/frame_gen.rs`, `renderer_frame_gen.rs` | [`FRAME_GENERATION_2026-10-17.md`](<dev records/FRAME_GENERATION_2026-10-17.md>) |
 | Frame pacing | A game asks for V-sync on/off and a frame cap. The request is applied between frames (`PresentMode` AutoVsync/AutoNoVsync) | `somnium_core/src/time.rs` `request_frame_pacing`, `context.rs` `set_vsync` | game record |
-| A game's own graphics budget | `set_graphics_budget(Some(budget))` lays a game's per-feature choices over the scene in place of a tier. Requests switch on what no scene authors: `path_tracing_requested`, `traced_reflections_requested`, `bloom_pass.lens_flare` | `renderer.rs`, `quality.rs`, `app.rs` settings push | game record |
+| A game's own graphics budget | `set_graphics_budget(Some(budget))` lays a game's per-feature choices over the scene in place of a tier. Requests switch on what no scene authors: `path_tracing_requested`, `traced_reflections_requested`, `lens_flare_requested` | `renderer.rs`, `quality.rs`, `app.rs` settings push | game record |
 | PS2 picture | `PostProcess.retro` (a PS2-style picture: low resolution, no temporal smoothing, no traced light) and `PictureShift` (through a screen, eyes closing, a wave of decay) | `pass/postprocess.rs`, `postprocess.wgsl` | game record `CLAUDE_SESSION_2026-10-15B_…` |
 | Characters | Skin scattering past the shadow edge and through thin parts; hair cards; eye glint; game silhouettes and interaction highlights | `skin_scatter.wgsl`, `shading.wgsl`, `pass/game_highlight.rs` | game records `GAME_SILHOUETTE_HIGHLIGHT_2026-10-07.md`, `HAIR_RENDERING_NOTES.md` |
 | Vertex paint | Painted PBR layers or stains, de-tiled per layer, baked per level | `somnium_core/src/vertex_paint.rs`, `somnium_renderer/src/vertex_paint.rs` | game memory `vertex-paint-pipeline` |
 | ReSTIR GI | The bounce light picks from every lamp that reaches the hit, not four at random (the fireflies in dressed interiors) | `restir_gi.wgsl` | commit `fed2290` |
 | Spatial audio | Room reverb by enclosure, a muffled track for occluded sounds, binaural voices through the MIT KEMAR head responses | `somnium_audio/src/acoustics.rs`, `hrtf.rs` | game record `CLAUDE_SESSION_2026-10-15B_…` |
 | Editor automation | A semantic MCP authoring bridge, project launch, mouse and wheel input validated end to end; the standalone player | `somnium_core` authoring, `app_play_input.rs` | game `ENGINE_AND_MCP.md`, `MCP_PERFORMANCE_FIX_2026-09-25.md` |
+
+### In the editor, for designers (17 Oct 2026, written, not yet built or tested)
+
+Most of the table above began as something only the game's options menu could switch. These are now ordinary schema
+fields, so they appear in Details, save with the scene and can be scripted. The game's own requests still win in Play.
+
+| Where in the editor | Field | What it drives |
+|---|---|---|
+| Post Processing → Bloom | Lens Flare (0–2; hidden with bloom off) | `BloomPass::lens_flare`, the larger of this and `lens_flare_requested` |
+| Post Processing → Ray Tracing | Traced Reflections, Reflection Roughness | the path tracer's mode 1 (`PathTracerPass::reflection_roughness`; `SOMNIUM_RT_REFLECT_ROUGH` still overrides) |
+| Post Processing → Path Tracing | Path Tracing (Experimental), with its cost in the tooltip | mode 0, as before |
+| Post Processing → Picture Shift | Shift (Off, Screen, Eyelids, Wave), Progress, Wave Origin, Wave Reach | `Renderer::authored_picture_shift`, drawn while the game runs no shift of its own |
+| Light (spots) | Cookie (None, Torch, Blinds, Panes, Wire guard, Grime) | `LightComponent::local_light`, the one place a scene light becomes a `GpuLocalLight` (flicker and area size included) |
+| Camera → Graphics Scalability | Custom, with Custom Scale (0.5–1) | `CameraSettingsComponent::scene_scale` |
+| Preferences → Display | V-Sync, Frame Cap (`SOMNIUM_VSYNC`, `SOMNIUM_FRAME_CAP` override), Frame Generation, Graphics Tier | applied at start and when changed, never in a standalone player; a game's request in between wins |
+
+hello_engine and TSF's `bootstrap.rs` both gather lamps through `local_light`, so the editor's own app now draws cookies
+and `LightFlickerComponent` too. TSF's older `tsf.LampCookie` still wins where a scene carries one. `somnium.d.luau`
+is stale until the editor regenerates it.
 
 ### A frame now
 

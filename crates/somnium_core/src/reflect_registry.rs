@@ -341,7 +341,7 @@ const SMAA_PRESET_NAMES: &[&str] = &["Low", "Medium", "High", "Ultra"];
 
 impl ReflectField for GraphicsScalability {
     fn field_type() -> FieldType {
-        FieldType::Enum(&["Native (100%)", "Balanced (75%)", "Performance (67%)"])
+        FieldType::Enum(&["Native (100%)", "Balanced (75%)", "Performance (67%)", "Custom"])
     }
     fn to_reflect(&self) -> ReflectValue {
         ReflectValue::I64(i64::from(self.as_index()))
@@ -351,10 +351,11 @@ impl ReflectField for GraphicsScalability {
             ReflectValue::I64(0) => Ok(Self::Native),
             ReflectValue::I64(1) => Ok(Self::Balanced),
             ReflectValue::I64(2) => Ok(Self::Performance),
+            ReflectValue::I64(3) => Ok(Self::Custom),
             ReflectValue::I64(_) => Err(ReflectError::OutOfRange {
                 field,
                 min: Some(0.0),
-                max: Some(2.0),
+                max: Some(3.0),
             }),
             other => Err(ReflectError::TypeMismatch {
                 field,
@@ -746,11 +747,13 @@ fn camera_settings_schema() -> ComponentSchema {
     component_schema! {
         CameraSettingsComponent as "somnium.CameraSettings", display "Camera", version 1,
         fields {
-            graphics_scalability { group: "Graphics Scalability", doc: "Fixed scene resolution: Native 100%, Balanced 75%, Performance 67%. FSR reconstructs to display size; other AA modes use a spatial blit. Applies after the viewport resolution cap. Other graphics controls stay independent." },
+            graphics_scalability { group: "Graphics Scalability", doc: "Fixed scene resolution: Native 100%, Balanced 75%, Performance 67%, or Custom (the Custom Scale below). FSR reconstructs to display size; other AA modes use a spatial blit. Applies after the viewport resolution cap. Other graphics controls stay independent." },
             frustum_cull { group: "Culling", doc: "Skip terrain chunks outside the camera frustum." },
             dynamic_resolution { group: "Dynamic Resolution" },
             dynamic_target_ms { min: 1.0, soft_max: 50.0, step: 0.1, precision: 2, unit: "ms", group: "Dynamic Resolution" },
             dynamic_floor { min: 0.25, max: 1.0, step: 0.01, precision: 2, group: "Dynamic Resolution", doc: "Minimum automatic scale relative to the fixed Graphics Scalability resolution." },
+            custom_scale { min: 0.5, max: 1.0, step: 0.05, precision: 2, group: "Graphics Scalability", display_name: "Custom Scale",
+                doc: "Scene resolution per dimension when Graphics Scalability is Custom: 0.67 renders about 45% of the pixels." },
         }
     }
 }
@@ -828,7 +831,7 @@ fn post_process_schema() -> ComponentSchema {
             dream_mode { min: 0, max: 4, group: "Dream Lens", doc: "0 Off; 1 Heat drift; 2 Peripheral echo; 3 Architectural shear; 4 Fracture (the whole picture breaks into slipping shards, doubles and breathes). 1 to 3 leave the central interaction region clear; 4 only eases there." },
             dream_strength { min: 0.0, max: 1.0, step: 0.01, group: "Dream Lens", doc: "Zero disables distortion. Use modest values; this effect should suggest unstable surroundings." },
             dream_speed { min: 0.0, max: 3.0, step: 0.05, group: "Dream Lens" },
-            retro { min: 0, max: 1, group: "Retro", doc: "0 Off; 1 PS2: 448 lines of square pixels with the console's flicker filter, 15-bit colour through an ordered dither, and none of TAA, FSR, motion blur, depth of field, GTAO or traced light (the PS2 levels, sub-phase 11)." },
+            retro { min: 0, max: 1, group: "Retro", doc: "0 Off; 1 PS2: 448 lines of square pixels with the console's flicker filter, 15-bit colour through an ordered dither, and none of TAA, FSR, motion blur, depth of field, GTAO or traced light." },
             retro_fog { min: 0.0, step: 0.5, group: "Retro", display_name: "Retro fog",
                 doc: "Linear fog for surfaces with baked light, as the PS2 drew it: start and end in metres (0, 0 is none). Beyond the end, the fog colour." },
             retro_fog_color { group: "Retro", display_name: "Retro fog colour",
@@ -862,7 +865,9 @@ fn post_process_schema() -> ComponentSchema {
             world_cache { group: "Global Illumination" }, cache_intensity { min: 0.0, step: 0.01, group: "Global Illumination" },
             cache_cell_size { min: 0.01, step: 0.1, unit: "m", group: "Global Illumination" },
             specular_gi { group: "Global Illumination" }, spec_roughness { min: 0.0, max: 1.0, step: 0.01, group: "Global Illumination" },
-            path_tracer { group: "Path Tracing" }, path_bounces { min: 1, max: 8, group: "Path Tracing" },
+            path_tracer { group: "Path Tracing", display_name: "Path Tracing (Experimental)",
+                doc: "Every light traced as it really travels, in place of the raster's light. Unfinished, and it slows the frame a great deal: often half the frame rate or less. Needs ray query; never under the retro picture." },
+            path_bounces { min: 1, max: 8, group: "Path Tracing" },
             mesh_sdf { group: "Global Illumination" },
             // Pre-AB compatibility fields remain loadable/saveable but are no
             // longer a second, ambiguous Details route to the same feature.
@@ -887,10 +892,28 @@ fn post_process_schema() -> ComponentSchema {
             foliage_green { min: 0.0, max: 1.0, step: 0.01, group: "Weathering", display_name: "Foliage Green",
                 doc: "Pulls foliage to a living green at each leaf's own brightness: 0 as textured, 1 fully." },
              fsr_sharpness { min: 0.0, max: 1.0, step: 0.01, group: "Anti-aliasing" },
+            // 17 Oct 2026: features The Somnus Fracture drove, authorable per scene.
+            lens_flare { min: 0.0, max: 2.0, step: 0.05, group: "Bloom", display_name: "Lens Flare",
+                doc: "Ghosts and a halo off bright lights, drawn from bloom: 0 off, 1 full. Needs bloom on." },
+            traced_reflections { group: "Ray Tracing", display_name: "Traced Reflections",
+                doc: "Ray-traced reflections on glossy surfaces, about 1 ms. Needs ray query; off under the retro picture and while the whole frame is path traced." },
+            traced_reflection_roughness { min: 0.0, max: 1.0, step: 0.01, group: "Ray Tracing", display_name: "Reflection Roughness",
+                doc: "The roughest surface that traces a reflection; they fade out over the last 30% below it. Higher costs more and gets noisier." },
+            picture_shift { group: "Picture Shift", display_name: "Shift",
+                doc: "A transition over the whole picture. Screen pushes into a television's phosphor stripes; Eyelids closes the eyes; Wave spreads the retro picture through the world from the origin. A game's own shift, while one runs, wins." },
+            picture_shift_progress { min: 0.0, max: 1.0, step: 0.01, group: "Picture Shift", display_name: "Progress",
+                doc: "How far through the shift. Animate it from a timeline or a script." },
+            picture_shift_origin { group: "Picture Shift", display_name: "Wave Origin", unit: "m",
+                doc: "Where the wave starts, in world metres. Wave only." },
+            picture_shift_reach { min: 0.0, soft_max: 200.0, step: 1.0, unit: "m", group: "Picture Shift", display_name: "Wave Reach",
+                doc: "How far the wave has spread at progress 1. Wave only." },
         }
     };
     if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "dream_mode") {
         field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Heat drift", "Peripheral echo", "Architectural shear", "Fracture"]);
+    }
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "picture_shift") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Off", "Screen", "Eyelids", "Wave"]);
     }
     schema
 }
@@ -968,25 +991,72 @@ fn water_schema() -> ComponentSchema {
 /// Deliberately **not** in [`component_registry`] — settings must never
 /// serialise into a scene.
 pub fn editor_settings_schema() -> ComponentSchema {
-    component_schema! {
+    let mut schema = component_schema! {
         crate::settings::EditorSettings as "somnium.EditorSettings", display "Editor", version 1,
         fields {
-            snap_translate_m { min: 0.0, soft_max: 10.0, step: 0.05, unit: "m", group: "Snapping" },
-            snap_rotate_deg { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Snapping" },
-            snap_scale { min: 0.0, soft_max: 10.0, step: 0.05, group: "Snapping" },
-            snap_to_surface { group: "Snapping" },
-            gizmo_local_space { group: "Gizmo" },
-            gizmo_pivot_centre { group: "Gizmo" },
-            select_only { group: "Gizmo" },
-            tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface" },
-            show_statistics { group: "Interface" },
+            // Phase ALYX-D: every preference has a name a person would use, not its field's.
+            snap_translate_m { min: 0.0, soft_max: 10.0, step: 0.05, unit: "m", group: "Snapping", display_name: "Move Snap",
+                doc: "The grid the move gizmo snaps to; 0 moves freely." },
+            snap_rotate_deg { min: 0.0, max: 180.0, step: 1.0, unit: "\u{b0}", group: "Snapping", display_name: "Rotate Snap",
+                doc: "The angle the rotate gizmo snaps to; 0 turns freely." },
+            snap_scale { min: 0.0, soft_max: 10.0, step: 0.05, group: "Snapping", display_name: "Scale Snap",
+                doc: "The step the scale gizmo snaps to; 0 scales freely." },
+            snap_to_surface { group: "Snapping", display_name: "Drop onto Surfaces",
+                doc: "A dragged object lands on whatever is under the pointer instead of moving freely." },
+            gizmo_local_space { group: "Gizmo", display_name: "Local Axes",
+                doc: "Gizmo axes follow the object's own rotation rather than the world's." },
+            gizmo_pivot_centre { group: "Gizmo", display_name: "Pivot at Selection Centre",
+                doc: "Several objects move and turn about their shared centre rather than each about its own origin." },
+            select_only { group: "Gizmo", display_name: "Clicks Only Select",
+                doc: "A click never starts dragging the gizmo it lands on, so selecting cannot move anything." },
+            tooltip_delay_ms { min: 0.0, soft_max: 2000.0, step: 25.0, unit: "ms", group: "Interface", display_name: "Tooltip Delay",
+                doc: "How long the pointer rests before a tooltip appears." },
+            show_statistics { group: "Interface", display_name: "Viewport Statistics",
+                doc: "Frame time, draw counts and memory in the corner of the viewport." },
+            ui_theme { group: "Interface", display_name: "Theme",
+                doc: "Nocturne is dark, Dawn is light. Applies the next time the editor starts; SOMNIUM_UI_THEME wins." },
+            ui_density { group: "Interface", display_name: "Density",
+                doc: "How tightly rows and controls are packed. Applies the next time the editor starts; SOMNIUM_UI_DENSITY wins." },
+            notification_seconds { min: 1.0, max: 30.0, step: 0.5, unit: "s", group: "Interface", display_name: "Notification Time",
+                doc: "How long a notification stays on screen. Errors stay until dismissed." },
+            camera_speed { min: 0.05, max: 500.0, step: 0.5, precision: 2, unit: "m/s", group: "Viewport", display_name: "Camera Speed at Start",
+                doc: "The fly camera's speed when the editor starts. The viewport's own slider changes it while you work." },
+            // Phase ALYX-M: what an agent over MCP may change. Reading is always allowed.
+            agent_edits { group: "Agents", display_name: "Agents May Edit",
+                doc: "Plans, commits, presets, strokes, graphs and editor commands from an MCP agent." },
+            agent_files { group: "Agents", display_name: "Agents May Change Files",
+                doc: "Importing, saving, loading and renaming files, and changing preferences, from an MCP agent." },
+            agent_play { group: "Agents", display_name: "Agents May Control Play",
+                doc: "Play, pause, stop, step and game input from an MCP agent." },
+            agent_captures { group: "Agents", display_name: "Agents May Capture",
+                doc: "Viewport captures an MCP agent can look at." },
             // MORROWIND-I. In the schema rather than in a hand-written panel,
             // per CONTROL-B's property seam: a preference the editor can show
             // and a game can read are the same declaration.
-            reduced_motion { group: "Accessibility" },
-            high_contrast { group: "Accessibility" },
+            reduced_motion { group: "Accessibility", display_name: "Reduce Motion",
+                doc: "Panels and highlights appear at once instead of animating. The system setting is respected as well." },
+            high_contrast { group: "Accessibility", display_name: "High Contrast",
+                doc: "Stronger text and borders. The system setting is respected as well." },
+            // 17 Oct 2026: what The Somnus Fracture's options menu gives its players, for whoever works in the editor.
+            vsync { group: "Display", display_name: "V-Sync" },
+            frame_cap { min: 0, max: 1000, unit: "fps", group: "Display",
+                doc: "Frames a second at most; 0 uncapped. A cap keeps frame times even, which screen recorders need." },
+            frame_generation { group: "Display",
+                doc: "AMD FSR 3 frame generation. Runs only in the game's own view: immersive Play, one view, not floated." },
+            graphics_tier { group: "Display", display_name: "Graphics Tier",
+                doc: "Laid over every scene's authored settings; Somnium is the scene as authored. SOMNIUM_GRAPHICS wins, and a game's own settings menu wins in Play." },
         }
+    };
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "graphics_tier") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Low", "Medium", "High", "Somnium"]);
     }
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "ui_theme") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Nocturne (dark)", "Dawn (light)"]);
+    }
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "ui_density") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["Compact", "Comfortable"]);
+    }
+    schema
 }
 
 /// Project settings: facts about the content, committed with it.
@@ -994,12 +1064,18 @@ pub fn project_settings_schema() -> ComponentSchema {
     component_schema! {
         crate::settings::ProjectSettings as "somnium.ProjectSettings", display "Project", version 1,
         fields {
-            startup_scene { group: "Startup" },
-            content_root { group: "Startup" },
-            autosave_interval_s { min: 0.0, soft_max: 3600.0, step: 30.0, unit: "s", group: "Saving" },
-            thumbnail_budget_ms { min: 0.0, soft_max: 16.0, step: 0.25, unit: "ms", group: "Content" },
-            external_editor { group: "Tools" },
-            default_float_step { min: 0.0, soft_max: 1.0, step: 0.001, precision: 4, group: "Interface" },
+            startup_scene { group: "Startup", display_name: "Startup Scene",
+                doc: "The scene opened when the editor starts; empty starts with an empty scene." },
+            content_root { group: "Startup", display_name: "Content Folder",
+                doc: "Where the project's assets live, relative to the project. SOMNIUM_CONTENT_ROOT wins." },
+            autosave_interval_s { min: 0.0, soft_max: 3600.0, step: 30.0, unit: "s", group: "Saving", display_name: "Autosave Every",
+                doc: "How often unsaved work is written to the recovery file; 0 never." },
+            thumbnail_budget_ms { min: 0.0, soft_max: 16.0, step: 0.25, unit: "ms", group: "Content", display_name: "Thumbnail Budget",
+                doc: "Time each frame may spend drawing asset thumbnails." },
+            external_editor { group: "Tools", display_name: "Code Editor Command",
+                doc: "Run to open a source file at a line; {file} and {line} are filled in. Empty shows the file in Explorer." },
+            default_float_step { min: 0.0, soft_max: 1.0, step: 0.001, precision: 4, group: "Interface", display_name: "Smallest Drag Step",
+                doc: "The finest step a number changes by when dragged, whatever the property declares." },
         }
     }
 }
@@ -1244,7 +1320,7 @@ fn transform_schema() -> ComponentSchema {
 }
 
 fn light_schema() -> ComponentSchema {
-    component_schema! {
+    let mut schema = component_schema! {
         LightComponent as "somnium.Light", display "Light", version 1,
         fields {
             light_type,
@@ -1260,8 +1336,14 @@ fn light_schema() -> ComponentSchema {
             moon_intensity { min: 0.0 },
             area_width { min: 0.0 },
             area_height { min: 0.0 },
+            cookie { display_name: "Cookie",
+                doc: "What a spot shines through, laid over its beam: a torch's reflector rings, venetian blinds, a window's panes, a work lamp's wire guard, or a grimy diffuser. Spots only." },
         }
+    };
+    if let Some(field) = schema.fields.iter_mut().find(|f| f.name == "cookie") {
+        field.ty = somnium_ecs::reflect::FieldType::Enum(&["None", "Torch", "Blinds", "Panes", "Wire guard", "Grime"]);
     }
+    schema
 }
 
 fn audio_emitter_schema() -> ComponentSchema {
@@ -1429,6 +1511,27 @@ fn ui_canvas_schema() -> ComponentSchema {
 
 #[cfg(test)]
 mod tests {
+    /// Project phases and their codenames belong in code and records, never in what a designer reads (the developer,
+    /// 18 Oct 2026: "that will confuse designers").
+    const CODENAMES: &[&str] = &[
+        "Phase ", "phase ", "MORROWIND", "PERSONA", "TSUSHIMA", "CONTROL-", "DOOM-", "KENSHI", "STALKER", "DREAMS",
+        "TALOS", "PORTAL-", "HALCYON", "Zeta", "Hades", "ALYX",
+    ];
+
+    #[test]
+    fn no_schema_a_designer_reads_names_a_project_phase() {
+        let registry = component_registry();
+        let (editor, project) = (editor_settings_schema(), project_settings_schema());
+        for schema in registry.iter().chain([&editor, &project]) {
+            for field in &schema.fields {
+                for text in [field.display_name, field.doc, field.group].into_iter().flatten() {
+                    for name in CODENAMES {
+                        assert!(!text.contains(name), "{}.{}: {text:?} names {name:?}", schema.display_name, field.name);
+                    }
+                }
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -1541,7 +1644,7 @@ mod tests {
             );
         }
         assert!(
-            GraphicsScalability::from_reflect(&ReflectValue::I64(3), "graphics_scalability")
+            GraphicsScalability::from_reflect(&ReflectValue::I64(4), "graphics_scalability")
                 .is_err()
         );
         // Older version-1 camera snapshots omit the new field; apply keeps the

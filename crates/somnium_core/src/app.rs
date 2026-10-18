@@ -323,6 +323,26 @@ mod content_target_tests {
             "a name that merely starts with a reserved word is fine"
         );
     }
+    #[test]
+    fn a_duplicate_takes_the_first_free_copy_name_and_brings_a_folder_whole() {
+        let dir = std::env::temp_dir().join(format!("somnium-duplicate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Rocks")).unwrap();
+        std::fs::write(dir.join("Rock.sommat"), "a").unwrap();
+        std::fs::write(dir.join("Rocks").join("Big.sommat"), "b").unwrap();
+
+        let first = super::duplicate_name(&dir.join("Rock.sommat"));
+        assert!(first.ends_with("Rock copy.sommat"), "{first:?}");
+        super::copy_content(&dir.join("Rock.sommat"), &first).unwrap();
+        let second = super::duplicate_name(&dir.join("Rock.sommat"));
+        assert!(second.ends_with("Rock copy 2.sommat"), "{second:?}");
+
+        let folder = super::duplicate_name(&dir.join("Rocks"));
+        assert!(folder.ends_with("Rocks copy"), "{folder:?}");
+        super::copy_content(&dir.join("Rocks"), &folder).unwrap();
+        assert_eq!(std::fs::read_to_string(folder.join("Big.sommat")).unwrap(), "b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -1048,6 +1068,9 @@ pub struct Engine<G: GameApp> {
     job_profile: Vec<crate::jobs::JobProfileRow>,
     /// Zones the telemetry ring had to drop for capacity since the last frame.
     job_zones_dropped: usize,
+    /// Preview requests made before the asset scan published (ALYX-E): held, not failed, so a material opened
+    /// at startup still gets its picture once the scan knows it.
+    deferred_previews: Vec<somnium_ui::thumbnail::ThumbnailRequest>,
     preview_jobs: std::collections::HashMap<
         std::path::PathBuf,
         JobHandle<Option<somnium_asset::preview::PreparedPreview>>,
@@ -1231,6 +1254,11 @@ pub struct Engine<G: GameApp> {
     /// Editor-only overlays and authoring tools stay disabled for the session.
     play_session_active: bool,
     play_cursor: play_input::PlayCursor,
+    /// The editor's Display preferences last applied (vsync, frame cap, frame generation, graphics tier). They
+    /// apply at start and when changed, so a game's own request in between keeps winning.
+    display_applied: Option<(bool, u32, bool, u32)>,
+    /// The Camera Speed at Start preference last applied (ALYX-D), so the slider is not pinned to it.
+    camera_speed_applied: Option<f32>,
     /// Carries fractional wall-clock time between 60 Hz physics steps.
     simulation_accumulator: f32,
     /// True after a mutating editor action until Save or New.
@@ -1713,6 +1741,7 @@ impl<G: GameApp + 'static> Engine<G> {
             last_shader_poll: std::time::Instant::now(),
             job_profile: Vec::new(),
             job_zones_dropped: 0,
+            deferred_previews: Vec::new(),
             preview_jobs: std::collections::HashMap::new(),
             preview_ready: std::collections::VecDeque::new(),
             material_asset_target: None,
@@ -1787,6 +1816,8 @@ impl<G: GameApp + 'static> Engine<G> {
             path_trace_previous_simulation_state: None,
             play_session_active: false,
             play_cursor: play_input::PlayCursor::default(),
+            display_applied: None,
+            camera_speed_applied: None,
             simulation_accumulator: 0.0,
             scene_dirty: false,
             day_state: None,
@@ -2311,6 +2342,58 @@ impl<G: GameApp> Engine<G> {
     fn zone_end(&mut self) {
         if let Some(r) = self.renderer.as_mut() {
             r.profiler.cpu_end();
+        }
+    }
+
+    /// `SOMNIUM_MOVIE_DIR` (17 Oct 2026, trailer captures): while a Play session runs and `<dir>/REC` holds
+    /// `{"take": "name", "look": [[seconds, dx, dy], ...]}`, every frame's finished picture (before the HUD and the
+    /// editor) is written to `<dir>/<take>/NNNNNN.ppm`, and the view turns by the look rate (mouse counts a second)
+    /// eased linearly between the keys. With `time::movie_step` each frame is one fixed slice of game time.
+    fn movie_frame(&mut self) {
+        static DIR: std::sync::LazyLock<Option<std::path::PathBuf>> =
+            std::sync::LazyLock::new(|| std::env::var_os("SOMNIUM_MOVIE_DIR").map(std::path::PathBuf::from));
+        static TAKE: std::sync::Mutex<Option<(String, u32)>> = std::sync::Mutex::new(None);
+        let (Some(dir), Some(step)) = (DIR.as_ref(), crate::time::movie_step()) else { return };
+        let Ok(mut take) = TAKE.lock() else { return };
+        let playing = self.play_session_active && self.simulation_clock.state == SimulationState::Playing;
+        let order = std::fs::read_to_string(dir.join("REC")).ok().filter(|_| playing)
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let Some(name) = order.as_ref().and_then(|o| o["take"].as_str())
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        else {
+            *take = None;
+            return;
+        };
+        let frame = match take.as_ref() {
+            Some((current, n)) if current == name => *n,
+            _ => 0,
+        };
+        let folder = dir.join(name);
+        let _ = std::fs::create_dir_all(&folder);
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        if renderer.request_authoring_capture(&folder.join(format!("{frame:06}.ppm")), false).is_err() {
+            return;
+        }
+        *take = Some((name.to_owned(), frame + 1));
+        let t = frame as f32 * step.as_secs_f32();
+        let keys: Vec<[f32; 3]> = order.as_ref().and_then(|o| serde_json::from_value(o["look"].clone()).ok()).unwrap_or_default();
+        let rate = match keys.iter().position(|k| k[0] > t) {
+            None => keys.last().map_or([0.0; 2], |k| [k[1], k[2]]),
+            Some(0) => [keys[0][1], keys[0][2]],
+            Some(i) => {
+                let (a, b) = (keys[i - 1], keys[i]);
+                let u = ((t - a[0]) / (b[0] - a[0]).max(1e-4)).clamp(0.0, 1.0);
+                [a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]
+            }
+        };
+        if rate != [0.0; 2] {
+            let dt = step.as_secs_f32();
+            let event = EngineEvent::MouseMotion { delta_x: rate[0] * dt, delta_y: rate[1] * dt };
+            let (Some(physics), Some(audio), Some(ui)) = (self.physics.as_mut(), self.audio.as_mut(), self.ui_manager.as_mut()) else { return };
+            let mut ctx = EngineContext::new(&self.time, &self.config, &mut self.world, physics, audio, &mut self.jobs,
+                &mut self.navigation_editor, self.render_ctx.as_ref(), self.renderer.as_mut(), &mut self.selection.primary, ui,
+                crate::camera_speed_from_normalized(self.camera_speed_norm), self.simulation_clock, &mut self.scripts);
+            self.game.on_event(&mut ctx, &event);
         }
     }
 
@@ -3623,6 +3706,91 @@ fn resolve_content_target(
 /// # Errors
 ///
 /// A message naming what the platform said.
+/// "Rock.sommat" becomes "Rock copy.sommat", then "Rock copy 2.sommat" and on, whichever is free first.
+fn duplicate_name(from: &std::path::Path) -> std::path::PathBuf {
+    let stem = from.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let ext = from
+        .extension()
+        .filter(|_| from.is_file())
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (1..)
+        .map(|n| match n {
+            1 => from.with_file_name(format!("{stem} copy{ext}")),
+            n => from.with_file_name(format!("{stem} copy {n}{ext}")),
+        })
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded range always finds a free name")
+}
+
+/// A file, or a folder and everything in it.
+fn copy_content(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_content(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// Send a file or folder to the Recycle Bin through the shell, so it can be restored. Nothing is ever erased here.
+#[cfg(target_os = "windows")]
+fn move_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    // SHFILEOPSTRUCTW, natural alignment on 64-bit Windows.
+    #[repr(C)]
+    struct FileOp {
+        hwnd: *mut std::ffi::c_void,
+        func: u32,
+        from: *const u16,
+        to: *const u16,
+        flags: u16,
+        aborted: i32,
+        mappings: *mut std::ffi::c_void,
+        title: *const u16,
+    }
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHFileOperationW(op: *mut FileOp) -> i32;
+    }
+    const FO_DELETE: u32 = 3;
+    const FOF_SILENT: u16 = 0x0004;
+    const FOF_NOCONFIRMATION: u16 = 0x0010;
+    const FOF_ALLOWUNDO: u16 = 0x0040;
+    const FOF_NOERRORUI: u16 = 0x0400;
+    if !path.exists() {
+        return Err("that file is no longer there".to_string());
+    }
+    // A list of paths, each NUL-ended, the list ended by a second NUL.
+    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+    from.extend([0, 0]);
+    let mut op = FileOp {
+        hwnd: std::ptr::null_mut(),
+        func: FO_DELETE,
+        from: from.as_ptr(),
+        to: std::ptr::null(),
+        flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+        aborted: 0,
+        mappings: std::ptr::null_mut(),
+        title: std::ptr::null(),
+    };
+    // SAFETY: `op` is a SHFILEOPSTRUCTW with a double-NUL-terminated `from` that outlives the call.
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 || op.aborted != 0 || path.exists() {
+        return Err(format!("the Recycle Bin did not take it (shell error {code:#x})"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn move_to_recycle_bin(_path: &std::path::Path) -> Result<(), String> {
+    Err("there is no Recycle Bin here; delete it from the file browser".to_string())
+}
+
 fn reveal_in_file_browser(path: &std::path::Path) -> Result<(), String> {
     if !path.exists() {
         return Err("that file is no longer there".to_string());
@@ -3770,6 +3938,23 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
                 let renderer = SomniumRenderer::new(&render_ctx);
 
+                // Phase ALYX-D: the Theme and Density preferences, chosen before any widget takes its colours.
+                // `SOMNIUM_UI_THEME` / `SOMNIUM_UI_DENSITY` win (UiManager::new reads them next).
+                if std::env::var_os("SOMNIUM_UI_THEME").is_none() {
+                    somnium_ui::theme::set_active(if self.settings.editor().ui_theme == 1 {
+                        somnium_ui::theme::ThemeId::Dawn
+                    } else {
+                        somnium_ui::theme::ThemeId::Nocturne
+                    });
+                }
+                if std::env::var_os("SOMNIUM_UI_DENSITY").is_none() {
+                    somnium_ui::theme::set_density(if self.settings.editor().ui_density == 1 {
+                        somnium_ui::theme::DensityId::Comfortable
+                    } else {
+                        somnium_ui::theme::DensityId::Compact
+                    });
+                }
+
                 let mut ui_manager = UiManager::new(
                     &render_ctx.device,
                     render_ctx.config.format,
@@ -3778,6 +3963,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     Arc::clone(&window),
                 );
                 ui_manager.set_render_toggles(renderer.debug_toggles.clone());
+                ui_manager.set_component_catalogue(self.addable_components());
                 ui_manager.set_foliage_palette(&self.foliage_palette_labels());
                 self.render_ctx = Some(render_ctx);
                 self.imported_uploads.clear();
@@ -4905,6 +5091,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             // attached script declared. Computed before the `ui` borrow
             // because it reads the world and the script host.
             let tool_context = self.persona_tool_context();
+            let animation_transport = self.animation_transport();
             let sel_scripts = self.script_inspector_state();
             self.zone_end();
             self.zone_begin("Material sync");
@@ -5088,6 +5275,13 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.set_history(history_entries, history_position);
                 ui.set_viewport_statistics(viewport_statistics);
                 ui.set_axis_widget(axis_directions);
+                if let Some(r) = &self.renderer {
+                    ui.set_gizmo_mode(match r.gizmo_mode {
+                        somnium_renderer::pass::gizmo::GizmoMode::Translate => 0,
+                        somnium_renderer::pass::gizmo::GizmoMode::Rotate => 1,
+                        somnium_renderer::pass::gizmo::GizmoMode::Scale => 2,
+                    });
+                }
                 ui.set_snap_state(
                     snap_state.0,
                     snap_state.1,
@@ -5151,6 +5345,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 ui.update_terrain_inspector(sel_terrain);
                 ui.update_foliage_inspector(sel_foliage);
                 ui.update_tool_context(tool_context);
+                ui.set_animation_transport(animation_transport);
                 ui.update_script_inspector(sel_scripts);
                 ui.set_scene_dirty(self.scene_dirty);
                 // Phase 26-Zeta-G. Must run after the update_* writes above:
@@ -5175,39 +5370,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 .filter(|r| r.profiler.enabled())
                 .map(|r| {
                     let p = &r.profiler;
-                    let mut rows: Vec<somnium_ui::ProfilerRow> = Vec::new();
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "— GPU —".to_string(),
-                        value: String::new(),
-                        depth: 0,
-                    });
-                    rows.extend(p.results().iter().map(|s| somnium_ui::ProfilerRow {
-                        label: s.name.to_string(),
-                        value: format!("{:.3} ms", s.ms),
-                        depth: s.depth.saturating_add(1),
-                    }));
+                    use somnium_ui::{ProfilerRow, icons::IconId};
+                    let mut rows: Vec<ProfilerRow> = Vec::new();
+                    rows.push(ProfilerRow::section("GPU", IconId::Chart, String::new()));
+                    rows.extend(p.results().iter().map(|s| ProfilerRow::timing(s.name, s.ms, s.depth.saturating_add(1))));
                     if p.results().is_empty() {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
-                            value: String::new(),
-                            depth: 1,
-                        });
+                        rows.push(ProfilerRow::stat("collecting…", "", 1));
                     }
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "unattributed".to_string(),
-                        value: format!("{:.3} ms", p.unattributed_ms()),
-                        depth: 1,
-                    });
-                    // Phase 16-F. CPU only, and labelled as such: there
-                    // is no GPU side to a script, and a row under "GPU"
-                    // that was really wall time would be a lie that took
-                    // someone a morning to find.
+                    rows.push(ProfilerRow::timing("unattributed", p.unattributed_ms(), 1));
+                    // CPU only, and labelled as such: there is no GPU side to a script, and a row under "GPU" that
+                    // was really wall time would be a lie that took someone a morning to find.
                     let script = self.scripts.stats();
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "— Scripts (CPU) —".to_string(),
-                        value: format!("{:.3} ms", script.total_ms()),
-                        depth: 0,
-                    });
+                    rows.push(ProfilerRow::section(
+                        "Scripts (CPU)",
+                        IconId::Script,
+                        format!("{:.3} ms", script.total_ms()),
+                    ));
                     for (label, value) in [
                         ("fixed", format!("{:.3} ms", script.fixed_ms)),
                         ("update", format!("{:.3} ms", script.update_ms)),
@@ -5218,29 +5396,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                         ("live instances", script.instances.to_string()),
                         ("VM memory", format!("{} KiB", script.vm_bytes / 1024)),
                     ] {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: label.to_string(),
-                            value,
-                            depth: 1,
-                        });
+                        rows.push(ProfilerRow::stat(label, value, 1));
                     }
-                    // MORROWIND-B: background work, folded by name and
-                    // sorted worst-wait first. Only shown when something ran,
+                    // Background work, folded by name and sorted worst-wait first. Only shown when something ran,
                     // so an idle editor does not carry an empty heading.
                     if !self.job_profile.is_empty() {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: "— Jobs (CPU, background) —".to_string(),
-                            value: String::new(),
-                            depth: 0,
-                        });
+                        rows.push(ProfilerRow::section("Background jobs (CPU)", IconId::Activity, String::new()));
                         for job in &self.job_profile {
-                            rows.push(somnium_ui::ProfilerRow {
-                                label: format!("{} x{}", job.name, job.count),
-                                // Queue wait first, because it is the number
-                                // that explains a stall: run time says the work
-                                // was slow, queue wait says the pool was busy,
-                                // and those have different fixes.
-                                value: format!(
+                            // Queue wait first, because it is the number that explains a stall: run time says the
+                            // work was slow, queue wait says the pool was busy, and those have different fixes.
+                            rows.push(ProfilerRow::stat(
+                                format!("{} x{}", job.name, job.count),
+                                format!(
                                     "wait {:.1} ms · ran {:.1} ms · {:?}{}",
                                     job.worst_queued_ms,
                                     job.ran_ms,
@@ -5251,59 +5418,18 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                                         String::new()
                                     }
                                 ),
-                                depth: 1,
-                            });
+                                1,
+                            ));
                         }
                         if self.job_zones_dropped > 0 {
-                            rows.push(somnium_ui::ProfilerRow {
-                                label: format!("and {} more", self.job_zones_dropped),
-                                value: String::new(),
-                                depth: 1,
-                            });
+                            rows.push(ProfilerRow::stat(format!("and {} more", self.job_zones_dropped), "", 1));
                         }
                     }
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "— Graph —".to_string(),
-                        value: String::new(),
-                        depth: 0,
-                    });
-                    let graph = p
-                        .results()
-                        .iter()
-                        .filter(|s| s.depth <= 1)
-                        .map(|s| s.name)
-                        .collect::<Vec<_>>()
-                        .join(" → ");
-                    if graph.is_empty() {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
-                            value: String::new(),
-                            depth: 1,
-                        });
-                    } else {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: graph,
-                            value: String::new(),
-                            depth: 1,
-                        });
-                    }
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "— CPU —".to_string(),
-                        value: String::new(),
-                        depth: 0,
-                    });
+                    rows.push(ProfilerRow::section("CPU", IconId::Cpu, String::new()));
                     if p.cpu_results().is_empty() {
-                        rows.push(somnium_ui::ProfilerRow {
-                            label: "collecting…".to_string(),
-                            value: String::new(),
-                            depth: 1,
-                        });
+                        rows.push(ProfilerRow::stat("collecting…", "", 1));
                     } else {
-                        rows.extend(p.cpu_results().iter().map(|s| somnium_ui::ProfilerRow {
-                            label: s.name.to_string(),
-                            value: format!("{:.3} ms", s.ms),
-                            depth: s.depth.saturating_add(1),
-                        }));
+                        rows.extend(p.cpu_results().iter().map(|s| ProfilerRow::timing(s.name, s.ms, s.depth.saturating_add(1))));
                     }
                     let c = p.last_counters;
                     let frustum_tag = if SomniumRenderer::cpu_frustum_env_off() {
@@ -5313,38 +5439,25 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                     } else {
                         ""
                     };
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "draws".to_string(),
-                        value: c.draw_calls.to_string(),
-                        depth: 0,
-                    });
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "triangles".to_string(),
-                        value: c.triangles.to_string(),
-                        depth: 0,
-                    });
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "terrain chunks".to_string(),
-                        value: format!(
-                            "{} vis / {} cpu-cull{frustum_tag}",
-                            c.terrain_chunks, c.terrain_cpu_culled
-                        ),
-                        depth: 0,
-                    });
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "TLAS instances".to_string(),
-                        value: c.tlas_instances.to_string(),
-                        depth: 0,
-                    });
-                    rows.push(somnium_ui::ProfilerRow {
-                        label: "shadow casters".to_string(),
-                        value: format!("{} / {}", c.shadow_casters, c.draw_calls),
-                        depth: 0,
-                    });
+                    rows.push(ProfilerRow::section("Scene", IconId::Cube, String::new()));
+                    rows.push(ProfilerRow::stat("draws", c.draw_calls.to_string(), 1));
+                    rows.push(ProfilerRow::stat("triangles", c.triangles.to_string(), 1));
+                    rows.push(ProfilerRow::stat(
+                        "terrain chunks",
+                        format!("{} vis / {} cpu-cull{frustum_tag}", c.terrain_chunks, c.terrain_cpu_culled),
+                        1,
+                    ));
+                    rows.push(ProfilerRow::stat("TLAS instances", c.tlas_instances.to_string(), 1));
+                    rows.push(ProfilerRow::stat(
+                        "shadow casters",
+                        format!("{} / {}", c.shadow_casters, c.draw_calls),
+                        1,
+                    ));
                     rows
                 });
+            let fps = self.time.fps() as f32;
             if let Some(ui) = &mut self.ui_manager {
-                ui.update_profiler(rows.as_deref());
+                ui.update_profiler(rows.as_deref(), fps);
             }
         }
 
@@ -5751,6 +5864,38 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
+        // The editor's Display preferences, when they change (and once at start). A standalone player's game owns
+        // its own display settings. Before the game's request below, so one made this frame still wins.
+        if !self.config.player_mode && self.render_ctx.is_some() {
+            let editor = self.settings.editor();
+            let wanted = (editor.vsync, editor.frame_cap, editor.frame_generation, editor.graphics_tier);
+            if self.display_applied != Some(wanted) {
+                let (vsync, cap, frame_generation, tier) = wanted;
+                self.time.set_target_fps((cap > 0).then_some(cap));
+                if let Some(render_ctx) = self.render_ctx.as_mut() {
+                    render_ctx.set_vsync(vsync);
+                }
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_frame_generation(frame_generation);
+                    // `SOMNIUM_GRAPHICS` (a timing run's tier) stays as asked.
+                    if std::env::var_os("SOMNIUM_GRAPHICS").is_none() {
+                        use somnium_renderer::quality::GraphicsPreset;
+                        r.set_graphics_preset(GraphicsPreset::ALL[(tier as usize).min(GraphicsPreset::ALL.len() - 1)]);
+                    }
+                }
+                self.display_applied = Some(wanted);
+            }
+            // The camera's speed at start, and again whenever the preference changes; the slider follows.
+            let speed = editor.camera_speed;
+            if self.camera_speed_applied != Some(speed) {
+                self.camera_speed_applied = Some(speed);
+                self.camera_speed_norm = crate::normalized_from_camera_speed(speed);
+                if let Some(ui) = &mut self.ui_manager {
+                    ui.update_camera_speed(self.camera_speed_norm, crate::camera_speed_from_normalized(self.camera_speed_norm));
+                }
+            }
+            somnium_ui::widgets::toast::set_lifetime(editor.notification_seconds);
+        }
         // Frame pacing asked for by the game's options (vsync, a cap or none): applied between frames.
         if let Some(pacing) = crate::time::take_frame_pacing_request() {
             // `SOMNIUM_FRAME_CAP=60` (0 uncapped) and `SOMNIUM_VSYNC=0/1` override a game's choice, for pacing runs.
@@ -5762,6 +5907,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 render_ctx.set_vsync(vsync);
             }
         }
+        self.movie_frame();
         self.time.wait_for_frame_budget();
 
         if let Some(window) = &self.window {
@@ -6277,13 +6423,21 @@ impl<G: GameApp> Engine<G> {
             }
         }
 
-        let requests = self
-            .ui_manager
-            .as_mut()
-            .map(UiManager::take_thumbnail_requests)
-            .unwrap_or_default();
+        let mut requests = std::mem::take(&mut self.deferred_previews);
+        requests.extend(
+            self.ui_manager
+                .as_mut()
+                .map(UiManager::take_thumbnail_requests)
+                .unwrap_or_default(),
+        );
         for request in requests {
             if self.preview_jobs.contains_key(&request.path) {
+                continue;
+            }
+            // Until the first scan publishes, no path is known yet: failing now would leave the tile broken for
+            // the whole session (a failed preview is never asked for again).
+            if self.asset_gate.published().is_none() {
+                self.deferred_previews.push(request);
                 continue;
             }
             let record = self
@@ -6309,6 +6463,21 @@ impl<G: GameApp> Engine<G> {
                 JobPriority::Background
             };
             let key = request.path.clone();
+            // A material whose base colour is a texture: find the texture's file here, where asset ids are known, so
+            // the worker can put it on the preview sphere.
+            let albedo = (record.kind == somnium_asset::database::AssetKind::Material)
+                .then(|| {
+                    let material = somnium_asset::material::load_material(&record.absolute_path).ok()?;
+                    let id = material.albedo_map;
+                    (id != somnium_asset::database::AssetId::NONE)
+                        .then(|| self.asset_gate.published())
+                        .flatten()?
+                        .records()
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.absolute_path.clone())
+                })
+                .flatten();
             // MORROWIND-B, the deadline's first real customer.
             //
             // An off-screen preview is speculative prefetch: the drawer might
@@ -6330,7 +6499,10 @@ impl<G: GameApp> Engine<G> {
             match self.jobs.submit_with(desc, move |ctx| {
                 ctx.check_cancelled()
                     .map_err(|error| format!("{error:?}"))?;
-                let result = somnium_asset::preview::prepare_preview(&record, &cache_root)?;
+                let result = match &albedo {
+                    Some(texture) => somnium_asset::preview::prepare_material_preview(&record, &cache_root, texture)?,
+                    None => somnium_asset::preview::prepare_preview(&record, &cache_root)?,
+                };
                 ctx.set_progress(1.0);
                 Ok(result)
             }) {
@@ -8378,6 +8550,7 @@ impl<G: GameApp> Engine<G> {
             r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active && !retro;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
+            r.bloom_pass.lens_flare = pp.lens_flare.max(r.lens_flare_requested).max(0.0);
             r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !retro;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
@@ -8446,8 +8619,10 @@ impl<G: GameApp> Engine<G> {
                 let _ = FLAG_PATH;
                 r.path_tracer_pass.enabled = path_active;
                 r.path_tracer_pass.bounces = pp.path_bounces;
-                let traced_reflections = r.traced_reflections_requested && rt && !path_active && !retro;
+                let traced_reflections =
+                    (pp.traced_reflections || r.traced_reflections_requested) && rt && !path_active && !retro;
                 r.path_tracer_pass.reflections = traced_reflections;
+                r.path_tracer_pass.reflection_roughness = pp.traced_reflection_roughness;
                 if path_active {
                     // Path tracing replaces the frame (renderer `path_tracer`, which sets shading's path-mode bit).
                     // Baking caches/probes or tracing the separate specular buffer underneath it only wastes work.
@@ -8503,6 +8678,13 @@ impl<G: GameApp> Engine<G> {
                     table
                 }),
             };
+            r.authored_picture_shift = somnium_renderer::pass::postprocess::PictureShift {
+                kind: if pp.picture_shift <= 3 { pp.picture_shift } else { 0 },
+                progress: pp.picture_shift_progress.clamp(0.0, 1.0),
+                at: pp.picture_shift_origin,
+                reach: pp.picture_shift_reach.max(0.0),
+                steady: false,
+            };
             r.vignette_strength = pp.effective_vignette();
             r.chromatic_aberration = pp.effective_ca();
             // MORROWIND-AC. One authored value in, two effective flags out, and
@@ -8545,7 +8727,7 @@ impl<G: GameApp> Engine<G> {
         // scene targets back to the base extent there and then.
         if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.render_ctx.as_ref()) {
             let cap = r.graphics_budget().render_scale;
-            r.set_graphics_scale(c, cam.graphics_scalability.scale().min(cap));
+            r.set_graphics_scale(c, cam.scene_scale().min(cap));
             r.set_dynamic_resolution(
                 c,
                 cam.dynamic_resolution,
@@ -10035,6 +10217,13 @@ impl<G: GameApp> Engine<G> {
             }
             EditorEvent::CreateComponent(name) => self.create_designer_component(&name),
             EditorEvent::DesignerTool(action) => self.run_designer_tool(action),
+            EditorEvent::AddComponent(component) => self.edit_selected_components(&component, true),
+            EditorEvent::RemoveComponent(component) => self.edit_selected_components(&component, false),
+            EditorEvent::ScrubAnimation(time) => {
+                if let Ok(entity) = self.animation_selection() {
+                    self.animation_authoring.scrub(entity, time);
+                }
+            }
             EditorEvent::Prefab(action) => {
                 self.selection.reconcile();
                 let registry = crate::reflect_registry::component_registry();
@@ -12059,6 +12248,51 @@ impl<G: GameApp> Engine<G> {
                 let path = std::path::PathBuf::from(path);
                 if let Err(error) = reveal_in_file_browser(&path) {
                     self.report_content_error(&path, &error);
+                }
+            }
+
+            EditorEvent::DuplicateContentItem(path) => {
+                let from = std::path::PathBuf::from(path);
+                if !from.starts_with(&self.config.content_root) || !from.exists() {
+                    self.report_content_error(&from, "only something in the project's content can be duplicated");
+                    return;
+                }
+                let target = duplicate_name(&from);
+                match copy_content(&from, &target) {
+                    Ok(()) => {
+                        info!("Duplicated {} to {}", from.display(), target.display());
+                        if let Some(ui) = &mut self.ui_manager {
+                            ui.select_content(target.clone(), false);
+                        }
+                        self.next_asset_scan = std::time::Instant::now();
+                        self.asset_scan_stamp = None;
+                        self.after_content_change(&format!(
+                            "Made {}",
+                            target.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&from, &error.to_string()),
+                }
+            }
+
+            EditorEvent::DeleteContentItem(path) => {
+                let path = std::path::PathBuf::from(path);
+                // Never the content root itself, never anything outside it.
+                if !path.starts_with(&self.config.content_root) || path == self.config.content_root {
+                    self.report_content_error(&path, "only something in the project's content can be deleted");
+                    return;
+                }
+                match move_to_recycle_bin(&path) {
+                    Ok(()) => {
+                        info!("Moved {} to the Recycle Bin", path.display());
+                        self.next_asset_scan = std::time::Instant::now();
+                        self.asset_scan_stamp = None;
+                        self.after_content_change(&format!(
+                            "Moved {} to the Recycle Bin",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => self.report_content_error(&path, &error),
                 }
             }
 

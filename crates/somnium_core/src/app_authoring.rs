@@ -13,7 +13,7 @@ use crate::authoring::{
 use crate::{InputState, KeyCode, MouseButton};
 use serde_json::{Value, json};
 use somnium_ui::authoring_panel::{
-    AuthoringAction, AuthoringEntry, AuthoringField, AuthoringState,
+    AuthoringAction, AuthoringActivity, AuthoringEntry, AuthoringField, AuthoringState, AuthoringStatus,
 };
 use std::{
     path::{Path, PathBuf},
@@ -38,6 +38,169 @@ pub(super) struct AuthoringHost {
     pub(super) import: Option<(String, u64)>,
     next_refresh: Instant,
     semantic_receipts: std::collections::BTreeMap<String, (Value, Value)>,
+    /// The last requests answered, newest last (Phase ALYX-C: the panel's activity feed).
+    activity: std::collections::VecDeque<AuthoringActivity>,
+    /// Who is asking: "Agent" over the pipe, "Editor" from the panel.
+    source: &'static str,
+}
+
+/// Requests the activity feed keeps.
+const ACTIVITY_KEPT: usize = 40;
+
+/// What a request asked, short: `execute · capture`, `discover · overview`.
+fn activity_summary(method: &str, params: &Value) -> String {
+    let short = method.strip_prefix("authoring.").unwrap_or(method);
+    let what = ["action", "command", "id", "section", "kind"]
+        .iter()
+        .find_map(|key| params.get(*key).and_then(Value::as_str))
+        .map(|what| what.strip_prefix("editor.").unwrap_or(what));
+    match what {
+        Some(what) => format!("{short} · {what}"),
+        None => short.to_string(),
+    }
+}
+
+/// The Editor preference an agent's request needs, and how the refusal names it; none for reads.
+fn agent_permission(method: &str, params: &Value) -> Option<(&'static str, &'static str)> {
+    const EDITS: (&str, &str) = ("agent_edits", "Editing");
+    const FILES: (&str, &str) = ("agent_files", "Changing files");
+    const PLAY: (&str, &str) = ("agent_play", "Controlling Play");
+    const CAPTURES: (&str, &str) = ("agent_captures", "Capturing");
+    match method {
+        "authoring.commit" => Some(if params["kind"] == "document" { FILES } else { EDITS }),
+        "authoring.history" => (params["action"].as_str().is_some_and(|a| a != "list")).then_some(EDITS),
+        "authoring.execute" => match params["action"].as_str().unwrap_or("") {
+            "capture" | "panel_capture" => Some(CAPTURES),
+            "step" | "input" | "tap" => Some(PLAY),
+            "command" => Some(if params["id"].as_str().is_some_and(|id| id.starts_with("editor.simulation.")) {
+                PLAY
+            } else {
+                EDITS
+            }),
+            "import" | "content" | "save_scene" | "load_scene" | "open_project" | "setting" | "material_save"
+            | "graph_save" => Some(FILES),
+            "camera" | "bookmark" | "select" | "protect" | "workspace" | "material_open" | "graph_open" | "revoke" => None,
+            _ => Some(EDITS),
+        },
+        _ => None,
+    }
+}
+
+/// The MCP clients the panel can set up, their labels, and where each keeps its settings.
+const MCP_CLIENTS: &[(&str, &str)] = &[
+    ("claude_code", "Claude Code (project)"),
+    ("claude_desktop", "Claude Desktop"),
+    ("cursor", "Cursor"),
+    ("vscode", "VS Code (project)"),
+];
+
+/// The Python that runs the adapter: the first `python.exe` (then `py.exe`) on PATH, else plain `python`.
+fn python_command() -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for name in ["python.exe", "python3.exe", "python", "py.exe"] {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(name);
+            // The Windows Store alias is a zero-byte stub that opens the Store; skip it.
+            if candidate.is_file()
+                && !candidate.to_string_lossy().contains("WindowsApps")
+            {
+                return candidate.to_string_lossy().replace('\\', "/");
+            }
+        }
+    }
+    "python".into()
+}
+
+/// Write this editor's MCP server into one client's settings, keeping everything else in the file (and a copy of
+/// it beside, the first time). Returns the file written. The entry holds paths only, never the credential.
+fn configure_mcp_client(
+    client: &str,
+    project_root: &Path,
+    project_id: &str,
+    descriptor: &Path,
+) -> Result<PathBuf, String> {
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/somnium_mcp/server.py");
+    let adapter = adapter.canonicalize().map_err(|e| format!("the MCP adapter is missing: {e}"))?;
+    let clean = |p: &Path| p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/");
+    let args = json!(["-B", clean(&adapter), "--connection", clean(descriptor), "--project-id", project_id, "--timeout", "60"]);
+    let home = |var: &str| std::env::var_os(var).map(PathBuf::from).ok_or(format!("{var} is not set"));
+    let (path, key, entry) = match client {
+        "claude_code" => (project_root.join(".mcp.json"), "mcpServers", json!({"type": "stdio", "command": python_command(), "args": args})),
+        "claude_desktop" => (home("APPDATA")?.join("Claude").join("claude_desktop_config.json"), "mcpServers", json!({"command": python_command(), "args": args})),
+        "cursor" => (home("USERPROFILE")?.join(".cursor").join("mcp.json"), "mcpServers", json!({"command": python_command(), "args": args})),
+        "vscode" => (project_root.join(".vscode").join("mcp.json"), "servers", json!({"type": "stdio", "command": python_command(), "args": args})),
+        other => return Err(format!("unknown MCP client {other}")),
+    };
+    let mut document: Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} is not valid JSON ({e}); left as it is", path.display()))?,
+        Err(_) => json!({}),
+    };
+    if !document.is_object() {
+        return Err(format!("{} is not a JSON object; left as it is", path.display()));
+    }
+    if path.is_file() {
+        let backup = path.with_extension("json.somnium-backup");
+        if !backup.exists() {
+            std::fs::copy(&path, &backup).map_err(|e| format!("could not keep a copy of {}: {e}", path.display()))?;
+        }
+    }
+    if !document[key].is_object() {
+        document[key] = json!({});
+    }
+    document[key]["somnium"] = entry;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text + "\n").map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// The command an MCP host runs to reach this editor: the engine's stdio adapter, given the descriptor's path (never
+/// its contents, which hold the credential) and the project id.
+fn setup_command(project_id: &str, descriptor: &Path) -> String {
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/somnium_mcp/server.py");
+    let adapter = adapter.canonicalize().unwrap_or(adapter);
+    let clean = |p: &Path| p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/");
+    format!(
+        "python -B \"{}\" --connection \"{}\" --project-id {project_id}",
+        clean(&adapter),
+        clean(descriptor)
+    )
+}
+
+/// The local wall clock as `HH:MM:SS`.
+fn clock_now() -> String {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            milliseconds: u16,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetLocalTime(time: *mut SystemTime);
+        }
+        let mut time = SystemTime::default();
+        // SAFETY: GetLocalTime only writes the struct it is given, which is the documented SYSTEMTIME layout.
+        unsafe { GetLocalTime(&mut time) };
+        format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second)
+    }
+    #[cfg(not(windows))]
+    {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        format!("{:02}:{:02}:{:02} UTC", seconds / 3600 % 24, seconds / 60 % 60, seconds % 60)
+    }
 }
 fn fail(code: &'static str, message: impl Into<String>) -> Value {
     AuthoringError::new(code, message).json()
@@ -349,6 +512,8 @@ impl<G: GameApp> Engine<G> {
                     import: None,
                     next_refresh: Instant::now(),
                     semantic_receipts: Default::default(),
+                    activity: Default::default(),
+                    source: "Agent",
                 })
             })();
             match result {
@@ -389,7 +554,9 @@ impl<G: GameApp> Engine<G> {
         let Some(mut host) = self.authoring.take() else {
             return fail("not_ready", "Authoring connection is not ready");
         };
+        host.source = "Editor";
         let result = self.dispatch_authoring(&mut host, method, params);
+        host.source = "Agent";
         host.next_refresh = Instant::now();
         self.authoring = Some(host);
         result
@@ -400,6 +567,33 @@ impl<G: GameApp> Engine<G> {
         method: &str,
         params: Value,
     ) -> Value {
+        let summary = activity_summary(method, &params);
+        // Phase ALYX-M: what an agent may change is the person's to decide (Preferences > Agents, or the panel).
+        if host.source == "Agent"
+            && let Some((field, what)) = agent_permission(method, &params)
+        {
+            let editor = self.settings.editor();
+            let allowed = match field {
+                "agent_edits" => editor.agent_edits,
+                "agent_files" => editor.agent_files,
+                "agent_play" => editor.agent_play,
+                _ => editor.agent_captures,
+            };
+            if !allowed {
+                let result = fail(
+                    "permission_denied",
+                    format!("{what} is turned off for agents in this editor (Authoring panel, or Preferences > Agents)."),
+                );
+                host.activity.push_back(AuthoringActivity {
+                    time: clock_now(),
+                    source: host.source.into(),
+                    summary,
+                    ok: false,
+                    message: format!("{what} is turned off for agents"),
+                });
+                return result;
+            }
+        }
         let marks_scene_dirty = (method == "authoring.commit"
             && !params["plan_token"]
                 .as_str()
@@ -613,6 +807,30 @@ impl<G: GameApp> Engine<G> {
                     "simulation_seconds":self.simulation_clock.elapsed_seconds,"pending_steps":self.pending_steps,
                     "camera":self.renderer.as_ref().map(|r|r.camera_pos.to_array())})
                 }
+                // Phase ALYX-M: the Output Log, for an agent to see what went wrong. `min` (debug, info, warn, error;
+                // default warn), `after` (a line id, to read only what is new), `contains`, `limit` (default 50, at
+                // most 200).
+                "log" => {
+                    use somnium_ui::log::LogSeverity;
+                    let min = match params["min"].as_str().unwrap_or("warn") {
+                        "debug" => LogSeverity::Debug,
+                        "info" => LogSeverity::Info,
+                        "error" => LogSeverity::Error,
+                        _ => LogSeverity::Warn,
+                    };
+                    let after = params["after"].as_u64().unwrap_or(0);
+                    let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+                    let contains = params["contains"].as_str().unwrap_or("");
+                    let lines = self
+                        .ui_manager
+                        .as_ref()
+                        .map(|ui| ui.log_lines(min, after, contains, limit))
+                        .unwrap_or_default();
+                    let last = lines.last().map_or(after, |line| line.id);
+                    json!({"ok":true,"last_id":last,"lines":lines.iter().map(|line| json!({
+                        "id":line.id,"seconds":line.timestamp,"severity":format!("{:?}",line.severity).to_lowercase(),
+                        "category":line.category,"text":line.text})).collect::<Vec<_>>()})
+                }
                 "documents" => host.documents.list().unwrap_or_else(|e| e.json()),
                 "document" => host.documents.query(&params).unwrap_or_else(|e| e.json()),
                 "scene" => host
@@ -694,6 +912,21 @@ impl<G: GameApp> Engine<G> {
             self.scene_dirty = true;
             self.selection.reconcile();
             self.after_selection_change();
+        }
+        let failed = result.get("ok") == Some(&Value::Bool(false)) || result.get("error").is_some();
+        host.activity.push_back(AuthoringActivity {
+            time: clock_now(),
+            source: host.source.into(),
+            summary,
+            ok: !failed,
+            message: result
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+        while host.activity.len() > ACTIVITY_KEPT {
+            host.activity.pop_front();
         }
         result
     }
@@ -900,10 +1133,20 @@ impl<G: GameApp> Engine<G> {
                     Ok(json!({"ok":true,"path":relative,"status":"dispatched"}))
                 }
             }
+            "configure_client"=>{
+                if host.source!="Editor"{return Err("Only the editor's own Authoring panel sets up MCP clients".into());}
+                let client=required(params,"client")?;
+                let descriptor=host.bridge.as_ref().map(|b|b.descriptor_path().to_path_buf()).ok_or("The authoring connection is not open")?;
+                let root=self.config.project_root.clone().ok_or("No project is open")?;
+                let written=configure_mcp_client(client,&root,&host.project.manifest.id,&descriptor)?;
+                let label=MCP_CLIENTS.iter().find(|(id,_)|*id==client).map_or(client,|(_,l)|*l);
+                if let Some(ui)=self.ui_manager.as_mut(){ui.push_toast(&format!("{label} is set up: {}. Restart it to connect.",written.display()));}
+                Ok(json!({"ok":true,"client":client,"path":written.to_string_lossy()}))
+            }
             "revoke"=>{
                 self.config.authoring_enabled=false;
                 host.bridge=None;
-                if let Some(ui)=self.ui_manager.as_mut(){ui.set_authoring_state(AuthoringState{enabled:true,project:host.project.manifest.name.clone(),connection:"Revoked; restart editor to reconnect".into(),..Default::default()});}
+                if let Some(ui)=self.ui_manager.as_mut(){ui.set_authoring_state(AuthoringState{enabled:true,project:host.project.manifest.name.clone(),connection:"Revoked; restart editor to reconnect".into(),status:AuthoringStatus::Revoked,activity:host.activity.iter().cloned().collect(),..Default::default()});}
                 Ok(json!({"ok":true,"connection":"revoked"}))
             }
             _=>Err("Unsupported execution action; inspect discovery".into()),
@@ -1157,8 +1400,33 @@ impl<G: GameApp> Engine<G> {
             ui.set_authoring_state(AuthoringState {
                 enabled: true,
                 project: host.project.manifest.name.clone(),
-                connection: "Local MCP available · current Windows user".into(),
+                connection: "Local pipe · current Windows user".into(),
                 revision: host.session.revision,
+                status: if host.bridge.as_ref().is_some_and(LocalBridge::client_connected) {
+                    AuthoringStatus::Connected
+                } else {
+                    AuthoringStatus::Listening
+                },
+                last_request: host.activity.back().map(|a| a.time.clone()).unwrap_or_default(),
+                activity: host.activity.iter().cloned().collect(),
+                setup_command: host.bridge.as_ref().map(|bridge| setup_command(&host.project.manifest.id, bridge.descriptor_path())).unwrap_or_default(),
+                permissions: {
+                    let editor = self.settings.editor();
+                    vec![
+                        ("agent_edits".into(), editor.agent_edits),
+                        ("agent_files".into(), editor.agent_files),
+                        ("agent_play".into(), editor.agent_play),
+                        ("agent_captures".into(), editor.agent_captures),
+                    ]
+                },
+                setup: if host.bridge.is_some() {
+                    MCP_CLIENTS
+                        .iter()
+                        .map(|(id, label)| action(&format!("Set up {label}"), "authoring.execute", json!({"action":"configure_client","client":id})))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 entries,
                 actions: vec![
                     action(

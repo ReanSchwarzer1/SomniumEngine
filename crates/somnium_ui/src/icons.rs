@@ -18,13 +18,14 @@ pub const ICON_CELL: u32 = 32;
 /// 80 px, and upscaling the 32 px cell by 2.5× is what made them look
 /// pixelated. 96 → 80 is a mild downscale instead.
 pub const ICON_CELL_LARGE: u32 = 96;
-pub const ICON_ATLAS_WIDTH: u32 = 1024;
-pub const ICON_ATLAS_HEIGHT: u32 = 1024;
+/// Phase ALYX-A grew the family past 200 glyphs, so the atlas went from 1024 x 1024 to 2048 x 1280: 256 small cells
+/// (four rows of 64) above 252 large ones (twelve rows of 21).
+pub const ICON_ATLAS_WIDTH: u32 = 2048;
+pub const ICON_ATLAS_HEIGHT: u32 = 1280;
 const CELLS_PER_ROW: u32 = ICON_ATLAS_WIDTH / ICON_CELL;
 const LARGE_PER_ROW: u32 = ICON_ATLAS_WIDTH / ICON_CELL_LARGE;
-/// The large block starts below the small one. Three rows of 32 px cover all
-/// 84 glyphs, so the large block begins at 96.
-const LARGE_ORIGIN_Y: u32 = 96;
+/// The large block starts below the small one: four rows of 32 px cells.
+const LARGE_ORIGIN_Y: u32 = 128;
 /// Above this drawn size a glyph samples the large cut. 40 sits between the
 /// 24 px action icons and the 80 px drawer tiles.
 const LARGE_CUT_THRESHOLD: f32 = 40.0;
@@ -129,6 +130,123 @@ pub enum IconId {
     LightProbe,
     MaterialGraph,
     RayTrace,
+    // Phase ALYX-A (18 Oct 2026): Tabler 3.49 glyphs, then Somnium's own drawn in VectorCraft (tools/alyx_icons.py).
+    Copy,
+    Paste,
+    Cut,
+    Rename,
+    Refresh,
+    Favorite,
+    History,
+    Sort,
+    GridView,
+    ListView,
+    NewFolder,
+    NewAsset,
+    ShowInExplorer,
+    Focus,
+    Bookmark,
+    Tag,
+    More,
+    MoreVertical,
+    Menu,
+    Keyboard,
+    Theme,
+    Display,
+    Accessibility,
+    Mouse,
+    Adjustments,
+    Notifications,
+    Info,
+    Debug,
+    Console,
+    Code,
+    Table,
+    Chart,
+    Cpu,
+    Database,
+    Plug,
+    PlugConnected,
+    ShieldCheck,
+    ShieldX,
+    Key,
+    Activity,
+    Agent,
+    User,
+    World,
+    LocalSpace,
+    Snap,
+    Grid,
+    Perspective,
+    Lit,
+    Unlit,
+    Record,
+    SkipBack,
+    SkipForward,
+    Loop,
+    ZoomIn,
+    ZoomOut,
+    Timeline,
+    Keyframe,
+    Keyframes,
+    Bone,
+    Locomotion,
+    Hierarchy,
+    BehaviorTree,
+    Curve,
+    Swatches,
+    Brush,
+    Eyedropper,
+    Prefab,
+    Component,
+    Plugin,
+    Map,
+    Route,
+    Physics,
+    Collider,
+    RigidBody,
+    Waveform,
+    Sequence,
+    Screenshot,
+    Weather,
+    Moon,
+    Clock,
+    Export,
+    Unlocked,
+    Pin,
+    Unlink,
+    Remove,
+    Pivot,
+    Measure,
+    Layers,
+    PanelLeft,
+    PanelRight,
+    PanelBottom,
+    Workspace,
+    AppWindow,
+    Home,
+    Back,
+    Forward,
+    Up,
+    Gamepad,
+    Docs,
+    Effects,
+    McpLink,
+    StateMachine,
+    BlendSpace,
+    AnimClip,
+    Rig,
+    MaterialBall,
+    Wireframe,
+    LightCookie,
+    PictureShift,
+    NavMesh,
+    TexelDensity,
+    DreamLens,
+    RetroPicture,
+    Lod,
+    FrameGeneration,
+    PathTrace,
 }
 
 impl IconId {
@@ -223,6 +341,122 @@ impl IconId {
         Self::LightProbe,
         Self::MaterialGraph,
         Self::RayTrace,
+        Self::Copy,
+        Self::Paste,
+        Self::Cut,
+        Self::Rename,
+        Self::Refresh,
+        Self::Favorite,
+        Self::History,
+        Self::Sort,
+        Self::GridView,
+        Self::ListView,
+        Self::NewFolder,
+        Self::NewAsset,
+        Self::ShowInExplorer,
+        Self::Focus,
+        Self::Bookmark,
+        Self::Tag,
+        Self::More,
+        Self::MoreVertical,
+        Self::Menu,
+        Self::Keyboard,
+        Self::Theme,
+        Self::Display,
+        Self::Accessibility,
+        Self::Mouse,
+        Self::Adjustments,
+        Self::Notifications,
+        Self::Info,
+        Self::Debug,
+        Self::Console,
+        Self::Code,
+        Self::Table,
+        Self::Chart,
+        Self::Cpu,
+        Self::Database,
+        Self::Plug,
+        Self::PlugConnected,
+        Self::ShieldCheck,
+        Self::ShieldX,
+        Self::Key,
+        Self::Activity,
+        Self::Agent,
+        Self::User,
+        Self::World,
+        Self::LocalSpace,
+        Self::Snap,
+        Self::Grid,
+        Self::Perspective,
+        Self::Lit,
+        Self::Unlit,
+        Self::Record,
+        Self::SkipBack,
+        Self::SkipForward,
+        Self::Loop,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Timeline,
+        Self::Keyframe,
+        Self::Keyframes,
+        Self::Bone,
+        Self::Locomotion,
+        Self::Hierarchy,
+        Self::BehaviorTree,
+        Self::Curve,
+        Self::Swatches,
+        Self::Brush,
+        Self::Eyedropper,
+        Self::Prefab,
+        Self::Component,
+        Self::Plugin,
+        Self::Map,
+        Self::Route,
+        Self::Physics,
+        Self::Collider,
+        Self::RigidBody,
+        Self::Waveform,
+        Self::Sequence,
+        Self::Screenshot,
+        Self::Weather,
+        Self::Moon,
+        Self::Clock,
+        Self::Export,
+        Self::Unlocked,
+        Self::Pin,
+        Self::Unlink,
+        Self::Remove,
+        Self::Pivot,
+        Self::Measure,
+        Self::Layers,
+        Self::PanelLeft,
+        Self::PanelRight,
+        Self::PanelBottom,
+        Self::Workspace,
+        Self::AppWindow,
+        Self::Home,
+        Self::Back,
+        Self::Forward,
+        Self::Up,
+        Self::Gamepad,
+        Self::Docs,
+        Self::Effects,
+        Self::McpLink,
+        Self::StateMachine,
+        Self::BlendSpace,
+        Self::AnimClip,
+        Self::Rig,
+        Self::MaterialBall,
+        Self::Wireframe,
+        Self::LightCookie,
+        Self::PictureShift,
+        Self::NavMesh,
+        Self::TexelDensity,
+        Self::DreamLens,
+        Self::RetroPicture,
+        Self::Lod,
+        Self::FrameGeneration,
+        Self::PathTrace,
     ];
 
     pub fn index(self) -> u32 {
@@ -313,14 +547,13 @@ impl IconAtlas {
     ///
     /// Packing is scale-invariant — the cell grid and the atlas dimensions grow
     /// together — so the ceiling is set by **memory**, not by geometry.
-    /// `measured_atlas_cost_at_every_supported_scale` records the real numbers:
-    /// 4.0 MiB at 100 %, 16.0 at 200 %, **36.0 at 300 %**, and 64.0 at 400 %.
+    /// `measured_atlas_cost_at_every_supported_scale` records the real numbers.
+    /// Since ALYX-A's larger atlas: 10 MiB at 100 %, 22.5 at 150 %, **40 at 200 %**.
     ///
-    /// 3.0 is the cap because Windows tops out at 300 % in its display settings
-    /// and 64 MiB of icon atlas is not a reasonable trade for the fraction of a
-    /// display beyond it. A higher ratio clamps here and renders very slightly
-    /// soft rather than allocating a quarter of a gigabyte across both cuts.
-    pub const MAX_RENDER_SCALE: f32 = 3.0;
+    /// 2.0 is the cap (it was 3.0 for the old 1024-square atlas, 36 MiB there):
+    /// at 300 % the bigger family would cost 90 MiB of icons. A higher ratio
+    /// clamps here and its glyphs render very slightly soft.
+    pub const MAX_RENDER_SCALE: f32 = 2.0;
 
     /// Rasterize every glyph at `scale` device pixels per logical unit.
     pub fn with_render_scale(scale: f32) -> Self {
@@ -1076,6 +1309,8 @@ impl IconAtlas {
                 self.circle(s(21.0), t(4.5), 1.6, w, false);
                 self.line(s(3.0), t(20.0), s(8.0), t(20.0), w);
             }
+            // Phase ALYX glyphs exist only as vendored vectors (`icon_svg.rs`); a test proves each one paints.
+            _ => {}
         }
     }
 }
@@ -1202,7 +1437,7 @@ mod nyx_dpi_tests {
 
     #[test]
     fn measured_atlas_cost_at_every_supported_scale() {
-        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
             let a = IconAtlas::with_render_scale(scale);
             let mb = a.pixels.len() as f32 / (1024.0 * 1024.0);
             println!(
@@ -1222,7 +1457,7 @@ mod nyx_dpi_tests {
         // atlas dimensions scale by the same factor — but that is exactly the
         // kind of "obviously true" claim worth pinning down, because the font
         // atlas turned out not to have room for its own three-phase variant.
-        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0] {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
             // Dimensions only — no rasterization needed to check the geometry.
             let a = IconAtlas {
                 pixels: Vec::new(),
@@ -1263,7 +1498,7 @@ mod nyx_dpi_tests {
             .iter()
             .map(|&id| (id, id.uv_rect(), id.uv_rect_large()))
             .collect();
-        for scale in [1.25f32, 2.0, 3.0] {
+        for scale in [1.25f32, 1.5, 2.0] {
             let atlas = IconAtlas::with_render_scale(scale);
             assert_eq!(atlas.render_scale, scale);
             for &(id, small, large) in &baseline {

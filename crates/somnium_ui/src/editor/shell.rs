@@ -929,6 +929,18 @@ pub(crate) fn build_editor_layout(
     .build();
     let vp_actions_h = ui.add_node(vp_actions, vp_bar_grid_h);
 
+    // How the viewport draws the scene, named on the button so a designer can always tell the picture is not the
+    // finished one (Phase ALYX-H). In the reserved end so it never overflows away.
+    let (view_mode_button, view_mode_label) = labeled_icon_button(
+        ui,
+        vp_actions_h,
+        IconId::View,
+        "Lit",
+        "View mode: how the viewport draws the scene. Lit is the finished image; the others take it apart.",
+        font_id,
+        22.0,
+    );
+
     // The overflow chevron, shown only when the cluster is hidden.
     let (snap_overflow, _) = labeled_icon_button(
         ui,
@@ -953,6 +965,60 @@ pub(crate) fn build_editor_layout(
         22.0,
     );
 
+    // ── Tools strip (Phase ALYX-H) ──────────────────────────────────────────
+    //
+    // Move, rotate and scale were keys only (T, R, S) with nothing on screen to say which was on. A strip down the
+    // viewport's left edge, where Unity's tools overlay sits, shows the one in force and takes a click; it does not
+    // compete with the context bar for width.
+    let tools_overlay = ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_horizontal_alignment(HorizontalAlignment::Left)
+                .with_vertical_alignment(VerticalAlignment::Top)
+                .with_margin(Thickness::new(crate::CONTEXT_BAR_INSET, 56.0, 0.0, 0.0))
+                .with_background(theme::with_alpha(
+                    theme::active().semantic.surface.window.bytes(),
+                    0xB8,
+                ))
+                .with_foreground(theme::active().semantic.border.default.bytes()),
+        )
+        .with_stroke_thickness(Thickness::uniform(theme::NOCTURNE.geometry.stroke_hairline))
+        .build(),
+        viewport_handle,
+    );
+    let tools_stack = ui.add_node(
+        StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(0.0, 2.0))
+                .with_background(theme::TRANSPARENT),
+        )
+        .with_orientation(Orientation::Vertical)
+        .build(),
+        tools_overlay,
+    );
+    let transform_tools = [
+        (IconId::Translate, "editor.gizmo.translate"),
+        (IconId::Rotate, "editor.gizmo.rotate"),
+        (IconId::Scale, "editor.gizmo.scale"),
+    ]
+    .map(|(icon, id)| icon_tool_button(ui, tools_stack, icon, &command_tooltip(id)));
+    ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_height(1.0)
+                .with_margin(Thickness::axes(6.0, 3.0))
+                .with_background(theme::active().semantic.border.subtle.bytes()),
+        )
+        .build(),
+        tools_stack,
+    );
+    let focus_tool = icon_tool_button(
+        ui,
+        tools_stack,
+        IconId::Focus,
+        &command_tooltip("editor.view.focus_selection"),
+    );
+
     // ── Profiler overlay (Phase 29) ──────────────────────────────────────────
     // A child of the viewport, pinned top-left, so it floats over the render
     // instead of stealing layout from it. Rows are built once and rewritten
@@ -960,20 +1026,21 @@ pub(crate) fn build_editor_layout(
     // timing would be its own entry in the table.
     let prof_panel = BorderBuilder::new(
         WidgetBuilder::new()
-            .with_width(300.0)
-            // Below the floating context bar (12 inset + 32 bar + 12 gap).
+            .with_width(320.0)
+            // Below the floating context bar (12 inset + 32 bar + 12 gap), right of the tools strip, clear of the
+            // viewport's foot.
             .with_margin(Thickness {
-                left: 12.0,
+                left: 64.0,
                 top: 56.0,
                 right: 0.0,
-                bottom: 0.0,
+                bottom: 12.0,
             })
             .with_horizontal_alignment(HorizontalAlignment::Left)
             .with_vertical_alignment(VerticalAlignment::Top)
-            .with_background(theme::active().semantic.surface.window.bytes())
-            .with_foreground(theme::active().semantic.border.subtle.bytes()),
+            .with_background(theme::TRANSPARENT)
+            .with_foreground(theme::TRANSPARENT),
     )
-    .with_stroke_thickness(Thickness::uniform(1.0))
+    .with_stroke_thickness(Thickness::ZERO)
     .build();
     // Phase 27-G. A selection readout pinned to the bottom-left of the render.
     //
@@ -1013,67 +1080,13 @@ pub(crate) fn build_editor_layout(
 
     let profiler_panel = ui.add_node(prof_panel, viewport_handle);
 
-    let prof_stack =
-        StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
-            .with_orientation(Orientation::Vertical)
-            .build();
-    let prof_stack_h = ui.add_node(prof_stack, profiler_panel);
-
-    let prof_hdr = TextBuilder::new(WidgetBuilder::new().with_height(18.0).with_margin(
-        Thickness {
-            left: 8.0,
-            top: 4.0,
-            right: 0.0,
-            bottom: 2.0,
-        },
-    ))
-    .with_role(TextRole::SectionCaps)
-    .with_text("GPU PROFILER")
-    .build();
-    ui.add_node(prof_hdr, prof_stack_h);
-
-    let mut profiler_names = Vec::with_capacity(PROFILER_ROWS);
-    let mut profiler_values = Vec::with_capacity(PROFILER_ROWS);
-    for _ in 0..PROFILER_ROWS {
-        let row = StackPanelBuilder::new(
-            WidgetBuilder::new()
-                .with_height(15.0)
-                .with_background(theme::TRANSPARENT),
-        )
-        .with_orientation(Orientation::Horizontal)
-        .build();
-        let row_h = ui.add_node(row, prof_stack_h);
-
-        let name = TextBuilder::new(WidgetBuilder::new().with_width(190.0).with_margin(
-            Thickness {
-                left: 8.0,
-                top: 1.0,
-                right: 0.0,
-                bottom: 0.0,
-            },
-        ))
-        .with_text("")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::active().semantic.text.secondary.bytes())
-        .build();
-        profiler_names.push(ui.add_node(name, row_h));
-
-        let value = TextBuilder::new(WidgetBuilder::new().with_width(92.0).with_margin(
-            Thickness {
-                left: 0.0,
-                top: 1.0,
-                right: 0.0,
-                bottom: 0.0,
-            },
-        ))
-        .with_text("")
-        .with_font_size(11.0)
-        .with_font_id(font_id)
-        .with_color(theme::active().semantic.text.primary.bytes())
-        .build();
-        profiler_values.push(ui.add_node(value, row_h));
-    }
+    // One view paints the whole card in the editor's recipe (`widgets/profiler_view.rs`).
+    let profiler_view = ui.add_node(
+        crate::widgets::profiler_view::ProfilerViewBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .with_font_id(font_id)
+            .build(),
+        profiler_panel,
+    );
     ui.set_visibility(profiler_panel, false);
 
     // MORROWIND-K/V: the shipped Animation workspace uses the same reusable
@@ -1132,21 +1145,11 @@ pub(crate) fn build_editor_layout(
         blend_seconds: 0.2,
         sync_track: Some("locomotion".into()),
     });
-    // K and L are one Animation workspace, not two mutually exclusive tools.
-    // The container owns visibility; both retained editors stay visible inside
-    // it so switching workspaces cannot leave half of the authoring surface
-    // hidden when the parent is shown again.
-    let animation_workspace = SplitterBuilder::new(
-        WidgetBuilder::new()
-            .with_visibility(false)
-            .with_background(theme::TRANSPARENT),
-    )
-    .with_orientation(SplitterOrientation::Vertical)
-    .with_first_size(360.0)
-    .with_min_first(180.0)
-    .with_min_second(260.0)
-    .build();
-    let animation_workspace = ui.add_node(animation_workspace, viewport_handle);
+    // The Animation workspace keeps the viewport as its preview: the timeline and the state machine share a dock
+    // along the viewport's foot (Phase ALYX-G), one tab at a time, with the rig's transport in the dock's header. The
+    // dock owns the workspace's visibility.
+    let animation_dock = build_animation_dock(ui, viewport_handle, font_id);
+    let animation_workspace = animation_dock.root;
 
     let animation_graph = crate::graph::GraphEditorBuilder::new(
         WidgetBuilder::new().with_tooltip(
@@ -1157,7 +1160,8 @@ pub(crate) fn build_editor_layout(
     .with_state_machine_document(animation_document)
     .with_font(font_id)
     .build();
-    let animation_graph_editor = ui.add_node(animation_graph, animation_workspace);
+    let animation_graph_editor = ui.add_node(animation_graph, animation_dock.body);
+    ui.set_visibility(animation_graph_editor, false);
 
     let animation_timeline_catalogue = crate::timeline::catalogues::animation();
     let mut animation_timeline_surface =
@@ -1174,7 +1178,7 @@ pub(crate) fn build_editor_layout(
     )
     .with_document(animation_timeline_document.clone())
     .with_font(font_id)
-    .build(ui, animation_workspace)
+    .build(ui, animation_dock.body)
     .expect("the shipped animation timeline matches its catalogue");
 
     // Right panel: two sections (outliner top, inspector bottom)
@@ -2265,6 +2269,7 @@ pub(crate) fn build_editor_layout(
         inspector_handles,
         viewport_handle,
         animation_workspace,
+        animation_dock,
         animation_graph_editor,
         animation_timeline,
         animation_timeline_document,
@@ -2273,8 +2278,7 @@ pub(crate) fn build_editor_layout(
         profiler_panel,
         profiler_toggle,
         profiler_toggle_lbl,
-        profiler_names,
-        profiler_values,
+        profiler_view,
         outer_grid: outer_h,
         menu_bar_h,
         mode_labels: [
@@ -2311,6 +2315,11 @@ pub(crate) fn build_editor_layout(
         gizmo_space_label,
         select_only_toggle,
         snap_overflow,
+        view_mode_button,
+        view_mode_label,
+        tools_overlay,
+        transform_tools,
+        focus_tool,
         time_cluster,
         time_label,
         time_slider,
@@ -2388,4 +2397,131 @@ pub(crate) fn build_editor_layout(
         locale_grid,
         locale_actions,
     }
+}
+
+/// Height of the Animation dock under the viewport, before a designer expands it.
+pub(crate) const ANIMATION_DOCK_SHARE: f32 = 0.42;
+
+/// The Animation workspace's dock: tabs, transport, and the body the two editors live in.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AnimationDock {
+    /// Shown only in the Animation workspace.
+    pub root: NodeHandle,
+    /// Where the timeline and the graph editor are parented, one visible at a time.
+    pub body: NodeHandle,
+    /// Timeline, then State Machine.
+    pub tabs: [NodeHandle; 2],
+    pub rewind: NodeHandle,
+    pub play: NodeHandle,
+    pub play_icon: NodeHandle,
+    /// The rig, its clock and its state, in words.
+    pub readout: NodeHandle,
+    pub expand: NodeHandle,
+    pub expand_icon: NodeHandle,
+}
+
+fn build_animation_dock(ui: &mut UserInterface, viewport: NodeHandle, font_id: u8) -> AnimationDock {
+    let t = theme::active();
+    let root = ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_visibility(false)
+                .with_vertical_alignment(VerticalAlignment::Bottom)
+                .with_height(300.0)
+                .with_background(t.semantic.surface.window.bytes())
+                .with_foreground(t.semantic.border.default.bytes()),
+        )
+        .with_stroke_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+        .build(),
+        viewport,
+    );
+    let grid = ui.add_node(
+        GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .add_row(Row::strict(38.0))
+            .add_row(Row::stretch())
+            .add_column(Column::stretch())
+            .build(),
+        root,
+    );
+    let header = ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_row(0)
+                .with_background(t.semantic.surface.header.bytes())
+                .with_foreground(t.semantic.border.subtle.bytes()),
+        )
+        .with_stroke_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+        .build(),
+        grid,
+    );
+    let bar = ui.add_node(
+        GridBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+            .add_row(Row::stretch())
+            .add_column(Column::stretch())
+            .add_column(Column::auto())
+            .build(),
+        header,
+    );
+    let row = |ui: &mut UserInterface, column| {
+        ui.add_node(
+            StackPanelBuilder::new(
+                WidgetBuilder::new()
+                    .with_column(column)
+                    .with_margin(Thickness::axes(6.0, 0.0))
+                    .with_vertical_alignment(VerticalAlignment::Center)
+                    .with_background(theme::TRANSPARENT),
+            )
+            .with_orientation(Orientation::Horizontal)
+            .build(),
+            bar,
+        )
+    };
+    let left = row(ui, 0);
+    let right = row(ui, 1);
+    let tabs = [
+        crate::editor::persona::icon_action(ui, left, IconId::Keyframes, "Timeline"),
+        crate::editor::persona::icon_action(ui, left, IconId::StateMachine, "State Machine"),
+    ];
+    for tab in tabs {
+        ui.nodes.borrow_mut(tab.transmute()).widget.margin = Thickness::new(0.0, 0.0, 4.0, 0.0);
+    }
+    ui.send(ButtonMessage::set_selected(tabs[0], true));
+    ui.add_node(
+        BorderBuilder::new(
+            WidgetBuilder::new()
+                .with_width(1.0)
+                .with_height(20.0)
+                .with_margin(Thickness::axes(10.0, 0.0))
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_background(t.semantic.border.subtle.bytes()),
+        )
+        .build(),
+        left,
+    );
+    let rewind = icon_tool_button(ui, left, IconId::SkipBack, "Rewind the rig to its start");
+    let play = icon_tool_button(ui, left, IconId::Play, "Play or pause the rig");
+    let play_icon = ui.children(play).first().copied().unwrap_or_default();
+    let readout = ui.add_node(
+        TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(10.0, 0.0))
+                .with_vertical_alignment(VerticalAlignment::Center),
+        )
+        .with_text("No rig. Create one in Tools.")
+        .with_font_id(font_id)
+        .with_role(TextRole::Body)
+        .with_color(t.semantic.text.secondary.bytes())
+        .build(),
+        left,
+    );
+    let expand = icon_tool_button(ui, right, IconId::Maximize, "Give the dock the whole viewport, or give it back");
+    let expand_icon = ui.children(expand).first().copied().unwrap_or_default();
+    let body = ui.add_node(
+        GridBuilder::new(WidgetBuilder::new().with_row(1).with_background(theme::TRANSPARENT))
+            .add_row(Row::stretch())
+            .add_column(Column::stretch())
+            .build(),
+        grid,
+    );
+    AnimationDock { root, body, tabs, rewind, play, play_icon, readout, expand, expand_icon }
 }

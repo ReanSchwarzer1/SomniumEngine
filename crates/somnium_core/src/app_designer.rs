@@ -84,8 +84,12 @@ impl<G: GameApp> Engine<G> {
 
     pub(super) fn run_designer_tool(&mut self, action: DesignerTool) {
         let result = self.run_designer_tool_result(action);
-        if let Some(ui) = &mut self.ui_manager {
-            ui.push_toast(&result.unwrap_or_else(|error| error));
+        // A transport press says nothing; the dock's header already shows what changed.
+        let message = result.unwrap_or_else(|error| error);
+        if let Some(ui) = &mut self.ui_manager
+            && !message.is_empty()
+        {
+            ui.push_toast(&message);
         }
     }
     pub(super) fn run_designer_tool_result(
@@ -138,6 +142,15 @@ impl<G: GameApp> Engine<G> {
                     self.animation_authoring
                         .reset(&mut self.world, self.physics.as_mut(), entity);
                     Ok("Animation preview reset".into())
+                }
+                DesignerTool::AnimationPlayPause => {
+                    let entity = self.animation_selection()?;
+                    let settings = self
+                        .world
+                        .get_mut::<crate::animation_authoring::AnimationAuthoring>(entity)
+                        .ok_or("The rig has no animation settings")?;
+                    settings.playing = !settings.playing;
+                    Ok(String::new())
                 }
                 DesignerTool::AnimationReload => {
                     let entity = self.animation_selection()?;
@@ -258,15 +271,99 @@ impl<G: GameApp> Engine<G> {
             }
         })()
     }
-    fn animation_selection(&self) -> Result<somnium_ecs::Entity, String> {
+    /// The rig the animation tools act on: the selection when it is one, otherwise the scene's first, so the
+    /// dock's transport works without hunting for the rig in the Outliner.
+    pub(super) fn animation_selection(&self) -> Result<somnium_ecs::Entity, String> {
+        let is_rig = |e: &somnium_ecs::Entity| {
+            self.world
+                .get::<crate::animation_authoring::AnimationAuthoring>(*e)
+                .is_some()
+        };
         self.selection
             .primary
-            .filter(|e| {
+            .filter(is_rig)
+            .or_else(|| {
                 self.world
-                    .get::<crate::animation_authoring::AnimationAuthoring>(*e)
-                    .is_some()
+                    .entities_with::<crate::animation_authoring::AnimationAuthoring>()
+                    .find(is_rig)
             })
-            .ok_or("Select the Animation Preview Rig in the Outliner".into())
+            .ok_or("Create an animation rig first, or select one in the Outliner".into())
+    }
+
+    /// Components a designer may add from Details: everything registered except identity, hierarchy, settings
+    /// singletons and the editor's own bookkeeping.
+    pub(super) fn addable_components(&self) -> Vec<(String, String)> {
+        self.type_registry
+            .iter()
+            .filter(|schema| {
+                let id = schema.stable_id.as_str();
+                !matches!(
+                    id,
+                    "somnium.Transform"
+                        | "somnium.Name"
+                        | "somnium.Parent"
+                        | "somnium.EditorFlags"
+                        | "somnium.AnimationPreviewJoint"
+                        | "somnium.MeshKind"
+                ) && !id.ends_with("Settings")
+                    && !id.starts_with("somnium.asset.")
+            })
+            .map(|schema| (schema.stable_id.as_str().to_string(), schema.display_name.to_string()))
+            .collect()
+    }
+
+    /// Add or remove one component on the selected entity, as one undo step.
+    pub(super) fn edit_selected_components(&mut self, component: &str, add: bool) {
+        let result = (|| -> Result<String, String> {
+            let entity = self.selection.primary.ok_or("Select an entity first")?;
+            if self.world.get::<crate::prefab::PrefabMember>(entity).is_some() {
+                return Err("Unpack the prefab, or edit its source, before changing its components".into());
+            }
+            let schema = self.type_registry.by_name(component).ok_or("Unknown component")?;
+            let (name, insert, remove) = (schema.display_name, schema.insert_default, schema.remove);
+            let before = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            if add {
+                insert(&mut self.world, entity).map_err(|e| e.to_string())?;
+            } else if !remove(&mut self.world, entity).map_err(|e| e.to_string())? {
+                return Err(format!("The entity has no {name}"));
+            }
+            let after = crate::scene_schema::scene_to_json(&mut self.world, &self.type_registry);
+            self.undo_stack
+                .push_silent(Box::new(crate::prefab::PrefabEditCommand::new(before, after)));
+            self.scene_dirty = true;
+            self.after_selection_change();
+            Ok(if add { format!("Added {name}") } else { format!("Removed {name}") })
+        })();
+        if let Some(ui) = &mut self.ui_manager {
+            ui.push_toast(&result.unwrap_or_else(|error| error));
+        }
+    }
+
+    /// What the Animation dock's header shows, in the Animation workspace only.
+    pub(super) fn animation_transport(&self) -> Option<somnium_ui::AnimationTransport> {
+        if self.ui_manager.as_ref()?.active_workspace() != somnium_ui::workspace::Workspace::Animation {
+            return None;
+        }
+        let entity = self.animation_selection().ok()?;
+        let settings = self
+            .world
+            .get::<crate::animation_authoring::AnimationAuthoring>(entity)?;
+        let length = self
+            .animation_authoring
+            .clip_length(entity)
+            .unwrap_or(settings.duration)
+            .max(1e-3);
+        Some(somnium_ui::AnimationTransport {
+            rig: self
+                .world
+                .get::<Name>(entity)
+                .map_or_else(|| "Rig".to_string(), |name| name.as_str().to_string()),
+            time: settings.preview_time.rem_euclid(length),
+            length,
+            playing: settings.playing,
+            speed: settings.speed,
+            status: settings.status.clone(),
+        })
     }
 }
 

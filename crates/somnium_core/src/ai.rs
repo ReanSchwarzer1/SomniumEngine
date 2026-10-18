@@ -192,7 +192,7 @@ pub fn register(registry: &mut somnium_ecs::reflect::TypeRegistry) {
             label { group:"Behavior",display_name:"Tree Name" },
             status { group:"Runtime",read_only:true,flags:somnium_ecs::reflect::FieldFlags::EDIT.union(somnium_ecs::reflect::FieldFlags::SCRIPT_READ) },
             last_error { group:"Runtime",read_only:true,flags:somnium_ecs::reflect::FieldFlags::EDIT.union(somnium_ecs::reflect::FieldFlags::SCRIPT_READ) },
-            graph_json { group:"Advanced",advanced:true,read_only:true,display_name:"Authored Graph",doc:"MORROWIND-K behavior graph. Apply a Behavior graph from the shared graph editor." },
+            graph_json { group:"Advanced",advanced:true,read_only:true,display_name:"Authored Graph",doc:"The behaviour graph this agent runs. Apply one from the shared graph editor." },
         }
     });
 }
