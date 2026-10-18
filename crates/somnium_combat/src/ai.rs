@@ -514,6 +514,8 @@ pub struct Mind {
     /// A cover or firing spot: where, whether hidden, when it was judged.
     spot: Option<(Vec3, bool, f64)>,
     think: f32,
+    /// World time it last thought.
+    thought: Option<f64>,
     situation: u8,
     shouted_for: Option<CombatantId>,
     swings_left: u8,
@@ -568,6 +570,7 @@ impl Brain {
                 climbing: false,
                 spot: None,
                 think: 0.0,
+                thought: None,
                 situation: u8::MAX,
                 shouted_for: None,
                 swings_left: 0,
@@ -1947,6 +1950,12 @@ pub(crate) fn think(
         cmd.channel = false;
         cmd.climb = false;
         brain.mind.jump = false;
+        // A brain the world's LOD let sit out a few steps lives the time it
+        // missed (up to a second), so its timers and awareness keep real time.
+        let dt = match brain.mind.thought.replace(now) {
+            Some(last) if now - last > f64::from(dt) * 1.5 => ((now - last) as f32).min(1.0),
+            _ => dt,
+        };
         if brain.mind.climbing {
             // Hands on the ledge: nothing pressed until the host says it is up.
             if let Some(c) = w.combatant_mut(id) {

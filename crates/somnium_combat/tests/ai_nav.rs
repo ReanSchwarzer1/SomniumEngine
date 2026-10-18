@@ -6,8 +6,8 @@ use glam::{Quat, Vec3};
 use somnium_combat::ai::{self, Archetype, BrainDesc};
 use somnium_combat::geometry::Obb;
 use somnium_combat::{
-    Action, CombatEvent, CombatQuery, CombatWorld, CombatantDesc, CombatantId, TeamId, Vitals,
-    WorldHit, weapon,
+    Action, CombatEvent, CombatQuery, CombatWorld, CombatantDesc, CombatantId, OpenField, TeamId,
+    Vitals, WorldHit, weapon,
 };
 
 /// A world of boxes for the brain's sight lines and the projectiles.
@@ -243,4 +243,50 @@ fn a_climber_hanging_on_the_edge_is_struck_from_the_top() {
         swings(&run(&mut w, 1.5, hold)) > 0,
         "struck while its hands are on the edge"
     );
+}
+
+/// A brain the world's LOD lets sit out three steps in four (as
+/// `CombatWorld::set_focus` does mid-range) keeps real time: its morale comes
+/// back as fast as one that thinks every step.
+#[test]
+fn a_brain_that_thinks_every_fourth_step_keeps_real_time() {
+    let mut w = world();
+    let every = brain(
+        &mut w,
+        "Every",
+        RAIDERS,
+        Vec3::ZERO,
+        weapon::spear(),
+        Archetype::Spearman,
+    );
+    let fourth = brain(
+        &mut w,
+        "Fourth",
+        RAIDERS,
+        Vec3::new(30.0, 0.0, 0.0),
+        weapon::spear(),
+        Archetype::Spearman,
+    );
+    let morale = |w: &CombatWorld, id: CombatantId| {
+        w.combatant(id).unwrap().brain.as_ref().unwrap().mind.morale
+    };
+    for id in [every, fourth] {
+        w.combatant_mut(id)
+            .unwrap()
+            .brain
+            .as_mut()
+            .unwrap()
+            .mind
+            .morale = 0.2;
+    }
+    for step in 0..120 {
+        let parked = (step % 4 != 0).then(|| w.combatant_mut(fourth).unwrap().brain.take());
+        w.step(DT, &OpenField, None);
+        if let Some(brain) = parked {
+            w.combatant_mut(fourth).unwrap().brain = brain;
+        }
+    }
+    let (a, b) = (morale(&w, every), morale(&w, fourth));
+    assert!(a > 0.235, "two seconds of recovery: {a}");
+    assert!((a - b).abs() < 0.002, "every step {a}, every fourth {b}");
 }
