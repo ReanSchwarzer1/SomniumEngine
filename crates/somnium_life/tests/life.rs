@@ -370,6 +370,51 @@ fn a_place_from_a_settlement_layout_and_back_through_json() {
 /// `cargo test -p somnium_life --release -- --ignored --nocapture`: the cost
 /// of a crowd: fifty villages with their beasts and carts, the player in one.
 #[test]
+fn an_alarm_sends_villagers_running_home_and_they_come_out_after() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = w.add_place(village(Vec3::ZERO));
+    w.populate(place, 3);
+    day(&mut w, 6.0, 11.0, 0.0, &[Vec3::ZERO], |_, _| {});
+    let out_before = w.villagers().iter().filter(|v| v.visible).count();
+    assert!(out_before > 0, "out and about by eleven");
+    // A fight breaks out on the road through the middle.
+    let frightened = w.alarm(Vec3::ZERO, 200.0, 60.0);
+    assert!(frightened >= out_before);
+    let (mut ran, mut bolted) = (false, false);
+    let clock = Clock::at(11.0);
+    for _ in 0..80 {
+        w.step(DT, clock, &[Vec3::ZERO], &Flat);
+        ran |= w.villagers().iter().any(|v| v.pose == Pose::Run);
+        bolted |= w.beasts().iter().any(|b| b.pose == Pose::Run);
+        assert!(
+            w.carts().iter().all(|c| c.pose != Pose::Drive),
+            "carts stop"
+        );
+    }
+    assert!(ran, "they ran");
+    assert!(bolted, "the beasts bolted");
+    assert!(
+        w.villagers().iter().all(|v| !v.visible),
+        "all indoors within forty seconds"
+    );
+    assert!(
+        w.villagers()
+            .iter()
+            .all(|v| v.activity == Activity::Shelter)
+    );
+    // The danger passes: back to the day.
+    for _ in 0..200 {
+        w.step(DT, clock, &[Vec3::ZERO], &Flat);
+    }
+    assert!(w.villagers().iter().any(|v| v.visible), "out again");
+    assert!(
+        w.villagers()
+            .iter()
+            .all(|v| v.activity != Activity::Shelter)
+    );
+}
+
+#[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());
     let at = Vec3::new(500.0, 0.0, 0.0);

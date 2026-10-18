@@ -26,6 +26,10 @@
 //! installs after Play began is adopted when it appears, keyed by its name and
 //! where it stands; when its cell unloads its people live on, and when it
 //! streams back it finds them again (`LifeWorld::adopt_place`).
+//!
+//! **B** rings the alarm bell where the camera is: everyone within 80 m runs
+//! home and stays in for 45 seconds, beasts bolt, carts stop
+//! (`LifeWorld::alarm`; a game rings it from its fights).
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
@@ -34,7 +38,8 @@ use somnium_combat::environment::Surface;
 use somnium_core::spline::{SAMPLES_PER_SEGMENT, SplineComponent};
 use somnium_core::time_of_day::TimeOfDayComponent;
 use somnium_core::{
-    EngineContext, MaterialComponent, MeshKind, Name, Parent, Transform, WorldTransform,
+    EngineContext, EngineEvent, InputState, KeyCode, MaterialComponent, MeshKind, Name, Parent,
+    Transform, WorldTransform,
 };
 use somnium_ecs::{Entity, World};
 use somnium_life::components::{
@@ -59,6 +64,9 @@ const PARKED: Vec3 = Vec3::new(0.0, -10_000.0, 0.0);
 const VILLAGER_BODIES: usize = 160;
 const BEAST_BODIES: usize = 48;
 const CART_BODIES: usize = 16;
+/// The alarm bell (B): how far it frightens, and for how long.
+const BELL_REACH: f32 = 80.0;
+const BELL_SECONDS: f32 = 45.0;
 
 fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
@@ -608,6 +616,8 @@ pub struct LifeDemo {
     run: Option<Run>,
     /// Seconds since Play last looked for life that had not streamed in yet.
     idle: f32,
+    /// B was pressed: ring the alarm bell next frame.
+    bell: bool,
 }
 
 fn role_material(role: Role) -> &'static str {
@@ -966,8 +976,24 @@ impl LifeDemo {
     }
 
     /// Put everything back as authored.
+    /// B rings the alarm bell while life runs.
+    pub fn event(&mut self, event: &EngineEvent) {
+        if self.run.is_some()
+            && matches!(
+                event,
+                EngineEvent::KeyInput {
+                    key: KeyCode::KeyB,
+                    state: InputState::Pressed
+                }
+            )
+        {
+            self.bell = true;
+        }
+    }
+
     pub fn end(&mut self, ctx: &mut EngineContext) {
         self.idle = 0.0;
+        self.bell = false;
         let Some(run) = self.run.take() else { return };
         for (e, t) in run.authored {
             if let Some(slot) = ctx.world.get_mut::<Transform>(e) {
@@ -998,6 +1024,7 @@ impl LifeDemo {
             }
             return;
         }
+        let ring = std::mem::take(&mut self.bell);
         let run = self.run.as_mut().expect("running");
         // Places and hand-placed agents stream in and out with their cells.
         run.synced += dt;
@@ -1021,6 +1048,10 @@ impl LifeDemo {
             .map(|r| r.camera_pos)
             .into_iter()
             .collect();
+        if ring && let Some(at) = focus.first() {
+            let frightened = run.life.alarm(*at, BELL_REACH, BELL_SECONDS);
+            info!(frightened, "life: the alarm bell");
+        }
         let t0 = Instant::now();
         run.life.step(
             dt,

@@ -90,6 +90,8 @@ pub enum Pose {
     Drive,
     /// Out of sight indoors.
     Inside,
+    /// Running from danger.
+    Run,
 }
 
 /// The world's random numbers: xorshift64*, seeded per agent.

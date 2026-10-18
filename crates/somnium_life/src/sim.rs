@@ -13,6 +13,8 @@ const WALK: f32 = 1.35;
 const AMBLE: f32 = 0.55;
 /// How close one cart keeps behind another going the same way.
 const CART_GAP: f32 = 8.0;
+/// Running from danger, metres a second.
+const RUN: f32 = 3.6;
 /// How far to the side of the road's line a cart drives (each way its own side).
 const CART_SIDE: f32 = 0.9;
 
@@ -101,6 +103,8 @@ pub struct Villager {
     routine: Routine,
     doing: Doing,
     owed: f32,
+    /// Sheltering from an alarm until then.
+    flee_until: f64,
     /// Hours it runs behind the routine, so a household does not leave as one.
     late: f32,
     rng: Rng,
@@ -159,6 +163,8 @@ pub struct Beast {
     until: f64,
     owed: f32,
     rng: Rng,
+    /// Bolting from an alarm until then.
+    bolt_until: f64,
 }
 
 /// A cart on a road.
@@ -262,6 +268,36 @@ impl LifeWorld {
         (index, true)
     }
 
+    /// Danger at `at` (a fight, a fire, a beast loose): villagers within
+    /// `radius` run home and stay in for `seconds`, beasts there bolt to the
+    /// far side of their pen, carts there stop. Returns how many took fright.
+    pub fn alarm(&mut self, at: Vec3, radius: f32, seconds: f32) -> usize {
+        let until = self.time + f64::from(seconds.max(0.0));
+        let near = |p: Vec3| flat(p, at) <= radius;
+        let mut frightened = 0;
+        for v in self.villagers.iter_mut().filter(|v| near(v.position)) {
+            v.flee_until = v.flee_until.max(until);
+            frightened += 1;
+        }
+        let places = &self.places;
+        for b in self.beasts.iter_mut().filter(|b| near(b.position)) {
+            b.bolt_until = b.bolt_until.max(until.min(self.time + 6.0));
+            if let Some(pen) = places.get(b.place).and_then(|p| p.place.spots.get(b.pen)) {
+                // The pen's side away from the danger.
+                let away = planar(pen.position - at).unwrap_or(Vec3::X);
+                b.to = Some(pen.position + away * pen.radius.max(0.1) * 0.8);
+                b.until = until;
+            }
+            frightened += 1;
+        }
+        for c in self.carts.iter_mut().filter(|c| near(c.position)) {
+            c.wait_until = c.wait_until.max(until);
+            c.pose = Pose::Idle;
+            frightened += 1;
+        }
+        frightened
+    }
+
     /// How many places there are.
     #[must_use]
     pub fn place_count(&self) -> usize {
@@ -352,6 +388,7 @@ impl LifeWorld {
                 shuffle_at: 0.0,
             },
             owed: 0.0,
+            flee_until: 0.0,
             late,
             rng,
         });
@@ -379,6 +416,7 @@ impl LifeWorld {
             until,
             owed: 0.0,
             rng,
+            bolt_until: 0.0,
         });
         Some(id)
     }
@@ -716,7 +754,10 @@ impl Villager {
 
     fn advance(&mut self, placed: &Placed, clock: Clock, ground: &impl Ground, dt: f32, now: f64) {
         let place = &placed.place;
-        let wanted = if clock.lid_fallen() {
+        let fleeing = now < self.flee_until;
+        let wanted = if fleeing {
+            Activity::Shelter
+        } else if clock.lid_fallen() {
             Activity::Sleep
         } else {
             self.routine.at(clock.hour - self.late)
@@ -731,14 +772,14 @@ impl Villager {
             }
             self.target = target;
         }
-        let mut walked = dt * WALK;
+        let mut walked = dt * if fleeing { RUN } else { WALK };
         loop {
             match &mut self.doing {
                 Doing::Walking { path, next, to } => {
                     let to = *to;
                     let left = walk_path(&mut self.position, &mut self.facing, path, next, walked);
                     settle(&mut self.position, ground);
-                    self.pose = Pose::Walk;
+                    self.pose = if fleeing { Pose::Run } else { Pose::Walk };
                     self.visible = true;
                     let Some(left) = left else {
                         break;
@@ -810,17 +851,19 @@ impl Villager {
 
 impl Beast {
     fn advance(&mut self, centre: Vec3, radius: f32, ground: &impl Ground, dt: f32, now: f64) {
+        let bolting = now < self.bolt_until;
         match self.to {
             Some(to) => {
                 let mut next = 0;
+                let pace = self.kind.pace() * if bolting { 4.0 } else { 1.0 };
                 let left = walk_path(
                     &mut self.position,
                     &mut self.facing,
                     &[to],
                     &mut next,
-                    dt * self.kind.pace(),
+                    dt * pace,
                 );
-                self.pose = Pose::Walk;
+                self.pose = if bolting { Pose::Run } else { Pose::Walk };
                 if left.is_some() {
                     self.to = None;
                     self.pose = Pose::Graze;

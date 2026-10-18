@@ -29,6 +29,8 @@ pub enum Activity {
     Wander,
     /// Playing on the green (children).
     Play,
+    /// Indoors until danger passes ([`crate::LifeWorld::alarm`]).
+    Shelter,
 }
 
 impl Activity {
@@ -38,7 +40,7 @@ impl Activity {
     pub fn spots(self) -> &'static [SpotKind] {
         use SpotKind::*;
         match self {
-            Self::Sleep | Self::Eat => &[Home],
+            Self::Sleep | Self::Eat | Self::Shelter => &[Home],
             Self::Chores => &[Well, Green, Home],
             Self::Work => &[Work, Market, Green],
             Self::Farm => &[Field, Pen, Green],
@@ -55,7 +57,7 @@ impl Activity {
     #[must_use]
     pub fn pose(self) -> Pose {
         match self {
-            Self::Sleep | Self::Eat | Self::Wander | Self::Chores => Pose::Idle,
+            Self::Sleep | Self::Eat | Self::Wander | Self::Chores | Self::Shelter => Pose::Idle,
             Self::Work => Pose::Work,
             Self::Farm => Pose::Farm,
             Self::Tend => Pose::Tend,

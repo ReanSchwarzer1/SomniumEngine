@@ -1737,6 +1737,7 @@ impl GameApp for HelloGame {
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
         self.work_demo.event(event);
         self.combat.event(event);
+        self.life.event(event);
         if play_session(ctx)
             && matches!(
                 event,
