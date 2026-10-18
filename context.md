@@ -23,7 +23,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
-| Workspace | 17 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
+| Workspace | 18 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
 | Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests. Not regenerated since: the generator now also counts `.claude/worktrees/` copies and must exclude them first |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
@@ -195,6 +195,27 @@ flowchart LR
 | Skinned BLAS limits | TLAS build 1.87 → 0.75 ms |
 | Scene restore | 47.5 → 9.7 s |
 | Frame generation | 42.3 fps → 76.7 presented, 2.0–2.5 ms GPU per generated frame |
+
+## Combat for Rimeborn (18 October 2026)
+
+`crates/somnium_combat` is the engine's combat: a deterministic, headless simulation a host drives one fixed step
+at a time (`set_pose`, `command`, `animation_event` in; `intent` and `CombatEvent`s out; physics through the
+`CombatQuery` trait). It was built for Rimeborn, the second game on the engine, and is generic.
+
+| Area | What it does | Where |
+|---|---|---|
+| Damage | eight types, resistances, armour with diminishing returns, statuses that meet each other (water and fire cancel, wet bodies freeze faster, the frozen shatter) | `damage.rs`, `status.rs` |
+| Pools | health, stamina, mana in lamps with overdraw, poise, focus | `vitals.rs` |
+| Melee | weapons as data, chains, the heavy on hold, charges, parries and ripostes, blocks and guard breaks, dodge frames, backstabs; hit windows from animation events and blade sweeps from the skeleton | `weapon.rs`, `world/melee.rs`, `world/resolve.rs` |
+| Schools | Aetherlance, Meridian, Night Fang, Gale Edge: 17 forms as rules | `schools.rs` |
+| Spells | six-part requests, rote measures vs numbers, three casting speeds, cooldowns, channels, interruption; bolts, lances, walls, waves, steps, blooms, wards | `spell.rs`, `world/cast.rs`, `world/effects.rs` |
+| The ground | grass burns and spreads downwind, water freezes into walkable ice, stone stops fire | `environment.rs` |
+| AI | brains on `somnium_ai` trees (native `combat.*` tasks), perception, navmesh corridors; attack tokens and flank slots | `ai.rs` |
+| Input | the rebindable `combat` action map, cursor-to-ground aim | `input.rs` |
+| Editor | `Combatant`, `Combat Surface`, `Wind Volume` schemas; hello_engine's **Create > Examples > Combat Sandbox** | `components.rs`, `examples/hello_engine/src/combat_demo.rs` |
+| Mounts | riding, trample, mounted cuts, rider IK targets | `mount.rs` |
+
+Record: [`COMBAT_2026-10-18.md`](<dev records/COMBAT_2026-10-18.md>). Help: [`docs/editor/combat.md`](docs/editor/combat.md).
 
 ## How to use this file
 
@@ -702,6 +723,7 @@ name is a mnemonic, not a claim of similarity.
 | `somnium_physics` | Safe Jolt-facing bodies, shapes, contacts, layers, world |
 | `somnium_physics_sys` | Raw Jolt FFI and C++ build boundary |
 | `somnium_voxel` | Voxel chunks, generation, edits, meshing, LOD |
+| `somnium_combat` | Combat simulation: hits, damage, statuses, weapons, spells, the reactive ground, combat AI, combat input, mounts |
 
 ### Dependency layers
 

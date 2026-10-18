@@ -10,8 +10,8 @@
 //! that dies, throws the rider.
 //!
 //! For the rider's pose the host asks [`rider_targets`] for the seat, the
-//! stirrups and the reins and solves the legs and arms with the engine's
-//! two-bone IK (`somnium_anim::TwoBoneIk`).
+//! stirrups and the reins, and [`pose_rider`] bends the legs (and the rein arm)
+//! onto them with the engine's two-bone IK (`somnium_anim::TwoBoneIk`).
 use crate::damage::{DamagePart, DamageType, Hit, HitFlags};
 use crate::geometry::{flat, planar_dir};
 use crate::world::{Body, CombatEvent, CombatWorld, CombatantDesc};
@@ -51,6 +51,12 @@ pub struct MountDef {
 }
 
 impl MountKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 3] = [Self::Horse, Self::FrostElk, Self::Strider];
+
+    /// Display names, in [`Self::ALL`] order.
+    pub const NAMES: [&'static str; 3] = ["Horse", "Frost-elk", "Strider"];
+
     /// The library numbers.
     #[must_use]
     pub fn def(self) -> MountDef {
@@ -98,6 +104,7 @@ impl MountKind {
         };
         desc.vitals = Vitals::new(220.0, 160.0, 0.0, 90.0);
         desc.resist = Resistances::default().with_armor(6.0);
+        desc.mount = Some(def);
         desc
     }
 }
@@ -134,6 +141,77 @@ pub fn rider_targets(position: Vec3, facing: Vec3, def: &MountDef) -> RiderTarge
     }
 }
 
+/// The rider's IK chains: hip, knee and ankle for each leg, shoulder, elbow
+/// and wrist for the hand on the reins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RiderRig {
+    /// Left leg.
+    pub left_leg: somnium_anim::TwoBoneIk,
+    /// Right leg.
+    pub right_leg: somnium_anim::TwoBoneIk,
+    /// The arm that holds the reins, if the rider has a hand free.
+    pub reins_arm: Option<somnium_anim::TwoBoneIk>,
+}
+
+/// Bend a rider's legs onto the stirrups (knees forward) and the rein hand onto
+/// the reins. `rider_world` is the rider's model-to-world matrix; `weight`
+/// blends from the animated pose (0) to fully seated (1), so mounting and
+/// dismounting ease in and out.
+pub fn pose_rider(
+    pose: &mut somnium_anim::Pose,
+    skeleton: &somnium_anim::Skeleton,
+    rig: &RiderRig,
+    targets: &RiderTargets,
+    rider_world: glam::Mat4,
+    weight: f32,
+) -> Result<(), somnium_anim::PoseEditError> {
+    if !rider_world.is_finite() || rider_world.determinant().abs() < 1e-8 {
+        return Err(somnium_anim::PoseEditError::InvalidTarget);
+    }
+    let to_model = rider_world.inverse();
+    let m = |p: Vec3| to_model.transform_point3(p);
+    rig.left_leg.solve(
+        pose,
+        skeleton,
+        m(targets.stirrups[0]),
+        m(targets.knee_poles[0]),
+        weight,
+    )?;
+    rig.right_leg.solve(
+        pose,
+        skeleton,
+        m(targets.stirrups[1]),
+        m(targets.knee_poles[1]),
+        weight,
+    )?;
+    if let Some(arm) = rig.reins_arm {
+        let elbow_pole = targets.reins - Vec3::Y * 0.5;
+        arm.solve(pose, skeleton, m(targets.reins), m(elbow_pole), weight)?;
+    }
+    Ok(())
+}
+
+/// Climb into the nearest free saddle within reach, or leave the one you are in.
+pub fn toggle(w: &mut CombatWorld, rider: CombatantId) -> Result<(), MountError> {
+    let r = w.combatant(rider).ok_or(MountError::Missing)?;
+    if r.mount.is_some() {
+        dismount(w, rider);
+        return Ok(());
+    }
+    let at = r.position;
+    let nearest = w
+        .combatants()
+        .filter(|c| c.mount_def.is_some() && c.rider.is_none() && c.alive() && c.id != rider)
+        .min_by(|a, b| {
+            flat(a.position - at)
+                .length()
+                .total_cmp(&flat(b.position - at).length())
+        })
+        .map(|c| c.id)
+        .ok_or(MountError::Missing)?;
+    mount(w, rider, nearest)
+}
+
 /// Why mounting failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountError {
@@ -149,7 +227,8 @@ pub enum MountError {
     Busy,
 }
 
-/// Make a combatant a mount of `kind` (after spawning it from [`MountKind::desc`]).
+/// Make an already spawned combatant a mount of `kind` ([`MountKind::desc`]
+/// already does this for a new one).
 pub fn make_mount(w: &mut CombatWorld, id: CombatantId, kind: MountKind) {
     if let Some(c) = w.combatant_mut(id) {
         c.mount_def = Some(kind.def());
@@ -260,9 +339,6 @@ pub(crate) fn sync_riders(w: &mut CombatWorld) {
         if let Some(r) = w.combatant_mut(rider) {
             // The rider's feet hang from the seat; its capsule rides above the mount's.
             r.position = targets.seat - Vec3::Y * r.body.height * 0.45;
-            if !matches!(r.action, crate::Action::Attack(_)) && r.command.aim.is_none() {
-                r.facing = facing;
-            }
         }
         if galloping && velocity.length() > def.speed * 1.4 {
             trample(
@@ -315,6 +391,68 @@ fn trample(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_riders_feet_find_the_stirrups() {
+        use somnium_anim::{NO_PARENT, Pose, Skeleton, SkeletonId, Transform, TwoBoneIk};
+        let t = |x: f32, y: f32| Transform {
+            translation: Vec3::new(x, y, 0.0),
+            ..Transform::IDENTITY
+        };
+        // Pelvis, then hip, knee and ankle on each side.
+        let (skeleton, _) = Skeleton::new(
+            SkeletonId(9),
+            [
+                "pelvis", "hip_l", "knee_l", "ankle_l", "hip_r", "knee_r", "ankle_r",
+            ]
+            .map(String::from)
+            .to_vec(),
+            vec![NO_PARENT, 0, 1, 2, 0, 4, 5],
+            vec![glam::Mat4::IDENTITY; 7],
+            vec![
+                t(0.0, 1.0),
+                // Facing +Z, the left side is +X.
+                t(0.1, 0.0),
+                t(0.0, -0.45),
+                t(0.0, -0.45),
+                t(-0.1, 0.0),
+                t(0.0, -0.45),
+                t(0.0, -0.45),
+            ],
+        )
+        .unwrap();
+        let def = MountKind::Horse.def();
+        let targets = rider_targets(Vec3::ZERO, Vec3::Z, &def);
+        // The model's pelvis sits on the seat.
+        let rider_world = glam::Mat4::from_translation(targets.seat - Vec3::Y);
+        let rig = RiderRig {
+            left_leg: TwoBoneIk {
+                root: 1,
+                middle: 2,
+                end: 3,
+            },
+            right_leg: TwoBoneIk {
+                root: 4,
+                middle: 5,
+                end: 6,
+            },
+            reins_arm: None,
+        };
+        let mut pose = Pose::rest(&skeleton);
+        pose_rider(&mut pose, &skeleton, &rig, &targets, rider_world, 1.0).unwrap();
+        let mut model = vec![glam::Mat4::IDENTITY; skeleton.len()];
+        assert!(pose.to_model_space(&skeleton, &mut model));
+        for (ankle, stirrup) in [(3usize, targets.stirrups[0]), (6, targets.stirrups[1])] {
+            let at = rider_world.transform_point3(model[ankle].w_axis.truncate());
+            assert!(
+                at.distance(stirrup) < 1e-3,
+                "ankle {ankle} at {at}, stirrup {stirrup}"
+            );
+        }
+        // Knees bend forward, toward the poles.
+        let knee = rider_world.transform_point3(model[2].w_axis.truncate());
+        assert!(knee.z > targets.seat.z, "the knee comes forward: {knee}");
+    }
 
     #[test]
     fn the_stirrups_hang_below_the_seat_either_side() {

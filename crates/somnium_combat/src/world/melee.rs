@@ -55,6 +55,9 @@ pub(super) fn handle_command(
     if cmd.focus {
         w.toggle_focus(id);
     }
+    if cmd.mount && w.get(id).is_some_and(|c| c.status.can_act()) {
+        let _ = crate::mount::toggle(w, id);
+    }
 
     cast::handle_spell_input(w, id, &cmd);
 

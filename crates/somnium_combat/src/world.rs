@@ -160,6 +160,8 @@ pub struct Command {
     pub lock: bool,
     /// Toggle slow-time focus.
     pub focus: bool,
+    /// Climb into the nearest saddle, or out of this one.
+    pub mount: bool,
     /// Spell keys 1 to 0.
     pub spells: [Press; 10],
     /// Mouse wheel notches while shaping.
@@ -186,6 +188,7 @@ impl Command {
         self.kindle = false;
         self.lock = false;
         self.focus = false;
+        self.mount = false;
         self.measure_steps = 0.0;
         self.measure_cycle = false;
         self.cast = None;
@@ -410,6 +413,8 @@ pub struct CombatantDesc {
     pub parts: Vec<HurtPart>,
     /// A Hollowborn (Night Fang's Shadow-step).
     pub hollowborn: bool,
+    /// This body is a mount that can be ridden.
+    pub mount: Option<crate::mount::MountDef>,
 }
 
 impl CombatantDesc {
@@ -432,6 +437,7 @@ impl CombatantDesc {
             host: 0,
             parts: Vec::new(),
             hollowborn: false,
+            mount: None,
         }
     }
 }
@@ -1125,7 +1131,7 @@ impl CombatWorld {
                 last_attacker: None,
                 mount: None,
                 rider: None,
-                mount_def: None,
+                mount_def: desc.mount,
             },
         );
         id
@@ -1630,7 +1636,12 @@ impl CombatWorld {
             .environment
             .as_ref()
             .zip(self.combatants.get(&id))
-            .map_or(1.0, |(f, c)| f.surface_at(c.position).traction());
+            .map_or(1.0, |(f, c)| {
+                // A sure-footed mount (the frost-elk) ignores the ice.
+                let sure = c.mount_def.map_or(0.0, |m| m.sure_footed);
+                let t = f.surface_at(c.position).traction();
+                t + (1.0 - t) * sure
+            });
         let lock_target = self
             .combatants
             .get(&id)
@@ -1646,9 +1657,24 @@ impl CombatWorld {
             time_scale: scale * c.status.action_scale(),
             ..MoveIntent::default()
         };
-        // A rider is carried by the mount; the mount reads its intent.
+        // A rider is carried by the mount (which reads its reins) but still
+        // looks where it aims, at its lock, or the way it rides.
+        if c.mount.is_some() && c.alive() && c.status.can_act() {
+            let desired = lock_target
+                .map(|p| p - c.position)
+                .or_else(|| c.command.aim.map(|p| p - c.position))
+                .or_else(|| {
+                    (flat(c.command.move_dir).length_squared() > 0.01).then_some(c.command.move_dir)
+                });
+            if let Some(d) = desired
+                && !matches!(&c.action, Action::Attack(a) if a.phase != Phase::Windup)
+            {
+                c.facing = turn_toward(c.facing, planar_dir(d, c.facing), 12.0 * dt);
+            }
+        }
         if !c.alive() || c.status.move_scale() == 0.0 || c.mount.is_some() {
             intent.rooted = true;
+            intent.facing = c.facing;
             intent.velocity = c.knock;
             c.knock *= (1.0 - 8.0 * dt).max(0.0);
             c.intent = intent;

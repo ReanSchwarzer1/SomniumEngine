@@ -7,6 +7,7 @@
 //! they change, so caches keyed on the component stay warm).
 use crate::ai::{Archetype, BrainDesc};
 use crate::environment::Surface;
+use crate::mount::MountKind;
 use crate::schools::{SwordSchool, Swordsmanship};
 use crate::spell::{CastSpeed, Discipline, Magic};
 use crate::weapon::WeaponKind;
@@ -51,6 +52,8 @@ pub struct CombatantComponent {
     pub spells: String,
     /// Knows the base-twelve numbers (measures take exact values).
     pub numbers: bool,
+    /// A mount to ride instead of a fighter: 0 none, then [`MountKind::ALL`] order.
+    pub mount: u32,
     /// Live: health.
     pub health: f32,
     /// Live: stamina.
@@ -82,6 +85,7 @@ impl Default for CombatantComponent {
             speed: 3.6,
             spells: String::new(),
             numbers: false,
+            mount: 0,
             health: 0.0,
             stamina: 0.0,
             mana: 0.0,
@@ -138,9 +142,28 @@ impl CombatantComponent {
             .filter(|s| !s.is_empty())
     }
 
-    /// Everything the world needs to create this fighter.
+    /// The mount kind, if this is a mount.
+    #[must_use]
+    pub fn mount_kind(&self) -> Option<MountKind> {
+        (self.mount > 0)
+            .then(|| MountKind::ALL[((self.mount - 1) as usize).min(MountKind::ALL.len() - 1)])
+    }
+
+    /// Everything the world needs to create this fighter (or mount).
     #[must_use]
     pub fn desc(&self, name: &str, position: Vec3, facing: Vec3, host: u64) -> CombatantDesc {
+        if let Some(kind) = self.mount_kind() {
+            let mut desc = kind.desc(name, TeamId(self.team as u16), position);
+            desc.facing = facing;
+            desc.host = host;
+            desc.vitals = Vitals::new(
+                self.max_health.max(1.0),
+                self.max_stamina.max(1.0),
+                0.0,
+                self.poise.max(1.0),
+            );
+            return desc;
+        }
         let rank = self.rank();
         let mut desc = CombatantDesc::new(
             name,
@@ -214,6 +237,9 @@ pub struct CombatSurfaceComponent {
     pub surface: u32,
     /// A disc rather than a box.
     pub round: bool,
+    /// Also a solid block (a pillar, a floor): the host gives it a collider,
+    /// so bodies, missiles and sight stop at it.
+    pub solid: bool,
 }
 
 impl Component for CombatSurfaceComponent {}
@@ -223,6 +249,7 @@ impl Default for CombatSurfaceComponent {
         Self {
             surface: Surface::Grass as u32,
             round: false,
+            solid: false,
         }
     }
 }
@@ -281,6 +308,7 @@ pub fn register(registry: &mut TypeRegistry) {
             speed { group: "Body", min: 0.5, max: 12.0, unit: "m/s" },
             spells { group: "Magic", doc: "Spell ids, comma-separated: the hotbar for the player, the book for AI." },
             numbers { group: "Magic", display_name: "Knows Numbers", doc: "Measures take exact values instead of rote steps." },
+            mount { group: "Combat", display_name: "Mount", doc: "Make this a mount to ride (E climbs into the nearest saddle)." },
             health { group: "Live", read_only: true, flags: LIVE },
             stamina { group: "Live", read_only: true, flags: LIVE },
             mana { group: "Live", read_only: true, flags: LIVE },
@@ -303,6 +331,7 @@ pub fn register(registry: &mut TypeRegistry) {
                 "Emperor",
                 "Sovereign",
             ]),
+            "mount" => FieldType::Enum(&["None", "Horse", "Frost-elk", "Strider"]),
             _ => continue,
         };
     }
@@ -312,6 +341,7 @@ pub fn register(registry: &mut TypeRegistry) {
         fields {
             surface { doc: "What the ground under this entity's footprint is: grass burns, water freezes." },
             round { doc: "A disc of the footprint's width instead of a box." },
+            solid { doc: "Also a solid block: bodies, missiles and sight stop at it." },
         }
     };
     if let Some(field) = surface.fields.iter_mut().find(|f| f.name == "surface") {

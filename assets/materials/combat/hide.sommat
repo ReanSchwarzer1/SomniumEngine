@@ -1,0 +1,17 @@
+{
+  "base_color": [
+    0.3,
+    0.21,
+    0.13
+  ],
+  "opacity": 1.0,
+  "metallic": 0.0,
+  "roughness": 0.85,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "emissive_intensity": 1.0,
+  "alpha_mode": "Opaque"
+}

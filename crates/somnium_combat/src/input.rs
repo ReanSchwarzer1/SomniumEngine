@@ -15,6 +15,7 @@
 //! | `Kindle` | C | the Kindled Body on or off |
 //! | `LockOn` | Q | lock onto the enemy nearest the cursor, or let go |
 //! | `Focus` | Tab | slow time while focus lasts |
+//! | `Mount` | E | climb into the nearest saddle, or out of it |
 //!
 //! Action names are distinct from the default gameplay map's (`Move`,
 //! `Sprint`, ...) because `somnium_input` keeps one state per action name across
@@ -67,7 +68,8 @@ pub fn combat_map() -> ActionMap {
         .action(Action::digital("Art").bind(Binding::single(ControlPath::keyboard("f"))))
         .action(Action::digital("Kindle").bind(Binding::single(ControlPath::keyboard("c"))))
         .action(Action::digital("LockOn").bind(Binding::single(ControlPath::keyboard("q"))))
-        .action(Action::digital("Focus").bind(Binding::single(ControlPath::keyboard("tab"))));
+        .action(Action::digital("Focus").bind(Binding::single(ControlPath::keyboard("tab"))))
+        .action(Action::digital("Mount").bind(Binding::single(ControlPath::keyboard("e"))));
     for (i, name) in SPELL_ACTIONS.iter().enumerate() {
         let key = if i == 9 {
             "0".to_string()
@@ -211,6 +213,7 @@ impl CombatInput {
             kindle: input.just_activated("Kindle"),
             lock: input.just_activated("LockOn"),
             focus: input.just_activated("Focus"),
+            mount: input.just_activated("Mount"),
             spells,
             measure_steps: input.axis("MeasureWheel"),
             measure_cycle: input.just_activated("MeasureNext"),
