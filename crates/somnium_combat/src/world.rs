@@ -996,6 +996,17 @@ pub enum CombatEvent {
         /// Mount, or none when dismounting.
         mount: Option<CombatantId>,
     },
+    /// A brain's awareness of an enemy changed (for the host's "?" and "!").
+    Noticed {
+        /// The brain.
+        watcher: CombatantId,
+        /// Of whom.
+        target: CombatantId,
+        /// Now.
+        level: ai::Awareness,
+        /// How, if it was noticed this time rather than forgotten.
+        clue: Option<ai::Clue>,
+    },
     /// Someone whistled for a mount.
     Whistled {
         /// Who.
@@ -1024,6 +1035,9 @@ pub(crate) struct Noise {
     pub source: CombatantId,
     pub position: Vec3,
     pub loudness: f32,
+    /// World time it was made: it hangs in the air long enough for every
+    /// brain to perceive once (they perceive at ten hertz, not every step).
+    pub at: f64,
 }
 
 /// Slow-time focus.
@@ -1041,6 +1055,10 @@ pub struct CombatWorld {
     pub relations: Relations,
     /// Reactive ground, if the area has one.
     pub environment: Option<EnvironmentField>,
+    /// How dark it is, 0 (day) to 1 (under the Lid): the host copies the
+    /// scene's `TimeOfDay` eclipse here. Sight shrinks to a third in full dark
+    /// ([`crate::ai::DARK_SIGHT_LOSS`]).
+    pub darkness: f32,
     spells: BTreeMap<String, SpellAsset>,
     combatants: BTreeMap<CombatantId, Combatant>,
     next_id: u32,
@@ -1069,6 +1087,7 @@ impl CombatWorld {
             rules,
             relations: Relations::default(),
             environment: None,
+            darkness: 0.0,
             spells: BTreeMap::new(),
             combatants: BTreeMap::new(),
             next_id: 1,
@@ -1356,6 +1375,7 @@ impl CombatWorld {
                 source,
                 position,
                 loudness,
+                at: self.time,
             });
             self.events.push(CombatEvent::Noise {
                 source,
@@ -1505,7 +1525,9 @@ impl CombatWorld {
             self.integrate(dt, query, |_| true);
         }
         crate::mount::sync_riders(self);
-        self.noises.clear();
+        let heard_for = f64::from(ai::THINK_INTERVAL) * 1.5;
+        let now = self.time;
+        self.noises.retain(|n| now - n.at < heard_for);
         let ids = self.ids();
         self.tactics.update(self.time, &ids, |id| {
             self.combatants.get(&id).is_some_and(Combatant::alive)

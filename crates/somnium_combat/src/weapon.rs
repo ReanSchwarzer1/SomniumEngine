@@ -29,11 +29,13 @@ pub enum WeaponKind {
     LatticeRifle,
     /// Fists.
     Unarmed,
+    /// A beast's jaws (the rime wolf's).
+    Fangs,
 }
 
 impl WeaponKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Sword,
         Self::LanceGlaive,
         Self::Spear,
@@ -42,10 +44,11 @@ impl WeaponKind {
         Self::Bow,
         Self::LatticeRifle,
         Self::Unarmed,
+        Self::Fangs,
     ];
 
     /// Display names, in [`Self::ALL`] order.
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "Sword",
         "Lance-glaive",
         "Spear",
@@ -54,6 +57,7 @@ impl WeaponKind {
         "Bow",
         "Lattice rifle",
         "Unarmed",
+        "Fangs",
     ];
 
     /// The library weapon of this kind.
@@ -68,6 +72,7 @@ impl WeaponKind {
             Self::Bow => bow(),
             Self::LatticeRifle => lattice_rifle(),
             Self::Unarmed => unarmed(),
+            Self::Fangs => fangs(),
         }
     }
 }
@@ -684,6 +689,56 @@ pub fn unarmed() -> WeaponDef {
         guard: guard(0.25, 0.1),
         ranged: None,
         reach: 1.0,
+        backstab: 1.5,
+    }
+}
+
+/// A rime wolf's jaws: a snapping bite that bleeds and chills, and a leap
+/// from a couple of metres out (the heavy, held) that drags its prey down.
+/// No guard: a wolf dodges.
+#[must_use]
+pub fn fangs() -> WeaponDef {
+    let mut bite = MoveDef::slash("wolf_bite", 0.26, 0.1, 0.4, 0.0, 14.0);
+    bite.kind = MoveKind::Thrust;
+    bite.damage = vec![
+        DamagePart::new(DamageType::Pierce, 13.0),
+        DamagePart::new(DamageType::Frost, 3.0),
+    ];
+    bite.shape = HitShape::Sphere {
+        forward: 0.9,
+        radius: 0.55,
+    };
+    bite.status = vec![(StatusKind::Bleed, 16.0), (StatusKind::Chill, 10.0)];
+    bite.stamina = 10.0;
+    bite.lunge = 0.9;
+    bite.knockback = 0.4;
+    bite.dodge_cancel = 0.2;
+    let mut leap = MoveDef::slash("wolf_leap", 0.45, 0.14, 0.7, 0.0, 40.0);
+    leap.kind = MoveKind::Thrust;
+    leap.damage = vec![DamagePart::new(DamageType::Pierce, 20.0)];
+    leap.shape = HitShape::Sphere {
+        forward: 1.1,
+        radius: 0.7,
+    };
+    leap.status = vec![(StatusKind::Bleed, 25.0)];
+    leap.lunge = 3.0;
+    leap.heavy = true;
+    leap.stamina = 22.0;
+    WeaponDef {
+        kind: WeaponKind::Fangs,
+        name: "Fangs".into(),
+        light: vec![bite],
+        heavy: Some(leap),
+        charge: None,
+        guard: GuardDef {
+            stability: 0.0,
+            stamina_per_damage: 1.0,
+            parry_window: 0.0,
+            angle: 0.0,
+            can_parry: false,
+        },
+        ranged: None,
+        reach: 1.3,
         backstab: 1.5,
     }
 }

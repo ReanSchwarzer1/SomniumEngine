@@ -423,7 +423,8 @@ pub fn whistle(w: &mut CombatWorld, who: CombatantId) -> Option<CombatantId> {
         herd.until = now + 45.0;
         herd.owner = Some(who);
     }
-    w.noise(who, at, 0.9);
+    // Loud enough to draw a look from anyone near, not to raise the alarm.
+    w.noise(who, at, 0.45);
     w.emit(CombatEvent::Whistled { who, mount: called });
     called
 }

@@ -9,9 +9,18 @@
 //! Three layers, as in most action games:
 //!
 //! 1. **Perception** at ten hertz: sight in a cone blocked by the world and by
-//!    spell walls (Night Fang's darkness shortens it), hearing of swings,
-//!    shots and verses, and being struck. The strongest hostile becomes the
-//!    target.
+//!    spell walls (Night Fang's darkness shortens it, and so does the dark:
+//!    [`CombatWorld::darkness`]), hearing of swings, shots, verses and
+//!    footsteps, and being struck. The strongest hostile becomes the target.
+//!
+//!    Sight is not instant: a brain's **awareness** of each enemy fills while
+//!    it can see them (fast up close, slowly at the edge of sight, faster for
+//!    a running shape) and drains while it cannot. Past a third it is
+//!    suspicious and goes to look; full, it fights. Footsteps and quiet
+//!    noises only make it suspicious ("heard, not seen"); the clash of
+//!    combat, being struck or a shout alerts it at once. A blow on a brain
+//!    unaware of its striker lands [`SNEAK_ATTACK`] times as hard. Changes
+//!    of state are [`CombatEvent::Noticed`], for the host's markers.
 //! 2. **Decision**: the tree. It is reset when the situation changes (a
 //!    target is found or lost, fear sets in), since the engine's composites
 //!    resume their running child rather than re-checking priorities.
@@ -42,12 +51,17 @@
 //! | `combat.follow_leader` | near the leader | companions |
 //! | `combat.hold` | at the held point | companions under orders |
 //! | `combat.idle` | always | returns home |
+//! | `combat.pack_bite` | never (runs while there is prey) | wolves: circle, dart in on a token, bite or leap, break away |
+//!
+//! Nerve: every friend that falls within 25 m shakes a brain, and one whose
+//! profile [`Profile::breaks_with_leader`] (a wolf, a bandit) breaks and runs
+//! when its leader falls.
 use crate::geometry::{flat, planar_dir};
 use crate::spell::{Address, Bearing, SpellRequest};
 use crate::weapon::WeaponKind;
 use crate::world::{Action, CombatEvent, CombatWorld, Command, Phase, Press};
 use crate::{CombatQuery, CombatantId, Rng, TeamId};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use somnium_ai::behavior::{
     BehaviorInstance, BehaviorTree, Blackboard, Node, Status, Task, TaskHost,
 };
@@ -59,6 +73,46 @@ use std::collections::BTreeMap;
 pub const THINK_INTERVAL: f32 = 0.1;
 /// Seconds a stimulus is remembered.
 pub const MEMORY_SECONDS: f64 = 10.0;
+/// Damage multiplier for a blow on a brain unaware of its striker.
+pub const SNEAK_ATTACK: f32 = 2.5;
+/// Fraction of sight lost in full dark (under the Lid): a third remains.
+pub const DARK_SIGHT_LOSS: f32 = 0.65;
+/// Awareness at which a brain turns suspicious and goes to look.
+pub const SUSPICIOUS: f32 = 0.35;
+
+/// How much a brain knows of an enemy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Awareness {
+    /// Has not noticed.
+    Unaware,
+    /// Saw something, or heard it: looking.
+    Suspicious,
+    /// Knows, and fights.
+    Alerted,
+}
+
+impl Awareness {
+    /// The state a level (0 to 1) is in.
+    #[must_use]
+    pub fn of(level: f32) -> Self {
+        if level >= 1.0 {
+            Self::Alerted
+        } else if level >= SUSPICIOUS {
+            Self::Suspicious
+        } else {
+            Self::Unaware
+        }
+    }
+}
+
+/// How a brain came to notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Clue {
+    /// Saw them (or felt them close).
+    Seen,
+    /// Heard them: footsteps, a noise.
+    Heard,
+}
 
 /// Fighting styles.
 #[derive(
@@ -81,11 +135,13 @@ pub enum Archetype {
     Caster,
     /// Follows a leader, fights the leader's enemies, takes orders.
     Companion,
+    /// A pack hunter: circles, darts in to bite, breaks away; follows its alpha.
+    Wolf,
 }
 
 impl Archetype {
     /// Every archetype, in declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Duelist,
         Self::Spearman,
         Self::Brute,
@@ -94,10 +150,11 @@ impl Archetype {
         Self::Rifleman,
         Self::Caster,
         Self::Companion,
+        Self::Wolf,
     ];
 
     /// Display names, in [`Self::ALL`] order.
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "Duelist",
         "Spearman",
         "Brute",
@@ -106,6 +163,7 @@ impl Archetype {
         "Rifleman",
         "Caster",
         "Companion",
+        "Wolf",
     ];
 
     /// The default profile.
@@ -125,6 +183,7 @@ impl Archetype {
             combo: 2,
             spells: Vec::new(),
             leash: 0.0,
+            breaks_with_leader: false,
         };
         match self {
             Self::Duelist => Profile {
@@ -186,6 +245,22 @@ impl Archetype {
                 leash: 9.0,
                 ..base
             },
+            // Wide eyes and keen ears; a howl carries.
+            Self::Wolf => Profile {
+                band: [0.6, 1.2],
+                aggression: 0.75,
+                skill: 0.3,
+                flee_below: 0.3,
+                morale: 0.9,
+                alert_radius: 40.0,
+                sight: 26.0,
+                fov: 220.0,
+                hearing: 30.0,
+                flanker: true,
+                combo: 1,
+                breaks_with_leader: true,
+                ..base
+            },
         }
     }
 
@@ -233,6 +308,19 @@ impl Archetype {
                     Do("combat.engage"),
                 ]),
             ]),
+            Self::Wolf => {
+                return build(Sel(vec![
+                    flee(),
+                    Seq(vec![
+                        Do("combat.has_target"),
+                        Do("combat.alert_allies"),
+                        Do("combat.pack_bite"),
+                    ]),
+                    search(),
+                    // The pack trots after its alpha; the alpha keeps home.
+                    Do("combat.follow_leader"),
+                ]));
+            }
             Self::Companion => {
                 return build(Sel(vec![
                     Do("combat.hold"),
@@ -316,6 +404,9 @@ pub struct Profile {
     pub spells: Vec<String>,
     /// Companions: how far it strays from the leader.
     pub leash: f32,
+    /// Breaks and runs when its leader falls (a wolf pack, a bandit band).
+    #[serde(default)]
+    pub breaks_with_leader: bool,
 }
 
 /// A companion's standing order.
@@ -384,6 +475,8 @@ pub struct Mind {
     /// What it is doing, for debugging and Details.
     pub doing: &'static str,
     memory: StimulusMemory,
+    /// Awareness of each enemy, 0 to 1.
+    aware: BTreeMap<CombatantId, f32>,
     /// Corners, each with whether it is reached over an off-mesh link.
     route: Vec<(Vec3, bool)>,
     route_goal: Option<Vec3>,
@@ -400,6 +493,10 @@ pub struct Mind {
     ranged: bool,
     reach: f32,
     charges: bool,
+    /// Wolves: which way it circles, and until when it breaks away after a bite.
+    orbit: f32,
+    retreat_until: f64,
+    leaping: bool,
 }
 
 /// A combatant's AI.
@@ -414,7 +511,6 @@ impl Brain {
     /// A brain from its description, for the combatant `id`.
     #[must_use]
     pub fn new(desc: BrainDesc, id: CombatantId) -> Self {
-        let _ = id;
         let profile = desc.profile.unwrap_or_else(|| desc.archetype.profile());
         let tree = desc.tree.unwrap_or_else(|| desc.archetype.tree());
         Self {
@@ -431,6 +527,7 @@ impl Brain {
                 home: desc.home,
                 doing: "Idle",
                 memory: StimulusMemory::new(16, MEMORY_SECONDS).expect("valid policy"),
+                aware: BTreeMap::new(),
                 route: Vec::new(),
                 route_goal: None,
                 route_age: 0.0,
@@ -446,6 +543,9 @@ impl Brain {
                 ranged: false,
                 reach: 2.0,
                 charges: false,
+                orbit: if id.0 % 2 == 0 { 1.0 } else { -1.0 },
+                retreat_until: f64::NEG_INFINITY,
+                leaping: false,
             },
         }
     }
@@ -653,6 +753,7 @@ pub(crate) fn hurt_by(w: &mut CombatWorld, id: CombatantId, source: CombatantId)
             sensed_at: now,
             sense: Sense::Hearing,
         });
+        brain.mind.aware.insert(source, 1.0);
         brain.mind.morale = brain.mind.morale.min(c.vitals.health.fraction() + 0.35);
     }
 }
@@ -671,7 +772,52 @@ pub fn alert(w: &mut CombatWorld, id: CombatantId, target: CombatantId, at: Vec3
             sensed_at: now,
             sense: Sense::Hearing,
         });
+        brain.mind.aware.insert(target, 1.0);
         brain.mind.think = 0.0;
+    }
+}
+
+/// How aware `watcher` is of `target`, 0 to 1 (1 while fighting it); 1 for a
+/// body with no brain (the player knows).
+#[must_use]
+pub fn awareness(w: &CombatWorld, watcher: CombatantId, target: CombatantId) -> f32 {
+    w.combatant(watcher).map_or(0.0, |c| match &c.brain {
+        Some(b) if b.mind.target == Some(target) => 1.0,
+        Some(b) => b.mind.aware.get(&target).copied().unwrap_or(0.0),
+        None => 1.0,
+    })
+}
+
+/// Whether a blow from `source` would take `watcher` unawares.
+pub(crate) fn unaware_of(w: &CombatWorld, watcher: CombatantId, source: CombatantId) -> bool {
+    w.combatant(watcher)
+        .and_then(|c| c.brain.as_ref())
+        .is_some_and(|b| b.mind.target.is_none() && awareness(w, watcher, source) < 1.0)
+}
+
+/// Someone fell: friends within 25 m lose a fifth of their nerve, and those
+/// that break with their leader ([`Profile::breaks_with_leader`]) run when it
+/// was theirs.
+pub(crate) fn fell(w: &mut CombatWorld, dead: CombatantId) {
+    let Some(at) = w.combatant(dead).map(|d| d.position) else {
+        return;
+    };
+    let shaken: Vec<CombatantId> = w
+        .combatants()
+        .filter(|c| c.id != dead && c.alive() && c.brain.is_some())
+        .filter(|c| w.allied(c.id, dead) && flat(c.position - at).length() < 25.0)
+        .map(|c| c.id)
+        .collect();
+    for id in shaken {
+        if let Some(brain) = w.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
+            let mind = &mut brain.mind;
+            if mind.leader == Some(dead) && mind.profile.breaks_with_leader {
+                mind.fleeing = true;
+                mind.morale = 0.0;
+            } else {
+                mind.morale = (mind.morale - 0.2).max(0.0);
+            }
+        }
     }
 }
 
@@ -1108,6 +1254,76 @@ impl<Q: CombatQuery> Host<'_, Q> {
         Status::Running
     }
 
+    /// A wolf's way: circle the prey a few metres out, dart in when the pack
+    /// gives an opening (an attack token), bite (or leap, from behind and a
+    /// couple of metres off), and break away to the ring again.
+    fn pack_bite(&mut self) -> Status {
+        let Some(t) = self.target() else {
+            self.mind.attacking = false;
+            return Status::Failure;
+        };
+        let d = self.distance(&t);
+        self.face(t.chest);
+        let ring = self.band()[1] + 2.8;
+        if self.mind.attacking {
+            return match self.action {
+                Action::Attack(a) => {
+                    // A leap is the heavy: hold through the windup until it turns.
+                    if self.mind.leaping && a.phase == Phase::Windup && !a.def.heavy {
+                        self.cmd.attack = Press::hold();
+                    }
+                    Status::Running
+                }
+                Action::Idle | Action::Guard { .. } => {
+                    self.mind.attacking = false;
+                    self.mind.leaping = false;
+                    self.tactics.release(t.id, self.me.id);
+                    self.mind.retreat_until = self.now + 0.8 + f64::from(self.rng.unit()) * 0.8;
+                    Status::Running
+                }
+                _ => Status::Running,
+            };
+        }
+        if self.now < self.mind.retreat_until {
+            self.mind.doing = "Breaking away";
+            let away = planar_dir(self.me.position - t.position, -self.me.facing);
+            self.go(t.position + away * ring, true);
+            return Status::Running;
+        }
+        if !self.me.busy
+            && self
+                .tactics
+                .request(t.id, self.me.id, self.max_attackers, self.now)
+        {
+            if d <= self.mind.reach + 0.2 {
+                self.cmd.attack = Press::tap();
+                self.mind.attacking = true;
+                self.mind.doing = "Biting";
+                return Status::Running;
+            }
+            let from_behind = t
+                .facing
+                .dot(planar_dir(self.me.position - t.position, t.facing))
+                < 0.3;
+            if d <= 3.2 && from_behind && self.caster.weapon.heavy.is_some() {
+                self.cmd.attack = Press::tap();
+                self.mind.attacking = true;
+                self.mind.leaping = true;
+                self.mind.doing = "Leaping";
+                return Status::Running;
+            }
+            self.mind.doing = "Darting in";
+            self.go(t.position, true);
+            return Status::Running;
+        }
+        // No opening: circle at the ring, facing the prey.
+        self.mind.doing = "Circling";
+        let from = planar_dir(self.me.position - t.position, -t.facing);
+        let ahead = Quat::from_rotation_y(self.mind.orbit * 0.6) * from;
+        self.go(t.position + ahead * ring, false);
+        Status::Running
+    }
+
     fn follow(&mut self) -> Status {
         let Some(leader) = self.mind.leader.and_then(|l| self.find(l)).copied() else {
             return self.idle();
@@ -1247,6 +1463,7 @@ impl<Q: CombatQuery> TaskHost for Host<'_, Q> {
                 }
             }
             "combat.follow_leader" => self.follow(),
+            "combat.pack_bite" => self.pack_bite(),
             "combat.hold" => match self.mind.order {
                 Order::Hold(p) => {
                     self.mind.doing = "Holding";
@@ -1279,7 +1496,7 @@ impl<Q: CombatQuery> TaskHost for Host<'_, Q> {
     }
 
     fn cancel(&mut self, _script: bool, name: &str, _board: &mut Blackboard) {
-        if matches!(name, "combat.attack" | "combat.shoot")
+        if matches!(name, "combat.attack" | "combat.shoot" | "combat.pack_bite")
             && let Some(t) = self.mind.target
         {
             self.tactics.release(t, self.me.id);
@@ -1289,10 +1506,21 @@ impl<Q: CombatQuery> TaskHost for Host<'_, Q> {
     }
 }
 
-/// Perceive: update memory from sight and sound, then pick the target.
-fn perceive(w: &CombatWorld, me: &Seen, mind: &mut Mind, view: &[Seen], query: &impl CombatQuery) {
+/// Perceive: update awareness and memory from sight and sound, then pick the
+/// target. Changes of awareness become [`CombatEvent::Noticed`].
+fn perceive(
+    w: &CombatWorld,
+    me: &Seen,
+    mind: &mut Mind,
+    view: &[Seen],
+    query: &impl CombatQuery,
+    events: &mut Vec<CombatEvent>,
+) {
     let now = w.time();
-    let p = &mind.profile;
+    let p = mind.profile.clone();
+    let dark = 1.0 - DARK_SIGHT_LOSS * w.darkness.clamp(0.0, 1.0);
+    // Each enemy's new awareness and how it was noticed this tick.
+    let mut noticed: BTreeMap<CombatantId, (f32, Option<Clue>)> = BTreeMap::new();
     let walls: Vec<_> = w
         .walls()
         .iter()
@@ -1306,7 +1534,7 @@ fn perceive(w: &CombatWorld, me: &Seen, mind: &mut Mind, view: &[Seen], query: &
         let observer = Observer {
             position: me.eye,
             forward: me.facing,
-            sight_range: p.sight * if other.concealed { 0.4 } else { 1.0 },
+            sight_range: p.sight * dark * if other.concealed { 0.4 } else { 1.0 },
             half_angle_degrees: (p.fov * 0.5).clamp(1.0, 180.0),
             hearing_range: p.hearing,
         };
@@ -1318,10 +1546,32 @@ fn perceive(w: &CombatWorld, me: &Seen, mind: &mut Mind, view: &[Seen], query: &
                     .try_normalize()
                     .is_some_and(|d| walls.iter().any(|o| o.ray(a, d, len, 0.0).is_some()))
         });
+        let d = flat(other.position - me.position).length();
+        let speed = flat(other.velocity).length();
+        let engaged = mind.target == Some(other.id);
+        let mut level = mind.aware.get(&other.id).copied().unwrap_or(0.0);
+        let mut clue = None;
         if let Some(s) = seen {
-            mind.memory.remember(s);
-        } else if flat(other.position - me.position).length() < 1.6 {
+            // Up close it is quick, at the edge of sight slow; a running
+            // shape catches the eye. Someone already fighting it knows.
+            let range = observer.sight_range.max(0.1);
+            let moving = if speed > 4.0 { 1.6 } else { 1.0 };
+            let rate = (2.2 * (1.0 - d / range).max(0.0) + 0.35) * moving;
+            level = if engaged {
+                1.0
+            } else {
+                level + rate * THINK_INTERVAL
+            };
+            clue = Some(Clue::Seen);
+            if level >= 1.0 {
+                mind.memory.remember(s);
+            } else if level >= SUSPICIOUS {
+                mind.lead = Some(other.position);
+            }
+        } else if d < me.radius + other.radius + 0.3 {
             // A body against your back is felt.
+            level = 1.0;
+            clue = Some(Clue::Seen);
             mind.memory.remember(Stimulus {
                 source: u64::from(other.id.0),
                 position: other.position,
@@ -1329,7 +1579,28 @@ fn perceive(w: &CombatWorld, me: &Seen, mind: &mut Mind, view: &[Seen], query: &
                 sensed_at: now,
                 sense: Sense::Sight,
             });
+        } else {
+            // Footsteps: a walk is heard a few metres off, a run across a
+            // yard, hooves far. Heard is not seen: it goes to look.
+            let loud = if other.mounted && speed > 1.0 {
+                0.9
+            } else if speed > 4.5 {
+                0.55
+            } else if speed > 0.6 {
+                0.15
+            } else {
+                0.0
+            };
+            if loud > 0.0 && d <= p.hearing * loud && !engaged {
+                level = level.max(0.5);
+                clue = Some(Clue::Heard);
+                mind.lead = Some(other.position);
+            }
         }
+        if clue.is_none() && !engaged {
+            level -= 0.15 * THINK_INTERVAL;
+        }
+        noticed.insert(other.id, (level.clamp(0.0, 1.0), clue));
     }
     for noise in &w.noises {
         if noise.source == me.id || !w.hostile(me.id, noise.source) {
@@ -1348,8 +1619,33 @@ fn perceive(w: &CombatWorld, me: &Seen, mind: &mut Mind, view: &[Seen], query: &
             noise.loudness.max(0.05),
             now,
         ) {
-            mind.memory.remember(s);
+            // The clash of a fight alerts; a quieter sound (a whistle, a
+            // thrown stone) only draws a look.
+            let entry = noticed
+                .entry(noise.source)
+                .or_insert_with(|| (mind.aware.get(&noise.source).copied().unwrap_or(0.0), None));
+            if noise.loudness >= 0.5 {
+                mind.memory.remember(s);
+                entry.0 = 1.0;
+            } else {
+                entry.0 = entry.0.max(0.5);
+                mind.lead = Some(noise.position);
+            }
+            entry.1 = entry.1.or(Some(Clue::Heard));
         }
+    }
+    for (id, (level, clue)) in noticed {
+        let before = Awareness::of(mind.aware.get(&id).copied().unwrap_or(0.0));
+        let after = Awareness::of(level);
+        if before != after {
+            events.push(CombatEvent::Noticed {
+                watcher: me.id,
+                target: id,
+                level: after,
+                clue,
+            });
+        }
+        mind.aware.insert(id, level);
     }
     mind.memory.expire(now);
     // Companions fight whoever threatens their leader first.
@@ -1429,11 +1725,15 @@ fn reflex(
         return false;
     }
     let parry_window = c.weapon.guard.parry_window * c.sword.map_or(1.0, |s| s.parry_scale());
+    // Only a blow it knows is coming: the unaware are taken unawares.
+    let knows = |who: CombatantId| {
+        mind.target == Some(who) || mind.aware.get(&who).is_some_and(|a| *a >= 1.0)
+    };
     for other in view {
         let Some((left, dir, reach, serial)) = other.windup else {
             continue;
         };
-        if !w.hostile(me.id, other.id) {
+        if !w.hostile(me.id, other.id) || !knows(other.id) {
             continue;
         }
         let to_me = flat(me.position - other.position);
@@ -1458,7 +1758,9 @@ fn reflex(
         }
         let skill = mind.profile.skill;
         let roll = rng.unit();
-        if roll < skill * 0.6 {
+        // A beast with no guard (a wolf) dodges instead.
+        let can_guard = c.weapon.guard.can_parry || c.weapon.guard.stability > 0.0;
+        if can_guard && roll < skill * 0.6 {
             cmd.guard = Press::tap();
             mind.guard_until = now + f64::from(left + 0.35);
             mind.doing = "Guarding";
@@ -1474,7 +1776,7 @@ fn reflex(
     }
     // Missiles in flight toward me.
     for p in w.projectiles() {
-        if p.owner.is_none_or(|o| !w.hostile(me.id, o)) {
+        if p.owner.is_none_or(|o| !w.hostile(me.id, o) || !knows(o)) {
             continue;
         }
         let to = me.chest - p.position;
@@ -1575,7 +1877,7 @@ pub(crate) fn think(
         if brain.mind.think <= 0.0 {
             // Staggered by id so a crowd does not all think on one step.
             brain.mind.think += THINK_INTERVAL + (id.0 % 5) as f32 * 0.004;
-            perceive(w, &me, &mut brain.mind, &view, query);
+            perceive(w, &me, &mut brain.mind, &view, query, &mut events);
         }
         let reflexed = reflex(w, &me, &mut brain.mind, &view, &mut cmd, &mut rng);
         let situation = u8::from(brain.mind.target.is_some())
@@ -1683,6 +1985,7 @@ pub(crate) fn think(
                     sensed_at: now,
                     sense: Sense::Hearing,
                 });
+                brain.mind.aware.insert(shout.target, 1.0);
                 brain.mind.think = 0.0;
                 heard = true;
             }
@@ -1721,6 +2024,7 @@ mod tests {
             "combat.follow_leader",
             "combat.hold",
             "combat.idle",
+            "combat.pack_bite",
         ];
         for a in Archetype::ALL {
             let tree = a.tree();

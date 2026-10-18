@@ -184,6 +184,13 @@ impl CombatantComponent {
             self.poise.max(1.0),
         );
         desc.resist = Resistances::default().with_armor(self.armor.max(0.0));
+        if self.archetype() == crate::ai::Archetype::Wolf {
+            // A rime wolf's body and coat; the component's pools still rule.
+            let (vitals, speed) = (desc.vitals.clone(), desc.body.speed);
+            crate::wilds::wolf_body(&mut desc, false);
+            desc.vitals = vitals;
+            desc.body.speed = speed;
+        }
         if self.school > 0 {
             let school = SwordSchool::ALL[((self.school - 1) as usize).min(3)];
             desc.swordsmanship = Some(Swordsmanship::with_forms(school, self.forms as usize, rank));

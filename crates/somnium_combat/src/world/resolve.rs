@@ -69,6 +69,15 @@ fn resolve_hit(w: &mut CombatWorld, target: CombatantId, mut hit: Hit, part: Opt
         return;
     }
 
+    // Struck unawares: a blow the target never knew was coming lands hard.
+    if !passive
+        && let Some(source) = hit.source
+        && crate::ai::unaware_of(w, target, source)
+    {
+        hit.scale *= crate::ai::SNEAK_ATTACK;
+        hit.flags |= HitFlags::CRITICAL;
+    }
+
     let attacker = hit
         .source
         .and_then(|s| w.get(s))
@@ -412,6 +421,7 @@ fn check_death(w: &mut CombatWorld, id: CombatantId, hit: &Hit) -> bool {
         impulse,
         point,
     });
+    crate::ai::fell(w, id);
     // A dead mount throws its rider; a dead rider falls from the saddle.
     if let Some(r) = rider {
         crate::mount::dismount(w, r);

@@ -47,6 +47,7 @@ pub mod status;
 pub mod team;
 pub mod vitals;
 pub mod weapon;
+pub mod wilds;
 pub mod world;
 
 pub use damage::{DamagePart, DamageType, Hit, HitFlags, Resistances};
