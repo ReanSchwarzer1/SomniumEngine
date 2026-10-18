@@ -11,10 +11,11 @@
 //! for it. With **LOD 1** and **LOD 2** set (the same skeleton and clips, fewer
 //! triangles: WS3's `<name>_lod1.glb`, `<name>_lod2.glb`), a body draws them
 //! beyond their distances, switching a couple of metres past each line and
-//! back a couple short of it so a body on the line does not flicker. A count
-//! budget caps the dear levels whatever the distances: only the nearest 24
-//! bodies draw LOD 0 and the next 96 LOD 1 (the renderer skins about 2 M
-//! vertices, WS3's crowd contract), so a packed market stays inside it.
+//! back a couple short of it so a body on the line does not flicker. A budget
+//! of posed vertices holds whatever the distances (the renderer skins about
+//! 2 M; WS3's crowd contract): nearest first, each body keeps the level its
+//! distance wants only while what is left still covers everyone behind it at
+//! their coarsest, so a packed market is coarsened from the back.
 //!
 //! A **Skinned Socket** (`hello.SkinnedSocket`) on an entity under a Skinned
 //! Body makes it follow one of the body's joints (`weapon_r`, `sheath`,
@@ -199,6 +200,8 @@ struct Shared {
     /// Each skinned mesh: its index in the scene, its rest allocation, its material.
     meshes: Vec<(usize, MeshAllocation, u32)>,
     users: usize,
+    /// Posed vertices one body of it costs.
+    vertices: u32,
 }
 
 struct Body {
@@ -226,14 +229,17 @@ struct Stats {
     bodies: usize,
     drawn: usize,
     sampled: usize,
+    /// Posed vertices the drawn bodies hold.
+    posed: u32,
     sample_ms: f64,
     frames: u32,
     reported: f32,
 }
 
 /// The bodies, and the glTFs they share.
-#[derive(Default)]
 pub struct SkinnedBodies {
+    /// Posed vertices all skinned bodies may hold together.
+    pub vertex_budget: u32,
     shared: HashMap<AssetId, Shared>,
     bodies: HashMap<Entity, Body>,
     failed: HashMap<AssetId, String>,
@@ -243,6 +249,21 @@ pub struct SkinnedBodies {
     /// were found at.
     subtrees: HashMap<Entity, Vec<Entity>>,
     subtrees_for: usize,
+}
+
+impl Default for SkinnedBodies {
+    fn default() -> Self {
+        Self {
+            vertex_budget: VERTEX_BUDGET,
+            shared: HashMap::new(),
+            bodies: HashMap::new(),
+            failed: HashMap::new(),
+            lod: AnimationLod::default(),
+            stats: Stats::default(),
+            subtrees: HashMap::new(),
+            subtrees_for: 0,
+        }
+    }
 }
 
 fn world_matrix(world: &World, e: Entity) -> Mat4 {
@@ -294,10 +315,15 @@ fn load(
     if meshes.is_empty() {
         return Err("no skinned meshes".into());
     }
+    let vertices = meshes
+        .iter()
+        .map(|(i, _, _)| asset.scene.meshes[*i].vertices.len() as u32)
+        .sum();
     Ok(Shared {
         asset,
         meshes,
         users: 0,
+        vertices,
     })
 }
 
@@ -312,22 +338,35 @@ fn levels(b: &SkinnedBody) -> Vec<AssetId> {
         .collect()
 }
 
-/// The most bodies drawing LOD 0, and LOD 1, the nearest first.
-const LOD0_MOST: usize = 24;
-const LOD1_MOST: usize = 96;
+/// Posed vertices for every skinned body together, by default: WS3's crowd
+/// contract gives the renderer about 2 M, and the cast and fighters need the rest.
+const VERTEX_BUDGET: u32 = 1_600_000;
 
-/// The finest level the count budget allows the `rank`-th nearest body: LOD 0
-/// for the nearest [`LOD0_MOST`], LOD 1 for the next [`LOD1_MOST`], LOD 2 for
-/// the rest. A body keeps a finer level two places past its line, so two
-/// neighbours at the line do not trade every frame.
-fn budget_level(rank: usize, current: usize) -> usize {
-    let lines = [LOD0_MOST, LOD0_MOST + LOD1_MOST];
-    let want = lines.iter().filter(|line| rank >= **line).count();
-    if want > current && current < lines.len() && rank < lines[current] + 2 {
-        current
-    } else {
-        want
-    }
+/// Levels for bodies in nearest-first order, each wanting `wants[i]` (its
+/// distance's level) and costing `sizes[i][level]` posed vertices. Each keeps
+/// the level it wants while what is left still covers everyone behind it at
+/// their coarsest, else the finest that does; when even everyone's coarsest
+/// does not fit, all are at their coarsest.
+// ponytail: a body near the budget's edge can flip level when someone ahead
+// moves; add slack (a small reserve kept per body) if it shows.
+fn fit(budget: u32, wants: &[usize], sizes: &[Vec<u32>]) -> Vec<usize> {
+    let coarsest = |s: &[u32]| i64::from(s.last().copied().unwrap_or(0));
+    let mut spare = i64::from(budget) - sizes.iter().map(|s| coarsest(s)).sum::<i64>();
+    wants
+        .iter()
+        .zip(sizes)
+        .map(|(&want, s)| {
+            let last = s.len().saturating_sub(1);
+            let mut level = want.min(last);
+            while level < last && i64::from(s[level]) - coarsest(s) > spare {
+                level += 1;
+            }
+            if let Some(size) = s.get(level) {
+                spare -= i64::from(*size) - coarsest(s);
+            }
+            level
+        })
+        .collect()
 }
 
 /// Metres past a line before a body switches level (and short of it before it
@@ -435,6 +474,7 @@ impl SkinnedBodies {
             "sampled": s.sampled,
             "sample_ms": s.sample_ms,
             "sources": self.shared.len(),
+            "posed_vertices": [s.posed, self.vertex_budget],
             "errors": self.failed.values().collect::<Vec<_>>(),
         })
     }
@@ -473,11 +513,15 @@ impl SkinnedBodies {
                 }
             }
         }
+        // A source stays while any body could draw it: every level is kept, so
+        // the budget knows each one's size.
+        let wanted_ids: std::collections::HashSet<AssetId> =
+            now.values().flatten().copied().collect();
         let unused: Vec<AssetId> = self
             .shared
-            .iter()
-            .filter(|(_, s)| s.users == 0)
-            .map(|(id, _)| *id)
+            .keys()
+            .filter(|id| !wanted_ids.contains(id))
+            .copied()
             .collect();
         for id in unused {
             if let Some(shared) = self.shared.remove(&id) {
@@ -487,49 +531,68 @@ impl SkinnedBodies {
             }
         }
         let started = Instant::now();
-        let (mut drawn, mut sampled) = (0, 0);
-        // Nearest first, for the count budget.
-        let mut order: Vec<(f32, Entity)> = wanted
+        let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
+        for id in wanted_ids {
+            if self.shared.contains_key(&id) || self.failed.contains_key(&id) {
+                continue;
+            }
+            let Some(record) = ctx.ui.asset_record(id) else {
+                continue;
+            };
+            match load(gpu, r, &record.absolute_path) {
+                Ok(shared) => {
+                    info!(clips = ?shared.asset.clips.keys().collect::<Vec<_>>(), "skinned body source loaded");
+                    self.shared.insert(id, shared);
+                }
+                Err(error) => {
+                    warn!(%error, "skinned body source failed");
+                    self.failed.insert(id, error);
+                }
+            }
+        }
+        // Each drawn body's level: its distance's, coarsened from the back until
+        // the crowd fits the vertex budget.
+        let mut plan: Vec<(f32, Entity, usize, Vec<u32>)> = wanted
             .iter()
-            .map(|(e, _, m)| (m.w_axis.truncate().distance(camera), *e))
+            .filter_map(|(e, b, m)| {
+                let distance = m.w_axis.truncate().distance(camera);
+                let sizes: Vec<u32> = levels(b)
+                    .iter()
+                    .map_while(|id| self.shared.get(id).map(|s| s.vertices))
+                    .collect();
+                if distance > self.lod.cull || sizes.is_empty() {
+                    return None;
+                }
+                let current = self.bodies.get(e).map_or(0, |x| x.level);
+                let lines = [b.lod1_beyond, b.lod2_beyond];
+                Some((
+                    distance,
+                    *e,
+                    level_for(distance, current, lines, sizes.len()),
+                    sizes,
+                ))
+            })
             .collect();
-        order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let rank: HashMap<Entity, usize> = order
+        plan.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let wants: Vec<usize> = plan.iter().map(|p| p.2).collect();
+        let sizes: Vec<Vec<u32>> = plan.iter().map(|p| p.3.clone()).collect();
+        let fitted: HashMap<Entity, usize> = plan
             .iter()
-            .enumerate()
-            .map(|(i, (_, e))| (*e, i))
+            .zip(fit(self.vertex_budget, &wants, &sizes))
+            .map(|(p, level)| (p.1, level))
             .collect();
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
-            let current = self.bodies.get(&e).map_or(0, |b| b.level);
-            let level = level_for(
-                distance,
-                current,
-                [settings.lod1_beyond, settings.lod2_beyond],
-                ids.len(),
-            )
-            .max(budget_level(rank[&e], current))
-            .min(ids.len() - 1);
+            // Culled (or not loaded): the level it had; it is not drawn.
+            let level = fitted
+                .get(&e)
+                .copied()
+                .unwrap_or_else(|| self.bodies.get(&e).map_or(0, |b| b.level))
+                .min(ids.len() - 1);
             let id = ids[level];
             if !self.shared.contains_key(&id) {
-                if self.failed.contains_key(&id) {
-                    continue;
-                }
-                let Some(record) = ctx.ui.asset_record(id) else {
-                    continue;
-                };
-                match load(gpu, r, &record.absolute_path) {
-                    Ok(shared) => {
-                        info!(clips = ?shared.asset.clips.keys().collect::<Vec<_>>(), "skinned body source loaded");
-                        self.shared.insert(id, shared);
-                    }
-                    Err(error) => {
-                        warn!(%error, "skinned body source failed");
-                        self.failed.insert(id, error);
-                        continue;
-                    }
-                }
+                continue;
             }
             // Moving to another level: give the old one's posed vertices back.
             if let Some(body) = self.bodies.get_mut(&e)
@@ -645,6 +708,7 @@ impl SkinnedBodies {
                 });
             }
             drawn += 1;
+            posed += shared.vertices;
         }
         if drawn > 0 {
             r.invalidate_shadow_casters();
@@ -653,6 +717,7 @@ impl SkinnedBodies {
         let s = &mut self.stats;
         s.bodies = self.bodies.len();
         s.drawn = drawn;
+        s.posed = posed;
         s.sampled = sampled;
         s.frames += 1;
         let k = 1.0 / f64::from(s.frames.min(120));
@@ -743,6 +808,7 @@ mod tests {
                 asset,
                 meshes: Vec::new(),
                 users: 1,
+                vertices: 0,
             },
         );
         bodies.bodies.insert(
@@ -768,20 +834,36 @@ mod tests {
         assert!(at(pommel).abs_diff_eq(below, 1e-5), "the subtree follows");
     }
 
-    /// The count budget: the nearest 24 at LOD 0, the next 96 at LOD 1, the
-    /// rest at LOD 2, with two places of slack before a body is moved coarser.
+    /// The vertex budget coarsens from the back: the nearest keep what their
+    /// distance wants while the rest still fit at their coarsest.
     #[test]
-    fn the_budget_keeps_the_dear_levels_for_the_nearest() {
-        assert_eq!(budget_level(0, 0), 0);
-        assert_eq!(budget_level(23, 0), 0);
-        assert_eq!(budget_level(24, 1), 1, "past the line, already coarser");
-        assert_eq!(budget_level(24, 0), 0, "within the slack");
-        assert_eq!(budget_level(26, 0), 1);
-        assert_eq!(budget_level(119, 1), 1);
-        assert_eq!(budget_level(121, 1), 1, "within the slack");
-        assert_eq!(budget_level(122, 1), 2);
-        assert_eq!(budget_level(5, 2), 0, "nearer is finer at once");
-        assert_eq!(budget_level(500, 0), 2);
+    fn the_vertex_budget_coarsens_from_the_back() {
+        // WS3's crowd adult: 52k, 20.5k and 7.8k posed vertices.
+        let adult = vec![52_000, 20_500, 7_800];
+        let wants = vec![0; 160];
+        let sizes = vec![adult.clone(); 160];
+        let levels = fit(2_000_000, &wants, &sizes);
+        let total: u32 = levels.iter().zip(&sizes).map(|(l, s)| s[*l]).sum();
+        assert!(total <= 2_000_000, "{total}");
+        assert!(levels.windows(2).all(|w| w[0] <= w[1]), "finer in front");
+        assert_eq!(levels[0], 0, "the nearest keep full detail");
+        assert_eq!(*levels.last().unwrap(), 2, "the back is coarsened");
+        // Plenty: everyone as their distance wants.
+        assert_eq!(
+            fit(
+                u32::MAX,
+                &[0, 1, 2],
+                &[adult.clone(), adult.clone(), adult.clone()]
+            ),
+            vec![0, 1, 2]
+        );
+        // Not even the coarsest fit: all coarsest.
+        assert_eq!(
+            fit(10, &[0, 0], &[adult.clone(), adult.clone()]),
+            vec![2, 2]
+        );
+        // A body with one level never moves.
+        assert_eq!(fit(0, &[0], &[vec![9_000]]), vec![0]);
     }
 
     /// Levels switch past each line with some slack either way, and never to

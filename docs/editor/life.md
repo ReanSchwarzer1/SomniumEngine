@@ -57,7 +57,7 @@ Measured in a release build (the 150-home village, 344 agents): life costs about
   - A file is read once however many bodies use it.
   - Far bodies are posed less often. Past 160 m they are not drawn and cost the GPU nothing.
   - **LOD 1** and **LOD 2** (lighter files with the same skeleton and clips) draw beyond their distances (20 m and 60 m by default).
-  - However close they stand, only the nearest 24 bodies draw full detail and the next 96 LOD 1, so a packed market stays inside the renderer's skinning budget.
+  - However close they stand, they keep within a budget of posed vertices (1.6 M by default; the renderer skins about 2 M): the nearest keep full detail, and a packed market is drawn lighter from the back. The `skinned` state reports the vertices in use against the budget.
 - **Skinned Socket**, on an entity under a Skinned Body, makes that entity follow one of the body's joints (`weapon_r`, `sheath`, `back`). The entity's own Transform is its offset from the joint. Put a sword under it and the sword stays in the hand.
 
 ## For captures
