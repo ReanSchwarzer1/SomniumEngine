@@ -65,6 +65,7 @@ pub mod editor_commands;
 mod editor_gizmo;
 pub mod error;
 pub mod event;
+mod foliage_batches;
 mod foliage_grid;
 mod foliage_palette;
 pub mod foliage_visibility;
