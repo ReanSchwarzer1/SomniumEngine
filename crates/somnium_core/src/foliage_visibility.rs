@@ -1,7 +1,7 @@
 //! Distance policy for imported plant hierarchies, shared by game render adapters.
 use crate::{FoliageComponent, ImportedMesh, Parent, Transform, WorldTransform};
 use glam::{Mat4, Vec3};
-use somnium_ecs::{Entity, World};
+use somnium_ecs::{Archetype, ComponentId, Entity, World};
 
 /// `None` omits an imported foliage draw; `Some` carries its shadow eligibility.
 /// Untagged meshes are unchanged. This only controls graphics submission and
@@ -96,6 +96,107 @@ pub fn draw_policy(
     ImportedDraw::Visible { casts_shadow }
 }
 
+/// [`imported_draw`] for a whole draw loop (open-world render scale, 19 Oct 2026): the same verdicts, with each
+/// parent's foliage owner and each owner's verdict found once a frame instead of once per mesh. A building's forty
+/// parts share one ancestry, which `imported_draw` walks forty times. In a region's mesh loop that walk was most of the
+/// frame: 18 of 23 ms at 73,600 mesh entities in release (`tests/draw_loop_scale.rs`). Call [`Self::begin_frame`]
+/// before each loop; within a frame the world and the camera must not change.
+///
+/// Differs from `imported_draw` only past 63 ancestors, where both give up (the parent's walk starts one level up).
+#[derive(Default)]
+pub struct ImportedDraws {
+    owners: std::collections::HashMap<Entity, Option<Entity>, EntityHash>,
+    verdicts: std::collections::HashMap<Entity, Option<bool>, EntityHash>,
+}
+
+impl ImportedDraws {
+    /// Forget last frame's owners and verdicts.
+    pub fn begin_frame(&mut self) {
+        self.owners.clear();
+        self.verdicts.clear();
+    }
+
+    /// [`imported_draw`]'s verdict for `entity` this frame.
+    pub fn draw(&mut self, world: &World, entity: Entity, camera: Vec3) -> Option<bool> {
+        if world.get::<ImportedMesh>(entity).is_none() {
+            return Some(true);
+        }
+        let own = world.get::<FoliageComponent>(entity).is_some_and(|f| f.enabled);
+        let parent = world.get::<Parent>(entity).map(|p| p.entity);
+        self.verdict(world, entity, own, parent, camera)
+    }
+
+    /// [`Self::draw`] for row `row` of `archetype`, the draw loop's own iteration: the row's components are read from
+    /// its columns, in order, instead of looked up through the world per entity.
+    pub fn draw_row(&mut self, world: &World, archetype: &Archetype, row: usize, camera: Vec3) -> Option<bool> {
+        if archetype.column_index(ComponentId::of::<ImportedMesh>()).is_none() {
+            return Some(true);
+        }
+        // SAFETY: each column is the one `column_index` found for that component's id, and `row` is the caller's row
+        // of this archetype.
+        let own = archetype
+            .column_index(ComponentId::of::<FoliageComponent>())
+            .is_some_and(|c| unsafe { archetype.column(c).get::<FoliageComponent>(row) }.enabled);
+        let parent = archetype
+            .column_index(ComponentId::of::<Parent>())
+            .map(|c| unsafe { archetype.column(c).get::<Parent>(row) }.entity);
+        self.verdict(world, archetype.entities()[row], own, parent, camera)
+    }
+
+    fn verdict(&mut self, world: &World, entity: Entity, own: bool, parent: Option<Entity>, camera: Vec3) -> Option<bool> {
+        let owner = if own {
+            Some(entity)
+        } else {
+            let Some(parent) = parent else {
+                return Some(true);
+            };
+            *self.owners.entry(parent).or_insert_with(|| foliage_owner(world, parent))
+        };
+        let Some(owner) = owner else {
+            return Some(true);
+        };
+        *self.verdicts.entry(owner).or_insert_with(|| {
+            let Some(position) = world_position(world, owner) else {
+                return Some(true);
+            };
+            let foliage = world.get::<FoliageComponent>(owner).expect("owner carries foliage");
+            distance_policy(foliage, position, camera, 1.0, 1.0)
+        })
+    }
+}
+
+/// A multiply-rotate hash for entity keys: `ImportedDraws` looks one up per mesh per frame.
+#[derive(Default, Clone, Copy)]
+pub struct EntityHash;
+
+impl std::hash::BuildHasher for EntityHash {
+    type Hasher = EntityHasher;
+    fn build_hasher(&self) -> EntityHasher {
+        EntityHasher(0)
+    }
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct EntityHasher(u64);
+
+impl std::hash::Hasher for EntityHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+    fn write_u32(&mut self, value: u32) {
+        self.write_u64(u64::from(value));
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
 /// World position of `entity`: its `WorldTransform` if it has one, else its
 /// local transforms composed up to the nearest ancestor that has one.
 pub fn world_position(world: &World, mut entity: Entity) -> Option<Vec3> {
@@ -117,6 +218,54 @@ pub fn world_position(world: &World, mut entity: Entity) -> Option<Vec3> {
 mod tests {
     use super::*;
     use crate::FoliageComponent;
+
+    /// `ImportedDraws` against `imported_draw` for every entity of a mixed world, from several cameras.
+    #[test]
+    fn the_frame_cache_gives_the_same_verdicts() {
+        let mut world = World::new();
+        let near_far = plant(&mut world, 10.0, 60.0);
+        let near_far_root = world.get::<Parent>(near_far).unwrap().entity;
+        // Siblings under the same root, a mesh that is not imported, and a disabled foliage root.
+        let sibling = world.spawn((Transform::default(), Parent { entity: near_far_root }, ImportedMesh::default()));
+        let plain = world.spawn((Transform::default(), Parent { entity: near_far_root }));
+        let off_root = world.spawn((
+            Transform::from_translation(Vec3::new(-30.0, 0.0, 5.0)),
+            FoliageComponent { enabled: false, cull_distance: 1.0, ..Default::default() },
+        ));
+        let under_off = world.spawn((Transform::default(), Parent { entity: off_root }, ImportedMesh::default()));
+        // A house: root, a level, parts; no foliage above them.
+        let house = world.spawn((Transform::from_translation(Vec3::new(5.0, 0.0, 5.0)),));
+        let level = world.spawn((Transform::default(), Parent { entity: house }));
+        let part = world.spawn((Transform::default(), Parent { entity: level }, ImportedMesh::default()));
+        // A mesh that is itself the foliage, and one whose parent was despawned.
+        let own = world.spawn((
+            Transform::from_translation(Vec3::new(0.0, 0.0, 200.0)),
+            ImportedMesh::default(),
+            FoliageComponent { enabled: true, cull_distance: 100.0, ..Default::default() },
+        ));
+        let gone = world.spawn((Transform::default(),));
+        let orphan = world.spawn((Transform::default(), Parent { entity: gone }, ImportedMesh::default()));
+        world.despawn(gone);
+        let dangling = world.spawn((Transform::default(), Parent { entity: Entity::DANGLING }, ImportedMesh::default()));
+        let all = [near_far, sibling, plain, under_off, part, own, orphan, dangling];
+        let mut cache = ImportedDraws::default();
+        for camera in [Vec3::ZERO, Vec3::new(50.0, 3.0, 0.0), Vec3::new(45.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 400.0)] {
+            cache.begin_frame();
+            for entity in all {
+                assert_eq!(cache.draw(&world, entity, camera), imported_draw(&world, entity, camera), "{camera}");
+            }
+            // The same through the loop's own archetype rows.
+            cache.begin_frame();
+            let required = somnium_ecs::ComponentSet::from_ids(vec![ComponentId::of::<Transform>()]);
+            for archetype in world.query_archetypes(&required, &somnium_ecs::ComponentSet::empty()) {
+                for row in 0..archetype.len() {
+                    let entity = archetype.entities()[row];
+                    let expected = imported_draw(&world, entity, camera);
+                    assert_eq!(cache.draw_row(&world, archetype, row, camera), expected, "{camera} row");
+                }
+            }
+        }
+    }
 
     fn plant(world: &mut World, near: f32, cull: f32) -> Entity {
         let root = world.spawn((
