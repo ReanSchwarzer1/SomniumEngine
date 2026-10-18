@@ -35,7 +35,7 @@ use somnium_asset::database::AssetId;
 use somnium_character::{
     Contact, Controller, ControllerConfig, LocomotionEvent, MantleKind, Mode, MoveInput, Terrain,
 };
-use somnium_combat::ai::Archetype;
+use somnium_combat::ai::{self, Archetype};
 use somnium_combat::components::{CombatSurfaceComponent, CombatantComponent, WindVolumeComponent};
 use somnium_combat::environment::{EnvironmentField, Surface, WindVolume};
 use somnium_combat::input::{AimView, CombatInput, combat_map, cursor_ray, ray_plane};
@@ -549,6 +549,13 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         Vec3::new(13.0, 1.0, -5.0),
         Vec3::new(3.0, 2.0, 3.0),
     ));
+    // As high as the ledge, two metres beyond it: a gap to leap.
+    out.push(stone(
+        world,
+        "Far ledge",
+        Vec3::new(18.0, 1.0, -5.0),
+        Vec3::new(3.0, 2.0, 3.0),
+    ));
     for (name, at, scale) in [
         (
             "Basin wall (north)",
@@ -620,19 +627,41 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
         },
     ));
     out.push(slope);
-    // Off-mesh links, so the AI's routes go over the low wall and up the
-    // ledge: each runs from a foot to the far side (the top), and the
-    // controller vaults or climbs whatever the body meets on the way.
-    for (name, from, to) in [
+    // Off-mesh links, so the AI's routes take the course: each runs from
+    // one side to the other. A link that rises is climbed; a level one is
+    // jumped at its start (a gap is leapt, a low wall cleared, a higher one
+    // met in the jump vaulted or climbed); one that falls is walked off. Swimming is slower
+    // than walking, so the water's links cost a metre more.
+    for (name, from, to, cost) in [
         (
             "Nav link (over the low wall)",
             Vec3::new(8.25, 0.0, -5.0),
             Vec3::new(9.75, 0.0, -5.0),
+            0.0,
         ),
         (
             "Nav link (up the ledge)",
             Vec3::new(10.6, 0.0, -5.0),
             Vec3::new(12.6, 2.0, -5.0),
+            0.0,
+        ),
+        (
+            "Nav link (across the gap)",
+            Vec3::new(14.1, 2.0, -5.0),
+            Vec3::new(17.2, 2.0, -5.0),
+            0.0,
+        ),
+        (
+            "Nav link (into the basin)",
+            Vec3::new(12.5, 0.0, -7.9),
+            Vec3::new(12.5, 0.0, -9.7),
+            1.0,
+        ),
+        (
+            "Nav link (out of the basin)",
+            Vec3::new(12.5, 0.0, -12.0),
+            Vec3::new(12.5, 0.0, -13.7),
+            1.0,
         ),
     ] {
         out.push(world.spawn((
@@ -643,6 +672,7 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
             NavigationLink {
                 destination: at + to,
                 attachment_radius: 0.6,
+                extra_cost: cost,
                 ..NavigationLink::default()
             },
         )));
@@ -1226,7 +1256,7 @@ impl CombatDemo {
             ray_plane(o, d, feet)
         });
         let forward = camera.map_or(Vec3::Z, |m| -m.z_axis.truncate());
-        let cmd = self.reader.command(
+        let mut cmd = self.reader.command(
             &self.input,
             ctx.dt(),
             AimView {
@@ -1234,6 +1264,19 @@ impl CombatDemo {
                 camera_forward: forward,
             },
         );
+        if run
+            .walkers
+            .get(&player)
+            .is_some_and(|w| matches!(w.mode, Mode::Mantle(_)))
+        {
+            // Hands on the ledge: no swing, guard, dodge or verse until up.
+            cmd = somnium_combat::Command {
+                move_dir: cmd.move_dir,
+                sprint: cmd.sprint,
+                aim: cmd.aim,
+                ..somnium_combat::Command::default()
+            };
+        }
         run.world.command(player, cmd);
     }
 
@@ -1438,6 +1481,21 @@ fn build(world: &World) -> Option<Run> {
             brain.mind.profile.breaks_with_leader = true;
         }
     }
+    // Each raider band holds a formation: its melee in a line, its bows,
+    // rifles and mages behind (knives flank on their own).
+    for &t in teams.iter().filter(|t| **t != 0) {
+        let band: Vec<CombatantId> = combat
+            .combatants()
+            .filter(|c| c.team == TeamId(t as u16))
+            .filter(|c| {
+                c.brain
+                    .as_ref()
+                    .is_some_and(|b| b.mind.archetype != Archetype::Skirmisher)
+            })
+            .map(|c| c.id)
+            .collect();
+        ai::form_up(&mut combat, &band);
+    }
     // The ground: every authored surface's footprint (axis-aligned), plus wind.
     let surfaces: Vec<(Mat4, CombatSurfaceComponent)> = world
         .iter_with::<CombatSurfaceComponent>()
@@ -1597,8 +1655,9 @@ fn walker_config(c: &somnium_combat::Combatant) -> ControllerConfig {
 
 /// Everyone's feet from their controllers, after the combat step decided
 /// where each wants to go. Running into a ledge (the run key, or an AI on an
-/// off-mesh link) vaults or climbs it. Mounts walk their own slopes and carry
-/// their riders. Returns what each body's locomotion did.
+/// off-mesh link) vaults or climbs it; a brain on a level link jumps. Each
+/// brain hears whether its body is mid-climb. Mounts walk their own slopes and
+/// carry their riders. Returns what each body's locomotion did.
 fn walk(
     combat: &mut CombatWorld,
     walkers: &mut BTreeMap<CombatantId, Controller>,
@@ -1633,13 +1692,18 @@ fn walk(
             walker.velocity.x = velocity.x;
             walker.velocity.z = velocity.z;
         }
+        // The player climbs on the run key; a brain climbs only what its
+        // route means it to (an off-mesh link), and jumps when it asks; a
+        // mount never climbs (nor leaps a gap: its rider falls with it).
+        let player = c.brain.is_none() && c.mount_def.is_none();
         let input = MoveInput {
             velocity,
-            jump: false,
-            climb: c.intent.climb || c.intent.sprinting,
+            jump: ai::wants_jump(combat, id),
+            climb: c.intent.climb || (player && c.intent.sprinting),
         };
         let events = walker.step(body_dt, &input, &Walled { terrain, combat });
         let (feet, velocity) = (walker.feet, walker.velocity);
+        let climbing = matches!(walker.mode, Mode::Mantle(_));
         if let Some(c) = combat.combatant_mut(id) {
             c.position = feet;
             c.velocity = velocity;
@@ -1650,6 +1714,7 @@ fn walk(
                 combat.landed(id, *speed);
             }
         }
+        ai::set_climbing(combat, id, climbing);
         out.extend(events.into_iter().map(|e| (id, e)));
     }
     somnium_combat::mount::seat_riders(combat);
@@ -2921,14 +2986,15 @@ mod tests {
         assert!(vitals.contains("Health") && hotbar.contains("Ice Lance"));
     }
 
-    /// A raider west of the low wall reaches a target standing on the 2 m
-    /// ledge: its route takes the off-mesh links, and its controller vaults
-    /// the wall and climbs the ledge on the way.
-    #[test]
-    fn a_raider_vaults_and_climbs_to_a_target_on_the_ledge() {
+    /// The axe raider alone against the protagonist, the raider's feet at
+    /// `from` and the target's at `to` (above the floor): the navmesh's route
+    /// takes `links` off-mesh links, and within thirty headless seconds of
+    /// the same `build` and `walk` as Play (on the boxes `colliders` hands
+    /// Jolt) the raider stands within 2 m of the target at its height.
+    /// Returns the raider's locomotion.
+    fn chase(from: Vec3, to: Vec3, links: usize) -> Vec<LocomotionEvent> {
         let mut world = World::new();
         spawn_sandbox(&mut world, &json!({})).expect("preset builds");
-        // Only the protagonist and the axe raider fight.
         let others: Vec<Entity> = world
             .iter_with::<CombatantComponent>()
             .filter(|(e, _)| {
@@ -2951,44 +3017,137 @@ mod tests {
             .find(|c| c.name == "Raider (axe)")
             .map(|c| c.id)
             .expect("the raider");
-        let floor = run.floor;
-        for (id, feet) in [
-            (target, Vec3::new(13.0, floor + 2.0, -5.0)),
-            (raider, Vec3::new(5.0, floor, -5.0)),
-        ] {
+        let (from, to) = (from + Vec3::Y * run.floor, to + Vec3::Y * run.floor);
+        for (id, feet) in [(target, to), (raider, from)] {
             run.world.combatant_mut(id).unwrap().position = feet;
             let walker = run.walkers.get_mut(&id).unwrap();
             walker.feet = feet + Vec3::Y * 0.02;
             walker.mode = Mode::Air;
         }
-        // The navmesh's way up goes over the wall and up the ledge.
-        let top = Vec3::new(13.0, floor + 2.0, -5.0);
-        let route = run.nav.as_ref().expect("the course baked");
-        let route = route.path(Vec3::new(5.0, floor, -5.0), top, 0.7);
-        assert_eq!(route.map(|p| p.links.len()), Some(2), "both links");
-        somnium_combat::ai::alert(&mut run.world, raider, target, top);
+        let route = run
+            .nav
+            .as_ref()
+            .expect("the course baked")
+            .path(from, to, 0.7);
+        assert_eq!(
+            route.map(|p| p.links.len()),
+            Some(links),
+            "the route's links"
+        );
+        ai::alert(&mut run.world, raider, target, to);
         let open = somnium_combat::OpenField;
-        let (mut mantles, mut trail) = (Vec::new(), Vec::new());
-        let mut reached = false;
+        let (mut events, mut trail) = (Vec::new(), Vec::new());
         for step in 0..30 * 60 {
             run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
-            for (id, event) in walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain) {
-                if let (true, LocomotionEvent::MantleStarted { kind, .. }) = (id == raider, event) {
-                    mantles.push(kind);
-                }
-            }
+            let moved = walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+            events.extend(
+                moved
+                    .into_iter()
+                    .filter(|(id, _)| *id == raider)
+                    .map(|(_, e)| e),
+            );
             run.world.drain_events();
             let r = run.world.combatant(raider).unwrap().position;
             let t = run.world.combatant(target).unwrap().position;
             if step % 60 == 0 {
                 trail.push(r);
             }
-            if r.y > floor + 1.9 && Vec2::new(r.x - t.x, r.z - t.z).length() < 2.0 {
-                reached = true;
-                break;
+            if (r.y - t.y).abs() < 0.3 && Vec2::new(r.x - t.x, r.z - t.z).length() < 2.0 {
+                return events;
             }
         }
-        assert!(reached, "the raider went {trail:?}; mantles {mantles:?}");
-        assert_eq!(mantles, [MantleKind::Vault, MantleKind::Climb], "{trail:?}");
+        panic!("the raider went {trail:?}; {events:?}");
+    }
+
+    fn mantles(events: &[LocomotionEvent]) -> Vec<MantleKind> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LocomotionEvent::MantleStarted { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Running flat out into the ledge, the player climbs it (the run key
+    /// is its climb) and a raider does not: a brain climbs only where its
+    /// route says to.
+    #[test]
+    fn a_running_raider_climbs_only_on_purpose() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let terrain = boxes(&world, &run);
+        let raider = run
+            .world
+            .combatants()
+            .find(|c| c.name == "Raider (axe)")
+            .map(|c| c.id)
+            .expect("the raider");
+        for (id, climbs) in [
+            (raider, false),
+            (run.player.expect("the protagonist"), true),
+        ] {
+            let feet = Vec3::new(10.9, run.floor, -5.0);
+            run.world.combatant_mut(id).unwrap().position = feet;
+            let walker = run.walkers.get_mut(&id).unwrap();
+            walker.feet = feet + Vec3::Y * 0.02;
+            walker.mode = Mode::Air;
+            let mut climbed = false;
+            for _ in 0..60 {
+                let c = run.world.combatant_mut(id).unwrap();
+                c.intent.velocity = Vec3::X * 6.0;
+                c.intent.sprinting = true;
+                c.intent.climb = false;
+                c.intent.rooted = false;
+                let moved = walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+                climbed |= moved.iter().any(|(who, e)| {
+                    *who == id && matches!(e, LocomotionEvent::MantleStarted { .. })
+                });
+            }
+            assert_eq!(climbed, climbs, "{}", run.world.combatant(id).unwrap().name);
+            run.world.combatant_mut(id).unwrap().position = Vec3::new(0.0, run.floor, 30.0);
+            run.walkers.get_mut(&id).unwrap().feet = Vec3::new(0.0, run.floor, 30.0);
+        }
+    }
+
+    /// From west of the low wall to a target on the 2 m ledge: over the wall
+    /// (jumped at the link's start: a 1 m wall is cleared by the jump, or
+    /// vaulted if the jump meets it low) and up the ledge.
+    #[test]
+    fn a_raider_vaults_and_climbs_to_a_target_on_the_ledge() {
+        let events = chase(Vec3::new(5.0, 0.0, -5.0), Vec3::new(13.0, 2.0, -5.0), 2);
+        let kinds = mantles(&events);
+        assert!(
+            events.contains(&LocomotionEvent::Jumped) || kinds.contains(&MantleKind::Vault),
+            "over the wall: {events:?}"
+        );
+        assert_eq!(
+            kinds.last(),
+            Some(&MantleKind::Climb),
+            "up the ledge: {events:?}"
+        );
+    }
+
+    /// Up the ledge and across the 2 m gap to a target on the far ledge.
+    #[test]
+    fn a_raider_leaps_the_gap_to_a_target_on_the_far_ledge() {
+        let events = chase(Vec3::new(10.3, 0.0, -5.0), Vec3::new(18.5, 2.0, -5.0), 2);
+        assert_eq!(mantles(&events), [MantleKind::Climb], "{events:?}");
+        assert!(events.contains(&LocomotionEvent::Jumped), "{events:?}");
+    }
+
+    /// Through the walled basin to a target beyond it, shorter than going
+    /// round: over the north wall into the water, a swim, and out the south.
+    #[test]
+    fn a_raider_swims_the_basin_to_a_target_beyond_it() {
+        let events = chase(Vec3::new(12.5, 0.0, -7.4), Vec3::new(12.5, 0.0, -16.5), 2);
+        assert!(
+            events.contains(&LocomotionEvent::EnteredWater),
+            "{events:?}"
+        );
+        assert!(events.contains(&LocomotionEvent::LeftWater), "{events:?}");
+        assert_eq!(mantles(&events).len(), 2, "in and out: {events:?}");
     }
 }
