@@ -66,6 +66,17 @@ pub struct BarkDef {
     pub effects: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Places it is heard in (`aldermere`, `eirvane_hall/kitchen`): a place matches itself and everything under it.
+    /// Empty: anywhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<String>,
+    /// Hours of the Lid's day it is heard, `[from, to)` of `0..24`, wrapping past midnight (`[20, 4]`). None: any
+    /// hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<[f32; 2]>,
+    /// How much of the sun the Lid covers, `[least, most]` of `0..1` (`[0.8, 1]` is Lidfall). None: any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eclipse: Option<[f32; 2]>,
 }
 
 /// One line of chatter.
@@ -100,6 +111,103 @@ pub struct ChatterDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effects: String,
     pub lines: Vec<ChatterLine>,
+    /// Places it is heard in (`aldermere`, `eirvane_hall/kitchen`): a place matches itself and everything under it.
+    /// Empty: anywhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<String>,
+    /// Hours of the Lid's day it is heard, `[from, to)` of `0..24`, wrapping past midnight (`[20, 4]`). None: any
+    /// hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<[f32; 2]>,
+    /// How much of the sun the Lid covers, `[least, most]` of `0..1` (`[0.8, 1]` is Lidfall). None: any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eclipse: Option<[f32; 2]>,
+}
+
+/// Where and when a bark is asked for, and of whom. `hour` and `eclipse` are the scene's TimeOfDay `hour` and
+/// `eclipse`; `place` is the game's name for where the listener is (`aldermere/market`).
+#[derive(Clone, Copy, Debug)]
+pub struct BarkContext<'a> {
+    pub place: &'a str,
+    /// `0..24`; `None` keeps barks with `hours` quiet.
+    pub hour: Option<f32>,
+    /// `0..1`; `0` is a clear sky.
+    pub eclipse: f32,
+    /// Who could say it: cast ids or roles (`villager`, `watch_guard`).
+    pub near: &'a [&'a str],
+    /// Barks and chatter (`set/id`) not to pick now: what was heard lately.
+    pub avoid: &'a [String],
+    /// Only barks and chatter of at least this priority: something more important is being said.
+    pub min_priority: i32,
+}
+
+impl<'a> BarkContext<'a> {
+    /// Just who is near: no place, no hour, a clear sky.
+    #[must_use]
+    pub fn near(near: &'a [&'a str]) -> Self {
+        Self {
+            place: "",
+            hour: None,
+            eclipse: 0.0,
+            near,
+            avoid: &[],
+            min_priority: i32::MIN,
+        }
+    }
+}
+
+/// Whether a bark's or an exchange's place and time allow it here and now.
+pub(crate) fn fits(
+    places: &[String],
+    hours: Option<[f32; 2]>,
+    eclipse: Option<[f32; 2]>,
+    context: &BarkContext,
+) -> bool {
+    let place = places.is_empty()
+        || places.iter().any(|p| {
+            context.place == p
+                || context
+                    .place
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        });
+    let hour = hours.is_none_or(|[from, to]| {
+        context.hour.is_some_and(|h| {
+            if from <= to {
+                (from..to).contains(&h)
+            } else {
+                h >= from || h < to
+            }
+        })
+    });
+    let lid = eclipse.is_none_or(|[least, most]| (least..=most).contains(&context.eclipse));
+    place && hour && lid
+}
+
+fn window_problems(
+    at: &str,
+    places: &[String],
+    hours: Option<[f32; 2]>,
+    eclipse: Option<[f32; 2]>,
+    problems: &mut Vec<Problem>,
+) {
+    if places
+        .iter()
+        .any(|p| p.is_empty() || p.split('/').any(str::is_empty))
+    {
+        problems.push(Problem::error(
+            at,
+            "places are names like aldermere or eirvane_hall/kitchen",
+        ));
+    }
+    if hours.is_some_and(|h| h.iter().any(|x| !(0.0..=24.0).contains(x))) {
+        problems.push(Problem::error(at, "hours are [from, to] within 0..24"));
+    }
+    if eclipse.is_some_and(|[least, most]| {
+        !(0.0..=1.0).contains(&least) || !(0.0..=1.0).contains(&most) || least > most
+    }) {
+        problems.push(Problem::error(at, "eclipse is [least, most] within 0..1"));
+    }
 }
 
 impl ChatterDef {
@@ -196,6 +304,22 @@ impl BarkSetAsset {
             if bark.text.is_empty() {
                 problems.push(Problem::error(&bark.id, "a bark needs text"));
             }
+            window_problems(
+                &bark.id,
+                &bark.places,
+                bark.hours,
+                bark.eclipse,
+                &mut problems,
+            );
+        }
+        for chatter in &self.chatter {
+            window_problems(
+                &chatter.id,
+                &chatter.places,
+                chatter.hours,
+                chatter.eclipse,
+                &mut problems,
+            );
         }
         for chatter in &self.chatter {
             if chatter.lines.len() < 2 {

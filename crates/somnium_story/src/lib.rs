@@ -20,6 +20,7 @@
 //! - [`actor`]: story actors' performance (talking, jaw and blinks, looks, gestures, marks) for the game to apply.
 
 pub mod actor;
+pub mod ambience;
 pub mod barks;
 pub mod conversation;
 pub mod database;
@@ -37,6 +38,7 @@ pub mod story;
 pub mod text;
 pub mod value;
 
+pub use barks::BarkContext;
 pub use conversation::{Beat, ChoiceBeat, Conversation, ConversationSave, LineBeat, SavedBeat};
 pub use database::{Issue, Severity, StoryDatabase, StorySources};
 pub use dialogue::DialogueAsset;

@@ -12,7 +12,7 @@
 //! with its effects, and so on until nothing is pending. A content loop that never settles (two stages that keep
 //! leading to each other) is stopped after a fixed budget and reported, never hung on.
 
-use crate::barks::{Bark, Chatter};
+use crate::barks::{Bark, BarkContext, Chatter, fits};
 use crate::database::StoryDatabase;
 use crate::expr::{Condition, Effect, Effects, Env, ExprError, Func};
 use crate::journal::{EntryRef, Journal};
@@ -111,6 +111,7 @@ pub struct BarkPick {
     pub language: String,
     pub voice: String,
     pub tags: Vec<String>,
+    pub priority: i32,
 }
 
 /// One line of picked chatter.
@@ -130,6 +131,7 @@ pub struct ChatterPick {
     pub id: String,
     pub roles: Vec<String>,
     pub lines: Vec<ChatterLinePick>,
+    pub priority: i32,
 }
 
 /// An objective's marker for the world canvas.
@@ -940,6 +942,13 @@ impl Story {
 
     /// Pick a bark for `trigger` among the speakers the game has at hand. Plays its effects.
     pub fn bark(&mut self, trigger: &str, speakers: &[&str]) -> Option<BarkPick> {
+        self.bark_in(trigger, &BarkContext::near(speakers))
+    }
+
+    /// [`Story::bark`] with the place, the hour, the Lid and what to leave out ([`crate::ambience::Ambience`]
+    /// fills those in): a bark plays only where and when its `places`, `hours` and `eclipse` allow.
+    pub fn bark_in(&mut self, trigger: &str, context: &BarkContext) -> Option<BarkPick> {
+        let speakers = context.near;
         let db = Arc::clone(&self.db);
         let mut candidates: Vec<(&str, &Bark, String)> = Vec::new();
         for set in db.bark_sets() {
@@ -958,7 +967,10 @@ impl Story {
                     continue;
                 };
                 let key = format!("{}/{}", set.id, bark.def.id);
-                if self.ready(&key, bark.def.cooldown_ms, bark.def.once)
+                if bark.def.priority >= context.min_priority
+                    && !context.avoid.contains(&key)
+                    && fits(&bark.def.places, bark.def.hours, bark.def.eclipse, context)
+                    && self.ready(&key, bark.def.cooldown_ms, bark.def.once)
                     && self.eval(&bark.when, None)
                 {
                     candidates.push((&set.id, bark, speaker));
@@ -981,6 +993,7 @@ impl Story {
             language: bark.def.language.clone(),
             voice: bark.def.voice.clone(),
             tags: bark.def.tags.clone(),
+            priority: bark.def.priority,
         };
         self.apply(&bark.effects, None);
         Some(pick)
@@ -988,6 +1001,20 @@ impl Story {
 
     /// Pick an exchange for `trigger` that `roles` people can perform. Plays its effects.
     pub fn chatter(&mut self, trigger: &str, roles: usize) -> Option<ChatterPick> {
+        self.chatter_with(trigger, roles, &BarkContext::near(&[]))
+    }
+
+    /// [`Story::chatter`] among those `context` names near, where and when the exchange's window allows.
+    pub fn chatter_in(&mut self, trigger: &str, context: &BarkContext) -> Option<ChatterPick> {
+        self.chatter_with(trigger, context.near.len(), context)
+    }
+
+    fn chatter_with(
+        &mut self,
+        trigger: &str,
+        roles: usize,
+        context: &BarkContext,
+    ) -> Option<ChatterPick> {
         let db = Arc::clone(&self.db);
         let mut candidates: Vec<(&str, &Chatter)> = Vec::new();
         for set in db.bark_sets() {
@@ -995,6 +1022,14 @@ impl Story {
                 let key = format!("{}/{}", set.id, chatter.def.id);
                 if chatter.def.trigger == trigger
                     && chatter.def.roles().len() <= roles
+                    && chatter.def.priority >= context.min_priority
+                    && !context.avoid.contains(&key)
+                    && fits(
+                        &chatter.def.places,
+                        chatter.def.hours,
+                        chatter.def.eclipse,
+                        context,
+                    )
                     && self.ready(&key, chatter.def.cooldown_ms, chatter.def.once)
                     && self.eval(&chatter.when, None)
                 {
@@ -1026,6 +1061,7 @@ impl Story {
             id: chatter.def.id.clone(),
             roles: role_names,
             lines,
+            priority: chatter.def.priority,
         };
         self.apply(&chatter.effects, None);
         Some(pick)

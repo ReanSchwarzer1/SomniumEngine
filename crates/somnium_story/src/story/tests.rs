@@ -695,6 +695,157 @@ fn people_join_the_journal_when_heard_or_written_about() {
     assert!(!people[0].name.is_empty());
 }
 
+fn aldermere() -> Story {
+    let mut sources = content();
+    sources.add_file(
+        "barks/aldermere.sombarks",
+        r#"{"version": 1, "id": "aldermere",
+        "barks": [
+            {"id": "morning", "trigger": "greet", "text": "Morning.", "places": ["aldermere"], "hours": [5, 11]},
+            {"id": "evening", "trigger": "greet", "text": "Evening.", "places": ["aldermere"], "hours": [17, 22]},
+            {"id": "late", "trigger": "greet", "text": "Off to bed, you.", "places": ["aldermere"], "hours": [22, 4]},
+            {"id": "lidfall", "trigger": "greet", "text": "The Lid's falling. Inside!", "eclipse": [0.8, 1.0], "priority": 5},
+            {"id": "hello_a", "trigger": "hello", "text": "Hello."},
+            {"id": "hello_b", "trigger": "hello", "text": "Hullo there."},
+            {"id": "alarm", "trigger": "thief", "text": "Thief! Stop!", "priority": 10}
+        ],
+        "chatter": [
+            {"id": "weather", "trigger": "murmur", "places": ["aldermere"],
+             "lines": [{"role": "a", "text": "Cold one."}, {"role": "b", "text": "Colder tomorrow."}]}
+        ]}"#,
+    );
+    let (database, _) = StoryDatabase::build(sources).unwrap_or_else(|i| panic!("{i:?}"));
+    Story::new(Arc::new(database), 11)
+}
+
+#[test]
+fn barks_follow_the_place_the_hour_and_the_lid() {
+    use crate::barks::BarkContext;
+    let mut story = aldermere();
+    let near = ["anna"];
+    let at = |place, hour: Option<f32>, eclipse| BarkContext {
+        place,
+        hour,
+        eclipse,
+        ..BarkContext::near(&near)
+    };
+    let id =
+        |story: &mut Story, context: BarkContext| story.bark_in("greet", &context).map(|b| b.id);
+    assert_eq!(
+        id(&mut story, at("aldermere/market", Some(8.0), 0.0)).as_deref(),
+        Some("morning")
+    );
+    assert_eq!(
+        id(&mut story, at("aldermere", Some(18.5), 0.0)).as_deref(),
+        Some("evening")
+    );
+    assert_eq!(
+        id(&mut story, at("aldermere", Some(2.0), 0.0)).as_deref(),
+        Some("late"),
+        "past midnight"
+    );
+    assert_eq!(
+        id(&mut story, at("aldermere_west", Some(8.0), 0.0)),
+        None,
+        "a name is not a place under it"
+    );
+    assert_eq!(id(&mut story, at("eirvane_hall", Some(8.0), 0.0)), None);
+    assert_eq!(
+        id(&mut story, at("aldermere", None, 0.0)),
+        None,
+        "no hour, no hourly bark"
+    );
+    assert_eq!(
+        id(&mut story, at("eirvane_hall", Some(8.0), 0.9)).as_deref(),
+        Some("lidfall")
+    );
+    assert_eq!(
+        story.bark("greet", &near),
+        None,
+        "the old call asks for nowhere, at no hour, under a clear sky"
+    );
+
+    let mut sources = content();
+    sources.add_file(
+        "barks/bad.sombarks",
+        r#"{"version": 1, "id": "bad", "barks": [
+            {"id": "b", "trigger": "t", "text": "x", "hours": [3, 25], "eclipse": [0.9, 0.2], "places": ["a//b"]}]}"#,
+    );
+    let issues = StoryDatabase::build(sources).unwrap_err();
+    for wanted in ["hours", "eclipse", "places"] {
+        assert!(
+            issues.iter().any(|i| i.message.starts_with(wanted)),
+            "{wanted}: {issues:?}"
+        );
+    }
+}
+
+#[test]
+fn the_ambience_keeps_one_voice_puts_barks_over_chatter_and_keeps_lines_fresh() {
+    use crate::ambience::{Ambience, AmbienceSettings, Heard};
+    use crate::barks::BarkContext;
+    let mut story = aldermere();
+    let mut ambience = Ambience::new(AmbienceSettings::default());
+    let near = ["anna", "bram", "cara"];
+    let here = BarkContext {
+        place: "aldermere/market",
+        hour: Some(9.0),
+        ..BarkContext::near(&near)
+    };
+    assert!(
+        ambience.idle(&mut story, "murmur", &here).is_none(),
+        "too soon after arriving"
+    );
+    story.tick(20_000);
+    let chat = ambience.idle(&mut story, "murmur", &here).unwrap();
+    let Heard::Chatter { cast, .. } = &chat.heard else {
+        panic!("{chat:?}")
+    };
+    assert_eq!(cast, &["anna", "bram"]);
+    assert!(ambience.busy(story.clock_ms()));
+
+    let hello = ambience.event(&mut story, "hello", &here).unwrap();
+    assert!(hello.interrupts, "a bark cuts chatter off");
+    let Heard::Bark(first) = &hello.heard else {
+        panic!()
+    };
+    assert_eq!(first.speaker, "cara", "the two chatting are resting");
+    assert!(
+        ambience.event(&mut story, "hello", &here).is_none(),
+        "a bark does not cut off a bark as plain"
+    );
+    let alarm = ambience.event(&mut story, "thief", &here).unwrap();
+    let Heard::Bark(alarm_pick) = &alarm.heard else {
+        panic!()
+    };
+    assert!(
+        alarm.interrupts && alarm_pick.id == "alarm",
+        "an urgent one does, rested or not"
+    );
+
+    story.tick(30_000);
+    let again = |ambience: &mut Ambience, story: &mut Story| {
+        story.tick(10_000);
+        match ambience.event(story, "hello", &here).map(|s| s.heard) {
+            Some(Heard::Bark(pick)) => pick.id,
+            other => panic!("{other:?}"),
+        }
+    };
+    let (one, two, three) = (
+        again(&mut ambience, &mut story),
+        again(&mut ambience, &mut story),
+        again(&mut ambience, &mut story),
+    );
+    assert_ne!(one, two, "the line just heard waits while another fits");
+    assert_ne!(two, three);
+    ambience.finished(&story);
+    assert!(!ambience.busy(story.clock_ms()));
+    assert!(
+        ambience.idle(&mut story, "murmur", &here).is_none(),
+        "chatter waits for a quiet stretch"
+    );
+}
+
 #[test]
 fn a_save_over_changed_content_drops_what_is_gone() {
     let mut story = story();
