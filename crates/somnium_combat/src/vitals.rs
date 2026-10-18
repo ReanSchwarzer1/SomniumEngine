@@ -101,7 +101,8 @@ impl Vitals {
             stamina_delay: 0.8,
             poise_regen: poise.max(1.0) * 0.35,
             poise_delay: 2.5,
-            mana_regen: (capacity * 0.004).max(0.02),
+            // A tenth of a percent a second: a fight barely refills a well.
+            mana_regen: (capacity * 0.001).max(0.02),
             focus_regen: 6.0,
             overdraw_floor: 0.5,
             overdraws: 0,
@@ -217,10 +218,10 @@ impl Vitals {
         true
     }
 
-    /// Regenerate. `exerting` (sprinting, blocking, channelling) holds stamina.
-    /// An overdrawn well recovers at half rate, and stamina returns at half rate
-    /// while it does (the shakes).
-    pub fn tick(&mut self, dt: f32, exerting: bool) {
+    /// Regenerate. `exerting` (sprinting, blocking, channelling) holds stamina;
+    /// `focusing` holds focus. An overdrawn well recovers at half rate, and
+    /// stamina returns at half rate while it does (the shakes).
+    pub fn tick(&mut self, dt: f32, exerting: bool, focusing: bool) {
         if !dt.is_finite() || dt <= 0.0 || !self.alive() {
             return;
         }
@@ -234,7 +235,9 @@ impl Vitals {
             self.poise.add(self.poise_regen * dt);
         }
         self.mana.add(self.mana_regen * shakes * dt);
-        self.focus.add(self.focus_regen * dt);
+        if !focusing {
+            self.focus.add(self.focus_regen * dt);
+        }
     }
 }
 
@@ -249,9 +252,9 @@ mod tests {
         assert!(v.spend_stamina(20.0), "any stamina left allows the action");
         assert_eq!(v.stamina.current, 0.0);
         assert!(!v.spend_stamina(1.0));
-        v.tick(0.5, false);
+        v.tick(0.5, false, false);
         assert_eq!(v.stamina.current, 0.0, "the delay holds regeneration");
-        v.tick(0.5, false);
+        v.tick(0.5, false, false);
         assert!(v.stamina.current > 0.0);
     }
 

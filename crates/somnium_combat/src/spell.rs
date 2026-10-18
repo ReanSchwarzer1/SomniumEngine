@@ -1182,10 +1182,12 @@ mod tests {
     #[test]
     fn every_library_spell_validates_its_own_defaults() {
         for spell in library::all() {
-            let mut magic = Magic::default();
-            magic.ranks = [Some(Rank::Sovereign); 9];
-            magic.speeds = 0b111;
-            magic.numbers = true;
+            let magic = Magic {
+                ranks: [Some(Rank::Sovereign); 9],
+                speeds: 0b111,
+                numbers: true,
+                ..Magic::default()
+            };
             let r = request(&spell, spell.default_measure);
             assert_eq!(spell.validate(&r, &magic), Ok(()), "{}", spell.id);
             let rote = Magic {

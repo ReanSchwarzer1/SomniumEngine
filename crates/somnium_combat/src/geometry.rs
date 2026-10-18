@@ -225,7 +225,7 @@ impl Obb {
         }
     }
 
-    fn to_local(&self, p: Vec3) -> Vec3 {
+    fn to_local(self, p: Vec3) -> Vec3 {
         self.rotation.conjugate() * (p - self.center)
     }
 

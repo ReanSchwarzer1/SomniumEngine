@@ -1555,6 +1555,7 @@ impl CombatWorld {
     }
 
     fn step_body(&mut self, id: CombatantId, dt: f32) {
+        let focusing = self.focus.is_some_and(|f| f.who == id);
         let Some(c) = self.combatants.get_mut(&id) else {
             return;
         };
@@ -1569,7 +1570,7 @@ impl CombatWorld {
         let exerting = c.command.sprint && c.command.move_dir.length_squared() > 0.01
             || matches!(c.action, Action::Guard { .. })
             || matches!(&c.action, Action::Cast(s) if s.phase == CastPhase::Channel);
-        c.vitals.tick(dt, exerting);
+        c.vitals.tick(dt, exerting, focusing);
         if c.command.sprint && c.command.move_dir.length_squared() > 0.01 {
             c.vitals.drain_stamina(10.0 * dt);
         }
@@ -1658,7 +1659,8 @@ impl CombatWorld {
         let wants = flat(cmd.move_dir).clamp_length_max(1.0);
         let sprint =
             cmd.sprint && c.vitals.stamina.current > 0.0 && matches!(c.action, Action::Idle);
-        let base = c.body.speed * if sprint { 1.7 } else { 1.0 } * kindle;
+        let gallop = c.mount_def.map_or(1.7, |m| m.gallop);
+        let base = c.body.speed * if sprint { gallop } else { 1.0 } * kindle;
         let action_scale = match &c.action {
             Action::Idle => 1.0,
             Action::Attack(a) => match a.phase {

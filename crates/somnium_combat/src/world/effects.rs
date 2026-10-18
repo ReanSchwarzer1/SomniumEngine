@@ -148,6 +148,7 @@ pub(crate) fn spell_hit(
 }
 
 /// Raise a wall and tell the host.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn raise_wall(
     w: &mut CombatWorld,
     owner: CombatantId,
@@ -202,6 +203,7 @@ pub(crate) fn raise_wall(
 }
 
 /// Heal or harm everyone a predicate picks, with the spell's rules for allies.
+#[allow(clippy::too_many_arguments)]
 fn strike(
     w: &mut CombatWorld,
     owner: Option<CombatantId>,

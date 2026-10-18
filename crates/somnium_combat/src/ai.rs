@@ -4,7 +4,7 @@
 //! are named `combat.*` (so a designer can author a tree in the shared graph
 //! editor with **Native Task** nodes and the same names), a
 //! `somnium_ai::perception` observer and stimulus memory, and optionally a
-//! `somnium_ai::navigation::NavAgent` when the host supplies a navmesh.
+//! corridor through `somnium_ai::navigation::NavWorld` when the host supplies a navmesh.
 //!
 //! Three layers, as in most action games:
 //!
@@ -51,7 +51,7 @@ use glam::Vec3;
 use somnium_ai::behavior::{
     BehaviorInstance, BehaviorTree, Blackboard, Node, Status, Task, TaskHost,
 };
-use somnium_ai::navigation::{NavAgent, NavWorld, Neighbor};
+use somnium_ai::navigation::NavWorld;
 use somnium_ai::perception::{Observer, Sense, Stimulus, StimulusMemory};
 use std::collections::BTreeMap;
 
@@ -384,8 +384,9 @@ pub struct Mind {
     /// What it is doing, for debugging and Details.
     pub doing: &'static str,
     memory: StimulusMemory,
-    agent: Option<NavAgent>,
-    agent_goal: Option<Vec3>,
+    route: Vec<Vec3>,
+    route_goal: Option<Vec3>,
+    route_age: f32,
     think: f32,
     situation: u8,
     shouted_for: Option<CombatantId>,
@@ -429,8 +430,9 @@ impl Brain {
                 home: desc.home,
                 doing: "Idle",
                 memory: StimulusMemory::new(16, MEMORY_SECONDS).expect("valid policy"),
-                agent: None,
-                agent_goal: None,
+                route: Vec::new(),
+                route_goal: None,
+                route_age: 0.0,
                 think: 0.0,
                 situation: u8::MAX,
                 shouted_for: None,
@@ -654,6 +656,24 @@ pub(crate) fn hurt_by(w: &mut CombatWorld, id: CombatantId, source: CombatantId)
     }
 }
 
+/// Tell a brain about `target` at `at`, as if it had heard it there: a shout
+/// from outside the fight, a bell, a crime reported (the game's Hue and Cry).
+pub fn alert(w: &mut CombatWorld, id: CombatantId, target: CombatantId, at: Vec3) {
+    let now = w.time();
+    if let Some(c) = w.combatant_mut(id)
+        && let Some(brain) = &mut c.brain
+    {
+        brain.mind.memory.remember(Stimulus {
+            source: u64::from(target.0),
+            position: at,
+            strength: 1.0,
+            sensed_at: now,
+            sense: Sense::Hearing,
+        });
+        brain.mind.think = 0.0;
+    }
+}
+
 /// Give a companion an order.
 pub fn order(w: &mut CombatWorld, id: CombatantId, order: Order) {
     if let Some(c) = w.combatant_mut(id)
@@ -711,43 +731,43 @@ impl<Q: CombatQuery> Host<'_, Q> {
         }
         let mut dir = to.normalize();
         if let Some(nav) = self.nav {
-            let replan = self.mind.agent_goal.is_none_or(|g| g.distance(dest) > 1.0);
-            let agent = self
-                .mind
-                .agent
-                .get_or_insert_with(|| NavAgent::new(4.0, self.me.radius).expect("valid agent"));
-            if replan {
-                agent.set_destination(nav, self.me.position, dest);
-                self.mind.agent_goal = Some(dest);
+            // Walk the corridor's corners. `NavAgent` advances a corner only on
+            // exact arrival, which assumes it moved the body; here collide and
+            // slide moves it, so corners are passed within an arrival radius.
+            let stale = self.mind.route_goal.is_none_or(|g| g.distance(dest) > 1.0)
+                || self.mind.route_age > 1.0;
+            if stale {
+                self.mind.route = nav
+                    .path(self.me.position, dest, (self.me.radius * 2.0).max(0.5))
+                    .map(|p| p.points)
+                    .unwrap_or_default();
+                self.mind.route_goal = Some(dest);
+                self.mind.route_age = 0.0;
             }
-            let neighbours: Vec<Neighbor> = self
-                .view
-                .iter()
-                .filter(|s| s.id != self.me.id && s.position.distance(self.me.position) < 3.0)
-                .map(|s| Neighbor {
-                    position: s.position,
-                    velocity: s.velocity,
-                    radius: s.radius,
-                })
-                .collect();
-            let step = agent.update(nav, self.me.position, self.dt.max(1e-3), &neighbours);
-            if step.velocity.length_squared() > 1e-4 {
-                dir = flat(step.velocity).normalize_or_zero();
+            self.mind.route_age += self.dt;
+            while self.mind.route.len() > 1
+                && flat(self.mind.route[0] - self.me.position).length() < 0.35
+            {
+                self.mind.route.remove(0);
             }
-        } else {
-            // Without a navmesh: straight, keeping clear of friends.
-            for s in self.view {
-                if s.id == self.me.id || !(self.allied)(s.id) {
-                    continue;
-                }
-                let away = flat(self.me.position - s.position);
-                let d = away.length();
-                if d < 1.6 && d > 1e-3 {
-                    dir += away / d * (1.6 - d) * 0.8;
-                }
+            if let Some(next) = self.mind.route.first() {
+                dir = flat(*next - self.me.position)
+                    .try_normalize()
+                    .unwrap_or(dir);
             }
-            dir = dir.normalize_or_zero();
         }
+        // Keep clear of friends.
+        for s in self.view {
+            if s.id == self.me.id || !(self.allied)(s.id) {
+                continue;
+            }
+            let away = flat(self.me.position - s.position);
+            let d = away.length();
+            if d < 1.6 && d > 1e-3 {
+                dir += away / d * (1.6 - d) * 0.8;
+            }
+        }
+        dir = dir.normalize_or_zero();
         self.cmd.move_dir = dir;
         self.cmd.sprint = sprint;
         false
