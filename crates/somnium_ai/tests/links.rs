@@ -189,6 +189,46 @@ fn nav_cost() {
     }
 }
 
+/// Four 80 m tiles side by side (about 400,000 polygons, as an editor bake
+/// over a stretch of open ground might be): a chase's 5 m replan in one corner.
+#[test]
+#[ignore = "a measurement"]
+fn nav_cost_tiled() {
+    let mut nav = NavWorld::default();
+    for (i, (x, z)) in [(0.0, 0.0), (80.0, 0.0), (0.0, 80.0), (80.0, 80.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let tile = bake(&BakeInput {
+            cell: [i as i64, 0, 0],
+            bounds: Bounds {
+                min: [x, -1.0, z],
+                max: [x + 80.0, 2.0, z + 80.0],
+            },
+            triangles: plane(x, z, 80.0, 80.0, 0.0),
+            obstacles: vec![],
+            settings: BakeSettings {
+                voxel_size: 0.25,
+                agent_radius: 0.35,
+                ..BakeSettings::default()
+            },
+        })
+        .unwrap();
+        nav.install(tile);
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        nav.path(Vec3::new(40.0, 0.0, 40.0), Vec3::new(44.0, 0.0, 43.0), 1.0);
+    }
+    let short = started.elapsed().as_secs_f64() * 1e3 / 20.0;
+    let polygons: usize = nav
+        .cells()
+        .filter_map(|c| nav.tile(c))
+        .map(|t| t.polygons().len())
+        .sum();
+    println!("four tiles: {polygons} polygons, 5 m path {short:.3} ms");
+}
+
 /// Thousands of nearest-point and path queries over floors with a hole, a
 /// ramp and links, hashed to the bit. A change meant only to make queries
 /// cheaper must print the same fingerprint before and after.

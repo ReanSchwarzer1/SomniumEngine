@@ -568,6 +568,56 @@ pub struct NavWorld {
     /// Polygons by the ground cells ([`INDEX_CELL`] metres) their extent
     /// touches, so `nearest` looks only near the point.
     index: BTreeMap<(i32, i32), Vec<u32>>,
+    /// Kept between path searches (see [`Search`]).
+    search: std::sync::Mutex<Search>,
+}
+/// A path search's bookkeeping, kept between searches so one costs what it
+/// visits rather than the size of the mesh: an entry counts only while it
+/// carries this search's generation.
+#[derive(Default)]
+struct Search {
+    generation: u32,
+    stamp: Vec<u32>,
+    best: Vec<f32>,
+    /// Where each polygon was reached from: the polygon, and the edge's
+    /// place in its list.
+    previous: Vec<Option<(u32, u32)>>,
+}
+impl Search {
+    fn begin(&mut self, polygons: usize) {
+        if self.stamp.len() != polygons {
+            *self = Self {
+                generation: 0,
+                stamp: vec![0; polygons],
+                best: vec![0.0; polygons],
+                previous: vec![None; polygons],
+            };
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamp.fill(0);
+            self.generation = 1;
+        }
+    }
+    fn best(&self, i: usize) -> f32 {
+        if self.stamp[i] == self.generation {
+            self.best[i]
+        } else {
+            f32::INFINITY
+        }
+    }
+    fn previous(&self, i: usize) -> Option<(u32, u32)> {
+        if self.stamp[i] == self.generation {
+            self.previous[i]
+        } else {
+            None
+        }
+    }
+    fn set(&mut self, i: usize, best: f32, previous: Option<(u32, u32)>) {
+        self.stamp[i] = self.generation;
+        self.best[i] = best;
+        self.previous[i] = previous;
+    }
 }
 /// The side of a [`NavWorld`] index cell, metres.
 const INDEX_CELL: f32 = 2.0;
@@ -777,13 +827,13 @@ impl NavWorld {
     pub fn path(&self, start: Vec3, goal: Vec3, snap_distance: f32) -> Option<NavPath> {
         let (source, start) = self.nearest_index(start, snap_distance)?;
         let (target, goal) = self.nearest_index(goal, snap_distance)?;
-        let mut best = vec![f32::INFINITY; self.polygons.len()];
-        // Where each polygon was reached from, by the edge's place in that
-        // polygon's list (a copy of the edge would make this array several
-        // megabytes to clear on a large mesh, for every path).
-        let mut previous: Vec<Option<(u32, u32)>> = vec![None; self.polygons.len()];
+        // The kept bookkeeping, or a fresh one when another search holds it.
+        let mut kept = self.search.try_lock().ok();
+        let mut fresh = Search::default();
+        let search = kept.as_deref_mut().unwrap_or(&mut fresh);
+        search.begin(self.polygons.len());
         let mut open = BinaryHeap::new();
-        best[source] = 0.0;
+        search.set(source, 0.0, None);
         open.push(Open {
             node: source,
             score: 0.0,
@@ -794,10 +844,9 @@ impl NavWorld {
                 break;
             }
             for (k, &edge) in self.adjacency[node].iter().enumerate() {
-                let cost = best[node] + edge.cost;
-                if cost < best[edge.to] {
-                    best[edge.to] = cost;
-                    previous[edge.to] = Some((node as u32, k as u32));
+                let cost = search.best(node) + edge.cost;
+                if cost < search.best(edge.to) {
+                    search.set(edge.to, cost, Some((node as u32, k as u32)));
                     open.push(Open {
                         node: edge.to,
                         score: cost + self.polygons[edge.to].center().distance(target_center),
@@ -805,13 +854,13 @@ impl NavWorld {
                 }
             }
         }
-        if !best[target].is_finite() {
+        if !search.best(target).is_finite() {
             return None;
         }
         let mut corridor = Vec::new();
         let mut cursor = target;
         while cursor != source {
-            let (from, k) = previous[cursor]?;
+            let (from, k) = search.previous(cursor)?;
             let from = from as usize;
             corridor.push((from, self.adjacency[from][k as usize]));
             cursor = from;
