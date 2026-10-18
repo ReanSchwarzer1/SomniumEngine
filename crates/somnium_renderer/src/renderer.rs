@@ -131,6 +131,8 @@ pub struct SomniumRenderer {
     pub animated_geometry: crate::animated_geometry::AnimatedGeometry,
     /// Last frame's opaque draws, in queue order (mesh key and transform), for object motion vectors (C2).
     last_motion: Vec<((u32, u32, u32), glam::Mat4)>,
+    /// The vector `last_motion` was before this frame, reused for the next one.
+    motion_spare: Vec<((u32, u32, u32), glam::Mat4)>,
     motion_records: Vec<crate::pass::velocity::GpuMotion>,
     pub skin_pass: crate::pass::skin::SkinPass,
     /// DREAMS-B: one spatiotemporal sampling resource shared by noisy passes.
@@ -1199,6 +1201,7 @@ impl SomniumRenderer {
             skin_pass,
             animated_geometry: Default::default(),
             last_motion: Vec::new(),
+            motion_spare: Vec::new(),
             motion_records: Vec::new(),
             global_pool,
             vis_pass,
@@ -5033,8 +5036,12 @@ impl SomniumRenderer {
         if self.instances.reserve(&ctx.device) {
             self.global_pool.set_instance_buffer(&ctx.device, &self.instances.buffer);
         }
+        self.profiler.cpu_begin("Instance upload");
         self.instances.upload(&ctx.queue);
+        self.profiler.cpu_end();
+        self.profiler.cpu_begin("Motion");
         self.record_motion(ctx);
+        self.profiler.cpu_end();
         self.upload_vertex_paint(ctx);
         self.profiler.cpu_end();
         let highlight_frame = self.game_highlight_style.map(|style| {
@@ -7404,34 +7411,17 @@ impl SomniumRenderer {
     fn record_motion(&mut self, ctx: &crate::context::RenderContext) {
         use crate::pass::velocity::{GpuMotion, NO_POSE};
         let posed: Vec<(u32, u32)> = self.animated_geometry.previous_bases().collect();
-        let mut fallback: Option<std::collections::HashMap<((u32, u32, u32), u32), glam::Mat4, MotionHash>> = None;
-        let mut seen: std::collections::HashMap<(u32, u32, u32), u32, MotionHash> = Default::default();
-        let mut current = Vec::with_capacity(self.draw_queue.len());
+        let mut current = std::mem::take(&mut self.motion_spare);
+        current.clear();
+        current.extend(
+            self.draw_queue
+                .iter()
+                .map(|cmd| ((cmd.vertex_offset, cmd.index_offset, cmd.index_count), cmd.transform)),
+        );
+        let previous_transforms = pair_motion(&current, &self.last_motion);
         self.motion_records.clear();
-        for (i, cmd) in self.draw_queue.iter().enumerate() {
-            let key = (cmd.vertex_offset, cmd.index_offset, cmd.index_count);
-            let occurrence = {
-                let n = seen.entry(key).or_insert(0);
-                *n += 1;
-                *n - 1
-            };
-            let previous = match self.last_motion.get(i) {
-                Some((k, transform)) if *k == key => *transform,
-                _ => {
-                    let map = fallback.get_or_insert_with(|| {
-                        let mut count: std::collections::HashMap<(u32, u32, u32), u32, MotionHash> = Default::default();
-                        self.last_motion
-                            .iter()
-                            .map(|(k, t)| {
-                                let n = count.entry(*k).or_insert(0);
-                                *n += 1;
-                                ((*k, *n - 1), *t)
-                            })
-                            .collect()
-                    });
-                    map.get(&(key, occurrence)).copied().unwrap_or(cmd.transform)
-                }
-            };
+        for ((cmd, (_, transform)), previous) in self.draw_queue.iter().zip(&current).zip(previous_transforms) {
+            debug_assert_eq!(*transform, cmd.transform);
             // More than a metre in one frame is a mismatched pairing (or a placement), not motion.
             let previous = if previous.w_axis.distance(cmd.transform.w_axis) > 1.0 { cmd.transform } else { previous };
             let pose = posed.iter().find(|(offset, _)| *offset == cmd.vertex_offset).map(|(_, base)| *base);
@@ -7442,9 +7432,8 @@ impl SomniumRenderer {
                 moving: u32::from(moving),
                 _pad: [0; 2],
             });
-            current.push((key, cmd.transform));
         }
-        self.last_motion = current;
+        self.motion_spare = std::mem::replace(&mut self.last_motion, current);
         self.velocity_pass.set_motion(
             &ctx.device,
             &ctx.queue,
@@ -7461,14 +7450,67 @@ fn sort_draws_stable(draws: &mut Vec<DrawCommand>, keys: &mut Vec<(u64, u32)>, s
     if draws.windows(2).all(|pair| pair[0].sort_key <= pair[1].sort_key) {
         return;
     }
-    keys.clear();
-    keys.extend(draws.iter().enumerate().map(|(i, d)| (d.sort_key.0, i as u32)));
-    // Ties broken by the original index: the order a stable sort keeps.
-    keys.sort_unstable();
+    // A still region submits the same keys in the same order every frame: last frame's order holds again. `keys`
+    // keeps it, each entry's key being the one at that sorted position, so the check is one pass over the submissions.
+    let reuse = keys.len() == draws.len()
+        && keys.iter().all(|&(key, i)| draws.get(i as usize).is_some_and(|d| d.sort_key.0 == key))
+        && keys.windows(2).all(|pair| pair[0] <= pair[1]);
+    if !reuse {
+        keys.clear();
+        keys.extend(draws.iter().enumerate().map(|(i, d)| (d.sort_key.0, i as u32)));
+        // Ties broken by the original index: the order a stable sort keeps.
+        keys.sort_unstable();
+    }
     scratch.clear();
     scratch.extend(keys.iter().map(|&(_, i)| draws[i as usize].clone()));
     std::mem::swap(draws, scratch);
 }
+
+/// Each draw's transform last frame: the draw at the same index when it is the same geometry, else the same
+/// geometry's same occurrence (its n-th copy then and now), else its own transform (it is new).
+///
+/// The occurrence counts are only needed from the first draw that does not pair by index, so they are counted from
+/// there (the draws before it first) and a still frame never builds them: at 100,000 draws the eager count was a large
+/// part of the `Instances` zone (`examples/scale_probe.rs`).
+fn pair_motion(now: &[MotionKey], last: &[MotionKey]) -> Vec<glam::Mat4> {
+    let mut fallback: Option<std::collections::HashMap<((u32, u32, u32), u32), glam::Mat4, MotionHash>> = None;
+    let mut seen: Option<std::collections::HashMap<(u32, u32, u32), u32, MotionHash>> = None;
+    let mut out = Vec::with_capacity(now.len());
+    for (i, (key, transform)) in now.iter().enumerate() {
+        let paired = matches!(last.get(i), Some((k, _)) if k == key);
+        if !paired && seen.is_none() {
+            let mut counts: std::collections::HashMap<(u32, u32, u32), u32, MotionHash> = Default::default();
+            for (earlier, _) in &now[..i] {
+                *counts.entry(*earlier).or_insert(0) += 1;
+            }
+            seen = Some(counts);
+        }
+        let occurrence = seen.as_mut().map_or(0, |seen| {
+            let n = seen.entry(*key).or_insert(0);
+            *n += 1;
+            *n - 1
+        });
+        out.push(if paired {
+            last[i].1
+        } else {
+            let map = fallback.get_or_insert_with(|| {
+                let mut count: std::collections::HashMap<(u32, u32, u32), u32, MotionHash> = Default::default();
+                last.iter()
+                    .map(|(k, t)| {
+                        let n = count.entry(*k).or_insert(0);
+                        *n += 1;
+                        ((*k, *n - 1), *t)
+                    })
+                    .collect()
+            });
+            map.get(&(*key, occurrence)).copied().unwrap_or(*transform)
+        });
+    }
+    out
+}
+
+/// A draw's geometry (vertex offset, index offset, index count) and its transform.
+type MotionKey = ((u32, u32, u32), glam::Mat4);
 
 /// The motion keys' hasher: the crate's per-draw one ([`crate::fast_hash`]).
 type MotionHash = crate::fast_hash::FastHash;
@@ -7824,6 +7866,71 @@ fn preserve_alpha_coverage(levels: &mut [(u32, u32, Vec<u8>)]) {
 }
 
 #[cfg(test)]
+mod motion_pairing_tests {
+    use super::{MotionKey, pair_motion};
+
+    /// The pairing before it counted lazily, kept here as the reference.
+    fn eager(now: &[MotionKey], last: &[MotionKey]) -> Vec<glam::Mat4> {
+        let mut seen = std::collections::HashMap::new();
+        let mut count = std::collections::HashMap::new();
+        let fallback: std::collections::HashMap<_, _> = last
+            .iter()
+            .map(|(k, t)| {
+                let n = count.entry(*k).or_insert(0u32);
+                *n += 1;
+                ((*k, *n - 1), *t)
+            })
+            .collect();
+        now.iter()
+            .enumerate()
+            .map(|(i, (key, transform))| {
+                let n = seen.entry(*key).or_insert(0u32);
+                *n += 1;
+                let occurrence = *n - 1;
+                match last.get(i) {
+                    Some((k, t)) if k == key => *t,
+                    _ => fallback.get(&(*key, occurrence)).copied().unwrap_or(*transform),
+                }
+            })
+            .collect()
+    }
+
+    fn frame(seed: u32, len: usize) -> Vec<MotionKey> {
+        (0..len as u32)
+            .map(|i| {
+                let geometry = (i.wrapping_mul(seed) % 7, 0, 3);
+                (geometry, glam::Mat4::from_translation(glam::Vec3::new(i as f32, seed as f32, 0.0)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lazy_counting_pairs_every_draw_as_the_eager_count_did() {
+        let base = frame(3, 400);
+        // Same; one inserted near the end; one removed at the start; reordered; shorter; duplicates of one mesh.
+        let mut inserted = base.clone();
+        inserted.insert(350, ((5, 0, 3), glam::Mat4::IDENTITY));
+        let removed = base[1..].to_vec();
+        let mut reordered = base.clone();
+        reordered.swap(10, 200);
+        let shorter = base[..150].to_vec();
+        let copies: Vec<MotionKey> = (0..50).map(|i| ((1, 0, 3), glam::Mat4::from_translation(glam::Vec3::X * i as f32))).collect();
+        for (now, last) in [
+            (&base, &base),
+            (&inserted, &base),
+            (&removed, &base),
+            (&reordered, &base),
+            (&shorter, &base),
+            (&base, &shorter),
+            (&copies, &copies[..20].to_vec()),
+            (&frame(5, 300), &base),
+        ] {
+            assert_eq!(pair_motion(now, last), eager(now, last));
+        }
+    }
+}
+
+#[cfg(test)]
 mod draw_sort_tests {
     use super::sort_draws_stable;
     use crate::command::{DrawCommand, SortKey};
@@ -7853,9 +7960,19 @@ mod draw_sort_tests {
         // Sorted already: left alone, and a second frame reuses the buffers.
         sort_draws_stable(&mut gathered, &mut keys, &mut scratch);
         assert!(gathered.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
-        let mut again = draws;
+        let mut again = draws.clone();
         sort_draws_stable(&mut again, &mut keys, &mut scratch);
         assert!(again.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
+        // The same submissions next frame reuse the order; a changed key re-sorts.
+        let mut next = draws.clone();
+        sort_draws_stable(&mut next, &mut keys, &mut scratch);
+        assert!(next.iter().map(|d| d.vertex_offset).eq(expected.iter().map(|d| d.vertex_offset)));
+        let mut changed = draws;
+        changed[17].sort_key = SortKey::new(0, 4, 0);
+        let mut expected_changed = changed.clone();
+        expected_changed.sort_by_key(|d| d.sort_key);
+        sort_draws_stable(&mut changed, &mut keys, &mut scratch);
+        assert!(changed.iter().map(|d| d.vertex_offset).eq(expected_changed.iter().map(|d| d.vertex_offset)));
     }
 }
 

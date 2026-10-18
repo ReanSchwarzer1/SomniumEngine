@@ -171,14 +171,16 @@ impl Probe {
                 })
                 .collect();
             // A high three-quarter view of the middle of the region, about 120 m across.
-            let target = glam::Vec3::ZERO;
-            let eye = target + glam::Vec3::new(55.0, 70.0, 55.0);
-            let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
+            // `SCALE_PROBE_MOVE=1` pans 2 m a frame, as a player walking does, which moves the shadow cascades.
+            let pan = std::env::var("SCALE_PROBE_MOVE").as_deref() == Ok("1");
             let proj = glam::Mat4::perspective_rh(0.6, 16.0 / 9.0, 0.5, 4000.0);
             let mut submit_ms = 0.0;
             let mut frame_ms = 0.0;
             for frame in 0..WARM_FRAMES + TIMED_FRAMES {
                 let start = Instant::now();
+                let target = if pan { glam::Vec3::new(frame as f32 * 2.0, 0.0, 0.0) } else { glam::Vec3::ZERO };
+                let eye = target + glam::Vec3::new(55.0, 70.0, 55.0);
+                let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
                 renderer.set_view(view, proj, eye);
                 for draw in &draws {
                     renderer.submit(draw.clone());
