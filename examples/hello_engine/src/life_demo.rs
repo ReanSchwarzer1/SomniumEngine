@@ -29,13 +29,14 @@
 //!
 //! **B** rings the alarm bell where the camera is: everyone within 80 m runs
 //! home and stays in for 45 seconds, beasts bolt, carts stop
-//! (`LifeWorld::alarm`; a game rings it from its fights). Walk past villagers
+//! (`LifeWorld::alarm`). A fight rings it too: wherever a **Combatant** in the
+//! scene loses health, everyone within 60 m runs home. Walk past villagers
 //! and those standing turn to look at you (`LifeWorld::notice`; a game plays
 //! greeting barks for them); nobody walks through you (`LifeWorld::keep_clear`).
 use glam::{Mat4, Quat, Vec3};
 use serde_json::{Value, json};
 use somnium_asset::database::AssetId;
-use somnium_combat::components::CombatSurfaceComponent;
+use somnium_combat::components::{CombatSurfaceComponent, CombatantComponent};
 use somnium_combat::environment::Surface;
 use somnium_core::spline::{SAMPLES_PER_SEGMENT, SplineComponent};
 use somnium_core::time_of_day::TimeOfDayComponent;
@@ -69,6 +70,8 @@ const CART_BODIES: usize = 16;
 /// The alarm bell (B): how far it frightens, and for how long.
 const BELL_REACH: f32 = 80.0;
 const BELL_SECONDS: f32 = 45.0;
+/// A fight frightens this far.
+const FIGHT_REACH: f32 = 60.0;
 
 fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
@@ -521,6 +524,10 @@ struct Run {
     synced: f32,
     /// Villagers who have noticed the camera walking past, all told.
     greeted: usize,
+    /// Each combatant's health when last looked at, to hear a fight.
+    health: HashMap<Entity, f32>,
+    /// Alarms rung by fights, all told.
+    fights: usize,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -678,6 +685,27 @@ fn name_of(world: &World, e: Entity, or: &str) -> String {
     world
         .get::<Name>(e)
         .map_or(or.to_string(), |n| n.as_str().to_string())
+}
+
+/// Ring the alarm where a combatant lost health since the last look; returns
+/// how many rang.
+fn hear_fights(world: &World, run: &mut Run) -> usize {
+    let mut rang = 0;
+    let mut seen = HashMap::new();
+    for (e, c) in world.iter_with::<CombatantComponent>() {
+        if run
+            .health
+            .get(&e)
+            .is_some_and(|before| c.health < *before - 0.5)
+        {
+            let at = world_matrix(world, e).w_axis.truncate();
+            run.life.alarm(at, FIGHT_REACH, BELL_SECONDS);
+            rang += 1;
+        }
+        seen.insert(e, c.health);
+    }
+    run.health = seen;
+    rang
 }
 
 /// Adopt the places and hand-placed agents that appeared since the last look,
@@ -958,6 +986,8 @@ impl LifeDemo {
             links: Links::default(),
             synced: 0.0,
             greeted: 0,
+            health: HashMap::new(),
+            fights: 0,
             spawned,
             colliders: Vec::new(),
             // `SOMNIUM_LIFE_HOUR` starts the day at another hour (captures).
@@ -1041,6 +1071,7 @@ impl LifeDemo {
         if run.synced >= 1.0 || (run.synced >= 0.25 && ctx.world.entity_count() != run.links.seen) {
             run.synced = 0.0;
             sync(ctx.world, run);
+            run.fights += hear_fights(ctx.world, run);
         }
         let tod = ctx
             .world
@@ -1116,6 +1147,7 @@ impl LifeDemo {
             "places": run.life.place_count(),
             "places_loaded": run.links.places.len(),
             "greeted": run.greeted,
+            "fights": run.fights,
             "villagers": run.life.villagers().len(),
             "outdoors": out,
             "beasts": run.life.beasts().len(),
@@ -1517,6 +1549,51 @@ mod tests {
             day(usize::MAX);
             day(24);
         }
+    }
+
+    /// A combatant hurt in the village sends the villagers near it home.
+    #[test]
+    fn a_fight_in_the_village_rings_the_alarm() {
+        let mut world = World::new();
+        spawn_village(&mut world, &json!({"homes": 20})).unwrap();
+        let fighter = world.spawn((
+            Name::new("Brawler"),
+            Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+            WorldTransform::identity(),
+            CombatantComponent::default(),
+        ));
+        let mut run = LifeDemo::start(&mut world).unwrap();
+        for _ in 0..1200 {
+            run.life.step(0.5, Clock::at(11.0), &[Vec3::ZERO], &Flat);
+        }
+        assert_eq!(
+            hear_fights(&world, &mut run),
+            0,
+            "first look: nothing to compare"
+        );
+        assert_eq!(hear_fights(&world, &mut run), 0, "no harm, no alarm");
+        // Those in earshot when the blow lands run home and stay in.
+        let earshot: Vec<_> = run
+            .life
+            .villagers()
+            .iter()
+            .filter(|v| v.position.distance(Vec3::ZERO) <= FIGHT_REACH)
+            .map(|v| v.id)
+            .collect();
+        assert!(!earshot.is_empty());
+        world.get_mut::<CombatantComponent>(fighter).unwrap().health -= 10.0;
+        assert_eq!(hear_fights(&world, &mut run), 1);
+        for _ in 0..80 {
+            run.life.step(0.5, Clock::at(11.0), &[Vec3::ZERO], &Flat);
+        }
+        let out: Vec<_> = run
+            .life
+            .villagers()
+            .iter()
+            .filter(|v| earshot.contains(&v.id) && v.visible)
+            .map(|v| (v.name.clone(), v.position, v.activity))
+            .collect();
+        assert!(out.is_empty(), "still out after the fight: {out:?}");
     }
 
     /// The preset gives a place with homes for every house, the trades, the
