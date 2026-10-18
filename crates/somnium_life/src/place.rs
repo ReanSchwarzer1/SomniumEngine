@@ -252,12 +252,15 @@ impl Place {
 pub struct LaneGraph {
     nodes: Vec<Vec3>,
     edges: Vec<Vec<(usize, f32)>>,
+    segments: Vec<(usize, usize)>,
 }
 
 /// Points closer than this are one junction.
 const JOIN: f32 = 0.75;
 /// Spots closer than this walk straight, not by the lanes.
 const STRAIGHT: f32 = 12.0;
+/// A lane route longer than this many times the straight line is cut across.
+const DETOUR: f32 = 1.8;
 
 fn flat(a: Vec3, b: Vec3) -> f32 {
     Vec2::new(a.x - b.x, a.z - b.z).length()
@@ -278,6 +281,7 @@ impl LaneGraph {
                     let d = flat(g.nodes[a], g.nodes[node]);
                     g.edges[a].push((node, d));
                     g.edges[node].push((a, d));
+                    g.segments.push((a, node));
                 }
                 previous = Some(node);
             }
@@ -295,9 +299,18 @@ impl LaneGraph {
         self.nodes.len() - 1
     }
 
-    fn nearest(&self, p: Vec3) -> Option<usize> {
-        (0..self.nodes.len())
-            .min_by(|a, b| flat(self.nodes[*a], p).total_cmp(&flat(self.nodes[*b], p)))
+    /// The nearest point on any lane to `p`: the segment's ends and the point.
+    fn onto(&self, p: Vec3) -> Option<(usize, usize, Vec3)> {
+        self.segments
+            .iter()
+            .map(|&(a, b)| {
+                let (pa, pb) = (self.nodes[a], self.nodes[b]);
+                let ab = Vec2::new(pb.x - pa.x, pb.z - pa.z);
+                let ap = Vec2::new(p.x - pa.x, p.z - pa.z);
+                let t = (ap.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                (a, b, pa.lerp(pb, t))
+            })
+            .min_by(|x, y| flat(x.2, p).total_cmp(&flat(y.2, p)))
     }
 
     /// Junctions in the graph.
@@ -312,29 +325,46 @@ impl LaneGraph {
         self.nodes.is_empty()
     }
 
-    /// The way from `from` to `to`: onto the nearest lane, along the lanes,
-    /// and off to `to` (which is always the last point). Near spots, or a
-    /// place without lanes, go straight.
+    /// The way from `from` to `to`: onto the nearest point of a lane, along
+    /// the lanes, and off to `to` (which is always the last point). Near spots,
+    /// a place without lanes, lanes that do not connect them, or a lane route
+    /// far longer than the straight one, go straight.
     #[must_use]
     pub fn path(&self, from: Vec3, to: Vec3) -> Vec<Vec3> {
-        if self.nodes.is_empty() || flat(from, to) < STRAIGHT {
+        let straight = flat(from, to);
+        if self.segments.is_empty() || straight < STRAIGHT {
             return vec![to];
         }
-        let (Some(a), Some(b)) = (self.nearest(from), self.nearest(to)) else {
+        let (Some((a1, b1, on)), Some((a2, b2, off))) = (self.onto(from), self.onto(to)) else {
             return vec![to];
         };
-        if a == b {
+        if (a1, b1) == (a2, b2) || (a1, b1) == (b2, a2) {
+            return vec![on, off, to];
+        }
+        let starts = [
+            (a1, flat(on, self.nodes[a1])),
+            (b1, flat(on, self.nodes[b1])),
+        ];
+        let Some((chain, along)) = self.dijkstra(starts, [(a2, off), (b2, off)]) else {
+            return vec![to];
+        };
+        if flat(from, on) + along + flat(off, to) > straight * DETOUR {
             return vec![to];
         }
-        let Some(chain) = self.dijkstra(a, b) else {
-            return vec![to];
-        };
-        let mut path: Vec<Vec3> = chain.into_iter().map(|i| self.nodes[i]).collect();
+        let mut path = vec![on];
+        path.extend(chain.into_iter().map(|i| self.nodes[i]));
+        path.push(off);
         path.push(to);
         path
     }
 
-    fn dijkstra(&self, a: usize, b: usize) -> Option<Vec<usize>> {
+    /// Shortest way from either start (with its cost so far) to either end
+    /// (finishing at its point): the nodes, and the length.
+    fn dijkstra(
+        &self,
+        starts: [(usize, f32); 2],
+        ends: [(usize, Vec3); 2],
+    ) -> Option<(Vec<usize>, f32)> {
         #[derive(PartialEq)]
         struct Item(f32, usize);
         impl Eq for Item {}
@@ -351,12 +381,13 @@ impl LaneGraph {
         let mut dist = vec![f32::INFINITY; self.nodes.len()];
         let mut prev = vec![usize::MAX; self.nodes.len()];
         let mut heap = BinaryHeap::new();
-        dist[a] = 0.0;
-        heap.push(Item(0.0, a));
-        while let Some(Item(d, n)) = heap.pop() {
-            if n == b {
-                break;
+        for (n, d) in starts {
+            if d < dist[n] {
+                dist[n] = d;
+                heap.push(Item(d, n));
             }
+        }
+        while let Some(Item(d, n)) = heap.pop() {
             if d > dist[n] {
                 continue;
             }
@@ -369,17 +400,21 @@ impl LaneGraph {
                 }
             }
         }
-        if !dist[b].is_finite() {
+        let (end, total) = ends
+            .iter()
+            .map(|(n, point)| (*n, dist[*n] + flat(self.nodes[*n], *point)))
+            .min_by(|x, y| x.1.total_cmp(&y.1))?;
+        if !total.is_finite() {
             return None;
         }
-        let mut chain = vec![b];
-        let mut n = b;
-        while n != a {
+        let mut chain = vec![end];
+        let mut n = end;
+        while prev[n] != usize::MAX {
             n = prev[n];
             chain.push(n);
         }
         chain.reverse();
-        Some(chain)
+        Some((chain, total))
     }
 }
 

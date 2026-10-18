@@ -1632,6 +1632,7 @@ dependencies = [
  "somnium_core",
  "somnium_ecs",
  "somnium_input",
+ "somnium_life",
  "somnium_physics",
  "somnium_renderer",
  "somnium_script",
