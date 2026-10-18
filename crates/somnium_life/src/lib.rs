@@ -92,6 +92,8 @@ pub enum Pose {
     Inside,
     /// Running from danger.
     Run,
+    /// Talking with a neighbour (facing them).
+    Talk,
 }
 
 /// The world's random numbers: xorshift64*, seeded per agent.

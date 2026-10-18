@@ -15,6 +15,8 @@ const AMBLE: f32 = 0.55;
 const CART_GAP: f32 = 8.0;
 /// Running from danger, metres a second.
 const RUN: f32 = 3.6;
+/// Neighbours idling at one spot this close stop to talk.
+const TALK_REACH: f32 = 4.0;
 /// How far to the side of the road's line a cart drives (each way its own side).
 const CART_SIDE: f32 = 0.9;
 
@@ -296,6 +298,42 @@ impl LifeWorld {
             frightened += 1;
         }
         frightened
+    }
+
+    /// Near villagers idling at the same outdoor spot pair off and talk,
+    /// facing each other; the rest go back to what they were doing.
+    fn converse(&mut self) {
+        let mut at_spot: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, v) in self.villagers.iter_mut().enumerate() {
+            if v.pose == Pose::Talk {
+                v.pose = v.activity.pose();
+            }
+            let idling = matches!(
+                v.activity,
+                Activity::Chores | Activity::Wander | Activity::Market | Activity::Drink
+            );
+            if let Doing::At { spot, .. } = v.doing
+                && idling
+                && v.visible
+                && v.tier == Tier::Near
+            {
+                at_spot.entry((v.place, spot)).or_default().push(i);
+            }
+        }
+        for group in at_spot.values() {
+            for pair in group.chunks(2) {
+                let [a, b] = *pair else { continue };
+                let (pa, pb) = (self.villagers[a].position, self.villagers[b].position);
+                if flat(pa, pb) > TALK_REACH {
+                    continue;
+                }
+                for (me, other) in [(a, pb), (b, pa)] {
+                    let v = &mut self.villagers[me];
+                    v.pose = Pose::Talk;
+                    v.facing = planar(other - v.position).unwrap_or(v.facing);
+                }
+            }
+        }
     }
 
     /// How many places there are.
@@ -679,6 +717,7 @@ impl LifeWorld {
                 }
             }
         }
+        self.converse();
         self.stats = stats;
     }
 }

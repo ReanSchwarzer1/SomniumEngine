@@ -415,6 +415,34 @@ fn an_alarm_sends_villagers_running_home_and_they_come_out_after() {
 }
 
 #[test]
+fn neighbours_idling_at_a_spot_stop_to_talk_face_to_face() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = w.add_place(village(Vec3::ZERO));
+    for _ in 0..4 {
+        w.populate(place, 11);
+    }
+    let mut talks = 0;
+    day(&mut w, 6.0, 20.0, 0.0, &[Vec3::ZERO], |w, _| {
+        let talking: Vec<_> = w
+            .villagers()
+            .iter()
+            .filter(|v| v.pose == Pose::Talk)
+            .collect();
+        for v in &talking {
+            // Each faces a neighbour within reach who is talking too.
+            assert!(talking.iter().any(|o| {
+                o.id != v.id && flat(o.position, v.position) <= 4.0 && {
+                    let to = (o.position - v.position).normalize_or_zero();
+                    v.facing.dot(to) > 0.99
+                }
+            }));
+        }
+        talks += talking.len();
+    });
+    assert!(talks > 0, "somebody stopped to talk");
+}
+
+#[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());
     let at = Vec3::new(500.0, 0.0, 0.0);
