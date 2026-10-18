@@ -1169,7 +1169,7 @@ impl CombatDemo {
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
             run.log.push_back(
-                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides the elk, H whistles it; run into walls to climb".into(),
+                "Fight! WASD, click, right click, Space, 1-0, F, C, Q, Tab; E rides a mount, H whistles it; run into walls to climb".into(),
             );
         }
     }
