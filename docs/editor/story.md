@@ -30,6 +30,7 @@ Select a node to edit it in the inspector on the right. Long text has room there
 - **Play** plays the dialogue from the selected node, or from the start when nothing is selected. The panel shows each line, the choices and every fact that changes. Keys 1 to 9 choose, Space goes on and Esc stops.
 - The **setup** field runs effects before playing, which is how you test one branch: `lang.patter = 'fluent'`.
 - **Game View** shows the play-through in the game's dialogue presenter, with portraits, typewriter text and quest notices. Click or press Space to go on. Esc leaves the view.
+- **Journal** opens the game's journal on the play-through's story: its quests, the people heard, the notes and the Voice's log. Q and E change pages, arrows move, T tracks a quest and Esc closes it.
 
 ## Quests
 
@@ -39,6 +40,13 @@ Select a node to edit it in the inspector on the right. Long text has room there
 - An objective's marker is an anchor name, or `(x, y, z)` in game metres. Add `region=<name>` to measure from that region's anchor, then `r=<metres>` and `arrive` to complete it when the player gets there: `strongroom_door r=2 arrive`.
 - Prefer anchors over positions. An anchor follows its place if the place moves.
 - Markers and radii are in game metres, but the text the player reads keeps the story's distances ("three days' ride").
+
+## Barks, the Voice and notes
+
+- Barks and chatter (`.sombarks`) can be limited to `places` (a place and everything under it: `aldermere` covers `aldermere/market`), to `hours` of the day (`[20, 4]` runs past midnight) and to an `eclipse` window (`[0.8, 1]` is Lidfall). The game says where the player is and what the sky is doing.
+- In play, one voice speaks at a time. A bark cuts off chatter, and only a more urgent bark cuts off a bark. People rest between lines, and the last few lines heard wait while others fit.
+- Notes files (`.somnotes`) also hold the Voice's lines. The effect `voice('id')` has the Voice say one. It is logged with the values its text names at that moment, so the log reads as it was said.
+- A cast member with `"journal": false` (the player, a narrator) stays off the journal's People page.
 
 ## Story actors
 

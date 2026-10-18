@@ -1786,11 +1786,22 @@ reference across files.
   gated and rolled checks, timed menus and interruption.
 - `Presenter` is the light-novel model (typewriter, auto, skip, history, inline
   cues). `Director` is the actor model (talk, jaw, blink, look, gesture, mark).
-- Saves go through `SaveGame.state["story"]`. Lines get i18n keys from where they
-  are, and `strings()` exports them.
+- `Ambience` arbitrates barks and chatter: one voice at a time, barks over
+  chatter, speakers resting, recent lines passed over. Barks are filtered by
+  place, hour and the Lid's `eclipse` through a `BarkContext`.
+- The journal view has quests, notes, people (cast heard or written about) and
+  the Voice's log. `voice('id')` logs an announcement with the values its text
+  names at that moment.
+- Saves go through `SaveGame.state["story"]`, and a mid-scene conversation goes
+  under `"story_conversation"` (`ConversationSave`). It restores without
+  re-running effects, with the presenter's log beside it. Lines get i18n keys
+  from where they are, and `strings()` exports them.
 
-The engine side is `somnium_ui`'s `DialoguePresenter` and `NoticeStack` widgets,
-the graph catalogues and `somnium_core`'s `somnium.CastMember` component. The
+The engine side is `somnium_ui`'s `DialoguePresenter`, `NoticeStack`,
+`ObjectiveMarkers` and `JournalScreen` widgets, `VectorGlyph` (an SVG drawn in
+one colour at any size and angle; the objective marks were drawn in
+VectorCraft), the graph catalogues and `somnium_core`'s `somnium.CastMember`
+component. The
 game owns the `Story`, sends beats and ticks, and applies the effects. Quest
 markers are in game metres, by anchor or region-local position. See
 [the story systems record](<dev records/STORY_SYSTEMS_2026-10-18.md>).
