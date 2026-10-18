@@ -1684,6 +1684,16 @@ impl GameApp for HelloGame {
             }),
         );
 
+        // Evidence hook, inert unless set: `SOMNIUM_COMBAT_SANDBOX=1` builds what
+        // Create > Examples > Combat Sandbox builds, so a capture run can pair it
+        // with `SOMNIUM_AUDIT_UI_STATE=cmd:editor.simulation.play`.
+        if std::env::var("SOMNIUM_COMBAT_SANDBOX").as_deref() == Ok("1") {
+            match combat_demo::spawn_at_startup(ctx.world) {
+                Ok(count) => info!("SOMNIUM_COMBAT_SANDBOX=1 - combat sandbox spawned ({count} entities)"),
+                Err(error) => tracing::warn!("SOMNIUM_COMBAT_SANDBOX: {error}"),
+            }
+        }
+
         // CONTROL-A capture harness: select one real, already-spawned entity
         // by its displayed name so the populated Details surface is captured
         // without inventing fixture data or synthesising an Outliner click.

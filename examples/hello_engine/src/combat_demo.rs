@@ -412,6 +412,11 @@ fn spawn_sandbox(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
     Ok(out)
 }
 
+/// Build the sandbox at the origin outside the Create menu (the capture hook).
+pub fn spawn_at_startup(world: &mut World) -> Result<usize, String> {
+    spawn_sandbox(world, &json!({})).map(|entities| entities.len())
+}
+
 /// Whether the scene has a player-controlled fighter, so Play is the
 /// sandbox's (hello_engine then spawns no first-person character).
 pub fn claims_play(world: &World) -> bool {
