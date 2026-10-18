@@ -13,6 +13,12 @@
 //! beyond their distances, switching a couple of metres past each line and
 //! back a couple short of it so a body on the line does not flicker.
 //!
+//! A **Skinned Socket** (`hello.SkinnedSocket`) on an entity under a Skinned
+//! Body makes it follow one of the body's joints (`weapon_r`, `sheath`,
+//! `back`...): its own Transform is its offset from the joint, and it and
+//! everything under it are placed the same frame the pose is, before meshes
+//! are drawn, so a sword does not trail the hand.
+//!
 //! **Create > Examples > Skinned Crowd** lays out a field of them (its Count
 //! sets how many) to see and measure; the crowd's numbers are in the MCP
 //! authoring state (`skinned`) and the log every ten seconds.
@@ -22,7 +28,9 @@ use serde_json::{Value, json};
 use somnium_anim::Playback;
 use somnium_asset::{animated::AnimatedAsset, database::AssetId};
 use somnium_core::animation_lod::{AnimationLod, AnimationStep};
-use somnium_core::{EngineContext, Name, Parent, Transform, WorldTransform};
+use somnium_core::{
+    EngineContext, MaterialComponent, MeshKind, Name, Parent, Transform, WorldTransform,
+};
 use somnium_ecs::{Component, Entity, World, component_schema, reflect::TypeRegistry};
 use somnium_renderer::{
     SomniumRenderer, animated_geometry::AnimatedMeshId, geometry::MeshAllocation,
@@ -45,6 +53,14 @@ pub struct SkinnedBody {
 }
 
 impl Component for SkinnedBody {}
+
+/// Follow a joint of the Skinned Body this entity is parented to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SkinnedSocket {
+    pub joint: String,
+}
+
+impl Component for SkinnedSocket {}
 
 impl Default for SkinnedBody {
     fn default() -> Self {
@@ -73,6 +89,12 @@ fn schema(r: &mut TypeRegistry) {
             lod2 { group: "LOD", asset_kind_mask: somnium_asset::database::ASSET_KIND_MESH, display_name: "LOD 2", doc: "Fewer still; drawn beyond LOD 2 Beyond (only with LOD 1 set)." },
             lod1_beyond { group: "LOD", min: 0.0, unit: "m", display_name: "LOD 1 Beyond" },
             lod2_beyond { group: "LOD", min: 0.0, unit: "m", display_name: "LOD 2 Beyond" },
+        }
+    });
+    r.register(component_schema! {
+        SkinnedSocket as "hello.SkinnedSocket", display "Skinned Socket", version 1,
+        fields {
+            joint { group: "Socket", doc: "A joint of the parent Skinned Body (weapon_r, weapon_l, spell_r, spell_l, sheath, back). This entity's own Transform is its offset from it." },
         }
     });
 }
@@ -106,7 +128,8 @@ fn spawn(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     Ok(spawn_crowd(world, Vec3::from(at), count))
 }
 
-/// A square of `count` bodies 2.5 m apart, under one root.
+/// A square of `count` bodies 2.5 m apart, under one root, each with a ball
+/// on its `tip` joint (a socket, to see that sockets keep up).
 fn spawn_crowd(world: &mut World, at: Vec3, count: usize) -> Vec<Entity> {
     let root = world.spawn((
         Name::new("Skinned Crowd"),
@@ -118,7 +141,7 @@ fn spawn_crowd(world: &mut World, at: Vec3, count: usize) -> Vec<Entity> {
     for i in 0..count {
         let (x, z) = ((i % side) as f32, (i / side) as f32);
         let half = side as f32 * 0.5;
-        out.push(world.spawn((
+        let body = world.spawn((
             Name::new(&format!("Body {}", i + 1)),
             Transform::from_translation(Vec3::new((x - half) * 2.5, 0.0, (z - half) * 2.5)),
             WorldTransform::identity(),
@@ -127,7 +150,27 @@ fn spawn_crowd(world: &mut World, at: Vec3, count: usize) -> Vec<Entity> {
                 time: (i as f32 * 0.37) % 4.0,
                 ..Default::default()
             },
-        )));
+        ));
+        let ball = world.spawn((
+            Name::new(&format!("Body {} ball", i + 1)),
+            Transform {
+                scale: Vec3::splat(0.3),
+                ..Default::default()
+            },
+            WorldTransform::identity(),
+            Parent { entity: body },
+            SkinnedSocket {
+                joint: "tip".into(),
+            },
+            MeshKind::Sphere,
+            MaterialComponent {
+                asset: AssetId::from_relative_path(std::path::Path::new(
+                    "materials/combat/fire.sommat",
+                )),
+                runtime_id: 0,
+            },
+        ));
+        out.extend([body, ball]);
     }
     out
 }
@@ -139,7 +182,9 @@ pub fn spawn_at_startup(world: &mut World) -> Option<usize> {
         .ok()?
         .parse::<usize>()
         .ok()?;
-    Some(spawn_crowd(world, Vec3::ZERO, count.clamp(1, 1000)).len() - 1)
+    let count = count.clamp(1, 1000);
+    spawn_crowd(world, Vec3::ZERO, count);
+    Some(count)
 }
 
 /// One glTF shared by every body that draws it.
@@ -159,6 +204,10 @@ struct Body {
     clock: f32,
     owed: f32,
     palette: Vec<Mat4>,
+    /// Each joint in the body's space, for sockets.
+    model: Vec<Mat4>,
+    /// Where the body stands, as last drawn.
+    matrix: Mat4,
     /// The palette holds a sampled pose.
     posed: bool,
 }
@@ -181,6 +230,10 @@ pub struct SkinnedBodies {
     failed: HashMap<AssetId, String>,
     lod: AnimationLod,
     stats: Stats,
+    /// Each socket's descendants, parents first, and the entity count they
+    /// were found at.
+    subtrees: HashMap<Entity, Vec<Entity>>,
+    subtrees_for: usize,
 }
 
 fn world_matrix(world: &World, e: Entity) -> Mat4 {
@@ -280,6 +333,72 @@ fn unregister(r: &mut SomniumRenderer, body: &mut Body) {
 }
 
 impl SkinnedBodies {
+    /// Put each socket (and everything under it) on its joint, as posed this
+    /// frame; transforms have already been propagated, so this writes the
+    /// world matrices the meshes are about to be drawn with.
+    fn place_sockets(&mut self, world: &mut World) {
+        if self.subtrees_for != world.entity_count() {
+            self.subtrees_for = world.entity_count();
+            self.subtrees.clear();
+            let sockets: Vec<Entity> = world.iter_with::<SkinnedSocket>().map(|(e, _)| e).collect();
+            if !sockets.is_empty() {
+                let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+                for (e, parent) in world.iter_with::<Parent>() {
+                    children.entry(parent.entity).or_default().push(e);
+                }
+                for socket in sockets {
+                    let mut below = Vec::new();
+                    let mut next = vec![socket];
+                    while let Some(e) = next.pop() {
+                        for child in children.get(&e).into_iter().flatten() {
+                            below.push(*child);
+                            next.push(*child);
+                        }
+                    }
+                    self.subtrees.insert(socket, below);
+                }
+            }
+        }
+        let sockets: Vec<(Entity, String, Entity, Mat4)> = world
+            .iter_with::<SkinnedSocket>()
+            .filter_map(|(e, s)| {
+                let parent = world.get::<Parent>(e)?.entity;
+                let local = world.get::<Transform>(e)?.to_matrix();
+                Some((e, s.joint.clone(), parent, local))
+            })
+            .collect();
+        for (socket, joint, parent, local) in sockets {
+            let Some(body) = self.bodies.get(&parent).filter(|b| b.posed) else {
+                continue;
+            };
+            let Some(joint) = self
+                .shared
+                .get(&body.source)
+                .and_then(|s| s.asset.joint(&joint))
+            else {
+                continue;
+            };
+            let mut placed =
+                HashMap::from([(socket, body.matrix * body.model[usize::from(joint)] * local)]);
+            for e in self.subtrees.get(&socket).into_iter().flatten() {
+                let (Some(parent), Some(local)) = (
+                    world.get::<Parent>(*e).map(|p| p.entity),
+                    world.get::<Transform>(*e).map(Transform::to_matrix),
+                ) else {
+                    continue;
+                };
+                if let Some(above) = placed.get(&parent).copied() {
+                    placed.insert(*e, above * local);
+                }
+            }
+            for (e, matrix) in placed {
+                if let Some(w) = world.get_mut::<WorldTransform>(e) {
+                    w.0 = matrix;
+                }
+            }
+        }
+    }
+
     /// For MCP and automation.
     pub fn state(&self) -> Value {
         let s = &self.stats;
@@ -385,6 +504,7 @@ impl SkinnedBodies {
                 body.source = id;
                 body.level = level;
                 body.palette = vec![Mat4::IDENTITY; shared.asset.skeleton.len()];
+                body.model = vec![Mat4::IDENTITY; shared.asset.skeleton.len()];
             }
             let shared = self.shared.get_mut(&id).expect("loaded above");
             let body = self.bodies.entry(e).or_insert_with(|| {
@@ -396,6 +516,8 @@ impl SkinnedBodies {
                     clock: settings.time,
                     owed: 0.0,
                     palette: vec![Mat4::IDENTITY; shared.asset.skeleton.len()],
+                    model: vec![Mat4::IDENTITY; shared.asset.skeleton.len()],
+                    matrix: Mat4::IDENTITY,
                     posed: false,
                 }
             });
@@ -447,8 +569,12 @@ impl SkinnedBodies {
                 if let Some(clip) = clip
                     && let Ok(pose) =
                         clip.sample(&shared.asset.skeleton, body.clock, Playback::LOOPING)
-                    && pose.to_palette(&shared.asset.skeleton, &mut body.palette)
+                    && pose.to_model_space(&shared.asset.skeleton, &mut body.model)
                 {
+                    let skeleton = &shared.asset.skeleton;
+                    for (i, joint) in body.model.iter().enumerate().take(skeleton.len()) {
+                        body.palette[i] = *joint * skeleton.inverse_bind()[i];
+                    }
                     for (skin, _) in &body.skins {
                         r.animated_geometry.update(*skin, &body.palette);
                     }
@@ -456,6 +582,7 @@ impl SkinnedBodies {
                     sampled += 1;
                 }
             }
+            body.matrix = matrix;
             for ((_, rest, material), (_, posed)) in shared.meshes.iter().zip(&body.skins) {
                 r.submit(somnium_renderer::command::DrawCommand {
                     paint: 0,
@@ -473,6 +600,7 @@ impl SkinnedBodies {
         if drawn > 0 {
             r.invalidate_shadow_casters();
         }
+        self.place_sockets(ctx.world);
         let s = &mut self.stats;
         s.bodies = self.bodies.len();
         s.drawn = drawn;
@@ -504,7 +632,8 @@ mod tests {
     fn the_crowd_preset_lays_out_its_bodies() {
         let mut world = World::new();
         let made = spawn(&mut world, &json!({"count": 50})).unwrap();
-        assert_eq!(made.len(), 51);
+        assert_eq!(made.len(), 101, "a root, and a body and its ball each");
+        assert_eq!(world.iter_with::<SkinnedSocket>().count(), 50);
         let bodies: Vec<_> = world
             .iter_with::<SkinnedBody>()
             .map(|(_, b)| b.time)
@@ -514,6 +643,79 @@ mod tests {
         starts.dedup();
         assert!(starts.len() > 10, "not in step");
         assert!(spawn(&mut world, &json!({"position": [f32::NAN, 0, 0]})).is_err());
+    }
+
+    /// A socket and what hangs from it land on the joint as posed, the same
+    /// frame (no GPU: the skeleton is read on the CPU).
+    #[test]
+    fn a_socket_follows_its_joint() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/models/animation_demo.gltf");
+        let asset = AnimatedAsset::load(&path).expect("the demo rig");
+        let tip = asset.joint("tip").expect("a tip joint");
+        let joints = asset.skeleton.len();
+        let pose = asset
+            .clips
+            .values()
+            .next()
+            .unwrap()
+            .sample(&asset.skeleton, 0.5, Playback::LOOPING)
+            .unwrap();
+        let mut model = vec![Mat4::IDENTITY; joints];
+        assert!(pose.to_model_space(&asset.skeleton, &mut model));
+        let mut world = World::new();
+        let body_at = Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0));
+        let body = world.spawn((
+            Name::new("Body"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        let offset = Vec3::new(0.0, 0.1, 0.0);
+        let socket = world.spawn((
+            Name::new("Sword"),
+            Transform::from_translation(offset),
+            WorldTransform::identity(),
+            Parent { entity: body },
+            SkinnedSocket {
+                joint: "tip".into(),
+            },
+        ));
+        let pommel = world.spawn((
+            Name::new("Pommel"),
+            Transform::from_translation(Vec3::new(0.0, -0.2, 0.0)),
+            WorldTransform::identity(),
+            Parent { entity: socket },
+        ));
+        let source = AssetId::from_relative_path("models/animation_demo.gltf");
+        let mut bodies = SkinnedBodies::default();
+        bodies.shared.insert(
+            source,
+            Shared {
+                asset,
+                meshes: Vec::new(),
+                users: 1,
+            },
+        );
+        bodies.bodies.insert(
+            body,
+            Body {
+                source,
+                level: 0,
+                skins: Vec::new(),
+                clock: 0.5,
+                owed: 0.0,
+                palette: vec![Mat4::IDENTITY; joints],
+                model: model.clone(),
+                matrix: body_at,
+                posed: true,
+            },
+        );
+        bodies.place_sockets(&mut world);
+        let at = |e: Entity| world.get::<WorldTransform>(e).unwrap().0;
+        let expected = body_at * model[usize::from(tip)] * Mat4::from_translation(offset);
+        assert!(at(socket).abs_diff_eq(expected, 1e-5));
+        let below = expected * Mat4::from_translation(Vec3::new(0.0, -0.2, 0.0));
+        assert!(at(pommel).abs_diff_eq(below, 1e-5), "the subtree follows");
     }
 
     /// Levels switch past each line with some slack either way, and never to
