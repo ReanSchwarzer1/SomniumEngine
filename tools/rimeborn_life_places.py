@@ -68,6 +68,8 @@ ROLE_POSES = {"Smith": {"Work": "Hammer_Anvil_Loop"}, "Keeper": {"Work": "Sweep_
 ELDER_POSES = {"Idle": "Idle_Old_Loop|Idle_Neutral_Loop", "Walk": "Loco_Old_Walk_F_Loop|Loco_Walk_F_Loop"}
 BEAST_POSES = {"Graze": "Graze_Loop|Idle_Loop", "Walk": "Walk_F_Loop", "Run": "Trot_F_Loop|Run_F_Loop|Walk_F_Loop",
                "Idle": "Idle_Loop"}
+CART = "cart_horse"  # a cart is drawn as its horse, walking the road or standing (there is no cart mesh yet)
+CART_POSES = {"Drive": "Walk_F_Loop", "Idle": "Idle_Loop"}
 # Loco_Walk_F_Loop's root speed, and Loco_Jog_F_Loop's measured from its planted feet (WS3: Loco_Run_F_Loop is a
 # 1.5 m/s trot that skates at a flee's pace; the jog reads right from 5.6 to 6.0 m/s).
 WALK_SPEED, RUN_SPEED = 0.86, 5.6
@@ -241,7 +243,9 @@ def looks_of(rimeborn: Path):
         gear = {}
     return {"villagers": villagers, "beasts": beasts, "poses": POSES, "child_poses": CHILD_POSES,
             "elder_poses": ELDER_POSES, "beast_poses": BEAST_POSES, "walk_speed": WALK_SPEED,
-            "run_speed": RUN_SPEED, "role_poses": role_poses, "gear": gear}
+            "run_speed": RUN_SPEED, "role_poses": role_poses, "gear": gear,
+            **({"cart": f"creatures/{CART}/{CART}.glb", "cart_poses": CART_POSES}
+               if (creatures / CART / f"{CART}.glb").exists() else {})}
 
 
 def asset_id(rel: str) -> str:

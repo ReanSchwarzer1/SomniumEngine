@@ -67,6 +67,12 @@ pub struct TableLooks {
     /// Each body's height in metres, by its path: gear is sized to its holder.
     #[serde(default)]
     pub heights: BTreeMap<String, f32>,
+    /// The body that draws a cart (its horse), if any.
+    #[serde(default)]
+    pub cart: Option<String>,
+    /// A cart's clips by pose name (`Drive`, `Idle`).
+    #[serde(default)]
+    pub cart_poses: BTreeMap<String, String>,
 }
 
 /// One piece a clip holds: meshes of a file, on a joint's socket.
@@ -168,6 +174,12 @@ impl TableLooks {
         self.beasts
             .get(BeastKind::NAMES[kind as usize])
             .map(String::as_str)
+    }
+
+    /// The clip a cart's body plays in `pose`.
+    #[must_use]
+    pub fn cart_clip(&self, pose: Pose) -> Option<&str> {
+        self.cart_poses.get(pose.name()).map(String::as_str)
     }
 
     /// The clip a beast plays in `pose`.

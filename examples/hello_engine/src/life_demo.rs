@@ -1207,6 +1207,7 @@ impl LifeDemo {
         let dress_as = table.as_ref().and_then(|t| t.table.looks.clone());
         let skinned_people = dress_as.as_ref().is_some_and(|l| !l.villagers.is_empty());
         let skinned_beasts = dress_as.as_ref().is_some_and(|l| !l.beasts.is_empty());
+        let skinned_carts = dress_as.as_ref().is_some_and(|l| l.cart.is_some());
         let villagers = Pool::new(
             world,
             &mut spawned,
@@ -1235,11 +1236,18 @@ impl LifeDemo {
             world,
             &mut spawned,
             effects,
-            (CART_BODIES, "Cart", Some(MeshKind::Cube), false),
+            (
+                CART_BODIES,
+                "Cart",
+                (!skinned_carts).then_some(MeshKind::Cube),
+                false,
+            ),
             HashSet::new(),
         );
-        for (body, _) in &carts.slots {
-            dress(world, *body, "Cart", Vec3::new(1.4, 1.1, 2.6), "hide");
+        if !carts.skinned {
+            for (body, _) in &carts.slots {
+                dress(world, *body, "Cart", Vec3::new(1.4, 1.1, 2.6), "hide");
+            }
         }
         carts.bodies.keep = 10.0;
         let tod = world
@@ -1560,8 +1568,21 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
             .map(|(i, c)| (i, near(c.position)))
             .collect(),
     );
-    for (slot, _) in changed {
-        run.looks.remove(&run.carts.slots[slot].0);
+    for (slot, holder) in changed {
+        let body = run.carts.slots[slot].0;
+        run.looks.remove(&body);
+        // A table's cart is its horse, walking the road or standing.
+        if let (Some(i), true, Some(looks)) = (holder, run.carts.skinned, &run.dress_as) {
+            let c = &life.carts()[i];
+            wear(
+                world,
+                body,
+                "Cart",
+                looks.cart.as_deref(),
+                looks.cart_clip(c.pose),
+                c.id.0,
+            );
+        }
     }
     // Skinned slots play the clip their holder's pose calls for, holding
     // what it holds; a parked slot holds nothing.
@@ -1591,6 +1612,13 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
                 && let Some(i) = run.beasts.bodies.holder(slot)
             {
                 play(world, *e, looks.beast_clip(life.beasts()[i].pose));
+            }
+        }
+        for (slot, (e, _)) in run.carts.slots.iter().enumerate() {
+            if run.carts.skinned
+                && let Some(i) = run.carts.bodies.holder(slot)
+            {
+                play(world, *e, looks.cart_clip(life.carts()[i].pose));
             }
         }
     }
@@ -1626,7 +1654,11 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         }
     }));
     all.extend(pooled(&run.carts, Visual::Cart, &|_| {
-        Vec3::new(1.4, 1.1, 2.6)
+        if run.carts.skinned {
+            feet
+        } else {
+            Vec3::new(1.4, 1.1, 2.6)
+        }
     }));
     for (entity, which, size) in &all {
         let Some(which) = which else {
@@ -2087,6 +2119,8 @@ mod tests {
                                                "joint": "weapon_r"}]
                     },
                     "heights": {"characters/kael_00/kael_00.glb": 1.32},
+                    "cart": "creatures/cart_horse/cart_horse.glb",
+                    "cart_poses": {"Drive": "Walk_F_Loop", "Idle": "Idle_Loop"},
                     "child_poses": {"Walk": "Child_Walk_F_Loop", "Idle": "Child_Idle_Loop"},
                     "walk_speed": 0.86
                 }))
@@ -2109,7 +2143,7 @@ mod tests {
             },
         ));
         let mut run = LifeDemo::start(&mut world, Some(&root)).unwrap();
-        assert!(run.villagers.skinned && !run.beasts.skinned);
+        assert!(run.villagers.skinned && !run.beasts.skinned && run.carts.skinned);
         assert!((run.life.walk_speed - 0.86).abs() < 1e-6, "the clip's pace");
         assert!(
             world.iter_with::<MeshKind>().all(|(e, _)| !run
