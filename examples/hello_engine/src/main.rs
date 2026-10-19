@@ -922,6 +922,12 @@ impl HelloGame {
         self.life.world()
     }
 
+    /// The life sim to change while Play runs it: the off-screen protagonist adopted as a person with a schedule
+    /// (`LifeWorld::adopt_person`), released when the switch hands him to the player.
+    pub fn life_mut(&mut self) -> Option<&mut somnium_life::LifeWorld> {
+        self.life.world_mut()
+    }
+
     fn spawn_default_vessel(
         &mut self,
         renderer: &mut somnium_renderer::SomniumRenderer,

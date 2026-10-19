@@ -685,13 +685,17 @@ fn wear(
     );
 }
 
-/// The body a villager wears: its town's own folk where the table names
-/// them, else the table's for its role.
+/// The body a villager wears: a person's own (the off-screen protagonist),
+/// else its town's own folk where the table names them, else the table's for
+/// its role.
 fn body_of<'a>(
     table: Option<&'a TableRun>,
     looks: &'a TableLooks,
-    v: &somnium_life::Villager,
+    v: &'a somnium_life::Villager,
 ) -> Option<&'a str> {
+    if let Some(own) = v.body.as_deref() {
+        return Some(own);
+    }
     match table.and_then(|t| t.people(v.place)) {
         Some(people) => looks.body_in(people, v.role, v.id.0),
         None => looks.body(v.role, v.id.0),
@@ -1332,6 +1336,11 @@ impl LifeDemo {
     /// The life sim, while Play runs it.
     pub fn world(&self) -> Option<&LifeWorld> {
         self.run.as_ref().map(|r| &r.life)
+    }
+
+    /// The life sim to change (a person to adopt or release), while Play runs it.
+    pub fn world_mut(&mut self) -> Option<&mut LifeWorld> {
+        self.run.as_mut().map(|r| &mut r.life)
     }
 
     pub fn event(&mut self, event: &EngineEvent) {
