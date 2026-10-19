@@ -126,9 +126,16 @@ impl ImportedDraws {
         self.verdict(world, entity, own, parent, camera)
     }
 
-    /// [`Self::draw`] for row `row` of `archetype`, the draw loop's own iteration: the row's components are read from
-    /// its columns, in order, instead of looked up through the world per entity.
-    pub fn draw_row(&mut self, world: &World, archetype: &Archetype, row: usize, camera: Vec3) -> Option<bool> {
+    /// [`Self::draw`] for row `row` of `archetype` (whose entity is `entity`), the draw loop's own iteration: the row's
+    /// components are read from its columns, in order, instead of looked up through the world per entity.
+    pub fn draw_row(
+        &mut self,
+        world: &World,
+        archetype: &Archetype,
+        row: usize,
+        entity: Entity,
+        camera: Vec3,
+    ) -> Option<bool> {
         if archetype.column_index(ComponentId::of::<ImportedMesh>()).is_none() {
             return Some(true);
         }
@@ -140,7 +147,7 @@ impl ImportedDraws {
         let parent = archetype
             .column_index(ComponentId::of::<Parent>())
             .map(|c| unsafe { archetype.column(c).get::<Parent>(row) }.entity);
-        self.verdict(world, archetype.entities()[row], own, parent, camera)
+        self.verdict(world, entity, own, parent, camera)
     }
 
     fn verdict(&mut self, world: &World, entity: Entity, own: bool, parent: Option<Entity>, camera: Vec3) -> Option<bool> {
@@ -254,16 +261,19 @@ mod tests {
             for entity in all {
                 assert_eq!(cache.draw(&world, entity, camera), imported_draw(&world, entity, camera), "{camera}");
             }
-            // The same through the loop's own archetype rows.
+            // The same through the loop's own archetype rows (their entities from the component query, which visits
+            // the same archetypes in the same order).
             cache.begin_frame();
             let required = somnium_ecs::ComponentSet::from_ids(vec![ComponentId::of::<Transform>()]);
+            let mut entities = world.entities_with::<Transform>();
             for archetype in world.query_archetypes(&required, &somnium_ecs::ComponentSet::empty()) {
                 for row in 0..archetype.len() {
-                    let entity = archetype.entities()[row];
+                    let entity = entities.next().expect("one entity a row");
                     let expected = imported_draw(&world, entity, camera);
-                    assert_eq!(cache.draw_row(&world, archetype, row, camera), expected, "{camera} row");
+                    assert_eq!(cache.draw_row(&world, archetype, row, entity, camera), expected, "{camera} row");
                 }
             }
+            assert!(entities.next().is_none());
         }
     }
 

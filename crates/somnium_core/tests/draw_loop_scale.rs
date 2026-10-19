@@ -102,7 +102,7 @@ fn cached_loop(
             if lods.is_hidden(entity) {
                 continue;
             }
-            let Some(casts) = draws.draw_row(world, archetype, row, camera) else { continue };
+            let Some(casts) = draws.draw_row(world, archetype, row, entity, camera) else { continue };
             if cutaways.is_shadow_only(entity) {
                 continue;
             }
