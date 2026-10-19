@@ -349,6 +349,14 @@ export type SomniumLifeSpot = {
 	kind: number --[[ Home | Work | Market | Inn | Chapel | Field | Pen | Green | Well ]],
 }
 
+--- `somnium.LifeTable` (schema version 1).
+export type SomniumLifeTable = {
+	enabled: boolean,
+	file: string,
+	reach: number,
+	adopted: number, -- engine-owned; reading only
+}
+
 --- `somnium.Light` (schema version 1).
 export type SomniumLight = {
 	light_type: number --[[ Directional | Point | Spot | Rect | Disc | Tube ]],
@@ -906,6 +914,7 @@ export type SelfComponents = {
 	isometricCamera: SomniumIsometricCamera?,
 	lifePlace: SomniumLifePlace?,
 	lifeSpot: SomniumLifeSpot?,
+	lifeTable: SomniumLifeTable?,
 	light: SomniumLight?,
 	lightFlicker: SomniumLightFlicker?,
 	livestock: SomniumLivestock?,

@@ -15,7 +15,10 @@
 //! of posed vertices holds whatever the distances (the renderer skins about
 //! 2 M; WS3's crowd contract): nearest first, each body keeps the level its
 //! distance wants only while what is left still covers everyone behind it at
-//! their coarsest, so a packed market is coarsened from the back.
+//! their coarsest, so a packed market is coarsened from the back. A body's
+//! skinned meshes that share a skin (WS3's people are one skin of 17 parts)
+//! are merged into one posed mesh at load, drawn part by part: one
+//! registration and one palette a body, not one a part.
 //!
 //! A **Skinned Socket** (`hello.SkinnedSocket`) on an entity under a Skinned
 //! Body makes it follow one of the body's joints (`weapon_r`, `sheath`,
@@ -196,10 +199,19 @@ pub fn spawn_at_startup(world: &mut World) -> Option<usize> {
 }
 
 /// One glTF shared by every body that draws it.
+/// A source's skinned meshes of one skin, merged: posed as one, drawn part by part.
+struct Merged {
+    rest: MeshAllocation,
+    skin: somnium_anim::Skin,
+    vertices: Vec<somnium_asset::Vertex>,
+    /// Each part's indices within `rest` (first, count) and its material.
+    parts: Vec<(u32, u32, u32)>,
+}
+
 struct Shared {
     asset: AnimatedAsset,
-    /// Each skinned mesh: its index in the scene, its rest allocation, its material.
-    meshes: Vec<(usize, MeshAllocation, u32)>,
+    /// Its skinned meshes, merged by skin.
+    meshes: Vec<Merged>,
     users: usize,
     /// Posed vertices one body of it costs.
     vertices: u32,
@@ -235,6 +247,13 @@ struct Stats {
     sample_ms: f64,
     /// Of it, loading sources and fitting levels to the budget.
     plan_ms: f64,
+    /// Of it, posing new bodies (registering their skins), and the most one
+    /// frame spent so since the last report.
+    register_ms: f64,
+    register_peak_ms: f64,
+    /// Skinned meshes registered last frame, and bodies left waiting their turn.
+    registered: usize,
+    waiting: usize,
     frames: u32,
     reported: f32,
 }
@@ -243,6 +262,10 @@ struct Stats {
 pub struct SkinnedBodies {
     /// Posed vertices all skinned bodies may hold together.
     pub vertex_budget: u32,
+    /// Skinned meshes registered a frame at most, nearest bodies first: the
+    /// renderer re-checks every registered skin for each new one, so a crowd
+    /// coming into view (or changing level) all at once would stall a frame.
+    pub registers_per_frame: usize,
     shared: HashMap<AssetId, Shared>,
     bodies: HashMap<Entity, Body>,
     failed: HashMap<AssetId, String>,
@@ -258,6 +281,7 @@ impl Default for SkinnedBodies {
     fn default() -> Self {
         Self {
             vertex_budget: VERTEX_BUDGET,
+            registers_per_frame: REGISTERS_PER_FRAME,
             shared: HashMap::new(),
             bodies: HashMap::new(),
             failed: HashMap::new(),
@@ -287,47 +311,98 @@ fn load(
         return Err("no skeletal clips".into());
     }
     let materials = r.upload_scene_materials(gpu, &asset.scene);
-    let mut meshes = Vec::new();
-    for (index, mesh) in asset.scene.meshes.iter().enumerate() {
-        if mesh.skin.is_none() {
-            continue;
-        }
-        let material = asset
-            .scene
-            .nodes
-            .iter()
-            .find(|n| n.mesh_index == Some(index))
-            .and_then(|n| n.material_index)
-            .and_then(|m| materials.get(m))
-            .copied()
-            .unwrap_or(0);
-        let rest =
-            r.geometry
-                .upload_mesh_pooled(&gpu.queue, &mesh.vertices, &mesh.indices, material);
-        if rest.vertex_count as usize != mesh.vertices.len()
-            || rest.index_count as usize != mesh.indices.len()
+    let skinned = asset
+        .scene
+        .meshes
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.skin.is_some())
+        .map(|(index, mesh)| {
+            let material = asset
+                .scene
+                .nodes
+                .iter()
+                .find(|n| n.mesh_index == Some(index))
+                .and_then(|n| n.material_index)
+                .and_then(|m| materials.get(m))
+                .copied()
+                .unwrap_or(0);
+            (mesh, material)
+        });
+    let merged = merge_by_skin(skinned);
+    let mut meshes: Vec<Merged> = Vec::new();
+    for (skin, vertices, indices, parts) in merged {
+        let rest = r
+            .geometry
+            .upload_mesh_pooled(&gpu.queue, &vertices, &indices, parts[0].2);
+        if rest.vertex_count as usize != vertices.len()
+            || rest.index_count as usize != indices.len()
         {
             r.geometry.free_mesh(rest);
-            for (_, rest, _) in meshes {
-                r.geometry.free_mesh(rest);
+            for m in meshes {
+                r.geometry.free_mesh(m.rest);
             }
             return Err("rest geometry pool is full".into());
         }
-        meshes.push((index, rest, material));
+        meshes.push(Merged {
+            rest,
+            skin,
+            vertices,
+            parts,
+        });
     }
     if meshes.is_empty() {
         return Err("no skinned meshes".into());
     }
-    let vertices = meshes
-        .iter()
-        .map(|(i, _, _)| asset.scene.meshes[*i].vertices.len() as u32)
-        .sum();
+    let vertices = meshes.iter().map(|m| m.vertices.len() as u32).sum();
     Ok(Shared {
         asset,
         meshes,
         users: 0,
         vertices,
     })
+}
+
+/// Skinned meshes merged by skin, in the file's order: each skin with every
+/// part's bindings, the parts' vertices, their indices (made relative to the
+/// merged vertices), and each part's first index, index count and material.
+type Merging = (
+    somnium_anim::Skin,
+    Vec<somnium_asset::Vertex>,
+    Vec<u32>,
+    Vec<(u32, u32, u32)>,
+);
+
+fn merge_by_skin<'a>(
+    meshes: impl IntoIterator<Item = (&'a somnium_asset::LoadedMesh, u32)>,
+) -> Vec<Merging> {
+    let mut merged: Vec<Merging> = Vec::new();
+    for (mesh, material) in meshes {
+        let Some(skin) = &mesh.skin else {
+            continue;
+        };
+        let at = match merged
+            .iter()
+            .position(|(s, ..)| s.skeleton == skin.skeleton)
+        {
+            Some(at) => at,
+            None => {
+                let empty = somnium_anim::Skin {
+                    skeleton: skin.skeleton,
+                    bindings: Vec::new(),
+                };
+                merged.push((empty, Vec::new(), Vec::new(), Vec::new()));
+                merged.len() - 1
+            }
+        };
+        let (into, vertices, indices, parts) = &mut merged[at];
+        let base = vertices.len() as u32;
+        parts.push((indices.len() as u32, mesh.indices.len() as u32, material));
+        into.bindings.extend_from_slice(&skin.bindings);
+        vertices.extend_from_slice(&mesh.vertices);
+        indices.extend(mesh.indices.iter().map(|i| i + base));
+    }
+    merged
 }
 
 /// A body's levels: its source, then LOD 1 and LOD 2 while each is set.
@@ -344,6 +419,16 @@ fn levels(b: &SkinnedBody) -> Vec<AssetId> {
 /// Posed vertices for every skinned body together, by default: WS3's crowd
 /// contract gives the renderer about 2 M, and the cast and fighters need the rest.
 const VERTEX_BUDGET: u32 = 1_600_000;
+
+/// Skinned meshes registered a frame, by default.
+const REGISTERS_PER_FRAME: usize = 4;
+
+/// Whether a body of `meshes` skinned meshes may register this frame, with
+/// `registered` already: within `cap`, and always the frame's first (a body
+/// of more meshes than the cap still gets its turn).
+fn may_register(registered: usize, meshes: usize, cap: usize) -> bool {
+    registered == 0 || registered + meshes <= cap
+}
 
 /// Metres past a line before a body switches level (and short of it before it
 /// switches back).
@@ -450,6 +535,9 @@ impl SkinnedBodies {
             "sampled": s.sampled,
             "sample_ms": s.sample_ms,
             "plan_ms": s.plan_ms,
+            "register_ms": s.register_ms,
+            "registered": s.registered,
+            "waiting": s.waiting,
             "sources": self.shared.len(),
             "posed_vertices": [s.posed, self.vertex_budget],
             "errors": self.failed.values().collect::<Vec<_>>(),
@@ -465,7 +553,7 @@ impl SkinnedBodies {
         let camera = r.camera_pos;
         let dt = ctx.time.dt().min(0.1);
         let running = ctx.simulation.state != somnium_core::SimulationState::Paused;
-        let wanted: Vec<(Entity, SkinnedBody, Mat4)> = ctx
+        let mut wanted: Vec<(Entity, SkinnedBody, Mat4)> = ctx
             .world
             .iter_with::<SkinnedBody>()
             .map(|(e, b)| (e, b.clone(), world_matrix(ctx.world, e)))
@@ -502,13 +590,14 @@ impl SkinnedBodies {
             .collect();
         for id in unused {
             if let Some(shared) = self.shared.remove(&id) {
-                for (_, rest, _) in shared.meshes {
-                    r.geometry.free_mesh(rest);
+                for m in shared.meshes {
+                    r.geometry.free_mesh(m.rest);
                 }
             }
         }
         let started = Instant::now();
         let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
+        let (mut registered, mut waiting, mut register_ms) = (0, 0, 0.0);
         for id in wanted_ids {
             if self.shared.contains_key(&id) || self.failed.contains_key(&id) {
                 continue;
@@ -559,6 +648,11 @@ impl SkinnedBodies {
             .map(|(p, level)| (p.1, level))
             .collect();
         let planned = started.elapsed().as_secs_f64() * 1000.0;
+        // Nearest first, so the bodies posed first under the frame's cap are the ones closest.
+        wanted.sort_by(|a, b| {
+            let d = |m: &Mat4| m.w_axis.truncate().distance_squared(camera);
+            d(&a.2).total_cmp(&d(&b.2))
+        });
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
@@ -617,17 +711,22 @@ impl SkinnedBodies {
                 if body.retry.is_some_and(|at| Instant::now() < at) {
                     continue;
                 }
-                for (index, rest, _) in &shared.meshes {
-                    let mesh = &shared.asset.scene.meshes[*index];
-                    let skin = mesh.skin.as_ref().expect("kept only skinned meshes");
+                // The frame's registrations are spent: it waits for the next.
+                if !may_register(registered, shared.meshes.len(), self.registers_per_frame) {
+                    waiting += 1;
+                    continue;
+                }
+                let registering = Instant::now();
+                registered += shared.meshes.len();
+                for m in &shared.meshes {
                     match r.animated_geometry.register(
                         gpu,
                         &mut r.geometry,
                         &mut r.skin_pass,
                         &shared.asset.skeleton,
-                        skin,
-                        rest.vertex_offset,
-                        &mesh.vertices,
+                        &m.skin,
+                        m.rest.vertex_offset,
+                        &m.vertices,
                     ) {
                         Ok(posed) => body.skins.push(posed),
                         Err(error) => {
@@ -639,6 +738,7 @@ impl SkinnedBodies {
                         }
                     }
                 }
+                register_ms += registering.elapsed().as_secs_f64() * 1000.0;
                 if body.skins.len() != shared.meshes.len() {
                     unregister(r, body);
                     body.retry = Some(Instant::now() + std::time::Duration::from_secs(1));
@@ -680,17 +780,23 @@ impl SkinnedBodies {
                 }
             }
             body.matrix = matrix;
-            for ((_, rest, material), (_, posed)) in shared.meshes.iter().zip(&body.skins) {
-                r.submit(somnium_renderer::command::DrawCommand {
-                    paint: 0,
-                    sort_key: somnium_renderer::command::SortKey::new(0, *material as u16, *posed),
-                    vertex_offset: *posed,
-                    index_offset: rest.index_offset,
-                    index_count: rest.index_count,
-                    material_id: *material,
-                    transform: matrix,
-                    casts_shadow: true,
-                });
+            for (m, (_, posed)) in shared.meshes.iter().zip(&body.skins) {
+                for &(first, count, material) in &m.parts {
+                    r.submit(somnium_renderer::command::DrawCommand {
+                        paint: 0,
+                        sort_key: somnium_renderer::command::SortKey::new(
+                            0,
+                            material as u16,
+                            *posed,
+                        ),
+                        vertex_offset: *posed,
+                        index_offset: m.rest.index_offset + first,
+                        index_count: count,
+                        material_id: material,
+                        transform: matrix,
+                        casts_shadow: true,
+                    });
+                }
             }
             drawn += 1;
             posed += shared.vertices;
@@ -708,6 +814,10 @@ impl SkinnedBodies {
         let k = 1.0 / f64::from(s.frames.min(120));
         s.sample_ms += (started.elapsed().as_secs_f64() * 1000.0 - s.sample_ms) * k;
         s.plan_ms += (planned - s.plan_ms) * k;
+        s.register_ms += (register_ms - s.register_ms) * k;
+        s.register_peak_ms = s.register_peak_ms.max(register_ms);
+        s.registered = registered;
+        s.waiting = waiting;
         s.reported += dt;
         if s.bodies > 0 && s.reported >= 10.0 {
             s.reported = 0.0;
@@ -715,10 +825,15 @@ impl SkinnedBodies {
                 bodies = s.bodies,
                 drawn = s.drawn,
                 sampled = s.sampled,
+                posed = s.posed,
                 cpu_ms = s.sample_ms,
                 plan_ms = s.plan_ms,
+                register_ms = s.register_ms,
+                register_peak_ms = s.register_peak_ms,
+                waiting = s.waiting,
                 "skinned crowd"
             );
+            s.register_peak_ms = 0.0;
         }
     }
 }
@@ -819,6 +934,70 @@ mod tests {
         assert!(at(socket).abs_diff_eq(expected, 1e-5));
         let below = expected * Mat4::from_translation(Vec3::new(0.0, -0.2, 0.0));
         assert!(at(pommel).abs_diff_eq(below, 1e-5), "the subtree follows");
+    }
+
+    /// Parts of one skin merge into one mesh: bindings and vertices end to
+    /// end, each part's indices moved past the parts before it, its own index
+    /// range and material kept for drawing; another skin stays apart.
+    #[test]
+    fn parts_of_one_skin_merge_into_one_posed_mesh() {
+        use somnium_anim::{SkeletonId, Skin, SkinBinding};
+        use somnium_asset::{LoadedMesh, Vertex};
+        let vertex = |x: f32| Vertex {
+            position: [x, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        };
+        let part = |skeleton: u32, n: usize, joint: u16| LoadedMesh {
+            vertices: (0..n).map(|i| vertex(i as f32)).collect(),
+            indices: vec![0, 1, 2],
+            skin: Some(Skin {
+                skeleton: SkeletonId(skeleton),
+                bindings: vec![
+                    SkinBinding {
+                        joints: [joint, 0, 0, 0],
+                        weights: [1.0, 0.0, 0.0, 0.0],
+                    };
+                    n
+                ],
+            }),
+        };
+        let unskinned = LoadedMesh {
+            vertices: vec![vertex(9.0); 3],
+            indices: vec![0, 1, 2],
+            skin: None,
+        };
+        let (body, cloak, prop, horse) = (part(1, 3, 1), part(1, 4, 2), unskinned, part(2, 3, 5));
+        let merged = merge_by_skin([(&body, 10), (&cloak, 11), (&prop, 12), (&horse, 13)]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "one per skin; the unskinned mesh is left out"
+        );
+        let (skin, vertices, indices, parts) = &merged[0];
+        assert_eq!(skin.skeleton, SkeletonId(1));
+        assert_eq!((vertices.len(), skin.bindings.len()), (7, 7));
+        assert_eq!(
+            skin.bindings[3].joints[0], 2,
+            "the cloak's bindings follow the body's"
+        );
+        assert_eq!(
+            indices,
+            &vec![0, 1, 2, 3, 4, 5],
+            "the cloak's indices start past the body's vertices"
+        );
+        assert_eq!(parts, &vec![(0, 3, 10), (3, 3, 11)]);
+        assert_eq!(merged[1].3, vec![(0, 3, 13)]);
+    }
+
+    /// A frame registers skinned meshes up to its cap; its first body always goes.
+    #[test]
+    fn registrations_are_capped_a_frame_but_never_starved() {
+        assert!(may_register(0, 3, 8));
+        assert!(may_register(5, 3, 8));
+        assert!(!may_register(6, 3, 8), "over the cap: next frame");
+        assert!(may_register(0, 12, 8), "the first always goes");
+        assert!(!may_register(1, 12, 8));
     }
 
     /// The vertex budget coarsens from the back: the nearest keep what their
