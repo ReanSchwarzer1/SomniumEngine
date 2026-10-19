@@ -48,6 +48,14 @@ BY_USE = {"house": "Home", "cottage": "Home", "farm": "Home", "barracks": "Home"
           "warehouse": "Work", "pithead": "Work", "hall": "Work", "inn": "Inn"}
 BY_AREA = {"green": "Green", "market": "Market", "parade": "Green", "yard": "Green"}
 INDOOR = {"Home", "Work", "Inn", "Chapel"}
+# Fields: a patch behind each farmstead's barn, byre, granary or farmhouse (there are no field plans yet), in villages,
+# farmsteads and manors only. Once a place has a field its people without a trade farm it (somnium_life casts them so),
+# which a town's or a city's should not.
+FARM_TYPES = {"barn", "byre", "granary", "farmhouse"}
+FARMING_KINDS = {"village", "manor", "farmstead", "hamlet"}
+SMALL_PLACE = 40  # buildings: a place WS1 has no kind for (the Eirvane tile's farmsteads) farms when smaller than this
+FIELD_BACK, FIELD_RADIUS = 14.0, 10.0  # m behind the farm building's back wall; the patch farmers work over
+FIELD_CLEAR = 12.0  # m from any building's middle (ponytail: middles, not footprints; bounds if fields land on roofs)
 ROAD_KINDS = {"road", "highway"}
 LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
 
@@ -242,6 +250,27 @@ def building_spots(buildings, plots_by_id, dx, dy, dz, bounds=None):
         spots.append({"kind": kind, "position": [round(v, 3) for v in at],
                       "radius": 0.5 if kind in INDOOR else 6.0, "label": b["id"]})
     return spots
+
+
+def field_spots(buildings, plots_by_id, dx, dy, dz):
+    """A field behind each farmstead, one per patch, clear of the place's buildings."""
+    fields = []
+    for b in buildings:
+        if (b.get("type") or "").lower() not in FARM_TYPES and (b.get("use") or "").lower() != "farm":
+            continue
+        plot = plots_by_id.get(b.get("plot"))
+        back = (plot["size"][1] if plot else 8.0) * 0.5 + FIELD_BACK
+        fx, fz = front(b["yaw_front_az_deg"])
+        p = b["position_local"]
+        at = (p[0] - fx * back, p[1], p[2] - fz * back)
+        if any(math.dist((at[0], at[2]), (f[0], f[2])) < 2 * FIELD_RADIUS for f, _ in fields):
+            continue
+        if any(math.dist((at[0], at[2]), (o["position_local"][0], o["position_local"][2])) < FIELD_CLEAR
+               for o in buildings):
+            continue
+        fields.append((at, b["id"]))
+    return [{"kind": "Field", "position": [round(at[0] + dx, 3), round(at[1] + dy, 3), round(at[2] + dz, 3)],
+             "radius": FIELD_RADIUS, "label": f"{label} field"} for at, label in fields]
 
 
 def age_of(folder: Path) -> float:
@@ -442,9 +471,13 @@ def build(rimeborn: Path):
         site plan's frame); without a site plan its centre is its buildings' middle and nobody walks a lane. `planned`
         is false for a placement not built on the site plan's plots (the Eirvane tile's): it keeps its own centre."""
         dx, dy, dz = shift(frame)
-        spots = building_spots(d.get("buildings", []), plots_of(name) if planned else {}, dx, dy, dz, bounds)
+        buildings, plots = d.get("buildings", []), plots_of(name) if planned else {}
+        spots = building_spots(buildings, plots, dx, dy, dz, bounds)
         lanes, roads = [], []
         found = by_name.get(name.lower())
+        kind = found[0].get("kind", "") if found else ""
+        if kind in FARMING_KINDS or (not kind and len(buildings) < SMALL_PLACE):
+            spots += field_spots(buildings, plots, dx, dy, dz)
         if found:
             site, site_frame = found
             sx, _, sz = shift(site_frame)
@@ -453,9 +486,11 @@ def build(rimeborn: Path):
             if centred is None and planned:
                 centred = ((site["x"] + sx, site["ground_y"], site["z"] + sz), float(site["radius_m"]))
         if centred is None:
-            xs = [sp["position"] for sp in spots] or [[0.0, 0.0, 0.0]]
+            # Its buildings' middle (fields lie outside), reaching every spot.
+            xs = [sp["position"] for sp in spots if sp["kind"] != "Field"] or [[0.0, 0.0, 0.0]]
             centre = tuple(sum(p[i] for p in xs) / len(xs) for i in range(3))
-            centred = (centre, max(math.dist((centre[0], centre[2]), (p[0], p[2])) for p in xs) + 10.0)
+            reach = [sp["position"] for sp in spots] or xs
+            centred = (centre, max(math.dist((centre[0], centre[2]), (p[0], p[2])) for p in reach) + 10.0)
         add(name, centred[0], centred[1], spots, lanes, roads)
 
     def plots_of(name):
@@ -514,7 +549,21 @@ def build(rimeborn: Path):
     return table, report
 
 
+def check():
+    """`--check`: a field lies behind its barn, one per patch, and none on another building."""
+    barn = {"id": "barn", "type": "barn", "position_local": [0.0, 5.0, 0.0], "yaw_front_az_deg": 0.0}  # faces north
+    byre = {**barn, "id": "byre", "type": "byre", "position_local": [4.0, 5.0, 0.0]}
+    [f] = field_spots([barn, byre], {}, 100.0, 0.0, 0.0)
+    assert f["position"] == [100.0, 5.0, 18.0] and f["label"] == "barn field", f  # south of it, 4 + 14 m back
+    shed = {"id": "shed", "type": "house", "position_local": [0.0, 5.0, 20.0], "yaw_front_az_deg": 0.0}
+    assert field_spots([barn, shed], {}, 0.0, 0.0, 0.0) == [], "a house stands there"
+    assert field_spots([{**barn, "type": "smithy"}], {}, 0.0, 0.0, 0.0) == []
+    print("check: ok")
+
+
 def main():
+    if "--check" in sys.argv:
+        return check()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--rimeborn", type=Path, required=True, help="the Rimeborn project folder")
     ap.add_argument("--out", type=Path, help="default: <rimeborn>/data/life/tyffir_life.json")
