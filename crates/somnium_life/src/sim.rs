@@ -7,6 +7,20 @@ use crate::{Clock, Pose, Rng};
 use glam::{Vec2, Vec3};
 use std::collections::HashMap;
 
+mod person;
+pub use person::{PersonAt, Schedule, ScheduleBlock, SpotRef};
+
+/// What a villager's day follows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Goal {
+    /// Its role's routine.
+    Routine,
+    /// A person's schedule: this spot, doing this.
+    At(usize, Activity),
+    /// A person whose schedule has him elsewhere: indoors here, unseen.
+    Away,
+}
+
 /// Walking pace, metres a second.
 const WALK: f32 = 1.35;
 /// A beast's amble.
@@ -122,6 +136,9 @@ pub struct Villager {
     /// It has asked for the door of the indoor spot it walks to.
     door_asked: bool,
     rng: Rng,
+    /// A person's own body (a glb), drawn instead of one for the role.
+    pub body: Option<String>,
+    goal: Goal,
 }
 
 /// Kinds of livestock.
@@ -268,6 +285,13 @@ pub struct LifeWorld {
     keyed: HashMap<u64, usize>,
     /// Doors near villagers passed through in the last step.
     door_passes: Vec<Vec3>,
+    /// People with days of their own ([`LifeWorld::adopt_person`]).
+    persons: Vec<person::Person>,
+    /// Hours of the world's day counted since the first step, and the hour last stepped at (persons' clock).
+    person_hours: f64,
+    last_hour: Option<f32>,
+    /// Game hours on the road between two places (keys, the smaller first).
+    travel: HashMap<(u64, u64), f32>,
 }
 
 impl LifeWorld {
@@ -289,6 +313,10 @@ impl LifeWorld {
             stats: Stats::default(),
             keyed: HashMap::new(),
             door_passes: Vec::new(),
+            persons: Vec::new(),
+            person_hours: 0.0,
+            last_hour: None,
+            travel: HashMap::new(),
         }
     }
 
@@ -536,6 +564,8 @@ impl LifeWorld {
             late,
             door_asked: false,
             rng,
+            body: None,
+            goal: Goal::Routine,
         });
         Some(id)
     }
@@ -716,6 +746,7 @@ impl LifeWorld {
         }
         self.tick += 1;
         self.time += f64::from(dt);
+        self.follow_schedules(clock);
         let (tick, now, lod) = (self.tick, self.time, self.lod);
         let mut stats = Stats::default();
 
@@ -747,6 +778,10 @@ impl LifeWorld {
         };
         for (i, v) in self.villagers.iter_mut().enumerate() {
             v.tier = lod.tier(v.position, focus);
+            // A person (the off-screen protagonist) is never asleep: his day goes on.
+            if v.goal != Goal::Routine && v.tier == Tier::Asleep {
+                v.tier = Tier::Far;
+            }
             sort(v.tier, v.id, &mut v.owed, Who::Villager(i), &mut stats);
         }
         for (i, b) in self.beasts.iter_mut().enumerate() {
@@ -892,6 +927,9 @@ fn walk_path(
 
 impl Villager {
     fn choose(&mut self, place: &Place, activity: Activity) -> Option<usize> {
+        if let Goal::At(spot, _) = self.goal {
+            return Some(spot);
+        }
         let wants = activity.spots();
         if let Some(w) = self.work
             && let Some(spot) = place.spots.get(w)
@@ -939,16 +977,21 @@ impl Villager {
         };
         let near = self.tier == Tier::Near;
         let place = &placed.place;
+        if self.goal == Goal::Away {
+            self.visible = false;
+            self.pose = Pose::Inside;
+            return;
+        }
         let fleeing = now < self.flee_until;
-        let wanted = if fleeing {
-            Activity::Shelter
-        } else if clock.lid_fallen() {
-            Activity::Sleep
-        } else {
-            self.routine.at(clock.hour - self.late)
+        let wanted = match self.goal {
+            _ if fleeing => Activity::Shelter,
+            Goal::At(_, activity) => activity,
+            _ if clock.lid_fallen() => Activity::Sleep,
+            _ => self.routine.at(clock.hour - self.late),
         };
+        let moved = matches!(self.goal, Goal::At(spot, _) if self.target != Some(spot));
         // Out of routes this tick: carry on as before and look again next tick.
-        if (wanted != self.activity || self.target.is_none()) && *paths > 0 {
+        if (wanted != self.activity || self.target.is_none() || moved) && *paths > 0 {
             self.activity = wanted;
             let target = self.choose(place, wanted);
             if target != self.target

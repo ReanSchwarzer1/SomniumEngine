@@ -216,6 +216,23 @@ impl TablePlace {
 }
 
 impl LifeTable {
+    /// The key of the table's place called `name` (for a person's schedule).
+    #[must_use]
+    pub fn key_of(&self, name: &str) -> Option<u64> {
+        self.places
+            .iter()
+            .find(|p| p.place.name.eq_ignore_ascii_case(name))
+            .map(TablePlace::key)
+    }
+
+    /// Where a spot of the place with `key` is, adopted or not (where a
+    /// person's schedule has him, for the protagonists' switch).
+    #[must_use]
+    pub fn spot_position(&self, key: u64, spot: &crate::SpotRef) -> Option<Vec3> {
+        let p = self.places.iter().find(|p| p.key() == key)?;
+        Some(p.place.spots[spot.resolve(&p.place)?].position)
+    }
+
     /// Read a table.
     pub fn from_json(text: &str) -> Result<Self, String> {
         serde_json::from_str(text).map_err(|e| e.to_string())

@@ -554,10 +554,17 @@ impl BoatHost {
                 .iter_with::<Parent>()
                 .any(|(_, p)| p.entity == entity)
                 || ctx.world.get::<MeshKind>(entity).is_some();
+            // Its own mesh, else rb-architecture's hull for its kind, else a plain one.
             let hull = if has_mesh {
                 Vec::new()
             } else {
-                plain_hull(ctx.world, entity, &kind, authored.scale)
+                let file = format!("props/boats/boat_{}.glb", kind.name);
+                let nodes = crate::combat_bodies::mesh_nodes(&ctx.config.content_root.join(&file));
+                if nodes.is_empty() {
+                    plain_hull(ctx.world, entity, &kind, authored.scale)
+                } else {
+                    hull_mesh(ctx.world, entity, &file, &nodes, authored.scale)
+                }
             };
             self.afloat.push(Afloat {
                 entity,
@@ -740,6 +747,39 @@ fn name_of(world: &World, e: Entity) -> String {
         .map_or_else(|| "Boat".into(), |n| n.as_str().to_string())
 }
 
+/// rb-architecture's hull for the kind (`assets/props/boats/boat_<kind>.glb`:
+/// its origin the hull box's middle, +Z the bow), every mesh node of it.
+fn hull_mesh(
+    world: &mut World,
+    boat: Entity,
+    file: &str,
+    nodes: &[u32],
+    scale: Vec3,
+) -> Vec<Entity> {
+    nodes
+        .iter()
+        .map(|&node| {
+            world.spawn((
+                Name::new("Boat hull"),
+                Transform {
+                    scale: Vec3::ONE / scale.max(Vec3::splat(1e-3)),
+                    ..Default::default()
+                },
+                WorldTransform::identity(),
+                Parent { entity: boat },
+                somnium_core::ImportedMesh {
+                    source: format!("assets/{file}"),
+                    node,
+                },
+                somnium_core::MaterialComponent {
+                    asset: somnium_asset::database::AssetId::NONE,
+                    runtime_id: 0,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// A plain hull (bottom and two sides) for a boat with no mesh of its own.
 fn plain_hull(world: &mut World, boat: Entity, kind: &Kind, scale: Vec3) -> Vec<Entity> {
     let h = kind.half / scale.max(Vec3::splat(1e-3));
@@ -789,6 +829,36 @@ mod tests {
                        {"canal": true, "pts": [[1000, 2100, 0.6, 5], [1000, 2200, 0.6, 5]]}]}"#,
         )
         .unwrap()
+    }
+
+    /// The project's real water and moorings (`RIMEBORN=<games/Rimeborn>`): the
+    /// map reads WS1's file, and every mooring is on water at about its height.
+    #[test]
+    #[ignore = "needs RIMEBORN pointing at the game's folder"]
+    fn every_mooring_is_on_the_real_water() {
+        let root = std::path::PathBuf::from(std::env::var("RIMEBORN").expect("RIMEBORN"));
+        let map =
+            WaterMap::from_json(&std::fs::read_to_string(root.join(WATER_MAP)).unwrap()).unwrap();
+        let moorings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("data/boats/moorings.json")).unwrap(),
+        )
+        .unwrap();
+        let mut off = Vec::new();
+        let all = moorings["moorings"].as_array().unwrap();
+        for m in all {
+            let at: Vec<f32> = m["at"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            match map.surface(Vec2::new(at[0], at[2])) {
+                Some(s) if (s.height - (at[1] - 0.15)).abs() < 0.3 => {}
+                other => off.push((m["place"].clone(), at, other.map(|s| s.height))),
+            }
+        }
+        println!("{} moorings, {} off their water", all.len(), off.len());
+        assert!(off.is_empty(), "{off:?}");
     }
 
     /// A river's surface slopes along it and runs downstream; a lake is level

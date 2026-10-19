@@ -2514,6 +2514,10 @@ pub struct CombatDemo {
     pub aboard: Option<Mat4>,
     /// E was the boats' this frame (boarding or stepping off), not a mount's.
     pub take_e: bool,
+    /// Points brains think near as well as the protagonist and the camera (a second place the game holds streamed).
+    pub focus_points: Vec<Vec3>,
+    /// The protagonist's work clip (`A|B`, looped while he stands idle: chopping, fishing), from the game.
+    pub player_clip: Option<String>,
     events: Vec<HostEvent>,
     /// Factions the game has turned against the protagonist, and those hunting
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
@@ -2584,6 +2588,8 @@ impl Default for CombatDemo {
             refused_mounts: Default::default(),
             aboard: None,
             take_e: false,
+            focus_points: Vec::new(),
+            player_clip: None,
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
@@ -2958,19 +2964,22 @@ impl CombatDemo {
             c.brain = None;
             c.command = somnium_combat::Command::default();
         }
+        // A slowed world comes back to time at the flip.
+        run.world.end_focus();
         if let Some(old) = run.player {
-            let archetype = run
-                .bodies
-                .get(&old)
-                .and_then(|e| world.get::<CombatantComponent>(*e))
-                .map_or(Archetype::Companion, CombatantComponent::archetype);
+            let component = run.bodies.get(&old).and_then(|e| world.get::<CombatantComponent>(*e)).cloned();
             if let Some(c) = run.world.combatant_mut(old) {
                 c.command = somnium_combat::Command::default();
                 c.lock = None;
-                // ponytail: his style's default profile (no spells of his own); the component's spell list if his
-                // AI should cast them.
-                let mut brain = ai::BrainDesc::new(archetype);
-                brain.home = Some(c.position);
+                // His own style and spells; his kit (the protagonist's perks) is his from enlisting, whoever is played.
+                let brain = component.map_or_else(
+                    || {
+                        let mut b = ai::BrainDesc::new(Archetype::Companion);
+                        b.home = Some(c.position);
+                        b
+                    },
+                    |k| k.brain_desc(c.position),
+                );
                 c.brain = Some(ai::Brain::new(brain, old));
             }
         }
@@ -3020,6 +3029,7 @@ impl CombatDemo {
         if let Some(camera) = run.camera {
             focus.push(world_matrix(ctx.world, camera).transform_point3(Vec3::ZERO));
         }
+        focus.extend_from_slice(&self.focus_points);
         run.world.set_focus(&focus);
         let editor = &ctx.navigation.cells.world;
         let nav = editor
@@ -3053,6 +3063,7 @@ impl CombatDemo {
             }
         }
         run.skins.seated = self.aboard.and(run.player);
+        run.skins.work = run.player.zip(self.player_clip.clone());
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
         self.events.extend(news(run, rode, &events));
@@ -5438,8 +5449,10 @@ mod tests {
         let mut world = World::new();
         spawn_sandbox(&mut world, &json!({})).expect("preset builds");
         somnium_core::propagate_transforms(&mut world);
-        let mut demo = CombatDemo::default();
-        demo.run = Some(build(&world).expect("a fight"));
+        let mut demo = CombatDemo {
+            run: Some(build(&world).expect("a fight")),
+            ..Default::default()
+        };
         let (caelan, other, other_entity) = {
             let run = demo.run.as_ref().unwrap();
             let caelan = run.player.unwrap();
