@@ -51,7 +51,8 @@ LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
 
 # Looks: WS3's crowd contract (WS3_CHARACTERS.md, "The crowd contract"). Bodies by somnium_life role: crowd_* children
 # and elders by their age (SOURCE.json), the other crowd_* adults farmers, labourers and anyone a role has no bodies for.
-TRADES = {"Smith": "smith", "Priest": "priest", "Keeper": "keeper", "Herder": "herder"}
+# A trade's body families (the Cinder's forge hands are smiths).
+TRADES = {"Smith": ("smith", "forge"), "Priest": ("priest",), "Keeper": ("keeper",), "Herder": ("herder",)}
 BEASTS = {"Sheep": "sheep", "Cow": "march_cow", "Goat": "goat", "Pig": "pig", "Hen": "hen", "Dog": "sheepdog"}
 POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Jog_F_Loop", "Talk": "Talk_Loop",
          "Work": "Bench_Work_Loop", "Farm": "Hoe_Loop", "Tend": "Farm_Water", "Trade": "Haggle_Loop",
@@ -75,7 +76,9 @@ CART_POSES = {"Drive": "Walk_F_Loop", "Idle": "Idle_Loop"}
 WALK_SPEED, RUN_SPEED = 0.86, 5.6
 SNAP = 3.0  # a street's end this close to another street joins it
 CHILD_BELOW, ELDER_FROM = 16, 50  # a body's age (SOURCE.json) that makes it a child's or an elder's (WS3's elders: 52+)
-NOT_VILLAGERS = {"guard"}  # families WS3 casts as set pieces, not people on a routine
+# Families WS3 casts as set pieces, not people on a routine (with folk_by_region.json's own list): the watch, the
+# garrison, bandits, and Valdremar's courtiers at the Lancehall and halls.
+NOT_VILLAGERS = {"guard", "lance", "bandit", "court"}
 MIN_OWN = 6  # a town's own bodies of a kind, fewer than this, are joined by the table's (no clones)
 
 
@@ -284,8 +287,8 @@ def looks_of(rimeborn: Path):
     villagers = {"default": adults, "Farmer": adults, "Labourer": adults,
                  "Elder": [body(n) for n in crowd if stage[n] == "Elder"],
                  "Child": [body(n) for n in crowd if stage[n] == "Child"]}
-    for role, prefix in TRADES.items():
-        villagers[role] = [body(n) for n in numbered(prefix)]
+    for role, prefixes in TRADES.items():
+        villagers[role] = [body(n) for prefix in prefixes for n in numbered(prefix)]
     villagers = {k: v for k, v in villagers.items() if v}
     beasts = {kind: f"creatures/{name}/{name}.glb" for kind, name in BEASTS.items()
               if (creatures / name / f"{name}.glb").exists()}
@@ -330,10 +333,27 @@ def people_index(rimeborn: Path):
     return index
 
 
-def people_of(rimeborn: Path, name: str, index):
-    """The bodies WS3 casts in `name` (its char_<place>_people scene), by somnium_life role name; {} without one."""
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    scene = rimeborn / "scenes" / f"char_{slug}_people.scene.json"
+def folk_of(rimeborn: Path):
+    """WS3's roster by region (`assets/characters/folk_by_region.json`): each region's bodies by somnium_life role (only
+    those built), each peopled place's region by its slug, and the families that are not villagers. Empty without it."""
+    try:
+        d = json.loads((rimeborn / "assets/characters/folk_by_region.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}, set()
+    built = lambda p: (rimeborn / "assets" / p).exists()  # noqa: E731
+    regions = {r: {role: [p for p in paths if built(p)] for role, paths in roles.items()}
+               for r, roles in d.get("regions", {}).items()}
+    return regions, d.get("places", {}), set(d.get("not_villagers", []))
+
+
+def slug_of(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def people_of(rimeborn: Path, name: str, index, skip=frozenset(NOT_VILLAGERS)):
+    """The bodies WS3 casts in `name` (its char_<place>_people scene), by somnium_life role name; {} without one.
+    Families in `skip` are set pieces, not villagers."""
+    scene = rimeborn / "scenes" / f"char_{slug_of(name)}_people.scene.json"
     if not scene.exists():
         return {}
     roles = {}
@@ -347,9 +367,9 @@ def people_of(rimeborn: Path, name: str, index):
             if source not in index:
                 continue  # a beast, a cart horse, or not a WS3 person
             path, family, age = index[source]
-            if family in NOT_VILLAGERS:
+            if family in skip:
                 continue
-            trade = next((role for role, prefix in TRADES.items() if prefix == family), None)
+            trade = next((role for role, prefixes in TRADES.items() if family in prefixes), None)
             role = trade or age_stage(age)
             roles.setdefault(role, set()).add(path)
     return {role: sorted(paths) for role, paths in sorted(roles.items())}
@@ -370,6 +390,8 @@ def build(rimeborn: Path):
     index = people_index(rimeborn)
     looks = looks_of(rimeborn)
     bounds = Bounds(rimeborn)
+    regions, region_of, not_villagers = folk_of(rimeborn)
+    skip = NOT_VILLAGERS | not_villagers
 
     def add(name, centre, radius, spots, lanes, roads):
         if not any(s["kind"] == "Home" for s in spots):
@@ -377,13 +399,20 @@ def build(rimeborn: Path):
             return
         entry = {"centre": [round(v, 3) for v in centre], "radius": radius, "seed": zlib.crc32(name.encode("utf-8")),
                  "place": {"name": name, "spots": spots, "lanes": lanes, "roads": roads}}
-        people = people_of(rimeborn, name, index)
-        # WS3's scenes keep only set pieces now (life owns whoever moves): a town with few bodies of a kind of its own
-        # (one story child, a village's herder and two hands) wears the table's too, so its folk are not clones.
-        for role, own in list(people.items()):
+        people = people_of(rimeborn, name, index, skip)
+        # WS3's scenes keep only set pieces now (life owns whoever moves): a kind a town has fewer than MIN_OWN bodies of
+        # of its own (no children at all, a village's herder and two hands) is joined by its region's roster (a Fjord
+        # town's children are Fjord children), then, still short, by the table's crowd lists, so its folk are not clones.
+        region = regions.get(region_of.get(slug_of(name), ""), {})
+        for role in sorted(set(people) | set(region)):
+            own = set(people.get(role, []))
+            if len(own) < MIN_OWN:
+                own |= set(region.get(role, []))
             table = looks["villagers"].get(role)
             if len(own) < MIN_OWN and table and role in ("default", "Child", "Elder"):
-                people[role] = sorted(set(own) | set(table))
+                own |= set(table)
+            if own:
+                people[role] = sorted(own)
         if people:
             entry["people"] = people
         places.append(entry)
