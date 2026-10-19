@@ -65,6 +65,14 @@ pub struct Interactable {
     pub close_after: f32,
     /// A door is open: how it starts, and its state while the door system runs.
     pub open: bool,
+    /// An operated thing (a lever, a gate) swings its children and `leaves` by `open_angle` about its origin, as a
+    /// door does, but blocks nothing. Doors always swing.
+    pub swings: bool,
+    /// A world-state condition; while it holds the thing is gone (taken): removed as it appears. A take removes it
+    /// at once. Empty: only the take removes it, and it comes back with its cell.
+    pub gone_when: String,
+    /// The prompt while refused (locked or `requires` false). Empty says "Locked".
+    pub refused_prompt: String,
 }
 impl Component for Interactable {}
 impl Default for Interactable {
@@ -92,6 +100,9 @@ impl Default for Interactable {
             swing_duration: 0.9,
             close_after: 0.0,
             open: false,
+            swings: false,
+            gone_when: String::new(),
+            refused_prompt: String::new(),
         }
     }
 }
@@ -100,7 +111,7 @@ pub fn register_schema(registry: &mut TypeRegistry) {
     let mut schema = component_schema! {
         Interactable as "somnium.Interactable", display "Interaction", version 1,
         fields {
-            kind { group:"Action", min:0.0,max:4.0,doc:"0 Door, 1 Collect, 2 Inspect, 3 Operate, 4 Equip light." },
+            kind { group:"Action", min:0.0,max:6.0,doc:"0 Door, 1 Collect, 2 Inspect, 3 Operate, 4 Equip light, 5 Talk, 6 Sit." },
             prompt { group:"Action",doc:"Player-facing verb shown while looking at this object." },
             trigger { group:"Action",doc:"Game event emitted once at hand contact." },
             enabled { group:"Availability" }, locked { group:"Availability" },
@@ -121,6 +132,9 @@ pub fn register_schema(registry: &mut TypeRegistry) {
             swing_duration { group:"Door",min:0.1,max:5.0,unit:"s" },
             close_after { group:"Door",min:0.0,max:60.0,unit:"s",doc:"Closes by itself this long after opening, once nobody is in its swing. 0 stays open." },
             open { group:"Door",doc:"Open now: how it starts, and its state while playing." },
+            swings { group:"Door",doc:"An operated thing (a lever, a gate) swings like a door when used, blocking nothing. Doors always swing." },
+            gone_when { group:"Availability",doc:"A world-state condition; while it holds the thing is gone (taken) and is removed as it appears. A take removes it at once." },
+            refused_prompt { group:"Availability",doc:"The prompt while refused. Empty says Locked." },
         }
     };
     if let Some(field) = schema.fields.iter_mut().find(|field| field.name == "kind") {
@@ -130,6 +144,8 @@ pub fn register_schema(registry: &mut TypeRegistry) {
             "Inspect",
             "Operate",
             "Equip Light",
+            "Talk",
+            "Sit",
         ]);
     }
     registry.register(schema);
@@ -164,7 +180,7 @@ impl InteractionSession {
         if !config.enabled || config.locked {
             return Err("Unavailable or locked");
         }
-        if config.kind > 4
+        if config.kind > 6
             || !config.duration.is_finite()
             || !(0.2..=3.0).contains(&config.duration)
         {

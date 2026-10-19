@@ -1,4 +1,4 @@
-# Interaction in an isometric game, and doors
+# Interaction in an isometric game: doors, talk, take, sit, read, use
 
 Rimeborn's player walks into buildings, opens their doors and uses what is inside. It does this with the engine's
 **Interaction** component (`somnium.Interactable`), the same one TSF's first-person hands use, driven by an
@@ -22,7 +22,10 @@ Inspect, Use), and an open door says "Close". The interact key (E by default) us
 - Within 0.45 m along the ground, the facing no longer matters, so a player standing in a doorway can still close
   the door.
 - The current target holds until another is clearly better, so two doors side by side do not flicker.
-- One pass over the interactables picks the target: about 1.2 µs a frame for 400 (release build).
+- The pick looks only at the interactables filed near the player (4 m squares), and at the cast members, so a
+  frame costs the same however many a city holds (see **What it costs**).
+- Interactables are filed where they are when they arrive. One that moves later (cargo on a cart) is still found
+  where it arrived. Put things that walk on a cast member: cast members are looked at where they stand each frame.
 
 ## Using it
 
@@ -43,7 +46,7 @@ fact or expression, such as `has_church_key` or `chapter >= 2 and not curfew`.
 
 | Field | Used here for |
 |---|---|
-| Kind | 0 Door swings itself; the others (1 Collect, 2 Inspect, 3 Operate, 4 Equip Light) go to the game |
+| Kind | What using it does: see **The verbs** below. 5 Talk and 6 Sit are new; 0 to 4 are TSF's |
 | Prompt, Trigger, Enabled, Locked | As above |
 | Reach | From the player's eye to the anchor, in metres (2.0) |
 | Duration | The reach and return. A door's is 0.4 s, so it moves 0.2 s after the key |
@@ -51,6 +54,43 @@ fact or expression, such as `has_church_key` or `chapter >= 2 and not curfew`.
 | Open Angle | How far a door swings, in degrees; positive turns anticlockwise seen from above |
 | *Cone* (new) | How far either side of the player's facing it can be picked, in degrees (75). 180: any direction |
 | *Requires* (new) | The world-state condition above. Empty: only Locked locks |
+| *Refused Prompt* (new) | The prompt while refused ("Barred for the night"). Empty says "Locked" |
+| *Gone When* (new) | A world-state condition. While it holds, the thing is gone: it is removed as it appears |
+| *Swings* (new) | An operated thing (a lever, a gate) swings like a door when used, blocking nothing |
+
+## The verbs
+
+| Kind | Prompt | What happens at the commit |
+|---|---|---|
+| 0 Door | Open, Close | It swings itself (below) |
+| 1 Collect | Take | The game gets the use, then the thing and everything under it are removed at the start of the next frame |
+| 2 Inspect | Read | The game opens the note or sign that **Trigger** names |
+| 3 Operate | Use | The game acts on **Trigger** (a well, a Glyphcraft device). With **Swings**, it also swings like a door (a lever) |
+| 4 Equip Light | Take | The game's |
+| 5 Talk | Talk | The game starts the conversation for **Trigger** |
+| 6 Sit | Sit | The game seats the player at `interact::seat(world, entity)` |
+
+`somnium_core::interact::interactable(kind, trigger)` gives an Interactable with this layer's defaults:
+- an empty prompt, so it says the verb;
+- a short reach, so the commit comes 0.15 s after the key;
+- for Talk, a 3 m reach.
+
+TSF's default prompt is "Operate", so set the prompt empty, or to your own words.
+
+**Talk needs no authoring for the story's people.** A `somnium.CastMember` with a speaker and no Interactable of its
+own is a talk target: its chest, 1.4 m above its origin, within 3 m of the player's eye; its speaker id is the
+trigger. Give a cast member its own Interactable to change that (a shopkeeper's "Barter", a different trigger).
+
+**Take for good.** A take removes the thing at once, but its cell brings it back when it streams in again. To stop
+that, set **Gone When** to the fact your game sets when the thing is taken (for example `taken.purse_01`). A thing
+whose condition holds is removed the moment it appears.
+
+**Sit.** `seat` gives the anchor in the world, where the hips go, and the way the sitter faces: the seat's +Z, along
+the ground. While the player sits, the seat stays the nearest target. Use on it again is the game's cue to stand.
+
+**Use with Swings.** A lever is an Operate whose children, or **Leaves**, turn by **Open Angle** about its origin's
+vertical. It springs back after **Close After**, or stays pulled when that is 0. Its **Open** says whether it is
+pulled. It has no box.
 
 ## Doors
 
@@ -113,7 +153,14 @@ interaction.on_event(event);
 // on_update, after the player has moved (None: nobody is using things):
 let actor = Actor { eye: player_eye, forward: player_facing };
 if let Some(used) = interaction.update(ctx, Some(actor), &|condition| story.check(condition).unwrap_or(false)) {
-    // The commit of a collect, inspect, operate or equip: `used.trigger` says which. `used.refused`: a locked try.
+    match used.kind {
+        _ if used.refused => { /* a locked try: a rattle at used.at */ }
+        interact::KIND_TALK => { /* start the conversation for used.trigger (a speaker id) */ }
+        interact::KIND_COLLECT => { /* add used.trigger to the inventory; set taken.<id>; it goes next frame */ }
+        interact::KIND_INSPECT => { /* open the note used.trigger */ }
+        interact::KIND_SIT => { /* seat the player at interact::seat(world, used.entity) */ }
+        _ => { /* a well, a device: used.trigger */ }
+    }
 }
 for event in &interaction.door_events { /* Opening, Closing, Closed, Refused: play a sound */ }
 // on_render, once the camera is set:
@@ -136,14 +183,28 @@ The prompt shows whichever key is bound.
 
 ## What it costs
 
-A town cell of 400 buildings (6,000 entities), each with a door of two named parts, in a release build:
+The whole layer (`Interaction::play`) in a release build. Each building has a door of two named parts, a stall,
+two pick-ups, a sign and a seat, so six interactables (`interact::tests::measure_city_density`):
 
-| | Cost |
-|---|---|
-| Finding the doors and their leaves, and making their boxes (once, as they arrive) | about 3 ms |
-| Every frame while no door moves | 0.3 to 1.5 µs |
-| Picking the target among 400 interactables, every frame | 1.2 µs |
+| | 400 buildings, 2,400 interactables, 50 cast | 4,000 buildings, 24,000 interactables, 500 cast |
+|---|---|---|
+| A frame, the player beside a door | 0.7 µs | 2.2 µs |
+| A frame with 20 walkers going through doorways | 5 µs | 10 µs |
+| A cell of 50 buildings arriving | 0.4 ms | 1.8 ms |
+| The first frame of play (everything arrives) | 1.8 ms | 20 ms |
 
-Idle doors are never looked at one by one. Each frame walks the interactables once, with one component query and
-no lookups, to check that they are last frame's. Only doors that are swinging, or waiting to close, are touched.
-Nothing is written while every door rests.
+On the city side, the frame's extra 1.5 µs is the cast members, about 3 ns each, looked at where they stand.
+Interactables add nothing. On the same machine the layer used to cost 191 µs a frame at the city's density, and a
+cell arriving 5.3 ms.
+
+How it stays flat:
+- **Arrivals.** The world counts, per component, the entities that gained or lost it (`World::population_tick`).
+  While that and the interactables' change tick are as they were, nothing arrived, went or was written, and the
+  frame reads two counters.
+- **The cell-arrival walk.** When a cell does arrive, one walk of the interactables finds the new ones, at an O(1)
+  mark each.
+- **The leaf search.** A new door's leaves are found in one walk of the world's parented and named entities. At
+  1.2 ms of the 1.8, this is most of a cell's arrival, against the 6 ms the cell's own spawning took.
+- **Doors.** A frame touches only doors that are swinging or waiting to close. Nothing is written while every door
+  rests.
+- **Passes.** A walker's pass looks only at the doorways filed near it.

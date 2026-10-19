@@ -305,6 +305,8 @@ pub struct World {
 struct ChangeTicks {
     structure: u64,
     by_type: Vec<u64>,
+    /// Per component type: entities that gained or lost it (spawn, despawn, insert, remove).
+    population: Vec<u64>,
 }
 
 impl ChangeTicks {
@@ -320,6 +322,15 @@ impl ChangeTicks {
     #[inline]
     fn of(&self, id: ComponentId) -> u64 {
         self.by_type.get(id.raw() as usize).copied().unwrap_or(0)
+    }
+
+    #[inline]
+    fn populate(&mut self, id: ComponentId) {
+        let i = id.raw() as usize;
+        if i >= self.population.len() {
+            self.population.resize(i + 1, 0);
+        }
+        self.population[i] += 1;
     }
 }
 
@@ -348,6 +359,9 @@ impl World {
         // Build the component set for this bundle.
         let infos = B::component_infos();
         let set = ComponentSet::from_ids(infos.iter().map(|i| i.id).collect());
+        for info in &infos {
+            self.changes.populate(info.id);
+        }
 
         // Find or create the archetype.
         let arch_id = self.get_or_create_archetype(&set, &infos);
@@ -382,6 +396,9 @@ impl World {
             return false;
         };
         self.changes.structure += 1;
+        for id in self.archetypes[loc.archetype_id.raw() as usize].component_set().iter() {
+            self.changes.populate(id);
+        }
 
         // Remove from archetype.
         let arch = &mut self.archetypes[loc.archetype_id.raw() as usize];
@@ -561,6 +578,7 @@ impl World {
         }
 
         self.changes.structure += 1;
+        self.changes.populate(info.id);
         let new_set = self.archetypes[old_idx].component_set().with(info.id);
         let mut infos: Vec<ComponentInfo> =
             self.archetypes[old_idx].column_infos().cloned().collect();
@@ -626,6 +644,7 @@ impl World {
         }
         self.changes.structure += 1;
         self.changes.touch(id);
+        self.changes.populate(id);
 
         let new_set = self.archetypes[old_idx].component_set().without(id);
         let infos: Vec<ComponentInfo> = self.archetypes[old_idx]
@@ -729,6 +748,15 @@ impl World {
     #[must_use]
     pub fn change_tick(&self, id: ComponentId) -> u64 {
         self.changes.of(id)
+    }
+
+    /// Entities that gained or lost component `id` so far: every spawn and despawn of one that has it, and every
+    /// insert of it into an entity without it or removal of it. Unlike [`Self::structure_tick`] it moves only for
+    /// `id`, so a system that keeps something per entity with `id` (an index of interactables, say) can tell in O(1)
+    /// that none arrived or went. Writes to an existing `id` do not move it; [`Self::change_tick`] counts those.
+    #[must_use]
+    pub fn population_tick(&self, id: ComponentId) -> u64 {
+        self.changes.population.get(id.raw() as usize).copied().unwrap_or(0)
     }
 
     /// One number that moves whenever any of `ids` is written or the world's
@@ -887,6 +915,32 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Health(f32);
     impl Component for Health {}
+
+    #[test]
+    fn population_moves_only_when_entities_gain_or_lose_the_component() {
+        let mut world = World::new();
+        let (pos, vel) = (ComponentId::of::<Pos>(), ComponentId::of::<Vel>());
+        let at = |world: &World| (world.population_tick(pos), world.population_tick(vel));
+        assert_eq!(at(&world), (0, 0));
+        let a = world.spawn((Pos { x: 0.0, y: 0.0 },));
+        let b = world.spawn((Pos { x: 1.0, y: 0.0 }, Vel { dx: 0.0, dy: 0.0 }));
+        assert_eq!(at(&world), (2, 1));
+        // Writing, and archetype access, change nothing that has the component.
+        world.get_mut::<Pos>(a).unwrap().x = 5.0;
+        let _ = world.query_archetypes_mut(&ComponentSet::empty(), &ComponentSet::empty()).count();
+        world.insert_component(b, Vel { dx: 1.0, dy: 1.0 }).unwrap(); // already has one: replaced
+        assert_eq!(at(&world), (2, 1));
+        world.insert_component(a, Vel { dx: 0.0, dy: 0.0 }).unwrap();
+        assert_eq!(at(&world), (2, 2), "gained Vel; its Pos stays");
+        world.remove_component::<Pos>(a).unwrap();
+        assert_eq!(at(&world), (3, 2), "lost Pos");
+        world.despawn(b);
+        assert_eq!(at(&world), (4, 3), "lost both");
+        // Something else coming and going does not move them.
+        let c = world.spawn((Health(1.0),));
+        world.despawn(c);
+        assert_eq!(at(&world), (4, 3));
+    }
 
     #[test]
     fn spawn_and_get() {
