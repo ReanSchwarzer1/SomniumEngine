@@ -207,15 +207,143 @@ fn spawn_crowd(world: &mut World, at: Vec3, count: usize) -> Vec<Entity> {
 }
 
 /// Build the crowd at the origin outside the Create menu (a capture hook):
-/// `SOMNIUM_SKINNED_CROWD=<count>`.
+/// `SOMNIUM_SKINNED_CROWD=<count>`; and `SOMNIUM_SKINNED_BODIES=<file.json>`
+/// lays out the bodies a file lists (a town's people, for measuring). How
+/// many were spawned.
 pub fn spawn_at_startup(world: &mut World) -> Option<usize> {
-    let count = std::env::var("SOMNIUM_SKINNED_CROWD")
-        .ok()?
-        .parse::<usize>()
-        .ok()?;
-    let count = count.clamp(1, 1000);
-    spawn_crowd(world, Vec3::ZERO, count);
-    Some(count)
+    let listed = std::env::var("SOMNIUM_SKINNED_BODIES").ok().map(|file| {
+        let n = spawn_listed(world, &file);
+        info!(n, "SOMNIUM_SKINNED_BODIES - bodies from {file}");
+        n
+    });
+    let crowd = std::env::var("SOMNIUM_SKINNED_CROWD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|count| {
+            let count = count.clamp(1, 1000);
+            spawn_crowd(world, Vec3::ZERO, count);
+            count
+        });
+    match (listed, crowd) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
+/// One body of a listed file: a Skinned Body where it stands, and what its
+/// clip holds on its sockets.
+#[derive(serde::Deserialize)]
+struct Listed {
+    source: String,
+    #[serde(default)]
+    lod1: String,
+    #[serde(default)]
+    lod2: String,
+    #[serde(default)]
+    clip: String,
+    #[serde(default = "one")]
+    speed: f32,
+    #[serde(default)]
+    time: f32,
+    position: [f32; 3],
+    #[serde(default = "upright")]
+    rotation: [f32; 4],
+    #[serde(default)]
+    gear: Vec<ListedGear>,
+}
+
+/// A piece a listed body holds: meshes of a file (relative to the project) on a joint.
+#[derive(serde::Deserialize)]
+struct ListedGear {
+    joint: String,
+    file: String,
+    #[serde(default)]
+    nodes: Vec<u32>,
+    #[serde(default)]
+    offset: [f32; 3],
+    #[serde(default = "one")]
+    scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn upright() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+/// Lay out the bodies `file` lists (JSON: an array of [`Listed`]); how many.
+fn spawn_listed(world: &mut World, file: &str) -> usize {
+    let listed: Vec<Listed> = match std::fs::read_to_string(file)
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+    {
+        Ok(listed) => listed,
+        Err(error) => {
+            warn!(%error, "SOMNIUM_SKINNED_BODIES: no bodies from {file}");
+            return 0;
+        }
+    };
+    let id = |path: &str| {
+        if path.is_empty() {
+            AssetId::NONE
+        } else {
+            AssetId::from_relative_path(path)
+        }
+    };
+    for b in &listed {
+        let body = world.spawn((
+            Name::new("Listed body"),
+            Transform {
+                translation: Vec3::from(b.position),
+                rotation: glam::Quat::from_array(b.rotation).normalize(),
+                ..Default::default()
+            },
+            WorldTransform::identity(),
+            SkinnedBody {
+                source: id(&b.source),
+                clip: b.clip.clone(),
+                speed: b.speed,
+                time: b.time,
+                lod1: id(&b.lod1),
+                lod2: id(&b.lod2),
+                ..Default::default()
+            },
+        ));
+        for g in &b.gear {
+            let socket = world.spawn((
+                Name::new("Listed gear"),
+                Transform {
+                    translation: Vec3::from(g.offset) * g.scale,
+                    scale: Vec3::splat(g.scale),
+                    ..Default::default()
+                },
+                WorldTransform::identity(),
+                Parent { entity: body },
+                SkinnedSocket {
+                    joint: g.joint.clone(),
+                },
+            ));
+            for &node in &g.nodes {
+                world.spawn((
+                    Name::new("Listed gear part"),
+                    Transform::default(),
+                    WorldTransform::identity(),
+                    Parent { entity: socket },
+                    somnium_core::ImportedMesh {
+                        source: g.file.clone(),
+                        node,
+                    },
+                    MaterialComponent {
+                        asset: AssetId::NONE,
+                        runtime_id: 0,
+                    },
+                ));
+            }
+        }
+    }
+    listed.len()
 }
 
 /// One glTF shared by every body that draws it.
