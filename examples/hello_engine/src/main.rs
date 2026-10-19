@@ -28,6 +28,8 @@ mod life_demo;
 mod dreams_fixture;
 mod fracture_demo;
 
+pub use combat_demo::HostEvent;
+
 use glam::Vec3;
 use serde::Serialize;
 use somnium_core::{
@@ -872,6 +874,22 @@ impl HelloGame {
             authored_ui_missing: None,
             authored_ui_visible: false,
         }
+    }
+
+    /// The fight's news for the game since it last asked: the protagonist mounting, a mount refused, hits on
+    /// combatants not hostile to who hit.
+    pub fn take_combat_events(&mut self) -> Vec<HostEvent> {
+        self.combat.take_events()
+    }
+
+    /// Mounts the protagonist may not take now (the game's say), refused when reached for.
+    pub fn refuse_mounts(&mut self, mounts: std::collections::HashSet<Entity>) {
+        self.combat.refused_mounts = mounts;
+    }
+
+    /// The life sim's people (positions, roles, who is out of doors), while Play runs it.
+    pub fn life(&self) -> Option<&somnium_life::LifeWorld> {
+        self.life.world()
     }
 
     fn spawn_default_vessel(

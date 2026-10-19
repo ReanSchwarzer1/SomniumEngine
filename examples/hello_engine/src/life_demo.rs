@@ -1329,6 +1329,11 @@ impl LifeDemo {
 
     /// Put everything back as authored.
     /// B rings the alarm bell while life runs.
+    /// The life sim, while Play runs it.
+    pub fn world(&self) -> Option<&LifeWorld> {
+        self.run.as_ref().map(|r| &r.life)
+    }
+
     pub fn event(&mut self, event: &EngineEvent) {
         if self.run.is_some()
             && matches!(
