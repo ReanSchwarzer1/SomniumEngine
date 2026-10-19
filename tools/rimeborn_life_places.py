@@ -462,7 +462,9 @@ def build(rimeborn: Path):
         """A placement file's own frame where it names a region (its "frame", or "rimeborn": {"region"}; some files'
         "frame" is a description), else its folder's."""
         for frame in (d.get("frame"), (d.get("rimeborn") or {}).get("region")):
-            if frame in world_frame.REGION_ANCHORS:
+            if isinstance(frame, dict):  # rb-vernacular's {"region": ..., "anchor_world": ...}
+                frame = frame.get("region")
+            if isinstance(frame, str) and frame in world_frame.REGION_ANCHORS:
                 return frame
         return default
 
