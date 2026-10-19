@@ -344,7 +344,15 @@ struct Skin {
     clock: f32,
     /// When it last fought (the blade comes out, and stays out a while).
     fought: f64,
+    /// Its weapon is in its hand (not in the sheath).
+    in_hand: bool,
+    /// A draw (true) or a sheathe begun then: the blade changes joint at the clip's grab.
+    swap: Option<(f64, bool)>,
 }
+
+/// WS3's grab in Sword_Draw and release in Sword_Sheathe, unless clips.json says (`events.draw`, `events.sheathe`).
+const DRAW_GRAB: f64 = 0.2;
+const SHEATHE_RELEASE: f64 = 0.6;
 
 impl Skin {
     /// The body and everything placed on it (despawn does not reach children).
@@ -622,6 +630,8 @@ impl Skins {
                     s
                 });
             let saddle = c.mount_def.is_some().then(|| socket(world, "saddle"));
+            // A sheathed weapon starts in its sheath; any other in hand.
+            let in_hand = !weapon.as_ref().is_some_and(|w| w.2);
             self.skins.insert(
                 id,
                 Skin {
@@ -632,6 +642,8 @@ impl Skins {
                     clip: String::new(),
                     clock: 0.0,
                     fought: f64::NEG_INFINITY,
+                    in_hand,
+                    swap: None,
                 },
             );
         }
@@ -674,10 +686,53 @@ impl Skins {
             let drawn = now - skin.fought < SHEATHE_AFTER;
             let mode = walkers.get(id).map(|w| w.mode);
             let steed = c.mount.and_then(|m| combat.combatant(m));
+            // A sword out of its sheath at Sword_Draw's grab and back at
+            // Sword_Sheathe's release, the clip played standing; in the hand at
+            // once when a move cannot wait.
+            let sheathes = skin.weapon.as_ref().is_some_and(|w| w.2);
+            let mut swapping = None;
+            if sheathes {
+                if !matches!(c.action, Action::Idle) {
+                    skin.in_hand = true;
+                    skin.swap = None;
+                } else if skin.swap.is_none() && drawn != skin.in_hand {
+                    skin.swap = Some((now, drawn));
+                }
+            }
+            if let Some((start, drawing)) = skin.swap {
+                let (name, event, grab) = if drawing {
+                    ("Sword_Draw", "draw", DRAW_GRAB)
+                } else {
+                    ("Sword_Sheathe", "sheathe", SHEATHE_RELEASE)
+                };
+                let info = self.table.as_ref().and_then(|t| t.clips.get(name));
+                let grab = info
+                    .and_then(|i| i.events.get(event))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(grab);
+                let length = info.map_or(grab + 0.3, |i| f64::from(i.seconds));
+                let t = now - start;
+                if t >= grab {
+                    skin.in_hand = drawing;
+                }
+                let standing =
+                    Vec3::new(c.velocity.x, 0.0, c.velocity.z).length() < 0.25 && c.mount.is_none();
+                if t >= length {
+                    skin.swap = None;
+                } else if standing {
+                    swapping = Some((
+                        format!("{name}|Idle_Neutral_Loop|Idle_Loop"),
+                        Timing::At(t as f32),
+                    ));
+                }
+            }
+            let shown = if sheathes { skin.in_hand } else { drawn };
             let (clip, timing) = if self.seated == Some(*id) && matches!(c.action, Action::Idle) {
                 ("Row_Loop|Sit_Idle_Loop".to_string(), Timing::Loop(1.0))
+            } else if let Some(swap) = swapping {
+                swap
             } else {
-                pose_of(c, steed, mode, now, drawn, self.table.as_ref())
+                pose_of(c, steed, mode, now, shown, self.table.as_ref())
             };
             if clip != skin.clip {
                 skin.clip.clone_from(&clip);
@@ -726,8 +781,8 @@ impl Skins {
                 }
                 b.time = time;
             }
-            if let Some((s, held, sheathes)) = &skin.weapon {
-                let joint = if drawn || !sheathes {
+            if let Some((s, held, _)) = &skin.weapon {
+                let joint = if skin.in_hand {
                     held.as_str()
                 } else {
                     "sheath"
@@ -847,6 +902,86 @@ mod tests {
                 .0
                 .starts_with("Jump_Loop")
         );
+    }
+
+    /// A swordsman draws at Sword_Draw's grab (clips.json's `events.draw`), the
+    /// clip playing as he stands, and sheathes at Sword_Sheathe's release once
+    /// the fight is long over; a move that cannot wait has the blade in hand.
+    #[test]
+    fn the_blade_changes_hands_at_the_grab() {
+        let table = ClipTable::from_json(
+            r#"{"clips": {
+                "Sword_Draw": {"seconds": 0.7, "events": {"draw": 0.2}},
+                "Sword_Sheathe": {"seconds": 0.9, "events": {"sheathe": 0.6}}}, "aliases": {}}"#,
+        )
+        .unwrap();
+        let (mut combat, id) = fighter();
+        let foe = combat.spawn(CombatantDesc::new(
+            "Raider",
+            somnium_combat::TeamId(1),
+            Vec3::new(30.0, 0.0, 0.0),
+            somnium_combat::weapon::sword(),
+        ));
+        let mut world = World::new();
+        let caelan = world.spawn((
+            Name::new("Caelan"),
+            Transform::default(),
+            WorldTransform::identity(),
+            SkinnedBody::default(),
+        ));
+        let mut skins = Skins {
+            table: Some(table),
+            ..Default::default()
+        };
+        let mut spawned = Vec::new();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(id, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        let socket = world
+            .iter_with::<SkinnedSocket>()
+            .map(|(e, _)| e)
+            .next()
+            .expect("the blade's socket");
+        let joint = |world: &World| world.get::<SkinnedSocket>(socket).unwrap().joint.clone();
+        let body = spawned[0];
+        let clip = |world: &World| world.get::<SkinnedBody>(body).unwrap().clip.clone();
+        let open = somnium_combat::OpenField;
+        let tick =
+            |combat: &mut CombatWorld, world: &mut World, skins: &mut Skins, seconds: f32| {
+                for _ in 0..(seconds * 60.0).round() as usize {
+                    combat.step(1.0 / 60.0, &open, None);
+                    skins.write(world, combat, &BTreeMap::new(), 1.0 / 60.0);
+                }
+            };
+        assert_eq!(joint(&world), "sheath");
+        combat.combatant_mut(id).unwrap().lock = Some(foe);
+        tick(&mut combat, &mut world, &mut skins, 0.1);
+        assert_eq!(joint(&world), "sheath", "the hand is not on the hilt yet");
+        assert!(
+            clip(&world).starts_with("Sword_Draw"),
+            "drawing: {}",
+            clip(&world)
+        );
+        tick(&mut combat, &mut world, &mut skins, 0.2);
+        assert_eq!(joint(&world), "weapon_r", "drawn at the grab");
+        combat.combatant_mut(id).unwrap().lock = None;
+        tick(
+            &mut combat,
+            &mut world,
+            &mut skins,
+            SHEATHE_AFTER as f32 + 0.3,
+        );
+        assert!(
+            clip(&world).starts_with("Sword_Sheathe"),
+            "putting it away: {}",
+            clip(&world)
+        );
+        assert_eq!(joint(&world), "weapon_r", "not released yet");
+        tick(&mut combat, &mut world, &mut skins, 0.5);
+        assert_eq!(joint(&world), "sheath", "back in the sheath");
     }
 
     /// clips.json's gear table gives each piece once, only where its file is
