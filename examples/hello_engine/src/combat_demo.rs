@@ -1971,6 +1971,18 @@ impl CombatDemo {
             return;
         };
         let dt = ctx.simulation.fixed_delta_seconds;
+        // Brains think by their distance from what matters (the combat
+        // world's LOD): the protagonist, and the fight's camera on the ground.
+        let mut focus: Vec<Vec3> = run
+            .player
+            .and_then(|p| run.world.combatant(p))
+            .map(|c| c.position)
+            .into_iter()
+            .collect();
+        if let Some(camera) = run.camera {
+            focus.push(world_matrix(ctx.world, camera).transform_point3(Vec3::ZERO));
+        }
+        run.world.set_focus(&focus);
         let editor = &ctx.navigation.cells.world;
         let nav = editor
             .cells()
@@ -2383,61 +2395,6 @@ fn walker_config(c: &somnium_combat::Combatant) -> ControllerConfig {
     config
 }
 
-/// Each body's push out of those it stands inside, exactly as
-/// `CombatWorld::separation` gives it (the same terms summed in the same
-/// order, so the same bits), but from the bodies in the neighbouring cells
-/// only: a call each scans everyone, which a crowd pays for every step.
-fn separations(combat: &CombatWorld, ids: &[CombatantId]) -> Vec<(CombatantId, Vec3)> {
-    // In id order, as `separation` folds them.
-    let others: Vec<_> = combat
-        .combatants()
-        .filter(|o| o.alive() && o.mount.is_none())
-        .collect();
-    // Two bodies push only when closer than their radii together.
-    let cell = combat
-        .combatants()
-        .map(|c| c.body.radius)
-        .fold(0.0f32, f32::max)
-        .mul_add(2.0, 1e-3)
-        .max(0.1);
-    let key = |p: Vec3| ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
-    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-    for (i, o) in others.iter().enumerate() {
-        grid.entry(key(o.position)).or_default().push(i);
-    }
-    let mut near = Vec::new();
-    ids.iter()
-        .map(|&id| {
-            let Some(me) = combat.combatant(id) else {
-                return (id, Vec3::ZERO);
-            };
-            let (x, z) = key(me.position);
-            near.clear();
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    let at = (x.saturating_add(dx), z.saturating_add(dz));
-                    near.extend(grid.get(&at).into_iter().flatten().copied());
-                }
-            }
-            near.sort_unstable();
-            near.dedup();
-            let push = near.iter().map(|&i| others[i]).filter(|o| o.id != id).fold(
-                Vec3::ZERO,
-                |push, o| {
-                    let d = somnium_combat::geometry::flat(me.position - o.position);
-                    let (len, min) = (d.length(), me.body.radius + o.body.radius);
-                    if len < min && len > 1e-4 {
-                        push + d / len * (min - len) * 0.5
-                    } else {
-                        push
-                    }
-                },
-            );
-            (id, push)
-        })
-        .collect()
-}
-
 /// Everyone's feet from their controllers, after the combat step decided
 /// where each wants to go. Running into a ledge (the run key, or an AI on an
 /// off-mesh link) vaults or climbs it; a brain on a level link jumps. Each
@@ -2451,7 +2408,7 @@ fn walk(
 ) -> Vec<(CombatantId, LocomotionEvent)> {
     // Pushes from where everyone stood before anyone moved.
     let ids: Vec<CombatantId> = walkers.keys().copied().collect();
-    let pushes = separations(combat, &ids);
+    let pushes = combat.separations(&ids);
     let mut out = Vec::new();
     for (id, push) in pushes {
         let (Some(c), Some(walker)) = (combat.combatant(id), walkers.get_mut(&id)) else {
@@ -4232,9 +4189,10 @@ mod tests {
         );
     }
 
-    /// The host's pushes for everyone at once are `separation`'s, to the
-    /// bit, in a packed and partly fallen crowd with a horse in it (if
-    /// `separation` changes, this says so).
+    /// The pushes the host's walk takes for everyone at once
+    /// (`CombatWorld::separations`) are `separation`'s, to the bit, in a
+    /// packed and partly fallen crowd with a horse in it: a second guard
+    /// beside the combat crate's own.
     #[test]
     fn everyone_is_pushed_as_separation_pushes_them() {
         let mut world = World::new();
@@ -4282,7 +4240,7 @@ mod tests {
             run.world.combatant_mut(id).unwrap().action = Action::Dead;
         }
         let mut pushed = 0;
-        for (id, push) in separations(&run.world, &ids) {
+        for (id, push) in run.world.separations(&ids) {
             assert_eq!(push, run.world.separation(id), "{id:?}");
             pushed += usize::from(push != Vec3::ZERO);
         }
