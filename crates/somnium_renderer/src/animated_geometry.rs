@@ -11,11 +11,19 @@
 //! frame after a skin still copies its pose aside, so the previous pose then
 //! equals the current one and the surface reads as still; after that a still
 //! registration costs nothing until its palette changes.
+//!
+//! Registering and removing cost the same however many are registered (asked
+//! by rb-combat for crowds, 19 Oct 2026): a new skin is checked alone against
+//! running totals, and joins the palettes and the previous-pose buffer at
+//! their ends, so no other registration is laid out or skinned again. A removed
+//! one leaves its palette slot and its previous-pose span unused until holes
+//! outweigh what is live; then (or when the palettes' own budget would refuse
+//! a new one) everything is laid out again once, compactly.
 use crate::{
     context::RenderContext,
     geometry::{GeometryPool, MeshAllocation},
     pass::skin::SkinPass,
-    skinning::{SkinnedHandle, SkinningPalettes},
+    skinning::{SkinBudget, SkinError, SkinnedHandle, SkinningPalettes},
 };
 use glam::Mat4;
 use somnium_anim::{Skeleton, Skin};
@@ -57,6 +65,11 @@ pub struct AnimatedGeometry {
     pool_size: u64,
     /// Registrations skinned by the last [`Self::record`] (a measure for crowds).
     skinned: usize,
+    /// Posed vertices of the live registrations, and of removed ones still holding palette slots and spans.
+    live_vertices: u32,
+    dead_vertices: u32,
+    /// Where the next registration's last pose goes in the previous-pose buffer.
+    prev_end: u32,
 }
 
 const VERTEX_BYTES: u64 = std::mem::size_of::<somnium_asset::Vertex>() as u64;
@@ -96,23 +109,30 @@ impl AnimatedGeometry {
             .checked_add(1)
             .ok_or("Animated mesh identifier exhausted")?;
         let bounds = pool.mesh_aabb(rest).ok_or("Rest mesh has no bounds")?;
-        // Validate budgets and bindings before allocating GPU memory.
-        let mut validation = SkinningPalettes::default();
-        for entry in self.entries.values() {
-            validation
-                .register(
-                    &entry.skeleton,
-                    &entry.skin,
-                    entry.rest,
-                    entry.posed.vertex_offset,
-                    entry.skin.bindings.len() as u32,
-                    entry.bounds,
-                )
-                .map_err(|e| format!("Skin registration: {e:?}"))?;
+        // Validate budgets and bindings before allocating GPU memory: the new skin alone, against running totals,
+        // with the checks and errors `SkinningPalettes::register` makes, in its order.
+        let vertex_count = vertices.len() as u32;
+        let budget = SkinBudget::default();
+        let refused = |e: SkinError| format!("Skin registration: {e:?}");
+        if skeleton.len() > somnium_anim::MAX_JOINTS_PER_SKELETON {
+            return Err(refused(SkinError::TooManyJoints {
+                joints: skeleton.len(),
+                limit: somnium_anim::MAX_JOINTS_PER_SKELETON,
+            }));
         }
-        validation
-            .register(skeleton, skin, rest, 0, vertices.len() as u32, bounds)
-            .map_err(|e| format!("Skin registration: {e:?}"))?;
+        if skin.bindings.len() != vertices.len() {
+            return Err(refused(SkinError::BindingCountMismatch { vertices: vertices.len(), bindings: skin.bindings.len() }));
+        }
+        if !skin.fits(skeleton) {
+            return Err(refused(SkinError::SkinDoesNotFitSkeleton));
+        }
+        if self.entries.len() as u32 >= budget.max_instances {
+            return Err(refused(SkinError::InstanceBudget { limit: budget.max_instances }));
+        }
+        let remaining = budget.max_posed_vertices.saturating_sub(self.live_vertices);
+        if vertex_count > remaining {
+            return Err(refused(SkinError::PosedVertexBudget { wanted: vertex_count, remaining }));
+        }
         let posed = pool.upload_mesh_pooled(queue, vertices, &[], 0);
         if posed.vertex_capacity < vertices.len() as u32 {
             return Err("Posed geometry budget exhausted".into());
@@ -121,6 +141,17 @@ impl AnimatedGeometry {
         self.next = next;
         let id = AnimatedMeshId(self.next);
         let offset = posed.vertex_offset;
+        // At the ends of the palettes and the previous poses, unless a full layout is due anyway (or the palettes,
+        // holding removed ones' slots, would refuse it: then the layout is due).
+        let handle = if self.dirty {
+            None
+        } else {
+            self.palettes.register(skeleton, skin, rest, posed.vertex_offset, vertex_count, bounds).ok()
+        };
+        self.dirty |= handle.is_none();
+        let prev_base = self.prev_end;
+        self.prev_end += vertex_count;
+        self.live_vertices += vertex_count;
         self.entries.insert(
             id,
             Entry {
@@ -130,14 +161,13 @@ impl AnimatedGeometry {
                 posed,
                 bounds,
                 matrices: vec![Mat4::IDENTITY; skeleton.len()],
-                handle: None,
-                prev_base: 0,
+                handle,
+                prev_base,
                 fresh: true,
                 changed: true,
                 settle: false,
             },
         );
-        self.dirty = true;
         Ok((id, offset))
     }
     /// Posed mesh origins identify visible draws that lack deformation motion vectors.
@@ -181,8 +211,15 @@ impl AnimatedGeometry {
         let Some(entry) = self.entries.remove(&id) else {
             return false;
         };
+        let vertex_count = entry.skin.bindings.len() as u32;
         pool.free_mesh(entry.posed);
-        self.dirty = true;
+        // Its palette slot and previous-pose span stay unused (nothing skins a handle no entry holds) until the holes
+        // outweigh what is live.
+        self.live_vertices -= vertex_count;
+        self.dead_vertices += vertex_count;
+        if self.dead_vertices > self.live_vertices.max(1 << 16) {
+            self.dirty = true;
+        }
         true
     }
     /// Rebuild changed registrations and refresh conservative posed bounds before culling.
@@ -211,6 +248,7 @@ impl AnimatedGeometry {
                 entry.changed = true;
                 base += entry.posed.vertex_count;
             }
+            (self.prev_end, self.dead_vertices) = (base, 0);
             self.dirty = false;
         }
         // A still registration's palette and bounds are what they were.
@@ -244,12 +282,8 @@ impl AnimatedGeometry {
         pool: &GeometryPool,
         pass: &mut SkinPass,
     ) {
-        let needed = self
-            .entries
-            .values()
-            .map(|entry| u64::from(entry.posed.vertex_count) * VERTEX_BYTES)
-            .sum::<u64>()
-            .max(VERTEX_BYTES);
+        // Up to the last span laid, removed ones' holes included.
+        let needed = (u64::from(self.prev_end) * VERTEX_BYTES).max(VERTEX_BYTES);
         if self.prev.is_none() || self.prev_capacity < needed {
             let capacity = needed.next_power_of_two();
             self.prev = Some(device.create_buffer(&wgpu::BufferDescriptor {
