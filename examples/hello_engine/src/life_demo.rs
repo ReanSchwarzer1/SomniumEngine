@@ -2102,7 +2102,7 @@ mod tests {
                     name: "Dressed".into(),
                     spots,
                     lanes: vec![vec![Vec3::new(-10.0, 2.0, 4.0), Vec3::new(100.0, 2.0, 4.0)]],
-                    roads: Vec::new(),
+                    roads: vec![vec![Vec3::new(-20.0, 2.0, 12.0), Vec3::new(110.0, 2.0, 12.0)]],
                 },
             }],
             looks: Some(
@@ -2228,6 +2228,28 @@ mod tests {
             }
         }
         assert!(holding > 0, "somebody holds something");
+        // The road's carts are their horses, walking or standing.
+        let mut horses = 0;
+        for (slot, (e, _)) in run.carts.slots.iter().enumerate() {
+            let Some(i) = run.carts.bodies.holder(slot) else {
+                continue;
+            };
+            let b = world
+                .get::<crate::skinned_crowd::SkinnedBody>(*e)
+                .expect("a cart wears its horse");
+            assert_eq!(
+                b.source,
+                AssetId::from_relative_path("creatures/cart_horse/cart_horse.glb")
+            );
+            let want = run
+                .dress_as
+                .as_ref()
+                .unwrap()
+                .cart_clip(run.life.carts()[i].pose);
+            assert_eq!(b.clip, want.unwrap_or_default());
+            horses += 1;
+        }
+        assert!(horses > 0, "a cart on the road");
         // The view leaves: every slot is parked, and holds nothing.
         let away = Vec3::new(9_000.0, 0.0, 0.0);
         run.life.step(0.5, Clock::at(11.0), &[away], &Flat);

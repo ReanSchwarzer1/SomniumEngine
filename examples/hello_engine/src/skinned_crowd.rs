@@ -602,6 +602,12 @@ const STILL_BEYOND: f32 = 160.0;
 /// edge.
 const STILL_CULL: f32 = 400.0;
 
+/// A still body's parts smaller than this many indices are not drawn far off.
+const FAR_PART_MIN: u32 = 240;
+
+/// Still bodies nearer than this cast shadows.
+const STILL_SHADOWS: f32 = 60.0;
+
 /// Held poses baked a frame, by default (each is one CPU skinning of a body).
 const STILLS_PER_FRAME: usize = 4;
 
@@ -1051,8 +1057,14 @@ impl SkinnedBodies {
                     body.model.copy_from_slice(&held.model);
                     body.posed = true;
                 }
+                // Far off, a body's smallest parts (tongue, teeth, buttons) are not
+                // seen and it casts no shadow worth its draws.
+                let far = distance > settings.still_beyond.min(self.lod.cull);
                 for (m, a) in shared.meshes.iter().zip(&held.meshes) {
                     for &(first, count, material) in &m.parts {
+                        if far && count < FAR_PART_MIN {
+                            continue;
+                        }
                         r.submit(somnium_renderer::command::DrawCommand {
                             paint: 0,
                             sort_key: somnium_renderer::command::SortKey::new(
@@ -1065,7 +1077,7 @@ impl SkinnedBodies {
                             index_count: count,
                             material_id: material,
                             transform: matrix,
-                            casts_shadow: true,
+                            casts_shadow: distance < STILL_SHADOWS,
                         });
                     }
                 }
