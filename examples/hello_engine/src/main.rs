@@ -20,8 +20,10 @@
 //! - Editor mode (Play/Pause/Stop) (11.5L)
 
 mod animated_preview;
+mod skinned_crowd;
 mod authoring_demo;
 mod combat_demo;
+mod life_demo;
 mod dreams_fixture;
 mod fracture_demo;
 
@@ -730,7 +732,10 @@ pub struct HelloGame {
     work_demo: fracture_demo::Demo,
     /// The combat sandbox (Create > Examples > Combat Sandbox), while Play runs it.
     combat: combat_demo::CombatDemo,
+    /// Ambient life (Create > Examples > Living Village), while Play runs it.
+    life: life_demo::LifeDemo,
     animated_previews: animated_preview::Previews,
+    skinned: skinned_crowd::SkinnedBodies,
     log_timer: f32,
     camera: EditorCamera,
     dreams_rail: Option<dreams_fixture::DreamRail>,
@@ -840,7 +845,9 @@ impl HelloGame {
             interactions: Default::default(),
             work_demo: Default::default(),
             combat: Default::default(),
+            life: Default::default(),
             animated_previews: Default::default(),
+            skinned: Default::default(),
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
             dreams_rail: None,
@@ -1167,10 +1174,12 @@ impl GameApp for HelloGame {
         authoring_demo::register(registration);
         fracture_demo::register(registration);
         combat_demo::register(registration);
+        life_demo::register(registration);
         animated_preview::register(registration);
+        skinned_crowd::register(registration);
     }
     fn authoring_state(&self) -> serde_json::Value {
-        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state()})
+        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state(),"life":self.life.state(),"skinned":self.skinned.state()})
     }
 
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
@@ -1705,6 +1714,27 @@ impl GameApp for HelloGame {
             }
         }
 
+        // Evidence hook, inert unless set: `SOMNIUM_SKINNED_CROWD=<count>`
+        // lays out that many skinned bodies at the origin.
+        if let Some(count) = skinned_crowd::spawn_at_startup(ctx.world) {
+            info!("SOMNIUM_SKINNED_CROWD - {count} skinned bodies spawned");
+        }
+        // Evidence hook, inert unless set: `SOMNIUM_LIFE_TABLE=<file>` adds a
+        // Life Table naming that file, and Play keeps the editor camera (no
+        // walker), for captures over a realm's towns.
+        if life_demo::table_at_startup(ctx.world) {
+            self.play_character = false;
+            info!("SOMNIUM_LIFE_TABLE - a Life Table for the capture, no walker");
+        }
+        // Evidence hook, inert unless set: `SOMNIUM_LIFE_VILLAGE=1` builds the
+        // Living Village (`SOMNIUM_LIFE_HOMES` houses) for a capture run.
+        if std::env::var("SOMNIUM_LIFE_VILLAGE").as_deref() == Ok("1") {
+            match life_demo::spawn_at_startup(ctx.world) {
+                Ok(count) => info!("SOMNIUM_LIFE_VILLAGE=1 - living village spawned ({count} entities)"),
+                Err(error) => tracing::warn!("SOMNIUM_LIFE_VILLAGE: {error}"),
+            }
+        }
+
         // CONTROL-A capture harness: select one real, already-spawned entity
         // by its displayed name so the populated Details surface is captured
         // without inventing fixture data or synthesising an Outliner click.
@@ -1723,6 +1753,7 @@ impl GameApp for HelloGame {
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
         self.work_demo.event(event);
         self.combat.event(event);
+        self.life.event(event);
         if play_session(ctx)
             && matches!(
                 event,
@@ -2077,15 +2108,18 @@ impl GameApp for HelloGame {
             } else if self.play_character {
                 spawn_player(self, ctx);
             }
+            self.life.begin(ctx);
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
             self.work_demo.reset(ctx.world);
             self.combat.end(ctx);
+            self.life.end(ctx);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
         if playing {
             self.combat.update(ctx);
+            self.life.update(ctx);
         }
 
         // Propagate after physics/editor synchronization so render transforms
@@ -2193,6 +2227,7 @@ impl GameApp for HelloGame {
             renderer.set_view(view_mat, proj, eye);
         }
         self.animated_previews.render(ctx);
+        self.skinned.render(ctx);
         // **Which canvas** and **whether it draws** are two questions, and
         // conflating them costs more than it looks. `EditorFlags::hidden` is an
         // authoring state — *"not submitted for drawing"* — not an unload: a

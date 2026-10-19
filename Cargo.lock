@@ -1632,6 +1632,7 @@ dependencies = [
  "somnium_core",
  "somnium_ecs",
  "somnium_input",
+ "somnium_life",
  "somnium_physics",
  "somnium_renderer",
  "somnium_script",
@@ -3969,6 +3970,16 @@ dependencies = [
 [[package]]
 name = "somnium_jobs"
 version = "0.1.0"
+
+[[package]]
+name = "somnium_life"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "serde",
+ "serde_json",
+ "somnium_ecs",
+]
 
 [[package]]
 name = "somnium_physics"

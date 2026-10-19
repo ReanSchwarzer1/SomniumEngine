@@ -35,6 +35,7 @@ somnium_ui = { workspace = true }
 # The combat sandbox (Create > Examples > Combat Sandbox).
 somnium_character = { workspace = true }
 somnium_combat = { workspace = true }
+somnium_life = { workspace = true }
 somnium_input = { workspace = true }
 somnium_ai = { workspace = true }
 glam = { workspace = true }

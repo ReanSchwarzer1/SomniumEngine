@@ -5566,6 +5566,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 playing,
             );
         }
+        // Animation LOD measures from last frame's camera.
+        self.animation_authoring
+            .set_viewer(self.renderer.as_ref().map(|r| r.camera_pos));
         self.animation_authoring.update(
             &mut self.world,
             self.physics.as_mut(),

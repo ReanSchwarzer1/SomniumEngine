@@ -303,6 +303,9 @@ pub struct WorldPartition {
     states: BTreeMap<CellCoord, CellLoadState>,
     active: BTreeMap<PersistentId, (CellCoord, Entity)>,
     flights: BTreeMap<CellCoord, CellFlight>,
+    /// Cells an actor was rehomed out of: saved even when left empty, so
+    /// their old copy of it goes.
+    vacated: BTreeSet<CellCoord>,
 }
 
 impl WorldPartition {
@@ -319,6 +322,7 @@ impl WorldPartition {
             states: BTreeMap::new(),
             active: BTreeMap::new(),
             flights: BTreeMap::new(),
+            vacated: BTreeSet::new(),
         }
     }
 
@@ -398,6 +402,42 @@ impl WorldPartition {
         }
         self.states.insert(coord, CellLoadState::Loaded);
         Ok(())
+    }
+
+    /// Keep each live actor's saved position where it now stands, and move
+    /// it to the cell it walked (or was carried) into when that cell is
+    /// loaded, so its cell saves it there and it streams back where it was
+    /// left. An actor in a cell that is not loaded stays with its old cell
+    /// (with its new position) until it is. Returns how many changed cells.
+    pub fn rehome(&mut self, world: &mut World) -> usize {
+        let actors: Vec<_> = self
+            .active
+            .iter()
+            .map(|(id, (cell, entity))| (*id, *cell, *entity))
+            .collect();
+        let mut moved = 0;
+        for (id, cell, entity) in actors {
+            let Some(at) = world.get::<crate::Transform>(entity).map(|t| t.translation) else {
+                continue;
+            };
+            let position = [f64::from(at.x), f64::from(at.y), f64::from(at.z)];
+            let now = CellCoord::from_position(position, self.cell_size);
+            // Both ends loaded: a cell mid-unload has already saved its actors.
+            let loaded = |coord| self.states.get(&coord) == Some(&CellLoadState::Loaded);
+            let rehome = now != cell && loaded(now) && loaded(cell);
+            if let Some(actor) = world.get_mut::<StreamedActor>(entity) {
+                actor.position = position;
+                if rehome {
+                    actor.cell = now;
+                }
+            }
+            if rehome {
+                self.active.insert(id, (now, entity));
+                self.vacated.insert(cell);
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// Poll completions and schedule every required load/unload with deadlines.
@@ -590,7 +630,8 @@ impl WorldPartition {
         // Empty spatial cells are a normal part of a camera radius. They have
         // no authored state to persist and must not create thousands of empty
         // directories as the camera moves.
-        if ids.is_empty() {
+        let vacated = self.vacated.remove(&coord);
+        if ids.is_empty() && !vacated {
             self.states.insert(coord, CellLoadState::Unloaded);
             return Ok(());
         }
@@ -778,6 +819,50 @@ mod tests {
     }
 
     #[test]
+    fn an_actor_that_moved_is_rehomed_to_its_loaded_cell() {
+        let (root, store) = fixture();
+        let mut partition = WorldPartition::new(store, 64.0);
+        let mut world = World::new();
+        let (a, b, c) = (
+            CellCoord::default(),
+            CellCoord { x: 1, y: 0, z: 0 },
+            CellCoord { x: 3, y: 0, z: 0 },
+        );
+        partition.activate(&mut world, a, &[actor(1, 1.0)]).unwrap();
+        partition
+            .activate(&mut world, b, &[actor(2, 70.0)])
+            .unwrap();
+        let walker = world
+            .entity_by_persistent_id(PersistentId::from_raw(1))
+            .unwrap();
+        world
+            .get_mut::<crate::Transform>(walker)
+            .unwrap()
+            .translation
+            .x = 100.0;
+        assert_eq!(partition.rehome(&mut world), 1);
+        assert_eq!(world.get::<StreamedActor>(walker).unwrap().cell, b);
+        assert_eq!(
+            world.get::<StreamedActor>(walker).unwrap().position[0],
+            100.0
+        );
+        assert_eq!(partition.active[&PersistentId::from_raw(1)].0, b);
+        // Into a cell that is not loaded: the position follows, the owner stays.
+        world
+            .get_mut::<crate::Transform>(walker)
+            .unwrap()
+            .translation
+            .x = 200.0;
+        assert_eq!(partition.rehome(&mut world), 0);
+        assert_ne!(world.get::<StreamedActor>(walker).unwrap().cell, c);
+        assert_eq!(
+            world.get::<StreamedActor>(walker).unwrap().position[0],
+            200.0
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn spatial_hash_is_floor_based_across_the_origin() {
         assert_eq!(
             CellCoord::from_position([-0.1, 64.0, 127.9], 64.0),
@@ -888,6 +973,51 @@ mod tests {
                 .all(|entity| world.get::<crate::Name>(entity).is_some()
                     && world.get::<crate::Transform>(entity).is_some())
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_rehomed_actor_streams_back_once_where_it_was_left() {
+        let (root, store) = fixture();
+        let (a, b) = (CellCoord::default(), CellCoord { x: 1, y: 0, z: 0 });
+        store.save_cell(a, &[actor(1, 1.0)]).unwrap();
+        store.save_cell(b, &[actor(2, 70.0)]).unwrap();
+        let mut partition = WorldPartition::new(store, 64.0);
+        let mut world = World::new();
+        let mut jobs = JobSystem::single_threaded();
+        let deadline = || Instant::now() + Duration::from_secs(1);
+        partition.pin(a);
+        partition.pin(b);
+        partition.update(&mut world, &mut jobs, deadline()).unwrap();
+        assert_eq!(world.entity_count(), 2);
+        let walker = world
+            .entity_by_persistent_id(PersistentId::from_raw(1))
+            .unwrap();
+        world
+            .get_mut::<crate::Transform>(walker)
+            .unwrap()
+            .translation
+            .x = 100.0;
+        assert_eq!(partition.rehome(&mut world), 1);
+        // The cell it left streams out empty, then the one it walked into.
+        partition.unpin(a);
+        partition.update(&mut world, &mut jobs, deadline()).unwrap();
+        assert_eq!(world.entity_count(), 2, "the walker went with its new cell");
+        partition.unpin(b);
+        partition.update(&mut world, &mut jobs, deadline()).unwrap();
+        assert_eq!(world.entity_count(), 0);
+        partition.pin(a);
+        partition.pin(b);
+        partition.update(&mut world, &mut jobs, deadline()).unwrap();
+        assert_eq!(world.entity_count(), 2, "one copy of each");
+        let walker = world
+            .entity_by_persistent_id(PersistentId::from_raw(1))
+            .unwrap();
+        assert_eq!(
+            world.get::<crate::Transform>(walker).unwrap().translation.x,
+            100.0
+        );
+        assert_eq!(partition.active[&PersistentId::from_raw(1)].0, b);
         let _ = fs::remove_dir_all(root);
     }
 

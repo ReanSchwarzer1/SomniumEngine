@@ -127,6 +127,7 @@ pub mod ground_cover;
 pub mod weather;
 /// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.
 pub mod world_partition;
+pub mod physics_handover;
 
 // ── Re-exports for ergonomic top-level access ──────────────────────────────
 
@@ -2938,5 +2939,6 @@ impl somnium_ecs::Component for AssetEditSession {}
 
 /// Native animation preview controls, visible rigs and runtime clip binding.
 pub mod animation_authoring;
+pub mod animation_lod;
 
 mod prefab_details;

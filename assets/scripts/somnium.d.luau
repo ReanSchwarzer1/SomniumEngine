@@ -62,6 +62,23 @@ export type HelloMirrorPart = {
 	role: number,
 }
 
+--- `hello.SkinnedBody` (schema version 1).
+export type HelloSkinnedBody = {
+	source: Asset?,
+	clip: string,
+	speed: number,
+	time: number,
+	lod1: Asset?,
+	lod2: Asset?,
+	lod1_beyond: number,
+	lod2_beyond: number,
+}
+
+--- `hello.SkinnedSocket` (schema version 1).
+export type HelloSkinnedSocket = {
+	joint: string,
+}
+
 --- `somnium.AnimationAuthoring` (schema version 1).
 export type SomniumAnimationAuthoring = {
 	playing: boolean,
@@ -101,6 +118,16 @@ export type SomniumAnimationAuthoring = {
 	event_count: number, -- engine-owned; reading only
 	last_event: string, -- engine-owned; reading only
 	status: string, -- engine-owned; reading only
+}
+
+--- `somnium.AnimationLod` (schema version 1).
+export type SomniumAnimationLod = {
+	enabled: boolean,
+	full: number,
+	far: number,
+	far_rate: number,
+	cull: number,
+	detail: number,
 }
 
 --- `somnium.AnimationPreviewJoint` (schema version 1).
@@ -168,6 +195,25 @@ export type SomniumCameraSettings = {
 	custom_scale: number,
 }
 
+--- `somnium.Cart` (schema version 1).
+export type SomniumCart = {
+	enabled: boolean,
+}
+
+--- `somnium.CastMember` (schema version 1).
+export type SomniumCastMember = {
+	speaker: string,
+	drive_look: boolean,
+	look_weight: number,
+	talking: boolean, -- engine-owned; reading only
+	jaw_open: number, -- engine-owned; reading only
+	lids_shut: number, -- engine-owned; reading only
+	expression: string, -- engine-owned; reading only
+	look_at: string, -- engine-owned; reading only
+	gesture: string, -- engine-owned; reading only
+	mark: string, -- engine-owned; reading only
+}
+
 --- `somnium.CombatSurface` (schema version 1).
 export type SomniumCombatSurface = {
 	surface: number --[[ Bare | Grass | Water | Ice | Snow | Burning | Ash | Stone ]],
@@ -201,18 +247,17 @@ export type SomniumCombatant = {
 	leader: boolean,
 }
 
---- `somnium.CastMember` (schema version 1).
-export type SomniumCastMember = {
-	speaker: string,
-	drive_look: boolean,
-	look_weight: number,
-	talking: boolean, -- engine-owned; reading only
-	jaw_open: number, -- engine-owned; reading only
-	lids_shut: number, -- engine-owned; reading only
-	expression: string, -- engine-owned; reading only
-	look_at: string, -- engine-owned; reading only
-	gesture: string, -- engine-owned; reading only
-	mark: string, -- engine-owned; reading only
+--- `somnium.Cutaway` (schema version 1).
+export type SomniumCutaway = {
+	enabled: boolean,
+	center: Vec3,
+	half_extents: Vec3,
+	hide: string,
+}
+
+--- `somnium.CutawayViewer` (schema version 1).
+export type SomniumCutawayViewer = {
+	position: Vec3,
 }
 
 --- `somnium.Decal` (schema version 1).
@@ -275,6 +320,43 @@ export type SomniumInteractable = {
 	preview_requested: boolean,
 }
 
+--- `somnium.IsometricCamera` (schema version 1).
+export type SomniumIsometricCamera = {
+	enabled: boolean,
+	pitch: number,
+	yaw: number,
+	distance: number,
+	min_distance: number,
+	max_distance: number,
+	fov: number,
+	zoom_step: number,
+	rotate_step: number,
+	drag_rate: number,
+	smoothing: number,
+	focus_height: number,
+}
+
+--- `somnium.LifePlace` (schema version 1).
+export type SomniumLifePlace = {
+	enabled: boolean,
+	populate: boolean,
+	seed: number,
+	population: number, -- engine-owned; reading only
+}
+
+--- `somnium.LifeSpot` (schema version 1).
+export type SomniumLifeSpot = {
+	kind: number --[[ Home | Work | Market | Inn | Chapel | Field | Pen | Green | Well ]],
+}
+
+--- `somnium.LifeTable` (schema version 1).
+export type SomniumLifeTable = {
+	enabled: boolean,
+	file: string,
+	reach: number,
+	adopted: number, -- engine-owned; reading only
+}
+
 --- `somnium.Light` (schema version 1).
 export type SomniumLight = {
 	light_type: number --[[ Directional | Point | Spot | Rect | Disc | Tube ]],
@@ -299,6 +381,18 @@ export type SomniumLightFlicker = {
 	rate: number,
 	dropout: number,
 	seed: number,
+}
+
+--- `somnium.Livestock` (schema version 1).
+export type SomniumLivestock = {
+	enabled: boolean,
+	kind: number --[[ Sheep | Cow | Goat | Pig | Hen | Dog ]],
+}
+
+--- `somnium.LodGroup` (schema version 1).
+export type SomniumLodGroup = {
+	enabled: boolean,
+	distances: Vec3,
 }
 
 --- `somnium.Material` (schema version 2).
@@ -505,6 +599,9 @@ export type SomniumPostProcess = {
 	picture_shift_progress: number,
 	picture_shift_origin: Vec3,
 	picture_shift_reach: number,
+	painterly: number,
+	ink_lines: number,
+	light_ramp: number,
 }
 
 --- `somnium.RigidBody` (schema version 1).
@@ -626,6 +723,16 @@ export type SomniumTimeOfDay = {
 	fog_density: { CurveKey },
 	exposure_compensation: { CurveKey },
 	cloud_coverage: { CurveKey },
+	fixed_sun: boolean,
+	fixed_azimuth: number,
+	fixed_elevation: number,
+	fixed_illuminance: number,
+	eclipse: number,
+	night_glow: number,
+	night_tint: Vec3,
+	night_aurora: number,
+	night_halo_road: number,
+	night_thread: number,
 }
 
 --- `somnium.Transform` (schema version 1).
@@ -664,6 +771,13 @@ export type SomniumVertexPaint = {
 	stain: Vec4,
 	detile: Vec4,
 	baked_light: boolean,
+}
+
+--- `somnium.Villager` (schema version 1).
+export type SomniumVillager = {
+	enabled: boolean,
+	role: number --[[ Farmer | Smith | Herder | Keeper | Priest | Elder | Labourer | Child ]],
+	doing: string, -- engine-owned; reading only
 }
 
 --- `somnium.VoxelTerrain` (schema version 1).
@@ -776,23 +890,35 @@ export type SomniumWorldPartition = {
 export type SelfComponents = {
 	animatedPreview: HelloAnimatedPreview?,
 	mirrorPart: HelloMirrorPart?,
+	skinnedBody: HelloSkinnedBody?,
+	skinnedSocket: HelloSkinnedSocket?,
 	animationAuthoring: SomniumAnimationAuthoring?,
+	animationLod: SomniumAnimationLod?,
 	animationPreviewJoint: SomniumAnimationPreviewJoint?,
 	audioEmitter: SomniumAudioEmitter?,
 	behavior: SomniumBehavior?,
 	blockout: SomniumBlockout?,
 	buoyantVessel: SomniumBuoyantVessel?,
 	cameraSettings: SomniumCameraSettings?,
+	cart: SomniumCart?,
 	castMember: SomniumCastMember?,
 	combatSurface: SomniumCombatSurface?,
 	combatant: SomniumCombatant?,
+	cutaway: SomniumCutaway?,
+	cutawayViewer: SomniumCutawayViewer?,
 	decal: SomniumDecal?,
 	editorFlags: SomniumEditorFlags?,
 	foliage: SomniumFoliage?,
 	importedMesh: SomniumImportedMesh?,
 	interactable: SomniumInteractable?,
+	isometricCamera: SomniumIsometricCamera?,
+	lifePlace: SomniumLifePlace?,
+	lifeSpot: SomniumLifeSpot?,
+	lifeTable: SomniumLifeTable?,
 	light: SomniumLight?,
 	lightFlicker: SomniumLightFlicker?,
+	livestock: SomniumLivestock?,
+	lodGroup: SomniumLodGroup?,
 	material: SomniumMaterial?,
 	mesh: SomniumMesh?,
 	meshKind: SomniumMeshKind?,
@@ -818,6 +944,7 @@ export type SelfComponents = {
 	transform: SomniumTransform?,
 	uiCanvas: SomniumUiCanvas?,
 	vertexPaint: SomniumVertexPaint?,
+	villager: SomniumVillager?,
 	voxelTerrain: SomniumVoxelTerrain?,
 	water: SomniumWater?,
 	weather: SomniumWeather?,

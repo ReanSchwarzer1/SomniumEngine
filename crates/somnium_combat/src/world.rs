@@ -40,7 +40,7 @@ use crate::{
     CombatQuery, CombatantId, DamageType, Relations, Resistances, Rng, TeamId, Vitals, WorldHit, ai,
 };
 use glam::Vec3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A body's size, for hurt volumes and movement.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1029,6 +1029,47 @@ pub enum CombatEvent {
 /// 3.3 m drop). Mounts have their own ([`crate::mount::MountDef::safe_fall`]).
 pub const SAFE_FALL: f32 = 8.0;
 
+/// Simulation LOD for brains: how far from the focus points
+/// ([`CombatWorld::set_focus`]) they think every step, every few, or rarely.
+/// With no focus set, every brain thinks every step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CombatLod {
+    /// Within this (metres, on the ground plane), every step.
+    pub near: f32,
+    /// Within this, every `mid_stride` steps. Beyond it a brain with no
+    /// enemy in mind thinks every `far_stride` steps (enough to hear an alarm
+    /// or feel a blow); one in a fight thinks as if mid-range.
+    pub far: f32,
+    /// Steps between a mid-range brain's thoughts.
+    pub mid_stride: u32,
+    /// Steps between a far, idle brain's thoughts.
+    pub far_stride: u32,
+}
+
+impl Default for CombatLod {
+    fn default() -> Self {
+        Self {
+            near: 45.0,
+            far: 140.0,
+            mid_stride: 4,
+            far_stride: 30,
+        }
+    }
+}
+
+/// What the last step's brains did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LodStats {
+    /// Brains near a focus point.
+    pub near: usize,
+    /// Brains mid-range.
+    pub mid: usize,
+    /// Brains far off.
+    pub far: usize,
+    /// Brains that thought this step.
+    pub thought: usize,
+}
+
 /// A sound for AI hearing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Noise {
@@ -1076,6 +1117,11 @@ pub struct CombatWorld {
     pub(crate) noises: Vec<Noise>,
     focus: Option<Focus>,
     pub(crate) tactics: ai::Tactics,
+    /// Brain LOD by distance from the focus points.
+    pub lod: CombatLod,
+    lod_focus: Vec<Vec3>,
+    lod_stats: LodStats,
+    steps: u64,
 }
 
 impl CombatWorld {
@@ -1104,6 +1150,10 @@ impl CombatWorld {
             noises: Vec::new(),
             focus: None,
             tactics: ai::Tactics::default(),
+            lod: CombatLod::default(),
+            lod_focus: Vec::new(),
+            lod_stats: LodStats::default(),
+            steps: 0,
         };
         for spell in crate::spell::library::all() {
             world.add_spell(spell);
@@ -1275,6 +1325,74 @@ impl CombatWorld {
                 c.facing = planar_dir(facing, c.facing);
             }
         }
+    }
+
+    /// The points that matter for brain LOD: the player, the camera. Brains
+    /// far from all of them with no enemy in mind think every
+    /// [`CombatLod::far_stride`] steps; mid-range ones every
+    /// [`CombatLod::mid_stride`]. An empty list (the default)
+    /// keeps every brain thinking every step.
+    pub fn set_focus(&mut self, points: &[Vec3]) {
+        self.lod_focus.clear();
+        self.lod_focus
+            .extend(points.iter().filter(|p| p.is_finite()));
+    }
+
+    /// What the last step's brains did.
+    #[must_use]
+    pub fn lod_stats(&self) -> LodStats {
+        self.lod_stats
+    }
+
+    /// Take out the brains that do not think this step; the caller puts them
+    /// back after `ai::think`. Their last command stands meanwhile.
+    fn park_brains(&mut self) -> Vec<(CombatantId, ai::Brain)> {
+        let mut stats = LodStats::default();
+        let mut parked = Vec::new();
+        if self.lod_focus.is_empty() {
+            stats.near = self
+                .combatants
+                .values()
+                .filter(|c| c.brain.is_some())
+                .count();
+            stats.thought = stats.near;
+            self.lod_stats = stats;
+            return parked;
+        }
+        let (lod, steps) = (self.lod, self.steps);
+        let focus = &self.lod_focus;
+        for c in self.combatants.values_mut() {
+            let Some(brain) = &c.brain else {
+                continue;
+            };
+            let d2 = focus
+                .iter()
+                .map(|f| flat(*f - c.position).length_squared())
+                .fold(f32::INFINITY, f32::min);
+            let engaged = brain.mind.target.is_some() || brain.mind.lead.is_some();
+            let stride = if d2 <= lod.near * lod.near {
+                stats.near += 1;
+                1
+            } else if d2 <= lod.far * lod.far {
+                stats.mid += 1;
+                lod.mid_stride
+            } else {
+                stats.far += 1;
+                if engaged {
+                    lod.mid_stride
+                } else {
+                    lod.far_stride
+                }
+            };
+            let stride = u64::from(stride.max(1));
+            if (steps + u64::from(c.id.0)) % stride != 0 {
+                parked.push((c.id, c.brain.take().expect("checked")));
+                continue;
+            }
+            stats.thought += 1;
+        }
+        self.lod_stats = stats;
+        parked
     }
 
     /// The host's controller set a body down after a fall at `speed` metres a
@@ -1491,8 +1609,15 @@ impl CombatWorld {
             self.step_body(id, body_dt);
         }
 
-        // 4. Brains.
+        // 4. Brains (far ones asleep, mid-range ones on their stride).
+        self.steps += 1;
+        let parked = self.park_brains();
         ai::think(self, world_dt, query, nav);
+        for (id, brain) in parked {
+            if let Some(c) = self.combatants.get_mut(&id) {
+                c.brain = Some(brain);
+            }
+        }
 
         // 5-6. Commands and actions (a ridden mount takes its rider's reins
         // first; one left alone keeps its own counsel).
@@ -1867,6 +1992,65 @@ impl CombatWorld {
             })
     }
 
+    /// [`CombatWorld::separation`] for many bodies at once, with the same bits
+    /// (the same terms summed in the same order), but from the bodies in the
+    /// neighbouring cells of a grid twice the largest radius wide instead of
+    /// from everyone: a crowd's pushes cost what is near each body.
+    #[must_use]
+    pub fn separations(&self, ids: &[CombatantId]) -> Vec<(CombatantId, Vec3)> {
+        // In id order, as `separation` folds them.
+        let others: Vec<&Combatant> = self
+            .combatants
+            .values()
+            .filter(|o| o.alive() && o.mount.is_none())
+            .collect();
+        // Two bodies push only when closer than their radii together.
+        let cell = self
+            .combatants
+            .values()
+            .map(|c| c.body.radius)
+            .fold(0.0f32, f32::max)
+            .mul_add(2.0, 1e-3)
+            .max(0.1);
+        let key = |p: Vec3| ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32);
+        let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, o) in others.iter().enumerate() {
+            grid.entry(key(o.position)).or_default().push(i);
+        }
+        let mut near = Vec::new();
+        ids.iter()
+            .map(|&id| {
+                let Some(me) = self.combatants.get(&id) else {
+                    return (id, Vec3::ZERO);
+                };
+                let (x, z) = key(me.position);
+                near.clear();
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        let at = (x.saturating_add(dx), z.saturating_add(dz));
+                        near.extend(grid.get(&at).into_iter().flatten().copied());
+                    }
+                }
+                near.sort_unstable();
+                near.dedup();
+                let push = near
+                    .iter()
+                    .map(|&i| others[i])
+                    .filter(|o| o.id != id)
+                    .fold(Vec3::ZERO, |push, o| {
+                        let d = flat(me.position - o.position);
+                        let (len, min) = (d.length(), me.body.radius + o.body.radius);
+                        if len < min && len > 1e-4 {
+                            push + d / len * (min - len) * 0.5
+                        } else {
+                            push
+                        }
+                    });
+                (id, push)
+            })
+            .collect()
+    }
+
     /// The first standing spell wall (stone, ice, force) that stops an upright
     /// capsule standing on `feet` (`radius`, overall `height`) moved by
     /// `delta`, for a host's controller to add to its own world. A wall raised
@@ -1936,7 +2120,8 @@ impl CombatWorld {
             })
             .collect();
         // Pushes from where everyone stood before anyone moved.
-        let pushes: Vec<Vec3> = bodies.iter().map(|b| self.separation(b.0)).collect();
+        let ids: Vec<CombatantId> = bodies.iter().map(|b| b.0).collect();
+        let pushes: Vec<Vec3> = self.separations(&ids).into_iter().map(|(_, push)| push).collect();
         for ((id, position, radius, alive), push) in bodies.iter().copied().zip(pushes) {
             let Some(c) = self.combatants.get(&id) else {
                 continue;
