@@ -332,6 +332,9 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     if let Some((team, faces, members)) = only.and_then(band_of) {
         spawn_line(world, root, Vec3::ZERO, content, team, faces, members, &mut out);
     }
+    if only == Some("harrowcat") {
+        spawn_harrowcat(world, root, Vec3::ZERO, content, &mut out);
+    }
     Ok(out)
 }
 
@@ -432,6 +435,43 @@ fn spawn_camp(
         let n = (first + i * 3) % BANDITS;
         wear(world, out[at], content, &format!("characters/bandit_{n:02}/bandit_{n:02}"));
     }
+}
+
+/// A harrowcat (ECOLOGY_AND_BESTIARY: long, silent and black-furred, as tall
+/// as a pony; it hunts alone in the forests near the Spires and in the
+/// Taigan): a wolf's brain and jaws (its bite and its pounce play the cat's
+/// own clips) in a far heavier body, with the beasts. With a `content` root
+/// holding WS3's harrowcat it wears it.
+fn spawn_harrowcat(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    out: &mut Vec<Entity>,
+) {
+    let n = out.len();
+    out.extend(beast(
+        world,
+        root,
+        "Harrowcat",
+        at,
+        Vec3::Z,
+        Vec3::new(0.9, 1.4, 2.6),
+        "dark",
+        CombatantComponent {
+            team: 2,
+            archetype: Archetype::Wolf as u32,
+            weapon: WeaponKind::Fangs as u32,
+            max_health: 320.0,
+            max_stamina: 200.0,
+            poise: 90.0,
+            armor: 3.0,
+            speed: 6.5,
+            leader: true,
+            ..CombatantComponent::default()
+        },
+    ));
+    wear(world, out[n], content, "creatures/harrowcat/harrowcat");
 }
 
 /// WS3's bandits (`characters/bandit_00` to `bandit_09`).
@@ -1264,7 +1304,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; lampmen: a Lamp crew on a street (a boss, two knives and a rifleman)." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -1329,11 +1369,11 @@ fn build_encounter(
     }
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
-        part @ ("wolves" | "bandits") => args["only"] = json!(part),
+        part @ ("wolves" | "bandits" | "harrowcat") => args["only"] = json!(part),
         band if band_of(band).is_some() => args["only"] = json!(band),
         other => {
             return Err(format!(
-                "no kind {other:?} (try wilds, wolves, bandits, lampmen [red|white|amber|green|blue], watch, lance or knights)"
+                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, lampmen [red|white|amber|green|blue], watch, lance or knights)"
             ));
         }
     }
@@ -5182,6 +5222,37 @@ mod tests {
         let after = hunters(&demo);
         assert_eq!(after.len(), 1, "none sent after");
         assert!(!after[0].1 && after[0].3, "asleep and taken back: {after:?}");
+    }
+
+    /// A harrowcat hunts alone with the beasts: one heavy body with a wolf's
+    /// brain and jaws, hostile to the party, in WS3's cat where it exists.
+    #[test]
+    fn a_harrowcat_hunts_alone() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_harrowcat");
+        let file = content.join("creatures/harrowcat/harrowcat.glb");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        let mut world = World::new();
+        let made = build_encounter(&mut world, "Harrowcat", Vec3::new(40.0, 0.0, 0.0), Vec3::X, false, Some(&content))
+            .expect("a cat");
+        let cats: Vec<Entity> = made
+            .iter()
+            .copied()
+            .filter(|e| world.get::<CombatantComponent>(*e).is_some())
+            .collect();
+        assert_eq!(cats.len(), 1);
+        let c = world.get::<CombatantComponent>(cats[0]).unwrap();
+        assert_eq!((c.team, c.weapon_kind()), (2, WeaponKind::Fangs));
+        assert!(c.max_health > 300.0);
+        assert_eq!(
+            world.get::<SkinnedBody>(cats[0]).unwrap().source,
+            AssetId::from_relative_path("creatures/harrowcat/harrowcat.glb")
+        );
+        let (_world, demo) = host_with(&[("harrowcat", Vec3::new(30.0, 0.0, 0.0))]);
+        let run = demo.run.as_ref().unwrap();
+        let cat = run.world.combatants().find(|c| c.name == "Harrowcat").expect("woken");
+        assert!(run.world.hostile(run.player.unwrap(), cat.id));
     }
 
     #[test]
