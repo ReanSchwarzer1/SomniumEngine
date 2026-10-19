@@ -27,6 +27,10 @@
 //! where it stands; when its cell unloads its people live on, and when it
 //! streams back it finds them again (`LifeWorld::adopt_place`).
 //!
+//! A **Life Table** names a realm's places in one file (a game's tool writes it
+//! from its settlements): each town is housed when the view comes within its
+//! reach, and lives on cheaply after. Villagers stand on the scene's terrain.
+//!
 //! **B** rings the alarm bell where the camera is: everyone within 80 m runs
 //! home and stays in for 45 seconds, beasts bolt, carts stop
 //! (`LifeWorld::alarm`). A fight rings it too: wherever a **Combatant** in the
@@ -46,17 +50,18 @@ use somnium_core::{
 };
 use somnium_ecs::{Entity, World};
 use somnium_life::components::{
-    CartComponent, LifePlaceComponent, LifeSpotComponent, LivestockComponent, VillagerComponent,
+    CartComponent, LifePlaceComponent, LifeSpotComponent, LifeTableComponent, LivestockComponent,
+    VillagerComponent,
 };
 use somnium_life::{
-    BeastKind, Bodies, Clock, Flat, LifeWorld, LodConfig, Place, Role, Spot, SpotKind, Tier,
-    VillagerDesc,
+    BeastKind, Bodies, Clock, Ground, LifeTable, LifeWorld, LodConfig, Place, Role, Spot, SpotKind,
+    Tier, VillagerDesc,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Real seconds to a village hour when no Time of Day moves the clock.
 const SECONDS_PER_HOUR: f32 = 60.0;
@@ -528,6 +533,8 @@ struct Run {
     health: HashMap<Entity, f32>,
     /// Alarms rung by fights, all told.
     fights: usize,
+    /// A Life Table's places, housed as the view comes near.
+    table: Option<TableRun>,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -669,10 +676,92 @@ struct Links {
     seen: usize,
 }
 
+/// A Life Table's places and which have been housed.
+struct TableRun {
+    entity: Entity,
+    table: LifeTable,
+    adopted: Vec<bool>,
+    reach: f32,
+    count: u32,
+}
+
+/// Read the scene's Life Table, if it has one.
+fn load_table(world: &World, root: Option<&std::path::Path>) -> Option<TableRun> {
+    let (entity, settings) = world
+        .iter_with::<LifeTableComponent>()
+        .find(|(_, t)| t.enabled && !t.file.is_empty())
+        .map(|(e, t)| (e, t.clone()))?;
+    let path = root.map_or_else(
+        || std::path::PathBuf::from(&settings.file),
+        |r| r.join(&settings.file),
+    );
+    match std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| LifeTable::from_json(&text))
+    {
+        Ok(table) => {
+            info!(
+                places = table.places.len(),
+                "life: table {}",
+                path.display()
+            );
+            Some(TableRun {
+                entity,
+                adopted: vec![false; table.places.len()],
+                table,
+                reach: settings.reach,
+                count: 0,
+            })
+        }
+        Err(error) => {
+            warn!(%error, "life: no table at {}", path.display());
+            None
+        }
+    }
+}
+
+/// House the table's towns the view has come within reach of; how many.
+fn adopt_near(run: &mut Run, at: Vec3) -> usize {
+    let Some(t) = run.table.as_mut() else {
+        return 0;
+    };
+    let near: Vec<usize> = t
+        .table
+        .near(at, t.reach)
+        .filter(|i| !t.adopted[*i])
+        .collect();
+    for &i in &near {
+        let p = &t.table.places[i];
+        run.life.adopt_place(p.key(), p.place.clone(), Some(p.seed));
+        t.adopted[i] = true;
+    }
+    t.count += near.len() as u32;
+    near.len()
+}
+
+/// The scene's terrains, for villagers' feet; nowhere off them.
+struct TerrainGround<'a> {
+    terrains: Vec<(&'a somnium_renderer::terrain::TerrainData, Vec3)>,
+}
+
+impl Ground for TerrainGround<'_> {
+    fn height(&self, x: f32, z: f32) -> Option<f32> {
+        self.terrains.iter().find_map(|(t, origin)| {
+            let [w, d] = t.desc.world_size();
+            let (lx, lz) = (x - origin.x, z - origin.z);
+            (lx >= 0.0 && lz >= 0.0 && lx <= w && lz <= d)
+                .then(|| origin.y + t.world_height_at(lx, lz))
+        })
+    }
+}
+
 fn declares_life(world: &World) -> bool {
     world
-        .iter_with::<LifePlaceComponent>()
-        .any(|(_, p)| p.enabled)
+        .iter_with::<LifeTableComponent>()
+        .any(|(_, t)| t.enabled)
+        || world
+            .iter_with::<LifePlaceComponent>()
+            .any(|(_, p)| p.enabled)
         || world
             .iter_with::<VillagerComponent>()
             .any(|(_, v)| v.enabled)
@@ -933,7 +1022,7 @@ impl LifeDemo {
     /// agents; a pool of bodies for everyone the places populated; colliders
     /// for the solid blocks.
     pub fn begin(&mut self, ctx: &mut EngineContext) {
-        let Some(mut run) = Self::start(ctx.world) else {
+        let Some(mut run) = Self::start(ctx.world, ctx.config.project_root.as_deref()) else {
             return;
         };
         run.colliders = colliders(ctx);
@@ -942,7 +1031,7 @@ impl LifeDemo {
 
     /// Everything but the colliders: the pools of bodies, then the scene's
     /// places and agents as they stand.
-    fn start(world: &mut World) -> Option<Run> {
+    fn start(world: &mut World, root: Option<&std::path::Path>) -> Option<Run> {
         if !declares_life(world) {
             return None;
         }
@@ -997,6 +1086,7 @@ impl LifeDemo {
             greeted: 0,
             health: HashMap::new(),
             fights: 0,
+            table: None,
             spawned,
             colliders: Vec::new(),
             // `SOMNIUM_LIFE_HOUR` starts the day at another hour (captures).
@@ -1012,6 +1102,9 @@ impl LifeDemo {
             reported: 0.0,
         };
         sync(world, &mut run);
+        run.table = load_table(world, root);
+        // Look round for the table's towns on the first frame.
+        run.synced = 1.0;
         let life = &run.life;
         info!(
             villagers = life.villagers().len(),
@@ -1081,6 +1174,18 @@ impl LifeDemo {
             run.synced = 0.0;
             sync(ctx.world, run);
             run.fights += hear_fights(ctx.world, run);
+            if let Some(at) = ctx.renderer.as_ref().map(|r| r.camera_pos)
+                && adopt_near(run, at) > 0
+                && let Some(t) = &run.table
+            {
+                info!(
+                    adopted = t.count,
+                    "life: towns housed as the view came near"
+                );
+                if let Some(c) = ctx.world.get_mut::<LifeTableComponent>(t.entity) {
+                    c.adopted = t.count;
+                }
+            }
         }
         let tod = ctx
             .world
@@ -1102,6 +1207,25 @@ impl LifeDemo {
             let frightened = run.life.alarm(*at, BELL_REACH, BELL_SECONDS);
             info!(frightened, "life: the alarm bell");
         }
+        let terrains: Vec<(u32, Vec3)> = ctx
+            .world
+            .iter_with::<somnium_core::TerrainComponent>()
+            .map(|(e, t)| {
+                let origin = ctx
+                    .world
+                    .get::<WorldTransform>(e)
+                    .map_or(Vec3::ZERO, |w| w.0.w_axis.truncate());
+                (t.terrain_id, origin)
+            })
+            .collect();
+        let ground = TerrainGround {
+            terrains: terrains
+                .iter()
+                .filter_map(|(id, origin)| {
+                    ctx.renderer.as_ref()?.terrain(*id).map(|t| (t, *origin))
+                })
+                .collect(),
+        };
         let t0 = Instant::now();
         run.life.step(
             dt,
@@ -1110,7 +1234,7 @@ impl LifeDemo {
                 eclipse: run.eclipse,
             },
             &focus,
-            &Flat,
+            &ground,
         );
         if let Some(at) = focus.first() {
             run.life.keep_clear(*at, 0.7);
@@ -1156,6 +1280,7 @@ impl LifeDemo {
             "places": run.life.place_count(),
             "places_loaded": run.links.places.len(),
             "greeted": run.greeted,
+            "table": run.table.as_ref().map(|t| json!({"places": t.table.places.len(), "adopted": t.count})),
             "fights": run.fights,
             "villagers": run.life.villagers().len(),
             "outdoors": out,
@@ -1353,6 +1478,7 @@ fn colliders(ctx: &mut EngineContext) -> Vec<BodyId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use somnium_life::Flat;
 
     /// The village gathered as Play gathers it keeps its day: by late morning
     /// the farmers are in the fields and most are out; under the Lid all are in.
@@ -1362,7 +1488,7 @@ mod tests {
         spawn_village(&mut world, &json!({"homes": 20})).expect("builds");
         let Run {
             mut life, links, ..
-        } = LifeDemo::start(&mut world).expect("a place");
+        } = LifeDemo::start(&mut world, None).expect("a place");
         assert_eq!(links.places.len(), 1);
         assert!(life.villagers().len() >= 20, "a household a home");
         assert!(!life.beasts().is_empty() && !life.carts().is_empty());
@@ -1406,7 +1532,7 @@ mod tests {
         let mut world = World::new();
         spawn_village(&mut world, &json!({"homes": 300})).unwrap();
         let before = world.entity_count();
-        let mut run = LifeDemo::start(&mut world).unwrap();
+        let mut run = LifeDemo::start(&mut world, None).unwrap();
         let villagers = run.life.villagers().len();
         assert!(villagers > 2 * VILLAGER_BODIES, "{villagers}");
         // One entity per body (and head), not per agent.
@@ -1481,7 +1607,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        let mut run = LifeDemo::start(&mut world).unwrap();
+        let mut run = LifeDemo::start(&mut world, None).unwrap();
         let people = run.life.villagers().len();
         assert_eq!(run.links.agents.len(), 1, "the hand-placed smith");
         // The cell unloads: every entity it held goes.
@@ -1529,7 +1655,7 @@ mod tests {
         let day = |paths: usize| {
             let mut world = World::new();
             spawn_village(&mut world, &json!({"homes": 400})).unwrap();
-            let mut run = LifeDemo::start(&mut world).unwrap();
+            let mut run = LifeDemo::start(&mut world, None).unwrap();
             run.life.paths_per_tick = paths;
             let dt = 1.0 / 60.0;
             let mut hour = 0.0_f32;
@@ -1571,7 +1697,7 @@ mod tests {
             WorldTransform::identity(),
             CombatantComponent::default(),
         ));
-        let mut run = LifeDemo::start(&mut world).unwrap();
+        let mut run = LifeDemo::start(&mut world, None).unwrap();
         for _ in 0..1200 {
             run.life.step(0.5, Clock::at(11.0), &[Vec3::ZERO], &Flat);
         }
@@ -1603,6 +1729,59 @@ mod tests {
             .map(|v| (v.name.clone(), v.position, v.activity))
             .collect();
         assert!(out.is_empty(), "still out after the fight: {out:?}");
+    }
+
+    /// A scene's Life Table is read from the project, and its towns are
+    /// housed only as the view comes within reach, once each.
+    #[test]
+    fn a_life_table_houses_towns_as_the_view_comes_near() {
+        let town = |name: &str, x: f32| somnium_life::TablePlace {
+            centre: [x, 0.0, 0.0],
+            radius: 30.0,
+            seed: 3,
+            place: Place {
+                name: name.into(),
+                spots: (0..5)
+                    .map(|i| Spot::new(SpotKind::Home, Vec3::new(x + i as f32 * 8.0, 0.0, 0.0)))
+                    .collect(),
+                lanes: vec![vec![
+                    Vec3::new(x - 20.0, 0.0, 4.0),
+                    Vec3::new(x + 50.0, 0.0, 4.0),
+                ]],
+                roads: Vec::new(),
+            },
+        };
+        let table = LifeTable {
+            version: 1,
+            places: vec![town("Here", 0.0), town("Yonder", 3_000.0)],
+        };
+        let root = std::env::temp_dir().join(format!("life_table_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(
+            root.join("data/realm.json"),
+            serde_json::to_string(&table).unwrap(),
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Realm"),
+            LifeTableComponent {
+                file: "data/realm.json".into(),
+                ..Default::default()
+            },
+        ));
+        let mut run = LifeDemo::start(&mut world, Some(&root)).expect("a table is life");
+        assert_eq!(run.life.place_count(), 0, "nobody before the view comes");
+        assert_eq!(adopt_near(&mut run, Vec3::ZERO), 1);
+        assert_eq!(adopt_near(&mut run, Vec3::ZERO), 0, "once");
+        assert_eq!(run.life.place_count(), 1);
+        assert!(run.life.villagers().len() >= 5);
+        assert_eq!(
+            adopt_near(&mut run, Vec3::new(2_500.0, 0.0, 0.0)),
+            1,
+            "Yonder, on the way there"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The preset gives a place with homes for every house, the trades, the

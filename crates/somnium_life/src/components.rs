@@ -131,6 +131,34 @@ impl Default for CartComponent {
     }
 }
 
+/// A realm's places from a file ([`crate::LifeTable`]): each town comes to
+/// life as the view comes within reach of it, and lives on, cheaply, after.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LifeTableComponent {
+    /// Lives in Play.
+    pub enabled: bool,
+    /// The table, relative to the project.
+    pub file: String,
+    /// How near the view comes to a town's edge before its people are housed,
+    /// metres (a streamed world's cell reach and its margin).
+    pub reach: f32,
+    /// Live: towns housed so far.
+    pub adopted: u32,
+}
+
+impl Component for LifeTableComponent {}
+
+impl Default for LifeTableComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            file: String::new(),
+            reach: 700.0,
+            adopted: 0,
+        }
+    }
+}
+
 const LIVE: FieldFlags = FieldFlags::EDIT.union(FieldFlags::SCRIPT_READ);
 
 /// Register the schemas.
@@ -181,6 +209,15 @@ pub fn register(registry: &mut TypeRegistry) {
         CartComponent as "somnium.Cart", display "Cart", version 1,
         fields {
             enabled { group: "Life", doc: "Drives the nearest road (a Spline) by day." },
+        }
+    });
+    registry.register(somnium_ecs::component_schema! {
+        LifeTableComponent as "somnium.LifeTable", display "Life Table", version 1,
+        fields {
+            enabled { group: "Life" },
+            file { group: "Life", doc: "A realm's places (spots, lanes, roads), relative to the project: a game's tool writes it from its settlements." },
+            reach { group: "Life", min: 0.0, unit: "m", doc: "How near the view comes to a town's edge before its people are housed; they live on, cheaply, after." },
+            adopted { group: "Live", read_only: true, flags: LIVE },
         }
     });
 }
