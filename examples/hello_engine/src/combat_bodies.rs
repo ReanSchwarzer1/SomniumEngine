@@ -20,7 +20,9 @@
 //! A fighter's weapon is WS3's mesh for its kind (`clips.json` `gear`: the
 //! spear, axe and knife on `weapon_r`, the bow on `weapon_l`; a plain blade
 //! for a sword until there is a sword mesh). A sword or knife goes to the
-//! `sheath` socket when not fighting. A rider sits on the mount's `saddle`.
+//! `sheath` socket when not fighting, beside its scabbard. A rider's Root sits
+//! on the mount's `saddle` (WS3's ride library is made so), playing the
+//! `Ride_*` loop of its mount's gait at its mount's rate, in step with it.
 
 use crate::skinned_crowd::{SkinnedBody, SkinnedSocket};
 use glam::{Mat4, Quat, Vec3};
@@ -52,10 +54,44 @@ pub enum Timing {
     Once,
 }
 
-/// What a fighter's state calls for: a clip (alternatives `A|B`) and how it runs.
+/// A mount's gait at `speed` (m/s), 0 standing to 4 galloping, and the rate its
+/// clips play. WS3's `Ride_*` loops are each two of the mount's own cycles, so
+/// a rider's plays at its mount's rate and the two keep step.
+fn gait(speed: f32) -> (usize, f32) {
+    match speed {
+        s if s < 0.3 => (0, 1.0),
+        s if s < 2.5 => (1, (s / 1.6).clamp(0.6, 1.6)),
+        s if s < 5.5 => (2, (s / 3.5).clamp(0.6, 1.6)),
+        s if s < 8.0 => (3, (s / 6.0).clamp(0.6, 1.6)),
+        s => (4, (s / 9.0).clamp(0.6, 1.6)),
+    }
+}
+
+/// A mount's clips by gait.
+const MOUNT_GAITS: [&str; 5] = [
+    "Idle_Loop",
+    "Walk_F_Loop",
+    "Trot_F_Loop|Walk_F_Loop",
+    "Canter_F_Loop|Gallop_F_Loop|Trot_F_Loop",
+    "Gallop_F_Loop|Canter_F_Loop|Trot_F_Loop",
+];
+
+/// A rider's clips by its mount's gait (a body without WS3's ride library,
+/// which only the players carry, sits).
+const RIDER_GAITS: [&str; 5] = [
+    "Ride_Idle_Loop|Sit_Idle_Loop",
+    "Ride_Walk_Loop|Ride_Idle_Loop|Sit_Idle_Loop",
+    "Ride_Trot_Loop|Ride_Walk_Loop|Sit_Idle_Loop",
+    "Ride_Canter_Loop|Ride_Gallop_Loop|Sit_Idle_Loop",
+    "Ride_Gallop_Loop|Ride_Canter_Loop|Sit_Idle_Loop",
+];
+
+/// What a fighter's state calls for: a clip (alternatives `A|B`) and how it
+/// runs. A rider's gait is its `steed`'s.
 #[must_use]
 pub fn pose_of(
     c: &Combatant,
+    steed: Option<&Combatant>,
     mode: Option<Mode>,
     now: f64,
     drawn: bool,
@@ -146,14 +182,12 @@ pub fn pose_of(
     let flat = Vec3::new(c.velocity.x, 0.0, c.velocity.z);
     let speed = flat.length();
     if c.mount.is_some() {
-        let clip = match speed {
-            s if s < 0.3 => "Ride_Idle_Loop|Sit_Idle_Loop",
-            s if s < 2.5 => "Ride_Walk_Loop|Ride_Idle_Loop|Sit_Idle_Loop",
-            s if s < 5.5 => "Ride_Trot_Loop|Ride_Idle_Loop|Sit_Idle_Loop",
-            s if s < 8.0 => "Ride_Canter_Loop|Ride_Gallop_Loop|Sit_Idle_Loop",
-            _ => "Ride_Gallop_Loop|Ride_Canter_Loop|Sit_Idle_Loop",
-        };
-        return (clip.into(), Timing::Loop(1.0));
+        // Carried, the rider has no pace of its own: its mount's.
+        let paced = steed.map_or(speed, |m| {
+            Vec3::new(m.velocity.x, 0.0, m.velocity.z).length()
+        });
+        let (g, rate) = gait(paced);
+        return (RIDER_GAITS[g].into(), Timing::Loop(rate));
     }
     match mode {
         Some(Mode::Mantle(m)) => {
@@ -182,15 +216,13 @@ pub fn pose_of(
             .herd
             .as_ref()
             .is_some_and(|h| matches!(h.doing, Herding::Grazing));
-        let (clip, rate) = match speed {
-            s if s < 0.3 && grazing => ("Graze_Loop|Idle_Loop", 1.0),
-            s if s < 0.3 => ("Idle_Loop", 1.0),
-            s if s < 2.5 => ("Walk_F_Loop", s / 1.6),
-            s if s < 5.5 => ("Trot_F_Loop|Walk_F_Loop", s / 3.5),
-            s if s < 8.0 => ("Canter_F_Loop|Gallop_F_Loop|Trot_F_Loop", s / 6.0),
-            s => ("Gallop_F_Loop|Canter_F_Loop|Trot_F_Loop", s / 9.0),
+        let (g, rate) = gait(speed);
+        let clip = if g == 0 && grazing {
+            "Graze_Loop|Idle_Loop"
+        } else {
+            MOUNT_GAITS[g]
         };
-        return (clip.into(), Timing::Loop(rate.clamp(0.6, 1.6)));
+        return (clip.into(), Timing::Loop(rate));
     }
     if speed < 0.25 {
         // A spearman (the watch, a garrison) stands sentry out of a fight and
@@ -306,8 +338,8 @@ struct Skin {
     weapon: Option<(Entity, String, bool)>,
     /// A mount's saddle socket, where its rider sits.
     saddle: Option<Entity>,
-    /// A rider's pelvis socket (made when it first mounts), the point that sits on the saddle.
-    pelvis: Option<Entity>,
+    /// A swordsman's scabbard, on the `sheath` joint.
+    scabbard: Option<Entity>,
     clip: String,
     clock: f32,
     /// When it last fought (the blade comes out, and stays out a while).
@@ -317,44 +349,73 @@ struct Skin {
 impl Skin {
     /// The body and everything placed on it (despawn does not reach children).
     fn despawn(self, world: &mut World) {
-        let mut parts = vec![self.body];
-        parts.extend(self.saddle);
-        parts.extend(self.pelvis);
-        if let Some((socket, _, _)) = self.weapon {
-            parts.extend(
-                world
-                    .iter_with::<Parent>()
-                    .filter(|(_, p)| p.entity == socket)
-                    .map(|(e, _)| e)
-                    .collect::<Vec<_>>(),
-            );
-            parts.push(socket);
-        }
+        let sockets: Vec<Entity> = self
+            .weapon
+            .map(|w| w.0)
+            .into_iter()
+            .chain(self.saddle)
+            .chain(self.scabbard)
+            .collect();
+        let mut parts: Vec<Entity> = world
+            .iter_with::<Parent>()
+            .filter(|(_, p)| sockets.contains(&p.entity))
+            .map(|(e, _)| e)
+            .collect();
+        parts.extend(sockets);
+        parts.push(self.body);
         for e in parts {
             world.despawn(e);
         }
     }
 }
 
-/// Where a body's pelvis is in the body's own frame, as last posed (its socket
-/// is placed with the pose); nothing until the socket has been placed.
-fn pelvis_offset(world: &World, body: Entity, pelvis: Entity) -> Vec3 {
-    let (Some(b), Some(p)) = (
-        world.get::<WorldTransform>(body),
-        world.get::<WorldTransform>(pelvis),
-    ) else {
-        return Vec3::ZERO;
+/// The nodes of a glTF binary that carry meshes, from its JSON chunk.
+fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
     };
-    if p.0 == Mat4::IDENTITY {
-        return Vec3::ZERO;
-    }
-    let offset = b.0.inverse().transform_point3(p.0.w_axis.truncate());
-    if offset.length() < 2.0 {
-        offset
-    } else {
-        Vec3::ZERO
+    let Some(len) = bytes
+        .get(12..16)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    else {
+        return Vec::new();
+    };
+    let doc: serde_json::Value = bytes
+        .get(20..20 + len)
+        .and_then(|j| serde_json::from_slice(j).ok())
+        .unwrap_or_default();
+    doc.get("nodes")
+        .and_then(|n| n.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, n)| n.get("mesh").is_some())
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+/// A piece's meshes, hung on `socket`.
+fn hang(world: &mut World, socket: Entity, name: &str, piece: &str, g: &Piece) {
+    for &node in &g.nodes {
+        world.spawn((
+            Name::new(&format!("{name} {piece} {node}")),
+            Transform::default(),
+            WorldTransform::identity(),
+            Parent { entity: socket },
+            ImportedMesh {
+                source: format!("assets/{}", g.file),
+                node,
+            },
+            MaterialComponent {
+                asset: somnium_asset::database::AssetId::NONE,
+                runtime_id: 0,
+            },
+        ));
     }
 }
+
+/// WS3's scabbard (`characters/gear/scabbard.glb`, in the `sheath` frame), where it is there.
+const SCABBARD: &str = "characters/gear/scabbard.glb";
 
 /// Each gear piece `clips.json` names (its `gear` table, clip to pieces), once, where its file is there.
 fn gear_pieces(content: &std::path::Path, text: &str) -> BTreeMap<String, Piece> {
@@ -420,10 +481,20 @@ impl Skins {
         let text =
             content.and_then(|c| std::fs::read_to_string(c.join("animation/clips.json")).ok());
         let table = text.as_deref().and_then(|t| ClipTable::from_json(t).ok());
-        let gear = match (content, text.as_deref()) {
+        let mut gear = match (content, text.as_deref()) {
             (Some(content), Some(text)) => gear_pieces(content, text),
             _ => BTreeMap::new(),
         };
+        if let Some(path) = content.map(|c| c.join(SCABBARD)).filter(|p| p.exists()) {
+            gear.insert(
+                "scabbard".into(),
+                Piece {
+                    file: SCABBARD.into(),
+                    nodes: mesh_nodes(&path),
+                    joint: "sheath".into(),
+                },
+            );
+        }
         Self {
             table,
             gear,
@@ -517,22 +588,7 @@ impl Skins {
                     Some(g) => {
                         // Out of a fight to begin with: a sword or knife starts in its sheath.
                         let s = socket(world, if sheathes { "sheath" } else { &g.joint });
-                        for &node in &g.nodes {
-                            world.spawn((
-                                Name::new(&format!("{name} {piece} {node}")),
-                                Transform::default(),
-                                WorldTransform::identity(),
-                                Parent { entity: s },
-                                ImportedMesh {
-                                    source: format!("assets/{}", g.file),
-                                    node,
-                                },
-                                MaterialComponent {
-                                    asset: somnium_asset::database::AssetId::NONE,
-                                    runtime_id: 0,
-                                },
-                            ));
-                        }
+                        hang(world, s, &name, piece, g);
                         Some((s, g.joint.clone(), sheathes))
                     }
                     None if piece == "sword" => {
@@ -553,6 +609,16 @@ impl Skins {
                     }
                     None => None,
                 });
+            // A swordsman wears the scabbard the blade goes back into.
+            let scabbard = self
+                .gear
+                .get("scabbard")
+                .filter(|_| c.weapon.kind == WeaponKind::Sword)
+                .map(|g| {
+                    let s = socket(world, "sheath");
+                    hang(world, s, &name, "scabbard", g);
+                    s
+                });
             let saddle = c.mount_def.is_some().then(|| socket(world, "saddle"));
             self.skins.insert(
                 id,
@@ -560,7 +626,7 @@ impl Skins {
                     body,
                     weapon,
                     saddle,
-                    pelvis: None,
+                    scabbard,
                     clip: String::new(),
                     clock: 0.0,
                     fought: f64::NEG_INFINITY,
@@ -605,7 +671,8 @@ impl Skins {
             }
             let drawn = now - skin.fought < SHEATHE_AFTER;
             let mode = walkers.get(id).map(|w| w.mode);
-            let (clip, timing) = pose_of(c, mode, now, drawn, self.table.as_ref());
+            let steed = c.mount.and_then(|m| combat.combatant(m));
+            let (clip, timing) = pose_of(c, steed, mode, now, drawn, self.table.as_ref());
             if clip != skin.clip {
                 skin.clip.clone_from(&clip);
                 skin.clock = 0.0;
@@ -635,22 +702,11 @@ impl Skins {
                 .and_then(|m| saddles.get(&m))
                 .filter(|s| s.w_axis.truncate().distance(c.position) < 3.0);
             let (at, turn) = match seat {
+                // Its Root on the saddle, no offset (WS3: the ride loops sit the
+                // pelvis 0.10 m above it, legs astride).
                 Some(s) => {
-                    // Its pelvis on the saddle (the body's origin is its feet).
-                    let body = skin.body;
-                    let pelvis = *skin.pelvis.get_or_insert_with(|| {
-                        world.spawn((
-                            Name::new("pelvis"),
-                            Transform::default(),
-                            WorldTransform::identity(),
-                            Parent { entity: body },
-                            SkinnedSocket {
-                                joint: "pelvis".into(),
-                            },
-                        ))
-                    });
                     let (_, r, t) = s.to_scale_rotation_translation();
-                    (t - r * pelvis_offset(world, body, pelvis), r)
+                    (t, r)
                 }
                 None => (c.position, yaw(c.facing)),
             };
@@ -674,6 +730,24 @@ impl Skins {
                     && sock.joint != joint
                 {
                     sock.joint = joint.into();
+                }
+            }
+        }
+        // A rider in its mount's gait keeps its mount's clock: the two loops
+        // start together and run at one rate, so stride and seat agree.
+        let clocks: BTreeMap<CombatantId, f32> =
+            self.skins.iter().map(|(id, s)| (*id, s.clock)).collect();
+        for (id, skin) in &mut self.skins {
+            let Some(steed) = combat.combatant(*id).and_then(|c| c.mount) else {
+                continue;
+            };
+            if !skin.clip.starts_with("Ride_") {
+                continue;
+            }
+            if let Some(&clock) = clocks.get(&steed) {
+                skin.clock = clock;
+                if let Some(b) = world.get_mut::<SkinnedBody>(skin.body) {
+                    b.time = clock;
                 }
             }
         }
@@ -725,45 +799,45 @@ mod tests {
         let c = w.combatant_mut(id).unwrap();
         c.facing = Vec3::Z;
         c.velocity = Vec3::ZERO;
-        let (clip, t) = pose_of(c, Some(Mode::Ground), 10.0, false, None);
+        let (clip, t) = pose_of(c, None, Some(Mode::Ground), 10.0, false, None);
         assert!(clip.starts_with("Idle_Neutral_Loop"));
         assert_eq!(t, Timing::Loop(1.0));
-        let (clip, _) = pose_of(c, Some(Mode::Ground), 10.0, true, None);
+        let (clip, _) = pose_of(c, None, Some(Mode::Ground), 10.0, true, None);
         assert!(
             clip.starts_with("Sword_Aether_Idle_Loop"),
             "on guard with the blade out"
         );
         c.velocity = Vec3::new(0.0, 0.0, 1.0);
-        let (clip, t) = pose_of(c, Some(Mode::Ground), 10.0, false, None);
+        let (clip, t) = pose_of(c, None, Some(Mode::Ground), 10.0, false, None);
         assert!(clip.starts_with("Loco_Walk_F_Loop"));
         assert!(matches!(t, Timing::Loop(r) if (r - 1.0 / 0.86).abs() < 1e-4));
         c.velocity = Vec3::new(0.0, 0.0, 5.6);
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
                 .0
                 .starts_with("Loco_Jog_F_Loop")
         );
         c.velocity = Vec3::new(0.0, 0.0, -1.0);
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
                 .0
                 .starts_with("Loco_Walk_B_Loop")
         );
         c.velocity = Vec3::new(-1.0, 0.0, 0.0);
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
                 .0
                 .starts_with("Loco_Walk_R_Loop"),
             "facing +Z, -X is the right"
         );
         c.velocity = Vec3::new(0.0, 0.0, 1.0);
         assert!(
-            pose_of(c, Some(Mode::Swim), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Swim), 10.0, false, None)
                 .0
                 .starts_with("Swim_F_Loop")
         );
         assert!(
-            pose_of(c, Some(Mode::Air), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Air), 10.0, false, None)
                 .0
                 .starts_with("Jump_Loop")
         );
@@ -834,25 +908,48 @@ mod tests {
         );
     }
 
-    /// A rider's pelvis offset is read from its socket as posed, in the
-    /// body's own frame; an unplaced socket gives none.
+    /// A rider plays the ride loop of its mount's gait at its mount's rate;
+    /// the mount's own clips follow the same lines.
     #[test]
-    fn a_rider_sits_by_its_pelvis() {
-        let mut world = World::new();
-        let turn = Quat::from_rotation_y(1.0);
-        let body = world.spawn((WorldTransform(Mat4::from_rotation_translation(
-            turn,
-            Vec3::new(5.0, 0.0, 2.0),
-        )),));
-        let pelvis = world.spawn((WorldTransform::identity(),));
-        assert_eq!(
-            pelvis_offset(&world, body, pelvis),
-            Vec3::ZERO,
-            "not placed yet"
+    fn a_rider_keeps_its_mounts_gait() {
+        let (mut w, id) = fighter();
+        let elk = w.spawn(somnium_combat::mount::MountKind::FrostElk.desc(
+            "Elk",
+            somnium_combat::TeamId(0),
+            Vec3::X,
+        ));
+        w.combatant_mut(id).unwrap().mount = Some(elk);
+        w.combatant_mut(elk).unwrap().velocity = Vec3::new(0.0, 0.0, 3.0);
+        let steed = w.combatant(elk).unwrap().clone();
+        let c = w.combatant(id).unwrap();
+        let (clip, t) = pose_of(c, Some(&steed), Some(Mode::Ground), 10.0, false, None);
+        assert!(clip.starts_with("Ride_Trot_Loop"), "{clip}");
+        let (horse, ht) = pose_of(&steed, None, Some(Mode::Ground), 10.0, false, None);
+        assert!(horse.starts_with("Trot_F_Loop"));
+        assert_eq!(t, ht, "one rate");
+        assert!(
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
+                .0
+                .starts_with("Ride_Idle_Loop"),
+            "its own pace is none"
         );
-        let posed = Vec3::new(5.0, 0.0, 2.0) + turn * Vec3::new(0.0, 0.92, -0.1);
-        world.get_mut::<WorldTransform>(pelvis).unwrap().0 = Mat4::from_translation(posed);
-        assert!(pelvis_offset(&world, body, pelvis).distance(Vec3::new(0.0, 0.92, -0.1)) < 1e-4);
+    }
+
+    /// A glTF binary's mesh nodes are read from its JSON chunk.
+    #[test]
+    fn a_scabbards_meshes_are_its_mesh_nodes() {
+        let json =
+            br#"{"nodes":[{"name":"root"},{"name":"scabbard","mesh":0},{"name":"iron","mesh":1}]}"#;
+        let mut glb = b"glTF".to_vec();
+        glb.extend(2u32.to_le_bytes());
+        glb.extend(((20 + json.len()) as u32).to_le_bytes());
+        glb.extend((json.len() as u32).to_le_bytes());
+        glb.extend(b"JSON");
+        glb.extend(json);
+        let path = std::env::temp_dir().join(format!("scabbard_{}.glb", std::process::id()));
+        std::fs::write(&path, &glb).unwrap();
+        assert_eq!(mesh_nodes(&path), vec![1, 2]);
+        let _ = std::fs::remove_file(path);
     }
 
     /// The watch: a spearman stands sentry, and on guard (drawn or guarding)
@@ -869,18 +966,18 @@ mod tests {
         let c = w.combatant_mut(id).unwrap();
         c.velocity = Vec3::ZERO;
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
                 .0
                 .starts_with("Spear_Sentry_Loop")
         );
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, true, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, true, None)
                 .0
                 .starts_with("Spear_Guard_Loop")
         );
         c.action = Action::Guard { t: 0.1 };
         assert_eq!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None),
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None),
             (
                 "Spear_Guard_Loop|Idle_Neutral_Loop|Idle_Loop".into(),
                 Timing::Loop(1.0)
@@ -890,7 +987,7 @@ mod tests {
         let c = w.combatant_mut(id).unwrap();
         c.action = Action::Guard { t: 0.1 };
         assert!(
-            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+            pose_of(c, None, Some(Mode::Ground), 10.0, false, None)
                 .0
                 .starts_with("Sword_Aether_Rimeguard_Block")
         );
@@ -949,7 +1046,7 @@ mod tests {
             dir: Vec3::Z,
             travelled: 0.0,
         }));
-        let (clip, t) = pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table));
+        let (clip, t) = pose_of(c, None, Some(Mode::Ground), 1.0, true, Some(&table));
         assert_eq!(clip, "Sword_Aether_Combo_1");
         assert!(
             matches!(t, Timing::At(s) if (s - 0.4).abs() < 1e-4),
@@ -965,7 +1062,7 @@ mod tests {
             trail: None,
             from: Vec3::ZERO,
         });
-        let (clip, t) = pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table));
+        let (clip, t) = pose_of(c, None, Some(Mode::Ground), 1.0, true, Some(&table));
         assert!(clip.starts_with("Dodge_B"));
         assert!(
             matches!(t, Timing::At(s) if (s - 0.4).abs() < 1e-4),
@@ -974,19 +1071,19 @@ mod tests {
         c.action = Action::Guard { t: 0.1 };
         c.riposte_until = 2.0;
         assert!(
-            pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table))
+            pose_of(c, None, Some(Mode::Ground), 1.0, true, Some(&table))
                 .0
                 .starts_with("Sword_Meridian_Parry_Mid")
         );
         c.riposte_until = f64::NEG_INFINITY;
         assert!(
-            pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table))
+            pose_of(c, None, Some(Mode::Ground), 1.0, true, Some(&table))
                 .0
                 .starts_with("Sword_Aether_Rimeguard_Block")
         );
         c.action = Action::Dead;
         assert_eq!(
-            pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table)),
+            pose_of(c, None, Some(Mode::Ground), 1.0, true, Some(&table)),
             ("Death_F|Death".into(), Timing::Once)
         );
     }
