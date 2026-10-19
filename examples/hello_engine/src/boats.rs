@@ -76,9 +76,19 @@ pub struct Kind {
     pub accel: f32,
     /// How fast it turns (rad/s at the most).
     pub turn: f32,
-    /// Where the protagonist sits, in the boat's frame (feet).
+    /// Where the protagonist's Root sits, from the middle of the hull's top: WS3's
+    /// rowing and sailing loops sit the pelvis 0.10 m above it and the feet 0.32 m
+    /// below, on rb-architecture's floor 0.33 m above the hull's bottom, so 0.65 m
+    /// above the bottom for every kind.
     pub seat: Vec3,
+    /// What he plays there (WS3's): rowing (the stroke while the oars pull, with
+    /// clips.json's oars in his hands) or at the tiller with the sheet.
+    pub clip: &'static str,
 }
+
+/// WS3's rowing loop, and the tiller and sheet's.
+const ROW: &str = "Row_Loop|Sit_Idle_Loop";
+const SAIL: &str = "Sail_Idle_Loop|Sit_Idle_Loop";
 
 pub const KINDS: [Kind; 4] = [
     Kind {
@@ -88,7 +98,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 2.2,
         accel: 1.2,
         turn: 0.9,
-        seat: Vec3::new(0.0, 0.05, -0.3),
+        seat: Vec3::new(0.0, 0.15, -0.3),
+        clip: ROW,
     },
     Kind {
         name: "currach",
@@ -97,7 +108,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 2.6,
         accel: 1.3,
         turn: 0.8,
-        seat: Vec3::new(0.0, 0.05, -0.5),
+        seat: Vec3::new(0.0, 0.15, -0.5),
+        clip: ROW,
     },
     Kind {
         name: "fjord",
@@ -106,7 +118,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 4.0,
         accel: 0.9,
         turn: 0.5,
-        seat: Vec3::new(0.0, 0.1, -2.6),
+        seat: Vec3::new(0.0, -0.15, -2.6),
+        clip: SAIL,
     },
     Kind {
         name: "barge",
@@ -115,7 +128,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 1.4,
         accel: 0.5,
         turn: 0.3,
-        seat: Vec3::new(0.0, 0.1, -4.0),
+        seat: Vec3::new(0.0, -0.25, -4.0),
+        clip: SAIL,
     },
 ];
 
@@ -707,6 +721,16 @@ impl BoatHost {
             }
             float(ctx.physics, a.body, &a.kind, water, oars, a.moored);
         }
+        // The stroke runs while the oars pull (WS3's loop is a 2 s stroke); the tiller always.
+        combat.aboard_clip = self.aboard.map(|(i, _)| {
+            let clip = self.afloat[i].kind.clip;
+            let rate = if clip == ROW {
+                rowing.ahead.abs().max(rowing.turn.abs() * 0.8)
+            } else {
+                1.0
+            };
+            (clip.to_string(), rate)
+        });
         combat.aboard = self.aboard.map(|(i, _)| {
             let a = &self.afloat[i];
             let hull = Mat4::from_rotation_translation(
