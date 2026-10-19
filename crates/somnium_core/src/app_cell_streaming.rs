@@ -115,13 +115,15 @@ impl<G: GameApp> Engine<G> {
         self.set_cell_status(owner, status);
     }
 
-    /// Unload what the view has left and start readers (up to `READERS`) for what it has reached, nearest first.
+    /// Unload what the view has left and start readers (up to `READERS`) for what it has reached, nearest first. The
+    /// points held with `cell_streaming::hold` count as views too, and are marked ready once their cells are in.
     fn schedule_cells(&mut self, settings: &CellStreamingComponent, focus: Option<glam::Vec3>) {
+        let mut holds: cells::Holds = self.world.take_cache();
         let streamer = &self.cell_streamer;
         let (load, unload) = match focus {
-            Some(focus) if settings.enabled => cells::plan(
+            Some(focus) if settings.enabled => cells::plan_many(
                 &streamer.cells,
-                [focus.x, focus.z],
+                &std::iter::once([focus.x, focus.z]).chain(holds.points()).collect::<Vec<_>>(),
                 settings.load_radius,
                 settings.unload_margin,
                 |index| streamer.loaded.contains_key(&index) || streamer.reading.contains_key(&index),
@@ -140,6 +142,11 @@ impl<G: GameApp> Engine<G> {
                 self.start_cell_read(index);
             }
         }
+        let streamer = &self.cell_streamer;
+        holds.mark_ready(&streamer.cells, settings.load_radius, |index| {
+            streamer.loaded.contains_key(&index) || streamer.failed.contains_key(&index)
+        });
+        self.world.put_cache(holds);
     }
 
     /// Start a cell's reader: parse it, then decode and prepare each source it needs that is not uploaded yet.

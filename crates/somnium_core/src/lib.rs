@@ -124,6 +124,10 @@ pub mod vertex_paint;
 pub mod time_of_day;
 /// An isometric camera rig for mouse-and-keyboard games (Rimeborn, 18 Oct 2026).
 pub mod isometric_camera;
+/// The lift: the isometric camera rising off one place and falling onto another (Rimeborn's protagonist switch).
+pub mod camera_lift;
+/// The switch between two protagonists: the lift, the destination's streaming, the hand-over (Rimeborn's DP-1).
+pub mod protagonist_switch;
 /// Roofs and upper floors that open for the camera while the viewer is inside (Rimeborn, 18 Oct 2026).
 pub mod cutaway;
 pub mod lod_group;
