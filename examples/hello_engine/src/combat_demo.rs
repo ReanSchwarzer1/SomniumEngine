@@ -180,6 +180,12 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         .get("facing")
         .and_then(|f| serde_json::from_value::<[f32; 3]>(f.clone()).ok())
         .map_or(Vec3::Z, Vec3::from_array);
+    // The project's content root: its wolves and bandits wear WS3's bodies
+    // where it has them.
+    let content = args
+        .get("bodies")
+        .and_then(Value::as_str)
+        .map(std::path::Path::new);
     let root = world.spawn((
         Name::new("Combat Wilds"),
         Transform {
@@ -313,7 +319,7 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         } else {
             Vec3::ZERO
         };
-        spawn_pack(world, root, den, &mut out);
+        spawn_pack(world, root, den, content, &mut out);
     }
     if all || only == Some("bandits") {
         let camp = if all {
@@ -321,13 +327,20 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         } else {
             Vec3::ZERO
         };
-        spawn_camp(world, root, camp, &mut out);
+        spawn_camp(world, root, camp, content, &mut out);
     }
     Ok(out)
 }
 
-/// A rime wolf pack round its den, the alpha leading; facing away.
-fn spawn_pack(world: &mut World, root: Entity, den: Vec3, out: &mut Vec<Entity>) {
+/// A rime wolf pack round its den, the alpha leading; facing away. With a
+/// `content` root holding WS3's rime wolves, each wears one (the alpha its own).
+fn spawn_pack(
+    world: &mut World,
+    root: Entity,
+    den: Vec3,
+    content: Option<&std::path::Path>,
+    out: &mut Vec<Entity>,
+) {
     let wolf = |alpha: bool| CombatantComponent {
         team: 2,
         archetype: Archetype::Wolf as u32,
@@ -339,6 +352,7 @@ fn spawn_pack(world: &mut World, root: Entity, den: Vec3, out: &mut Vec<Entity>)
         leader: alpha,
         ..CombatantComponent::default()
     };
+    let alpha = out.len();
     out.extend(beast(
         world,
         root,
@@ -349,8 +363,10 @@ fn spawn_pack(world: &mut World, root: Entity, den: Vec3, out: &mut Vec<Entity>)
         "frost",
         wolf(true),
     ));
+    wear(world, out[alpha], content, "creatures/rime_wolf_alpha/rime_wolf_alpha");
     for i in 0..4 {
         let a = i as f32 / 4.0 * std::f32::consts::TAU;
+        let at = out.len();
         out.extend(beast(
             world,
             root,
@@ -361,11 +377,28 @@ fn spawn_pack(world: &mut World, root: Entity, den: Vec3, out: &mut Vec<Entity>)
             "snow",
             wolf(false),
         ));
+        wear(world, out[at], content, "creatures/rime_wolf/rime_wolf");
     }
 }
 
-/// A bandit camp round its chief; facing in.
-fn spawn_camp(world: &mut World, root: Entity, camp: Vec3, out: &mut Vec<Entity>) {
+/// A bandit camp round its chief; facing in. With a `content` root holding
+/// WS3's ten bandits, each wears one: four different, which four by where the
+/// camp stands.
+fn spawn_camp(
+    world: &mut World,
+    root: Entity,
+    camp: Vec3,
+    content: Option<&std::path::Path>,
+    out: &mut Vec<Entity>,
+) {
+    let home = world
+        .get::<Transform>(root)
+        .map_or(camp, |t| t.translation + camp);
+    // ponytail: the 100 m cell the camp stands in picks its faces, so a camp whose
+    // survivors drift over a cell's edge between wakes changes faces (unseen at
+    // the wake's 120 m); key it by the encounter if that ever shows.
+    let first = ((home.x / 100.0).floor() as i64 * 7 + (home.z / 100.0).floor() as i64 * 3)
+        .rem_euclid(BANDITS as i64) as usize;
     for (i, (name, archetype, weapon, leader)) in [
         ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
         (
@@ -382,6 +415,7 @@ fn spawn_camp(world: &mut World, root: Entity, camp: Vec3, out: &mut Vec<Entity>
     {
         let a = i as f32 / 4.0 * std::f32::consts::TAU;
         let spot = camp + Vec3::new(a.cos(), 0.0, a.sin()) * 3.0;
+        let at = out.len();
         out.extend(fighter(
             world,
             root,
@@ -398,7 +432,41 @@ fn spawn_camp(world: &mut World, root: Entity, camp: Vec3, out: &mut Vec<Entity>
                 ..CombatantComponent::default()
             },
         ));
+        // Three apart round ten: four different bandits.
+        let n = (first + i * 3) % BANDITS;
+        wear(world, out[at], content, &format!("characters/bandit_{n:02}/bandit_{n:02}"));
     }
+}
+
+/// WS3's bandits (`characters/bandit_00` to `bandit_09`).
+const BANDITS: usize = 10;
+
+/// Dress a fighter in WS3's skinned body `<stem>.glb` (its `_lod1` and `_lod2`
+/// beside it) when `content` has the file: in Play it draws through it
+/// (`combat_bodies`). Without the file the shapes stay (the sandbox).
+fn wear(world: &mut World, fighter: Entity, content: Option<&std::path::Path>, stem: &str) {
+    let Some(content) = content else {
+        return;
+    };
+    let file = |suffix: &str| format!("{stem}{suffix}.glb");
+    if !content.join(file("")).exists() {
+        return;
+    }
+    let level = |suffix: &str| {
+        let f = file(suffix);
+        if content.join(&f).exists() {
+            AssetId::from_relative_path(&f)
+        } else {
+            AssetId::NONE
+        }
+    };
+    let body = crate::skinned_crowd::SkinnedBody {
+        source: AssetId::from_relative_path(file("")),
+        lod1: level("_lod1"),
+        lod2: level("_lod2"),
+        ..Default::default()
+    };
+    let _ = world.insert_component(fighter, body);
 }
 
 fn origin(args: &Value) -> Result<Vec3, String> {
@@ -1031,9 +1099,9 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
 }
 
 /// Every enabled Combat Encounter built at its entity's position (the
-/// scene's own camera and protagonist kept): the entities made, for Stop to
-/// take away.
-fn expand_encounters(world: &mut World) -> Vec<Entity> {
+/// scene's own camera and protagonist kept), in WS3's bodies where `content`
+/// has them: the entities made, for Stop to take away.
+fn expand_encounters(world: &mut World, content: Option<&std::path::Path>) -> Vec<Entity> {
     let wanted: Vec<(Mat4, CombatEncounterComponent)> = world
         .iter_with::<CombatEncounterComponent>()
         .filter(|(_, c)| c.enabled)
@@ -1060,7 +1128,7 @@ fn expand_encounters(world: &mut World) -> Vec<Entity> {
     let mut made = Vec::new();
     for (m, encounter) in wanted {
         let (at, facing) = (m.transform_point3(Vec3::ZERO), m.transform_vector3(Vec3::Z));
-        match build_encounter(world, &encounter.kind, at, facing, encounter.floor) {
+        match build_encounter(world, &encounter.kind, at, facing, encounter.floor, content) {
             Ok(entities) => made.extend(entities),
             Err(e) => tracing::warn!("Combat Encounter at {at}: {e}"),
         }
@@ -1076,6 +1144,7 @@ fn build_encounter(
     at: Vec3,
     facing: Vec3,
     floor: bool,
+    content: Option<&std::path::Path>,
 ) -> Result<Vec<Entity>, String> {
     let mut args = json!({
         "position": [at.x, at.y, at.z],
@@ -1083,6 +1152,9 @@ fn build_encounter(
         "floor": floor,
         "encounter": true,
     });
+    if let Some(content) = content {
+        args["bodies"] = json!(content.to_string_lossy());
+    }
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
         part @ ("wolves" | "bandits") => args["only"] = json!(part),
@@ -1505,7 +1577,8 @@ fn wake(
         return;
     }
     let made =
-        build_encounter(world, &record.kind, at, record.facing, record.floor).unwrap_or_default();
+        build_encounter(world, &record.kind, at, record.facing, record.floor, run.content.as_deref())
+            .unwrap_or_default();
     somnium_core::propagate_transforms(world);
     let mut left = record.left.clone();
     let mut members = Vec::new();
@@ -1895,6 +1968,9 @@ struct Run {
     readouts: HashMap<Entity, (i32, i32, i32, &'static str)>,
     /// Fighters and mounts drawn as their Skinned Bodies (the shapes stand in for the rest).
     skins: crate::combat_bodies::Skins,
+    /// The project's content root: woken wolves and bandits wear WS3's bodies
+    /// where it has them.
+    content: Option<std::path::PathBuf>,
 }
 
 struct Hud {
@@ -2224,7 +2300,7 @@ impl CombatDemo {
         let encounters = if protagonist {
             Vec::new()
         } else {
-            expand_encounters(ctx.world)
+            expand_encounters(ctx.world, Some(&ctx.config.content_root))
         };
         somnium_core::propagate_transforms(ctx.world);
         let Some(run) = build(ctx.world) else {
@@ -2245,6 +2321,7 @@ impl CombatDemo {
             group_under_effects(ctx.world, run);
             // Fighters that carry a Skinned Body draw through it (Caelan, a horse).
             run.skins = crate::combat_bodies::Skins::new(Some(&ctx.config.content_root));
+            run.content = Some(ctx.config.content_root.clone());
             run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
             // Those already near wake now, the rest as the protagonist comes.
             tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
@@ -2611,6 +2688,7 @@ fn build(world: &World) -> Option<Run> {
         patched: false,
         readouts: HashMap::new(),
         skins: Default::default(),
+        content: None,
     })
 }
 
@@ -4262,6 +4340,91 @@ mod tests {
         assert!(!world.get::<somnium_core::EditorFlags>(hero).is_some_and(|f| f.hidden), "shown again at Stop");
     }
 
+    /// Woken wolves and bandits wear WS3's bodies where the project has them
+    /// (the rime wolf, the alpha its own, four different bandits), on their
+    /// Combatant entities for `combat_bodies` to draw; the horse and a project
+    /// without the files keep their shapes.
+    #[test]
+    fn woken_wolves_and_bandits_wear_ws3_bodies() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_presets");
+        let mut files = vec![
+            "creatures/rime_wolf/rime_wolf".to_string(),
+            "creatures/rime_wolf/rime_wolf_lod1".to_string(),
+            "creatures/rime_wolf_alpha/rime_wolf_alpha".to_string(),
+        ];
+        files.extend((0..BANDITS).map(|n| format!("characters/bandit_{n:02}/bandit_{n:02}")));
+        for f in &files {
+            let path = content.join(format!("{f}.glb"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+        let wake_wilds = |content: Option<std::path::PathBuf>| {
+            let mut world = World::new();
+            let root = world.spawn((
+                Name::new("Scene"),
+                Transform::default(),
+                WorldTransform::identity(),
+            ));
+            fighter(
+                &mut world,
+                root,
+                "Protagonist",
+                Vec3::ZERO,
+                Vec3::X,
+                CombatantComponent::protagonist(),
+            );
+            world.spawn((
+                Name::new("Wilds"),
+                Transform::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: "wilds".into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ));
+            somnium_core::propagate_transforms(&mut world);
+            let mut run = build(&world).expect("a fight");
+            run.content = content;
+            run.encounters = Some(encounters_asleep(&world));
+            tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+            let worn: BTreeMap<String, Option<SkinnedBody>> = run
+                .world
+                .combatants()
+                .filter(|c| !c.name.starts_with("Protagonist"))
+                .map(|c| (c.name.clone(), world.get::<SkinnedBody>(run.bodies[&c.id]).cloned()))
+                .collect();
+            (world, run, worn)
+        };
+        let (mut world, mut run, worn) = wake_wilds(Some(content));
+        assert_eq!(worn.len(), 10, "{:?}", worn.keys());
+        let id = |f: &str| AssetId::from_relative_path(f);
+        let alpha = worn["Rime wolf (alpha)"].clone().expect("the alpha's body");
+        assert_eq!(alpha.source, id("creatures/rime_wolf_alpha/rime_wolf_alpha.glb"));
+        assert_eq!((alpha.lod1, alpha.lod2), (AssetId::NONE, AssetId::NONE), "no levels on disk");
+        for n in 1..=4 {
+            let wolf = worn[&format!("Rime wolf {n}")].clone().expect("a wolf's body");
+            assert_eq!(wolf.source, id("creatures/rime_wolf/rime_wolf.glb"));
+            assert_eq!(wolf.lod1, id("creatures/rime_wolf/rime_wolf_lod1.glb"));
+            assert_eq!(wolf.lod2, AssetId::NONE);
+        }
+        let faces: std::collections::BTreeSet<AssetId> = worn
+            .iter()
+            .filter(|(name, _)| name.starts_with("Bandit"))
+            .map(|(_, b)| b.as_ref().expect("a bandit's body").source)
+            .collect();
+        assert_eq!(faces.len(), 4, "four different bandits");
+        assert!(worn["Horse"].is_none(), "the horse keeps its shapes");
+        // combat_bodies dresses every one of them.
+        run.skins = crate::combat_bodies::Skins::new(None);
+        run.skins
+            .dress(&mut world, &run.bodies, &run.world, &mut run.spawned);
+        assert_eq!(run.skins.count(), 9);
+        // A project without WS3's files: shapes only.
+        let (_, _, bare) = wake_wilds(None);
+        assert!(bare.values().all(Option::is_none));
+    }
+
     #[test]
     fn the_sandbox_builds_and_fights_without_a_window() {
         let mut world = World::new();
@@ -4517,7 +4680,7 @@ mod tests {
         ));
         assert!(claims_play(&world), "an encounter alone claims Play");
         somnium_core::propagate_transforms(&mut world);
-        let made = expand_encounters(&mut world);
+        let made = expand_encounters(&mut world, None);
         somnium_core::propagate_transforms(&mut world);
         let names: Vec<String> = made
             .iter()
@@ -4561,7 +4724,7 @@ mod tests {
             },
         ));
         somnium_core::propagate_transforms(&mut off);
-        assert!(expand_encounters(&mut off).is_empty());
+        assert!(expand_encounters(&mut off, None).is_empty());
     }
 
     /// An encounter turned a quarter turn lays its pack and camp out turned
@@ -4610,7 +4773,7 @@ mod tests {
         };
         // Built at Play.
         let mut world = scene(false);
-        expand_encounters(&mut world);
+        expand_encounters(&mut world, None);
         somnium_core::propagate_transforms(&mut world);
         let run = build(&world).expect("a fight");
         assert!(alpha(&run).distance(den) < 0.5, "{} not {den}", alpha(&run));
@@ -5201,7 +5364,7 @@ mod tests {
             ));
         }
         somnium_core::propagate_transforms(&mut world);
-        expand_encounters(&mut world);
+        expand_encounters(&mut world, None);
         somnium_core::propagate_transforms(&mut world);
         let run = build(&world).expect("a fight");
         let near = |prefix: &str, at: Vec3| {
