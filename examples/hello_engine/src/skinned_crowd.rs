@@ -434,6 +434,10 @@ pub struct SkinnedBodies {
     shared: HashMap<AssetId, Shared>,
     bodies: HashMap<Entity, Body>,
     failed: HashMap<AssetId, String>,
+    /// Files being read on a worker thread.
+    pending: HashMap<AssetId, std::sync::mpsc::Receiver<Result<AnimatedAsset, String>>>,
+    /// Posed vertices a body of each file costs, from its glTF's JSON alone.
+    sizes: HashMap<AssetId, u32>,
     lod: AnimationLod,
     stats: Stats,
     /// Each socket's descendants, parents first, and the entity count they
@@ -452,6 +456,8 @@ impl Default for SkinnedBodies {
             shared: HashMap::new(),
             bodies: HashMap::new(),
             failed: HashMap::new(),
+            pending: HashMap::new(),
+            sizes: HashMap::new(),
             lod: AnimationLod::default(),
             stats: Stats::default(),
             subtrees: HashMap::new(),
@@ -468,12 +474,13 @@ fn world_matrix(world: &World, e: Entity) -> Mat4 {
         .unwrap_or(Mat4::IDENTITY)
 }
 
-fn load(
+/// A read file's materials and merged meshes, uploaded (the read itself happens
+/// on a worker thread).
+fn upload(
     gpu: &somnium_renderer::RenderContext,
     r: &mut SomniumRenderer,
-    path: &std::path::Path,
+    asset: AnimatedAsset,
 ) -> Result<Shared, String> {
-    let asset = AnimatedAsset::load(path).map_err(|e| e.to_string())?;
     if asset.clips.is_empty() {
         return Err("no skeletal clips".into());
     }
@@ -573,6 +580,47 @@ fn merge_by_skin<'a>(
     merged
 }
 
+/// Posed vertices one body of a glTF costs, from its JSON alone (the skinned
+/// meshes' positions), so the budget plans before the file is read.
+fn skinned_vertices(path: &std::path::Path) -> Option<u32> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 20];
+    file.read_exact(&mut head).ok()?;
+    let doc: Value = if &head[0..4] == b"glTF" {
+        let mut json = vec![0u8; u32::from_le_bytes(head[12..16].try_into().ok()?) as usize];
+        file.read_exact(&mut json).ok()?;
+        serde_json::from_slice(&json).ok()?
+    } else {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?
+    };
+    skinned_count(&doc)
+}
+
+/// The skinned meshes' vertices a glTF document declares (each mesh once).
+fn skinned_count(doc: &Value) -> Option<u32> {
+    let (accessors, meshes) = (
+        doc.get("accessors")?.as_array()?,
+        doc.get("meshes")?.as_array()?,
+    );
+    let skinned: std::collections::BTreeSet<usize> = doc
+        .get("nodes")?
+        .as_array()?
+        .iter()
+        .filter(|n| n.get("skin").is_some())
+        .filter_map(|n| n.get("mesh")?.as_u64())
+        .map(|m| m as usize)
+        .collect();
+    let mut total = 0u64;
+    for m in skinned {
+        for p in meshes.get(m)?.get("primitives")?.as_array()? {
+            let a = p.get("attributes")?.get("POSITION")?.as_u64()? as usize;
+            total += accessors.get(a)?.get("count")?.as_u64()?;
+        }
+    }
+    (total > 0).then(|| total.min(u64::from(u32::MAX)) as u32)
+}
+
 /// A body's levels: its source, then LOD 1 and LOD 2 while each is set.
 fn levels(b: &SkinnedBody) -> Vec<AssetId> {
     std::iter::once(b.source)
@@ -590,6 +638,9 @@ const VERTEX_BUDGET: u32 = 1_600_000;
 
 /// Metres a posed body's place in the budget is kept against nearer newcomers.
 const BUDGET_KEEP: f32 = 4.0;
+
+/// Files read at once on worker threads.
+const LOADS_IN_FLIGHT: usize = 4;
 
 /// Skinned meshes registered a frame, by default.
 const REGISTERS_PER_FRAME: usize = 4;
@@ -813,6 +864,7 @@ impl SkinnedBodies {
             "registered": s.registered,
             "waiting": s.waiting,
             "still": s.still,
+            "loading": self.pending.len(),
             "sources": self.shared.len(),
             "posed_vertices": [s.posed, self.vertex_budget],
             "errors": self.failed.values().collect::<Vec<_>>(),
@@ -877,16 +929,43 @@ impl SkinnedBodies {
         let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
         let (mut registered, mut waiting, mut register_ms) = (0, 0, 0.0);
         let (mut still, mut baked) = (0, 0);
-        for id in wanted_ids {
-            if self.shared.contains_key(&id) || self.failed.contains_key(&id) {
+        // What a body of each file costs, from its header, so the budget plans
+        // before anything is read.
+        for id in &wanted_ids {
+            if self.sizes.contains_key(id) || self.failed.contains_key(id) {
                 continue;
             }
-            let Some(record) = ctx.ui.asset_record(id) else {
+            let Some(record) = ctx.ui.asset_record(*id) else {
                 continue;
             };
-            match load(gpu, r, &record.absolute_path) {
+            match skinned_vertices(&record.absolute_path) {
+                Some(n) => {
+                    self.sizes.insert(*id, n);
+                }
+                None => {
+                    warn!(path = %record.absolute_path.display(), "skinned body source has no skinned meshes");
+                    self.failed
+                        .insert(*id, "no skinned meshes in its glTF".into());
+                }
+            }
+        }
+        // A file read off the frame goes to the GPU, one a frame.
+        let finished = self
+            .pending
+            .iter()
+            .find_map(|(id, rx)| match rx.try_recv() {
+                Ok(read) => Some((*id, read)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some((*id, Err("its reader stopped".into())))
+                }
+            });
+        if let Some((id, read)) = finished {
+            self.pending.remove(&id);
+            match read.and_then(|asset| upload(gpu, r, asset)) {
                 Ok(shared) => {
                     info!(clips = ?shared.asset.clips.keys().collect::<Vec<_>>(), "skinned body source loaded");
+                    self.sizes.insert(id, shared.vertices);
                     self.shared.insert(id, shared);
                 }
                 Err(error) => {
@@ -903,7 +982,7 @@ impl SkinnedBodies {
                 let distance = m.w_axis.truncate().distance(camera);
                 let sizes: Vec<u32> = levels(b)
                     .iter()
-                    .map_while(|id| self.shared.get(id).map(|s| s.vertices))
+                    .map_while(|id| self.sizes.get(id).copied())
                     .collect();
                 if distance > b.still_beyond.min(self.lod.cull) || sizes.is_empty() {
                     return None;
@@ -942,6 +1021,37 @@ impl SkinnedBodies {
             let d = |m: &Mat4| m.w_axis.truncate().distance_squared(camera);
             d(&a.2).total_cmp(&d(&b.2))
         });
+        // Read the files that will be drawn (only those levels), nearest first,
+        // a few at a time on worker threads.
+        for (e, settings, matrix) in &wanted {
+            if self.pending.len() >= LOADS_IN_FLIGHT {
+                break;
+            }
+            let ids = levels(settings);
+            let far = matrix.w_axis.truncate().distance(camera)
+                > settings.still_beyond.min(self.lod.cull);
+            let level = if far || held.contains(e) {
+                ids.len() - 1
+            } else {
+                fitted.get(e).copied().unwrap_or(0).min(ids.len() - 1)
+            };
+            let id = ids[level];
+            if self.shared.contains_key(&id)
+                || self.failed.contains_key(&id)
+                || self.pending.contains_key(&id)
+            {
+                continue;
+            }
+            let Some(record) = ctx.ui.asset_record(id) else {
+                continue;
+            };
+            let path = record.absolute_path.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(AnimatedAsset::load(&path).map_err(|e| e.to_string()));
+            });
+            self.pending.insert(id, rx);
+        }
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
@@ -957,10 +1067,18 @@ impl SkinnedBodies {
                     .unwrap_or_else(|| self.bodies.get(&e).map_or(0, |b| b.level))
                     .min(ids.len() - 1)
             };
-            let id = ids[level];
-            if !self.shared.contains_key(&id) {
+            // Its level's file still on its way: the level it has, if that is read.
+            let (level, id) = if self.shared.contains_key(&ids[level]) {
+                (level, ids[level])
+            } else if let Some(b) = self
+                .bodies
+                .get(&e)
+                .filter(|b| self.shared.contains_key(&b.source))
+            {
+                (b.level, b.source)
+            } else {
                 continue;
-            }
+            };
             // Moving to another level: give the old one's posed vertices back.
             if let Some(body) = self.bodies.get_mut(&e)
                 && body.source != id
@@ -1211,6 +1329,7 @@ impl SkinnedBodies {
                 waiting = s.waiting,
                 still = s.still,
                 baked = s.baked,
+                loading = self.pending.len(),
                 "skinned crowd"
             );
             s.register_peak_ms = 0.0;
@@ -1467,6 +1586,30 @@ mod tests {
             hold_pose(&shared, "No Such Clip", 0.5).is_some(),
             "an unknown clip holds the first"
         );
+    }
+
+    /// A file's cost read from its glTF JSON alone matches what loading it
+    /// gives, so the budget plans before anything is read.
+    #[test]
+    fn a_files_cost_is_read_from_its_header() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/models/animation_demo.gltf");
+        let asset = AnimatedAsset::load(&path).expect("the demo rig");
+        let loaded: usize = asset
+            .scene
+            .meshes
+            .iter()
+            .filter(|m| m.skin.is_some())
+            .map(|m| m.vertices.len())
+            .sum();
+        assert_eq!(skinned_vertices(&path), Some(loaded as u32));
+        assert_eq!(
+            skinned_vertices(std::path::Path::new("no/such/file.glb")),
+            None
+        );
+        let unskinned = json!({"nodes": [{"mesh": 0}], "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+                               "accessors": [{"count": 9}]});
+        assert_eq!(skinned_count(&unskinned), None, "no skinned meshes");
     }
 
     /// The budget covers the nearest bodies at their fitted sizes; the rest hold a pose.
