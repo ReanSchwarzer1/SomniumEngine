@@ -650,7 +650,74 @@ fn realm_table() {
         .iter()
         .max_by_key(|p| p.place.spots.len())
         .unwrap();
-    let view = Vec3::from(biggest.centre);
+    // Its densest 256 m cell (the most homes): the view stands at their middle.
+    let mut cells: std::collections::HashMap<(i32, i32), Vec<Vec3>> = Default::default();
+    for s in biggest
+        .place
+        .spots
+        .iter()
+        .filter(|s| s.kind == SpotKind::Home)
+    {
+        let key = (
+            (s.position.x / 256.0).floor() as i32,
+            (s.position.z / 256.0).floor() as i32,
+        );
+        cells.entry(key).or_default().push(s.position);
+    }
+    let homes = cells.values().max_by_key(|v| v.len()).unwrap();
+    let view = homes.iter().copied().sum::<Vec3>() / homes.len() as f32;
+    // Noon there: the villager pool (the nearest 160 out of doors) at WS3's
+    // crowd sizes (adult 52,189 / 20,538 / 7,834 posed vertices; child 43,851
+    // / 17,013 / 6,497), LOD 1 past 20 m and LOD 2 past 60 m, fitted to the
+    // 1.6 M budget.
+    let mut hour = 6.0_f32;
+    while hour < 12.0 {
+        w.step(0.25, Clock::at(hour), &[view], &Flat);
+        hour += 0.25 / 60.0;
+    }
+    let mut out: Vec<(f32, bool)> = w
+        .villagers()
+        .iter()
+        .filter(|v| v.visible)
+        .map(|v| (v.position.distance(view), v.role == Role::Child))
+        .collect();
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.truncate(160);
+    let (adult, child) = (
+        vec![52_189_u32, 20_538, 7_834],
+        vec![43_851_u32, 17_013, 6_497],
+    );
+    let wants: Vec<usize> = out
+        .iter()
+        .map(|(d, _)| usize::from(*d > 20.0) + usize::from(*d > 60.0))
+        .collect();
+    let sizes: Vec<Vec<u32>> = out
+        .iter()
+        .map(|(_, c)| if *c { child.clone() } else { adult.clone() })
+        .collect();
+    let fitted = somnium_life::crowd::fit_levels(1_600_000, &wants, &sizes);
+    let sum = |levels: &[usize]| {
+        levels
+            .iter()
+            .zip(&sizes)
+            .map(|(l, s)| u64::from(s[*l]))
+            .sum::<u64>()
+    };
+    let count = |levels: &[usize], l: usize| levels.iter().filter(|x| **x == l).count();
+    eprintln!(
+        "{}'s densest cell ({} homes): {} out of doors in the pool at noon; by distance alone {} posed vertices (LOD 0/1/2: {}/{}/{}); fitted to 1.6 M: {} ({}/{}/{})",
+        biggest.place.name,
+        homes.len(),
+        out.len(),
+        sum(&wants),
+        count(&wants, 0),
+        count(&wants, 1),
+        count(&wants, 2),
+        sum(&fitted),
+        count(&fitted, 0),
+        count(&fitted, 1),
+        count(&fitted, 2)
+    );
     let dt = 1.0 / 60.0;
     let mut hour = 0.0_f32;
     let mut ticks = Vec::new();
@@ -666,7 +733,7 @@ fn realm_table() {
     ticks.sort_by(f64::total_cmp);
     let at = |q: f64| ticks[((ticks.len() - 1) as f64 * q) as usize];
     eprintln!(
-        "a day in {} (view at its middle): mean {mean:.4} ms a tick, p99 {:.3}, p99.9 {:.3}, worst {:.3}; up to {near} near",
+        "a day in {} (view in its densest cell): mean {mean:.4} ms a tick, p99 {:.3}, p99.9 {:.3}, worst {:.3}; up to {near} near",
         biggest.place.name,
         at(0.99),
         at(0.999),

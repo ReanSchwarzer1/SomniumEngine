@@ -99,6 +99,34 @@ impl<K: Copy + Eq + Hash> Bodies<K> {
     }
 }
 
+/// Levels for bodies in nearest-first order, each wanting `wants[i]` (its
+/// distance's level) and costing `sizes[i][level]` (posed vertices, say).
+/// Each keeps the level it wants while what is left of `budget` still covers
+/// everyone behind it at their coarsest, else the finest that does; when even
+/// everyone's coarsest does not fit, all are at their coarsest.
+// ponytail: a body near the budget's edge can flip level when someone ahead
+// moves; add slack (a small reserve kept per body) if it shows.
+#[must_use]
+pub fn fit_levels(budget: u32, wants: &[usize], sizes: &[Vec<u32>]) -> Vec<usize> {
+    let coarsest = |s: &[u32]| i64::from(s.last().copied().unwrap_or(0));
+    let mut spare = i64::from(budget) - sizes.iter().map(|s| coarsest(s)).sum::<i64>();
+    wants
+        .iter()
+        .zip(sizes)
+        .map(|(&want, s)| {
+            let last = s.len().saturating_sub(1);
+            let mut level = want.min(last);
+            while level < last && i64::from(s[level]) - coarsest(s) > spare {
+                level += 1;
+            }
+            if let Some(size) = s.get(level) {
+                spare -= i64::from(*size) - coarsest(s);
+            }
+            level
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
