@@ -105,11 +105,11 @@ pub(crate) fn kind_parts(kind: u8, near_mesh: &[Piece], lod_mesh: Option<&[Piece
     out
 }
 
-/// Per part of `mesh`, the distance past which the legacy LOD (`kind < 128`) drops it, 0 if never: past
+/// Per part of `mesh`, the distance past which the legacy LOD (a built-in kind) drops it, 0 if never: past
 /// `lod_distance` the leaves go (the heaviest part, without leaves), past `impostor_distance` everything but the
 /// solid parts (the cheapest, without leaves). Read off `App::submit_foliage`'s `keep_only`/`drop_heavy`.
 fn legacy_limits(kind: u8, mesh: &[Piece], d: KindDistances) -> Vec<f32> {
-    if kind >= 128 || mesh.len() < 2 {
+    if crate::foliage_palette::is_project_kind(kind) || mesh.len() < 2 {
         return vec![0.0; mesh.len()];
     }
     let has_leaf = mesh.iter().any(|p| p.is_leaf);

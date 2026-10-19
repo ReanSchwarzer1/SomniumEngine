@@ -9163,7 +9163,7 @@ impl<G: GameApp> Engine<G> {
                 // not mark any part as foliage.
                 // A project entry can be a mixed planted patch. Its material
                 // parts are not tree LODs: keep all until distance culling.
-                let legacy_lod = inst.kind < 128;
+                let legacy_lod = !crate::foliage_palette::is_project_kind(inst.kind);
                 let keep_only = legacy_lod
                     && impostor_distance > 0.0
                     && dist > impostor_distance
@@ -9313,7 +9313,7 @@ impl<G: GameApp> Engine<G> {
 
     /// Load and upload one palette entry, the first time it is painted.
     fn ensure_palette_mesh(&mut self, kind: u8) {
-        if kind >= 128 {
+        if crate::foliage_palette::is_project_kind(kind) {
             self.ensure_project_palette_mesh(kind);
             return;
         }

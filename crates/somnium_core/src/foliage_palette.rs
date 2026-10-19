@@ -1,4 +1,5 @@
-//! Project-owned foliage kinds. Stable IDs 128..255 leave legacy palette IDs intact.
+//! Project-owned foliage kinds. Stable IDs past the built-in palette's (25..255; projects began at 128 and those
+//! ids keep their meaning) leave legacy palette IDs intact.
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -110,9 +111,15 @@ struct Document {
     entries: Vec<ProjectEntry>,
 }
 
+/// Whether a foliage kind is a project's (its palette file) rather than one of the built-in `FOLIAGE_PALETTE`.
+#[must_use]
+pub(crate) fn is_project_kind(kind: u8) -> bool {
+    usize::from(kind) >= crate::app::FOLIAGE_PALETTE.len()
+}
+
 fn parse(bytes: &[u8]) -> Result<BTreeMap<u8, ProjectEntry>, String> {
     let document: Document = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    if document.version != 1 || document.entries.len() > 128 {
+    if document.version != 1 || document.entries.len() > 256 - crate::app::FOLIAGE_PALETTE.len() {
         return Err("unsupported or oversized foliage palette".into());
     }
     let mut entries = BTreeMap::new();
@@ -148,7 +155,7 @@ fn parse(bytes: &[u8]) -> Result<BTreeMap<u8, ProjectEntry>, String> {
             b.scale_min,
             b.scale_max,
         ];
-        if entry.kind < 128
+        if !is_project_kind(entry.kind)
             || entry.name.trim().is_empty()
             || entry.name.len() > 128
             || entry.primitives.is_empty()
@@ -288,5 +295,15 @@ mod tests {
         );
         assert!(parse(br#"{"version":1,"entries":[{"kind":0,"name":"bad","source":"x","primitives":[0]}]}"#).is_err());
         assert!(parse(br#"{"version":1,"entries":[{"kind":128,"name":"bad","source":"x","primitives":[0,0]}]}"#).is_err());
+    }
+
+    #[test]
+    fn project_kinds_start_past_the_built_in_palette() {
+        let first = crate::app::FOLIAGE_PALETTE.len() as u8;
+        let entry = |kind: u8| format!(r#"{{"version":1,"entries":[{{"kind":{kind},"name":"k","source":"x","primitives":[0]}}]}}"#);
+        assert!(parse(entry(first).as_bytes()).is_ok(), "the first free id");
+        assert!(parse(entry(127).as_bytes()).is_ok());
+        assert!(parse(entry(first - 1).as_bytes()).is_err(), "a built-in kind");
+        assert!(is_project_kind(128) && is_project_kind(255) && !is_project_kind(0));
     }
 }
