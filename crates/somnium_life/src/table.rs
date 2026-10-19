@@ -37,7 +37,8 @@ pub struct TableLooks {
     /// A body by beast kind ([`BeastKind::NAMES`]).
     #[serde(default)]
     pub beasts: BTreeMap<String, String>,
-    /// Clips by pose name ([`Pose::name`]).
+    /// Clips by pose name ([`Pose::name`]). A clip may list alternatives,
+    /// `A|B`: a body plays the first its file has.
     #[serde(default)]
     pub poses: BTreeMap<String, String>,
     /// Children's own clips, over `poses`.
@@ -55,6 +56,42 @@ pub struct TableLooks {
     /// How fast the run clip moves, m/s: villagers run from danger at it.
     #[serde(default)]
     pub run_speed: Option<f32>,
+    /// A role's own clips by pose (a smith at work hammers), over `poses`
+    /// and the children's and elders' own.
+    #[serde(default)]
+    pub role_poses: BTreeMap<String, BTreeMap<String, String>>,
+    /// What a clip holds, by clip name: pieces on joint sockets (a game's
+    /// gear table: the hoe in `Hoe_Loop`).
+    #[serde(default)]
+    pub gear: BTreeMap<String, Vec<GearPiece>>,
+    /// Each body's height in metres, by its path: gear is sized to its holder.
+    #[serde(default)]
+    pub heights: BTreeMap<String, f32>,
+}
+
+/// One piece a clip holds: meshes of a file, on a joint's socket.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GearPiece {
+    /// What it is (`hoe`).
+    #[serde(default)]
+    pub piece: String,
+    /// Its file, relative to the assets folder.
+    pub file: String,
+    /// The file's mesh nodes to draw.
+    #[serde(default)]
+    pub nodes: Vec<u32>,
+    /// The joint it rides (`weapon_r`).
+    pub joint: String,
+    /// Its offset from the joint, for a body of `ref_height_m`.
+    #[serde(default)]
+    pub offset: [f32; 3],
+    /// The height the piece and offset are sized for.
+    #[serde(default = "ref_height")]
+    pub ref_height_m: f32,
+}
+
+fn ref_height() -> f32 {
+    1.76
 }
 
 impl TableLooks {
@@ -94,13 +131,35 @@ impl TableLooks {
     /// The clip a person of `role` plays in `pose`.
     #[must_use]
     pub fn clip(&self, role: Role, pose: Pose) -> Option<&str> {
+        let trade = self
+            .role_poses
+            .get(Role::NAMES[role as usize])
+            .and_then(|p| p.get(pose.name()));
         let own = match role {
             Role::Child => self.child_poses.get(pose.name()),
             Role::Elder => self.elder_poses.get(pose.name()),
             _ => None,
         };
-        own.or_else(|| self.poses.get(pose.name()))
+        trade
+            .or(own)
+            .or_else(|| self.poses.get(pose.name()))
             .map(String::as_str)
+    }
+
+    /// What `clip` holds (its first alternative, `A|B`, the one a body plays
+    /// when its file has it), and the scale each piece takes on `body` (its
+    /// height over the piece's reference height).
+    pub fn gear_for<'a>(
+        &'a self,
+        clip: &str,
+        body: &str,
+    ) -> impl Iterator<Item = (&'a GearPiece, f32)> + 'a {
+        let height = self.heights.get(body).copied();
+        let first = clip.split('|').next().unwrap_or_default().trim();
+        self.gear.get(first).into_iter().flatten().map(move |g| {
+            let scale = height.map_or(1.0, |h| h / g.ref_height_m.max(0.01));
+            (g, scale)
+        })
     }
 
     /// The body a beast of `kind` wears.
@@ -281,5 +340,54 @@ mod tests {
         kids.villagers
             .insert("Child".into(), vec!["child.glb".into()]);
         assert_eq!(kids.body_in(&people, Role::Child, 7), Some("child.glb"));
+    }
+
+    /// A trade's own clips come first; a clip's gear is sized to its holder.
+    #[test]
+    fn trades_have_their_own_clips_and_gear_fits_the_hand() {
+        let looks: TableLooks = serde_json::from_str(
+            r#"{
+              "poses": {"Work": "Bench_Work_Loop", "Farm": "Hoe_Loop"},
+              "role_poses": {"Smith": {"Work": "Hammer_Anvil_Loop"}},
+              "gear": {"Hoe_Loop": [{"piece": "hoe", "file": "characters/gear/hoe.glb", "nodes": [0, 1],
+                                     "joint": "weapon_r", "offset": [0, 0.1, 0], "ref_height_m": 1.76}]},
+              "heights": {"short.glb": 1.32}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            looks.clip(Role::Smith, Pose::Work),
+            Some("Hammer_Anvil_Loop")
+        );
+        assert_eq!(
+            looks.clip(Role::Labourer, Pose::Work),
+            Some("Bench_Work_Loop")
+        );
+        let (hoe, scale) = looks
+            .gear_for("Hoe_Loop", "short.glb")
+            .next()
+            .expect("a hoe");
+        assert_eq!(
+            (hoe.piece.as_str(), hoe.joint.as_str(), hoe.nodes.len()),
+            ("hoe", "weapon_r", 2)
+        );
+        assert!((scale - 0.75).abs() < 1e-6, "1.32 m of 1.76: {scale}");
+        assert_eq!(
+            looks.gear_for("Hoe_Loop", "unknown.glb").next().unwrap().1,
+            1.0
+        );
+        assert!(
+            looks
+                .gear_for("Bench_Work_Loop", "short.glb")
+                .next()
+                .is_none()
+        );
+        assert!(
+            looks
+                .gear_for("Hoe_Loop|Bench_Work_Loop", "short.glb")
+                .next()
+                .is_some(),
+            "the first alternative's gear"
+        );
     }
 }

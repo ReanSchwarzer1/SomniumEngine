@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import re
+import struct
 import sys
 import zlib
 from pathlib import Path
@@ -52,14 +53,24 @@ LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
 # and elders by their age (SOURCE.json), the other crowd_* adults farmers, labourers and anyone a role has no bodies for.
 TRADES = {"Smith": "smith", "Priest": "priest", "Keeper": "keeper", "Herder": "herder"}
 BEASTS = {"Sheep": "sheep", "Cow": "march_cow", "Goat": "goat", "Pig": "pig", "Hen": "hen", "Dog": "sheepdog"}
-POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Run_F_Loop", "Talk": "Talk_Loop",
+POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Jog_F_Loop", "Talk": "Talk_Loop",
          "Work": "Bench_Work_Loop", "Farm": "Hoe_Loop", "Tend": "Farm_Water", "Trade": "Haggle_Loop",
-         "Pray": "Kneel_Pray_Loop", "Sit": "Sit_Idle_Loop", "Drive": "Drive_Reins_Loop", "Play": "Child_Tag"}
-CHILD_POSES = {"Idle": "Child_Idle_Loop", "Walk": "Child_Walk_F_Loop", "Run": "Child_Run_F_Loop",
-               "Play": "Child_Hopscotch"}
-ELDER_POSES = {"Idle": "Idle_Old_Loop", "Walk": "Loco_Old_Walk_F_Loop"}
-BEAST_POSES = {"Graze": "Graze_Loop", "Walk": "Walk_F_Loop", "Run": "Trot_F_Loop", "Idle": "Idle_Loop"}
-WALK_SPEED, RUN_SPEED = 0.86, 1.52  # Loco_Walk_F_Loop's and Loco_Run_F_Loop's root speeds (clips.json)
+         "Pray": "Kneel_Pray_Loop", "Sit": "Sit_Idle_Loop", "Drive": "Drive_Reins_Loop"}
+# A clip may list alternatives, `A|B`: a body plays the first its file has (a youth built with the adults' clips, an
+# elder without the old walk, a hen that runs instead of trotting).
+CHILD_POSES = {"Idle": "Child_Idle_Loop|Idle_Neutral_Loop", "Walk": "Child_Walk_F_Loop|Loco_Walk_F_Loop",
+               "Run": "Child_Run_F_Loop|Loco_Jog_F_Loop",
+               # on the spot: Child_Hopscotch and Child_Tag travel (WS3)
+               "Play": "Child_Spin_Loop|Child_Fidget_Loop|Idle_Neutral_Loop"}
+# A trade's own clips (with what they hold, clips.json `gear`), kept only where every body of the role carries the clip.
+ROLE_POSES = {"Smith": {"Work": "Hammer_Anvil_Loop"}, "Keeper": {"Work": "Sweep_Loop"},
+              "Labourer": {"Work": "Chop_Wood_Loop"}, "Herder": {"Tend": "Farm_Water"}}
+ELDER_POSES = {"Idle": "Idle_Old_Loop|Idle_Neutral_Loop", "Walk": "Loco_Old_Walk_F_Loop|Loco_Walk_F_Loop"}
+BEAST_POSES = {"Graze": "Graze_Loop|Idle_Loop", "Walk": "Walk_F_Loop", "Run": "Trot_F_Loop|Run_F_Loop|Walk_F_Loop",
+               "Idle": "Idle_Loop"}
+# Loco_Walk_F_Loop's root speed, and Loco_Jog_F_Loop's measured from its planted feet (WS3: Loco_Run_F_Loop is a
+# 1.5 m/s trot that skates at a flee's pace; the jog reads right from 5.6 to 6.0 m/s).
+WALK_SPEED, RUN_SPEED = 0.86, 5.6
 SNAP = 3.0  # a street's end this close to another street joins it
 CHILD_BELOW, ELDER_FROM = 16, 50  # a body's age (SOURCE.json) that makes it a child's or an elder's (WS3's elders: 52+)
 NOT_VILLAGERS = {"guard"}  # families WS3 casts as set pieces, not people on a routine
@@ -179,6 +190,26 @@ def age_stage(age: float) -> str:
     return "Child" if age < CHILD_BELOW else "Elder" if age >= ELDER_FROM else "default"
 
 
+def clips_in(glb: Path) -> set:
+    """The animation names a glb carries (its JSON chunk only)."""
+    try:
+        with open(glb, "rb") as f:
+            head = f.read(20)
+            n = struct.unpack("<I", head[12:16])[0]
+            doc = json.loads(f.read(n))
+        return {a.get("name", "") for a in doc.get("animations", [])}
+    except (OSError, ValueError, struct.error):
+        return set()
+
+
+def height_of(folder: Path) -> float:
+    """A WS3 body's height in metres, from its SOURCE.json (1.76, the clips' reference body, when it has none)."""
+    try:
+        return float(json.loads((folder / "SOURCE.json").read_text(encoding="utf-8")).get("height_m") or 1.76)
+    except (OSError, ValueError):
+        return 1.76
+
+
 def looks_of(rimeborn: Path):
     """WS3's bodies that exist on disk, as somnium_life looks (paths relative to the assets folder)."""
     chars, creatures = rimeborn / "assets/characters", rimeborn / "assets/creatures"
@@ -196,9 +227,21 @@ def looks_of(rimeborn: Path):
     villagers = {k: v for k, v in villagers.items() if v}
     beasts = {kind: f"creatures/{name}/{name}.glb" for kind, name in BEASTS.items()
               if (creatures / name / f"{name}.glb").exists()}
+    # A trade's own clip only where every body of the role carries it (a missing clip holds the last pose).
+    role_poses = {}
+    for role, poses in ROLE_POSES.items():
+        bodies = villagers.get(role, [])
+        kept = {pose: clip for pose, clip in poses.items()
+                if bodies and all(clip in clips_in(rimeborn / "assets" / b) for b in bodies)}
+        if kept:
+            role_poses[role] = kept
+    try:
+        gear = json.loads((rimeborn / "assets/animation/clips.json").read_text(encoding="utf-8")).get("gear", {})
+    except (OSError, ValueError):
+        gear = {}
     return {"villagers": villagers, "beasts": beasts, "poses": POSES, "child_poses": CHILD_POSES,
             "elder_poses": ELDER_POSES, "beast_poses": BEAST_POSES, "walk_speed": WALK_SPEED,
-            "run_speed": RUN_SPEED}
+            "run_speed": RUN_SPEED, "role_poses": role_poses, "gear": gear}
 
 
 def asset_id(rel: str) -> str:
@@ -326,8 +369,13 @@ def build(rimeborn: Path):
     table = {"version": 1, "frame": f"{WORLD} (compose_tyffir.py's world)",
              "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks_of(rimeborn)}
     looks = table["looks"]
+    # Every body anyone may wear, by its height: gear is sized to its holder.
+    worn = {b for bodies in looks["villagers"].values() for b in bodies}
+    worn |= {b for p in places for bodies in p.get("people", {}).values() for b in bodies}
+    looks["heights"] = {b: round(height_of(rimeborn / "assets" / Path(b).parent), 3) for b in sorted(worn)}
     report.append(f"  looks: {sum(len(v) for v in looks['villagers'].values())} bodies over "
-                  f"{len(looks['villagers'])} roles, {len(looks['beasts'])} beasts")
+                  f"{len(looks['villagers'])} roles, {len(looks['beasts'])} beasts; trades' own clips "
+                  f"{looks['role_poses']}; gear for {len(looks['gear'])} clips; {len(looks['heights'])} heights")
     cast = [p for p in places if p.get("people")]
     report.append(f"  own people: {len(cast)} of {len(places)} places (WS3's char_<place>_people scenes)")
     return table, report

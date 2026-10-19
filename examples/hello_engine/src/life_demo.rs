@@ -557,6 +557,9 @@ struct Run {
     table: Option<TableRun>,
     /// A Life Table's looks: what the pooled people and beasts wear.
     dress_as: Option<TableLooks>,
+    /// What each pooled skinned villager holds: its clip and body, and the
+    /// socket and mesh entities of the gear.
+    gear: HashMap<Entity, (String, Vec<Entity>)>,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -676,6 +679,77 @@ fn wear(
             ..Default::default()
         },
     );
+}
+
+/// The body a villager wears: its town's own folk where the table names
+/// them, else the table's for its role.
+fn body_of<'a>(
+    table: Option<&'a TableRun>,
+    looks: &'a TableLooks,
+    v: &somnium_life::Villager,
+) -> Option<&'a str> {
+    match table.and_then(|t| t.people(v.place)) {
+        Some(people) => looks.body_in(people, v.role, v.id.0),
+        None => looks.body(v.role, v.id.0),
+    }
+}
+
+/// Give a pooled skinned slot what its clip holds (a socket on the joint,
+/// sized to its body, and the piece's meshes under it), and take away what
+/// the last clip held. Nothing changes while the clip and body stay.
+fn hold_gear(
+    world: &mut World,
+    held: &mut HashMap<Entity, (String, Vec<Entity>)>,
+    slot: Entity,
+    looks: &TableLooks,
+    body: Option<&str>,
+    clip: Option<&str>,
+) {
+    let key = format!("{}|{}", clip.unwrap_or_default(), body.unwrap_or_default());
+    if held.get(&slot).is_some_and(|(k, _)| *k == key) {
+        return;
+    }
+    for e in held.remove(&slot).into_iter().flat_map(|(_, old)| old) {
+        world.despawn(e);
+    }
+    let (Some(body), Some(clip)) = (body, clip) else {
+        held.insert(slot, (key, Vec::new()));
+        return;
+    };
+    let mut spawned = Vec::new();
+    for (g, scale) in looks.gear_for(clip, body) {
+        let socket = world.spawn((
+            Name::new(&g.piece),
+            Transform {
+                translation: Vec3::from(g.offset) * scale,
+                scale: Vec3::splat(scale),
+                ..Default::default()
+            },
+            WorldTransform::identity(),
+            Parent { entity: slot },
+            crate::skinned_crowd::SkinnedSocket {
+                joint: g.joint.clone(),
+            },
+        ));
+        spawned.push(socket);
+        for &node in &g.nodes {
+            spawned.push(world.spawn((
+                Name::new(&format!("{} {node}", g.piece)),
+                Transform::default(),
+                WorldTransform::identity(),
+                Parent { entity: socket },
+                somnium_core::ImportedMesh {
+                    source: format!("assets/{}", g.file),
+                    node,
+                },
+                MaterialComponent {
+                    asset: AssetId::NONE,
+                    runtime_id: 0,
+                },
+            )));
+        }
+    }
+    held.insert(slot, (key, spawned));
 }
 
 /// Play the clip a pooled skinned slot's holder's pose calls for (when it changed).
@@ -1195,6 +1269,7 @@ impl LifeDemo {
             fights: 0,
             table,
             dress_as,
+            gear: HashMap::new(),
             spawned,
             colliders: Vec::new(),
             // `SOMNIUM_LIFE_HOUR` starts the day at another hour (captures).
@@ -1257,6 +1332,9 @@ impl LifeDemo {
             if let Some(slot) = ctx.world.get_mut::<Transform>(e) {
                 *slot = t;
             }
+        }
+        for e in run.gear.into_values().flat_map(|(_, held)| held) {
+            ctx.world.despawn(e);
         }
         for e in run.spawned {
             ctx.world.despawn(e);
@@ -1435,13 +1513,12 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         if let Some(i) = holder {
             let v = &life.villagers()[i];
             if let (true, Some(looks)) = (run.villagers.skinned, &run.dress_as) {
-                // The town's own folk, where its table entry names them.
-                let look = match run.table.as_ref().and_then(|t| t.people(v.place)) {
-                    Some(people) => looks.body_in(people, v.role, v.id.0),
-                    None => looks.body(v.role, v.id.0),
-                };
-                let clip = looks.clip(v.role, v.pose);
+                let (look, clip) = (
+                    body_of(run.table.as_ref(), looks, v),
+                    looks.clip(v.role, v.pose),
+                );
                 wear(world, body, &v.name, look, clip, v.id.0);
+                hold_gear(world, &mut run.gear, body, looks, look, clip);
                 continue;
             }
             let size = villager_size(v.role);
@@ -1486,14 +1563,27 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
     for (slot, _) in changed {
         run.looks.remove(&run.carts.slots[slot].0);
     }
-    // Skinned slots play the clip their holder's pose calls for.
+    // Skinned slots play the clip their holder's pose calls for, holding
+    // what it holds; a parked slot holds nothing.
     if let Some(looks) = &run.dress_as {
         for (slot, (e, _)) in run.villagers.slots.iter().enumerate() {
-            if run.villagers.skinned
-                && let Some(i) = run.villagers.bodies.holder(slot)
-            {
+            if !run.villagers.skinned {
+                continue;
+            }
+            if let Some(i) = run.villagers.bodies.holder(slot) {
                 let v = &life.villagers()[i];
-                play(world, *e, looks.clip(v.role, v.pose));
+                let clip = looks.clip(v.role, v.pose);
+                play(world, *e, clip);
+                hold_gear(
+                    world,
+                    &mut run.gear,
+                    *e,
+                    looks,
+                    body_of(run.table.as_ref(), looks, v),
+                    clip,
+                );
+            } else {
+                hold_gear(world, &mut run.gear, *e, looks, None, None);
             }
         }
         for (slot, (e, _)) in run.beasts.slots.iter().enumerate() {
@@ -1990,6 +2080,13 @@ mod tests {
                         "Child": ["characters/crowd_04/crowd_04.glb"]
                     },
                     "poses": {"Walk": "Loco_Walk_F_Loop", "Idle": "Idle_Neutral_Loop", "Play": "Child_Tag"},
+                    "gear": {
+                        "Loco_Walk_F_Loop": [{"piece": "basket", "file": "characters/gear/basket.glb", "nodes": [0, 1],
+                                              "joint": "weapon_r", "offset": [0.0, 0.2, 0.0]}],
+                        "Idle_Neutral_Loop": [{"piece": "besom", "file": "characters/gear/besom.glb", "nodes": [0],
+                                               "joint": "weapon_r"}]
+                    },
+                    "heights": {"characters/kael_00/kael_00.glb": 1.32},
                     "child_poses": {"Walk": "Child_Walk_F_Loop", "Idle": "Child_Idle_Loop"},
                     "walk_speed": 0.86
                 }))
@@ -2063,6 +2160,50 @@ mod tests {
             dressed += 1;
         }
         assert!(dressed > 0, "somebody out of doors at eleven");
+        // What their clips hold: a socket on the joint, sized to the body, its meshes under it.
+        let mut holding = 0;
+        for (slot, (e, _)) in run.villagers.slots.iter().enumerate() {
+            let Some(i) = run.villagers.bodies.holder(slot) else {
+                continue;
+            };
+            let v = &run.life.villagers()[i];
+            let clip = run.dress_as.as_ref().unwrap().clip(v.role, v.pose);
+            let held = &run.gear[e].1;
+            let wants = match clip {
+                Some("Loco_Walk_F_Loop") => 3,
+                Some("Idle_Neutral_Loop") => 2,
+                _ => 0,
+            };
+            assert_eq!(held.len(), wants, "{:?} in {clip:?}", v.role);
+            if let Some(socket) = held.first() {
+                assert_eq!(world.get::<Parent>(*socket).unwrap().entity, *e);
+                let joint = &world
+                    .get::<crate::skinned_crowd::SkinnedSocket>(*socket)
+                    .unwrap()
+                    .joint;
+                assert_eq!(joint, "weapon_r");
+                let t = world.get::<Transform>(*socket).unwrap();
+                assert!(
+                    (t.scale.x - 0.75).abs() < 1e-5,
+                    "sized to a 1.32 m body: {}",
+                    t.scale.x
+                );
+                let mesh = world.get::<somnium_core::ImportedMesh>(held[1]).unwrap();
+                assert!(mesh.source.starts_with("assets/characters/gear/"));
+                holding += 1;
+            }
+        }
+        assert!(holding > 0, "somebody holds something");
+        // The view leaves: every slot is parked, and holds nothing.
+        let away = Vec3::new(9_000.0, 0.0, 0.0);
+        run.life.step(0.5, Clock::at(11.0), &[away], &Flat);
+        write_visuals(&mut world, &mut run, away);
+        let all: Vec<Entity> = run
+            .gear
+            .values()
+            .flat_map(|(_, held)| held.clone())
+            .collect();
+        assert!(all.is_empty(), "parked slots hold nothing");
         let _ = std::fs::remove_dir_all(root);
     }
 

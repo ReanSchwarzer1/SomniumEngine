@@ -33,7 +33,7 @@ pub use crowd::Bodies;
 pub use lod::{LodConfig, Tier};
 pub use place::{LaneGraph, Place, Spot, SpotKind};
 pub use routine::{Activity, Role, Routine};
-pub use table::{LifeTable, TableLooks, TablePlace};
+pub use table::{GearPiece, LifeTable, TableLooks, TablePlace};
 pub use sim::{
     AgentId, Beast, BeastKind, Cart, Flat, Ground, LifeWorld, Stats, Villager, VillagerDesc,
 };

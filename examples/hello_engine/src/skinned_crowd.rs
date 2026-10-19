@@ -108,7 +108,7 @@ fn schema(r: &mut TypeRegistry) {
         SkinnedBody as "hello.SkinnedBody", display "Skinned Body", version 1,
         fields {
             source { group: "Body", asset_kind_mask: somnium_asset::database::ASSET_KIND_MESH, doc: "A skinned glTF/GLB (one skeleton, baked clips). Read once however many bodies share it." },
-            clip { group: "Body", doc: "Clip name; empty plays the first." },
+            clip { group: "Body", doc: "Clip name; empty plays the first. Alternatives separated by | play the first the file has (Loco_Old_Walk_F_Loop|Loco_Walk_F_Loop)." },
             speed { group: "Body", min: -4.0, max: 4.0 },
             time { group: "Body", min: 0.0, max: 3600.0, unit: "s", doc: "Where in the clip this body starts, so a crowd is not in step." },
             lod1 { group: "LOD", asset_kind_mask: somnium_asset::database::ASSET_KIND_MESH, display_name: "LOD 1", doc: "Fewer triangles, the same skeleton and clips; drawn beyond LOD 1 Beyond. Empty: the source everywhere." },
@@ -483,11 +483,7 @@ fn hold_pose(
     time: f32,
 ) -> Option<(Vec<Vec<somnium_asset::Vertex>>, Vec<Mat4>)> {
     let skeleton = &shared.asset.skeleton;
-    let clip = shared
-        .asset
-        .clips
-        .get(clip)
-        .or_else(|| shared.asset.clips.values().next())?;
+    let clip = pick_clip(&shared.asset, clip).or_else(|| shared.asset.clips.values().next())?;
     let pose = clip.sample(skeleton, time, Playback::LOOPING).ok()?;
     let mut model = vec![Mat4::IDENTITY; skeleton.len()];
     if !pose.to_model_space(skeleton, &mut model) {
@@ -510,6 +506,16 @@ fn hold_pose(
         })
         .collect();
     Some((meshes, model))
+}
+
+/// The first of `wanted`'s alternatives (`A|B`) the file has.
+fn pick_clip<'a>(
+    asset: &'a AnimatedAsset,
+    wanted: &str,
+) -> Option<&'a somnium_anim::AnimationClip> {
+    wanted
+        .split('|')
+        .find_map(|name| asset.clips.get(name.trim()))
 }
 
 /// A vertex moved by its joints, as the GPU skin pass would.
@@ -984,10 +990,7 @@ impl SkinnedBodies {
                 let clip = if settings.clip.is_empty() {
                     first()
                 } else {
-                    shared
-                        .asset
-                        .clips
-                        .get(&settings.clip)
+                    pick_clip(&shared.asset, &settings.clip)
                         .or_else(|| if body.posed { None } else { first() })
                 };
                 if let Some(clip) = clip
@@ -1308,6 +1311,12 @@ mod tests {
             .map(|(a, b)| Vec3::from(a.position).distance(Vec3::from(b.position)))
             .fold(0.0, f32::max);
         assert!(bent > 0.01, "the tube bends ({bent} m)");
+        assert_eq!(
+            pick_clip(&shared.asset, &format!("No Such Clip|{clip}")).map(|c| c.id()),
+            shared.asset.clips.get(&clip).map(|c| c.id()),
+            "the first alternative the file has"
+        );
+        assert!(pick_clip(&shared.asset, "Nope|Nor This").is_none());
         assert!(
             hold_pose(&shared, "No Such Clip", 0.5).is_some(),
             "an unknown clip holds the first"
