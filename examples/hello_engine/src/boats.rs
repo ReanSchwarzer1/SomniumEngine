@@ -775,8 +775,9 @@ mod tests {
     use super::*;
     use somnium_physics::config::PhysicsConfig;
 
-    /// Jolt keeps process-wide state: one world at a time.
-    static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Jolt keeps process-wide state: one world at a time, the combat host's
+    /// tests included (one lock for the crate).
+    use crate::combat_demo::JOLT;
 
     fn map() -> WaterMap {
         // In world metres with the scene's origin at (1000, 0, 2000): a square lake at 10 m round the scene's (0, 0);
