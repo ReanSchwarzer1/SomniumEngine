@@ -2516,6 +2516,8 @@ pub struct CombatDemo {
     pub take_e: bool,
     /// Points brains think near as well as the protagonist and the camera (a second place the game holds streamed).
     pub focus_points: Vec<Vec3>,
+    /// The protagonist's work clip (`A|B`, looped while he stands idle: chopping, fishing), from the game.
+    pub player_clip: Option<String>,
     events: Vec<HostEvent>,
     /// Factions the game has turned against the protagonist, and those hunting
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
@@ -2587,6 +2589,7 @@ impl Default for CombatDemo {
             aboard: None,
             take_e: false,
             focus_points: Vec::new(),
+            player_clip: None,
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
@@ -3060,6 +3063,7 @@ impl CombatDemo {
             }
         }
         run.skins.seated = self.aboard.and(run.player);
+        run.skins.work = run.player.zip(self.player_clip.clone());
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
         self.events.extend(news(run, rode, &events));

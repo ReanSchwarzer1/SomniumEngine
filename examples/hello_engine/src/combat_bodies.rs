@@ -349,6 +349,8 @@ struct Skin {
     in_hand: bool,
     /// A draw (true) or a sheathe begun then: the blade changes joint at the clip's grab.
     swap: Option<(f64, bool)>,
+    /// The work clip whose tools it holds (clips.json `gear`), and their sockets.
+    worn: Option<(String, Vec<Entity>)>,
 }
 
 /// WS3's grab in Sword_Draw and release in Sword_Sheathe, unless clips.json says (`events.draw`, `events.sheathe`).
@@ -364,6 +366,7 @@ impl Skin {
             .into_iter()
             .chain(self.saddle)
             .chain(self.scabbard)
+            .chain(self.worn.into_iter().flat_map(|w| w.1))
             .collect();
         let mut parts: Vec<Entity> = world
             .iter_with::<Parent>()
@@ -426,6 +429,38 @@ fn hang(world: &mut World, socket: Entity, name: &str, piece: &str, g: &Piece) {
 /// WS3's scabbard (`characters/gear/scabbard.glb`, in the `sheath` frame), where it is there.
 const SCABBARD: &str = "characters/gear/scabbard.glb";
 
+/// Which pieces each clip holds (clips.json's `gear` table: clip to pieces).
+fn clip_gear(text: &str) -> BTreeMap<String, Vec<String>> {
+    let doc: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    doc.get("gear")
+        .and_then(|g| g.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(clip, list)| {
+            let pieces = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|g| g.get("piece").and_then(|v| v.as_str()).map(str::to_string))
+                .collect();
+            (clip.clone(), pieces)
+        })
+        .collect()
+}
+
+/// A socket on `body`'s `joint`.
+fn socket_on(world: &mut World, body: Entity, joint: &str) -> Entity {
+    world.spawn((
+        Name::new(joint),
+        Transform::default(),
+        WorldTransform::identity(),
+        Parent { entity: body },
+        SkinnedSocket {
+            joint: joint.into(),
+        },
+    ))
+}
+
 /// Each gear piece `clips.json` names (its `gear` table, clip to pieces), once, where its file is there.
 fn gear_pieces(content: &std::path::Path, text: &str) -> BTreeMap<String, Piece> {
     let doc: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
@@ -482,6 +517,10 @@ pub struct Skins {
     taken: Vec<(Entity, SkinnedBody)>,
     /// A fighter sitting in a boat (the combat host sets it): it rows, or sits.
     pub seated: Option<CombatantId>,
+    /// A fighter at work (the game's activity clip, `A|B`, looped while it stands idle), holding the clip's tools.
+    pub work: Option<(CombatantId, String)>,
+    /// Each clip's pieces (clips.json's `gear`).
+    clip_gear: BTreeMap<String, Vec<String>>,
     hidden: Vec<(Entity, Option<EditorFlags>)>,
 }
 
@@ -509,6 +548,7 @@ impl Skins {
         Self {
             table,
             gear,
+            clip_gear: text.as_deref().map(clip_gear).unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -645,6 +685,7 @@ impl Skins {
                     fought: f64::NEG_INFINITY,
                     in_hand,
                     swap: None,
+                    worn: None,
                 },
             );
         }
@@ -728,8 +769,48 @@ impl Skins {
                 }
             }
             let shown = if sheathes { skin.in_hand } else { drawn };
-            let (clip, timing) = if self.seated == Some(*id) && matches!(c.action, Action::Idle) {
+            let idle = matches!(c.action, Action::Idle);
+            let work = self
+                .work
+                .as_ref()
+                .filter(|(w, _)| w == id && idle)
+                .map(|(_, clip)| clip.clone());
+            // The tools its work clip holds, swapped when the work changes.
+            let tools = work
+                .as_deref()
+                .and_then(|w| w.split('|').find(|n| self.clip_gear.contains_key(*n)))
+                .map(str::to_string);
+            if skin.worn.as_ref().map(|w| &w.0) != tools.as_ref() {
+                for s in skin.worn.take().into_iter().flat_map(|w| w.1) {
+                    let held: Vec<Entity> = world
+                        .iter_with::<Parent>()
+                        .filter(|(_, p)| p.entity == s)
+                        .map(|(e, _)| e)
+                        .collect();
+                    for e in held.into_iter().chain([s]) {
+                        world.despawn(e);
+                    }
+                }
+                if let Some(t) = tools {
+                    let name = world
+                        .get::<Name>(skin.body)
+                        .map_or("Fighter", |n| n.as_str())
+                        .to_string();
+                    let mut sockets = Vec::new();
+                    for piece in self.clip_gear.get(&t).into_iter().flatten() {
+                        if let Some(g) = self.gear.get(piece) {
+                            let s = socket_on(world, skin.body, &g.joint);
+                            hang(world, s, &name, piece, g);
+                            sockets.push(s);
+                        }
+                    }
+                    skin.worn = Some((t, sockets));
+                }
+            }
+            let (clip, timing) = if self.seated == Some(*id) && idle {
                 ("Row_Loop|Sit_Idle_Loop".to_string(), Timing::Loop(1.0))
+            } else if let Some(work) = work {
+                (work, Timing::Loop(1.0))
             } else if let Some(swap) = swapping {
                 swap
             } else {
@@ -983,6 +1064,64 @@ mod tests {
         assert_eq!(joint(&world), "weapon_r", "not released yet");
         tick(&mut combat, &mut world, &mut skins, 0.5);
         assert_eq!(joint(&world), "sheath", "back in the sheath");
+    }
+
+    /// The game's work clip plays while he stands idle, holding the clip's
+    /// tools (clips.json `gear`); without it his own moves come back and the
+    /// tools go.
+    #[test]
+    fn at_work_he_plays_its_clip_holding_its_tools() {
+        let dir = std::env::temp_dir().join(format!("combat_work_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("characters/gear")).unwrap();
+        std::fs::write(dir.join("characters/gear/axe.glb"), b"").unwrap();
+        let text = r#"{"gear": {
+            "Chop_Wood_Loop": [{"piece": "axe", "file": "characters/gear/axe.glb", "nodes": [0, 1], "joint": "weapon_r"}]},
+            "clips": {}, "aliases": {}}"#;
+        let mut skins = Skins {
+            gear: gear_pieces(&dir, text),
+            clip_gear: clip_gear(text),
+            ..Default::default()
+        };
+        let (combat, id) = fighter();
+        let mut world = World::new();
+        let caelan = world.spawn((
+            Name::new("Caelan"),
+            Transform::default(),
+            WorldTransform::identity(),
+            SkinnedBody::default(),
+        ));
+        let mut spawned = Vec::new();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(id, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        let body = spawned[0];
+        let axes = |world: &World| {
+            world
+                .iter_with::<Name>()
+                .filter(|(_, n)| n.as_str().contains(" axe "))
+                .count()
+        };
+        skins.work = Some((id, "Chop_Wood_Loop|Idle_Loop".into()));
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert_eq!(
+            world.get::<SkinnedBody>(body).unwrap().clip,
+            "Chop_Wood_Loop|Idle_Loop"
+        );
+        assert_eq!(axes(&world), 2, "the axe's two nodes in his hand");
+        skins.work = None;
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert!(
+            world
+                .get::<SkinnedBody>(body)
+                .unwrap()
+                .clip
+                .starts_with("Idle_Neutral_Loop")
+        );
+        assert_eq!(axes(&world), 0, "put down");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// clips.json's gear table gives each piece once, only where its file is

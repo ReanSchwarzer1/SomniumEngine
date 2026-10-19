@@ -918,6 +918,12 @@ impl HelloGame {
         self.life.focus_points = points.to_vec();
     }
 
+    /// The protagonist's work clip while he stands idle (chopping, fishing, cutting peat: `A|B`, looped), holding the
+    /// clip's tools from clips.json `gear`; `None` gives him his own moves back.
+    pub fn set_player_clip(&mut self, clip: Option<String>) {
+        self.combat.player_clip = clip;
+    }
+
     /// Put the protagonist back from a save (out of any boat): see `CombatDemo::restore_player`.
     pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
         self.boats.cast_off();
