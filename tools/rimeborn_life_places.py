@@ -11,9 +11,11 @@ built, as a place in the composed world's frame (eirvane: compose_tyffir.py's WO
     elders by the body's age (SOURCE.json), smiths, priests, keepers and herders by their family, anyone else as the
     town's adults; guards stay WS3's set pieces. Over the table's looks (WS3's crowd contract).
 
-Reads (only): <rimeborn>/data/scatter/tyffir_places.json (WS1: places, streets, plots, areas; tyffir-local),
-<rimeborn>/data/placements/realm/*.json (WS2: the realm's buildings; tyffir-local), <rimeborn>/data/placements/*.json
-(WS2: the Eirvane tile's towns and farmsteads; eirvane frame), <rimeborn>/tools/world_frame.py (the anchors),
+Reads (only), every region the files exist for (Tyffir today; the Ash Road's and Vespergate's when they are made):
+<rimeborn>/data/scatter/<region>_places.json (WS1's site plans: places, streets, plots, areas; that region's frame),
+<rimeborn>/data/placements/<region>/*.json (WS2's buildings; that region's frame, `realm` being Tyffir's; a file's own
+"frame" or "rimeborn": {"region"} wins), <rimeborn>/data/placements/*.json (the Eirvane tile's towns and farmsteads;
+eirvane frame), <rimeborn>/tools/world_frame.py (the anchors),
 <rimeborn>/scenes/char_*_people.scene.json and <rimeborn>/assets/characters/*/SOURCE.json (WS3: who lives where).
 
   python tools/rimeborn_life_places.py --rimeborn games/Rimeborn      # writes games/Rimeborn/data/life/tyffir_life.json
@@ -383,9 +385,14 @@ def build(rimeborn: Path):
         a, w = world_frame.REGION_ANCHORS[frame], world_frame.REGION_ANCHORS[WORLD]
         return (a[0] - w[0], a[1] - w[1], a[2] - w[2])
 
-    ws1 = json.loads((rimeborn / "data/scatter/tyffir_places.json").read_text(encoding="utf-8"))
-    by_name = {p["name"].lower(): p for p in ws1["places"]}
-    tdx, tdy, tdz = shift("tyffir")
+    # WS1's site plans, each in its region's frame (`<region>_places.json`).
+    by_name = {}
+    for f in sorted((rimeborn / "data/scatter").glob("*_places.json")):
+        frame = f.stem[: -len("_places")]
+        if frame not in world_frame.REGION_ANCHORS:
+            continue
+        for site in json.loads(f.read_text(encoding="utf-8")).get("places", []):
+            by_name.setdefault(site["name"].lower(), (site, frame))
     places, report = [], []
     index = people_index(rimeborn)
     looks = looks_of(rimeborn)
@@ -422,19 +429,56 @@ def build(rimeborn: Path):
         report.append(f"  {name}: {kinds}, {len(lanes)} lanes ({sum(len(l) for l in lanes)} points), "
                       f"{len(roads)} roads")
 
-    # The realm (tyffir-local, y absolute), with WS1's streets, plots and areas.
-    for f in sorted((rimeborn / "data/placements/realm").glob("*.json")):
-        d = json.loads(f.read_text(encoding="utf-8"))
-        site = by_name.get(d["settlement"].lower())
-        if site is None:
-            report.append(f"  {d['settlement']}: not in WS1's site plan, left out")
-            continue
-        plots = {pl["id"]: pl for pl in site["plots"]}
-        spots = building_spots(d["buildings"], plots, tdx, tdy, tdz, bounds)
-        spots += [area_spot(a, tdx, tdz) for a in site["areas"] if a["use"] in BY_AREA]
-        lanes, roads = lanes_of(site["streets"], tdx, tdz, heights_from(site["plots"], site["ground_y"]))
-        add(d["settlement"], (site["x"] + tdx, site["ground_y"], site["z"] + tdz), float(site["radius_m"]),
-            spots, lanes, roads)
+    def frame_of(d, default):
+        """A placement file's own frame where it names a region (its "frame", or "rimeborn": {"region"}; some files'
+        "frame" is a description), else its folder's."""
+        for frame in (d.get("frame"), (d.get("rimeborn") or {}).get("region")):
+            if frame in world_frame.REGION_ANCHORS:
+                return frame
+        return default
+
+    def place(name, d, frame, centred=None, planned=True):
+        """A placement's place: its buildings (in `frame`), and WS1's streets and areas where it has the place (in the
+        site plan's frame); without a site plan its centre is its buildings' middle and nobody walks a lane. `planned`
+        is false for a placement not built on the site plan's plots (the Eirvane tile's): it keeps its own centre."""
+        dx, dy, dz = shift(frame)
+        spots = building_spots(d.get("buildings", []), plots_of(name) if planned else {}, dx, dy, dz, bounds)
+        lanes, roads = [], []
+        found = by_name.get(name.lower())
+        if found:
+            site, site_frame = found
+            sx, _, sz = shift(site_frame)
+            lanes, roads = lanes_of(site["streets"], sx, sz, heights_from(site["plots"], site["ground_y"]))
+            spots += [area_spot(a, sx, sz) for a in site["areas"] if a["use"] in BY_AREA]
+            if centred is None and planned:
+                centred = ((site["x"] + sx, site["ground_y"], site["z"] + sz), float(site["radius_m"]))
+        if centred is None:
+            xs = [sp["position"] for sp in spots] or [[0.0, 0.0, 0.0]]
+            centre = tuple(sum(p[i] for p in xs) / len(xs) for i in range(3))
+            centred = (centre, max(math.dist((centre[0], centre[2]), (p[0], p[2])) for p in xs) + 10.0)
+        add(name, centred[0], centred[1], spots, lanes, roads)
+
+    def plots_of(name):
+        found = by_name.get(name.lower())
+        return {pl["id"]: pl for pl in found[0]["plots"]} if found else {}
+
+    # Each region's settlements (`data/placements/<region>/`, `realm` being Tyffir's), with WS1's streets, plots and
+    # areas where it has drawn the place.
+    for folder in sorted(p for p in (rimeborn / "data/placements").iterdir() if p.is_dir()):
+        default = "tyffir" if folder.name == "realm" else folder.name
+        for f in sorted(folder.glob("*.json")):
+            d = json.loads(f.read_text(encoding="utf-8"))
+            frame = frame_of(d, default)
+            if frame not in world_frame.REGION_ANCHORS:
+                report.append(f"  {f.relative_to(rimeborn).as_posix()}: no frame named {frame!r}, left out")
+                continue
+            name = d.get("settlement") or f.stem.replace("_", " ").title()
+            # Tyffir's realm placements without WS1's site plan are the Eirvane tile's towns built again elsewhere
+            # (that tile's own placement is the one composed); a new region's are its own.
+            if default == "tyffir" and name.lower() not in by_name:
+                report.append(f"  {name}: not in WS1's site plan, left out")
+                continue
+            place(name, d, frame)
 
     # The Eirvane tile's towns and farmsteads (eirvane frame, y absolute); WS1's streets where it has the place.
     for f in sorted((rimeborn / "data/placements").glob("*.json")):
@@ -442,21 +486,9 @@ def build(rimeborn: Path):
             continue
         d = json.loads(f.read_text(encoding="utf-8"))
         name = d.get("settlement") or f.stem.replace("_", " ").title()
-        spots = building_spots(d.get("buildings", []), {}, 0.0, 0.0, 0.0, bounds)
-        site = by_name.get(name.lower())
-        lanes, roads = [], []
-        if site:
-            lanes, roads = lanes_of(site["streets"], tdx, tdz, heights_from(site["plots"], site["ground_y"]))
-            spots += [area_spot(a, tdx, tdz) for a in site["areas"] if a["use"] in BY_AREA]
         s = d.get("site") or {}
-        if "x" in s:
-            centre = (s["x"], s.get("y", 0.0), s["z"])
-            radius = float(s.get("radius_m", s.get("radius", 60)))
-        else:
-            xs = [sp["position"] for sp in spots] or [[0.0, 0.0, 0.0]]
-            centre = tuple(sum(p[i] for p in xs) / len(xs) for i in range(3))
-            radius = max(math.dist((centre[0], centre[2]), (p[0], p[2])) for p in xs) + 10.0
-        add(name, centre, radius, spots, lanes, roads)
+        centred = ((s["x"], s.get("y", 0.0), s["z"]), float(s.get("radius_m", s.get("radius", 60)))) if "x" in s else None
+        place(name, d, frame_of(d, WORLD), centred, planned=False)
 
     # A town WS2 built twice (the realm's and the Eirvane tile's own placement, at the same centre): the fuller one.
     fullest = {}
