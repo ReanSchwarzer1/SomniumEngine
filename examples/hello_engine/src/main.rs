@@ -2643,11 +2643,21 @@ impl GameApp for HelloGame {
                 let painted = archetype
                     .column_index(ComponentId::of::<somnium_core::vertex_paint::VertexPaintComponent>())
                     .is_some();
+                let water_col = archetype.column_index(ComponentId::of::<somnium_core::WaterComponent>());
                 for row in 0..archetype.len() {
                     if let Some(col) = flags_col
                         && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
                     {
                         continue;
+                    }
+                    // A water body the water pass draws (below) is not also drawn as its plain mesh: that opaque copy
+                    // sat in the depth buffer exactly under the surface, and the water's soft edge faded it to
+                    // nothing over it (imported rivers and springs showed as their dark glTF material, WS1-21).
+                    if let Some(col) = water_col {
+                        let water = unsafe { archetype.column(col).get::<somnium_core::WaterComponent>(row) };
+                        if water.enabled && water.water_id != u32::MAX && water.preset != 0 {
+                            continue;
+                        }
                     }
                     let wt = unsafe { archetype.column(wt_col).get::<WorldTransform>(row) };
                     let mesh = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
