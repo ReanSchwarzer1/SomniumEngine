@@ -574,17 +574,11 @@ mod tests {
         let g = LaneGraph::new(&lanes);
         // The same by a scan of every node.
         let mut nodes: Vec<Vec3> = Vec::new();
-        let mut want = Vec::new();
         for lane in &lanes {
             for &p in lane {
-                let i = nodes
-                    .iter()
-                    .position(|n| flat(*n, p) < JOIN)
-                    .unwrap_or_else(|| {
-                        nodes.push(p);
-                        nodes.len() - 1
-                    });
-                want.push(i);
+                if !nodes.iter().any(|n| flat(*n, p) < JOIN) {
+                    nodes.push(p);
+                }
             }
         }
         assert_eq!(g.nodes, nodes);
@@ -603,7 +597,6 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        let _ = want;
     }
 
     /// The grid finds the same nearest lane point as looking at every segment,
