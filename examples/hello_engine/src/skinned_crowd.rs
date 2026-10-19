@@ -457,6 +457,35 @@ pub struct SkinnedBodies {
     /// were found at.
     subtrees: HashMap<Entity, Vec<Entity>>,
     subtrees_for: usize,
+    /// The content root's glTF binaries by id, from one walk of it (on a worker
+    /// thread), for the frames before the editor's inventory is published: a
+    /// standalone game's first minute or so, when nobody would otherwise draw.
+    walked: Option<HashMap<AssetId, std::path::PathBuf>>,
+    walking: Option<std::sync::mpsc::Receiver<HashMap<AssetId, std::path::PathBuf>>>,
+}
+
+/// Every glTF binary under `root`, by the id of its path relative to it.
+fn walk_glbs(root: &std::path::Path) -> HashMap<AssetId, std::path::PathBuf> {
+    let mut found = HashMap::new();
+    let mut next = vec![root.to_path_buf()];
+    while let Some(dir) = next.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                next.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("glb"))
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                found.insert(AssetId::from_relative_path(relative), path);
+            }
+        }
+    }
+    found
 }
 
 impl Default for SkinnedBodies {
@@ -477,6 +506,8 @@ impl Default for SkinnedBodies {
             stats: Stats::default(),
             subtrees: HashMap::new(),
             subtrees_for: 0,
+            walked: None,
+            walking: None,
         }
     }
 }
@@ -948,6 +979,32 @@ impl SkinnedBodies {
                 }
             }
         }
+        // A file the editor's inventory does not have yet is found by walking
+        // the content root, once.
+        if let Some(found) = self.walking.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.walked = Some(found);
+            self.walking = None;
+        }
+        if self.walked.is_none()
+            && self.walking.is_none()
+            && wanted_ids
+                .iter()
+                .any(|id| ctx.ui.asset_record(*id).is_none())
+        {
+            let root = ctx.config.content_root.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(walk_glbs(&root));
+            });
+            self.walking = Some(rx);
+        }
+        let walked = self.walked.as_ref();
+        let ui = &*ctx.ui;
+        let path_of = |id: AssetId| {
+            ui.asset_record(id)
+                .map(|r| r.absolute_path.clone())
+                .or_else(|| walked?.get(&id).cloned())
+        };
         let started = Instant::now();
         let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
         let (mut registered, mut waiting, mut register_ms) = (0, 0, 0.0);
@@ -974,7 +1031,7 @@ impl SkinnedBodies {
                     && !self.failed.contains_key(id)
                     && !self.sizing.contains(id)
             })
-            .filter_map(|id| Some((*id, ctx.ui.asset_record(*id)?.absolute_path.clone())))
+            .filter_map(|id| Some((*id, path_of(*id)?)))
             .collect();
         if !to_size.is_empty() {
             self.sizing.extend(to_size.iter().map(|(id, _)| *id));
@@ -1078,10 +1135,9 @@ impl SkinnedBodies {
             {
                 continue;
             }
-            let Some(record) = ctx.ui.asset_record(id) else {
+            let Some(path) = path_of(id) else {
                 continue;
             };
-            let path = record.absolute_path.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let _ = tx.send(AnimatedAsset::load(&path).map_err(|e| e.to_string()));
@@ -1376,6 +1432,24 @@ impl SkinnedBodies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The walk finds glTF binaries anywhere under the root by the same id the
+    /// editor's inventory gives them, and nothing else.
+    #[test]
+    fn a_walk_finds_bodies_by_their_ids() {
+        let root = std::env::temp_dir().join(format!("skinned_walk_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("characters/Caelan_Adult")).unwrap();
+        std::fs::write(root.join("characters/Caelan_Adult/caelan_adult.GLB"), b"").unwrap();
+        std::fs::write(root.join("characters/Caelan_Adult/SOURCE.json"), b"{}").unwrap();
+        let found = walk_glbs(&root);
+        assert_eq!(found.len(), 1);
+        let id = AssetId::from_relative_path("characters/caelan_adult/caelan_adult.glb");
+        assert_eq!(
+            found.get(&id),
+            Some(&root.join("characters/Caelan_Adult/caelan_adult.GLB"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// The preset lays out as many bodies as asked, under one root, out of
     /// step with each other.

@@ -233,9 +233,15 @@ pub fn toggle(w: &mut CombatWorld, rider: CombatantId) -> Result<(), MountError>
         dismount(w, rider);
         return Ok(());
     }
-    let at = r.position;
-    let nearest = w
-        .combatants()
+    let nearest = nearest_free(w, rider).ok_or(MountError::Missing)?;
+    mount(w, rider, nearest)
+}
+
+/// The nearest free, living mount to `rider`: the one [`toggle`] climbs into.
+#[must_use]
+pub fn nearest_free(w: &CombatWorld, rider: CombatantId) -> Option<CombatantId> {
+    let at = w.combatant(rider)?.position;
+    w.combatants()
         .filter(|c| c.mount_def.is_some() && c.rider.is_none() && c.alive() && c.id != rider)
         .min_by(|a, b| {
             flat(a.position - at)
@@ -243,8 +249,6 @@ pub fn toggle(w: &mut CombatWorld, rider: CombatantId) -> Result<(), MountError>
                 .total_cmp(&flat(b.position - at).length())
         })
         .map(|c| c.id)
-        .ok_or(MountError::Missing)?;
-    mount(w, rider, nearest)
 }
 
 /// Why mounting failed.

@@ -2211,6 +2211,17 @@ impl Hud {
     }
 }
 
+/// What the fight tells the game ([`CombatDemo::take_events`]), as entities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostEvent {
+    /// The protagonist climbed into a saddle.
+    Mounted { rider: Entity, mount: Entity },
+    /// The protagonist reached for a mount the game refuses ([`CombatDemo::refused_mounts`]).
+    MountRefused { mount: Entity },
+    /// Someone hurt a combatant not hostile to them (a bystander, the watch, a horse).
+    Hit { attacker: Entity, target: Entity },
+}
+
 /// The sandbox's runtime.
 pub struct CombatDemo {
     run: Option<Run>,
@@ -2226,6 +2237,9 @@ pub struct CombatDemo {
     pub show_hud: bool,
     /// The fight's latest events, for a game's HUD (the newest [`HUD_EVENTS`]).
     hud_events: VecDeque<CombatEvent>,
+    /// Mounts the protagonist may not take now, the game's say (someone else's horse before the story allows it).
+    pub refused_mounts: std::collections::HashSet<Entity>,
+    events: Vec<HostEvent>,
 }
 
 /// How many of the fight's events wait for a game's HUD before the oldest go.
@@ -2265,6 +2279,8 @@ impl Default for CombatDemo {
             ctrl: false,
             show_hud: true,
             hud_events: VecDeque::new(),
+            refused_mounts: Default::default(),
+            events: Vec::new(),
         }
     }
 }
@@ -2523,7 +2539,13 @@ impl CombatDemo {
                 ..somnium_combat::Command::default()
             };
         }
+        self.events.extend(gate_mount(run, &self.refused_mounts, player, &mut cmd));
         run.world.command(player, cmd);
+    }
+
+    /// What the fight told the game since it last asked.
+    pub fn take_events(&mut self) -> Vec<HostEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// One fixed step of the fight, then everything it changed onto the scene.
@@ -2552,6 +2574,7 @@ impl CombatDemo {
             .then_some(editor)
             .or(run.nav.as_ref());
         let query = JoltQuery(ctx.physics);
+        let rode = run.player.and_then(|p| run.world.combatant(p)).and_then(|c| c.mount);
         run.world.step(dt, &query, nav);
         let terrain = JoltTerrain {
             physics: ctx.physics,
@@ -2562,6 +2585,7 @@ impl CombatDemo {
         }
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
+        self.events.extend(news(run, rode, &events));
         for event in &events {
             react(ctx, run, event);
         }
@@ -3423,6 +3447,52 @@ fn mark(world: &mut World, run: &mut Run, at: Vec3, size: f32, mat: &str) {
 }
 
 /// Turn one event into presentation: ragdolls, impacts, marks, the log.
+/// The protagonist's reach for the nearest free mount, refused where the game
+/// says (the command's `mount` dropped, so the step leaves it be).
+fn gate_mount(
+    run: &Run,
+    refused: &std::collections::HashSet<Entity>,
+    player: CombatantId,
+    cmd: &mut somnium_combat::Command,
+) -> Option<HostEvent> {
+    if !cmd.mount || refused.is_empty() || run.world.combatant(player)?.mount.is_some() {
+        return None;
+    }
+    let mount = *run.bodies.get(&somnium_combat::mount::nearest_free(&run.world, player)?)?;
+    refused.contains(&mount).then(|| {
+        cmd.mount = false;
+        HostEvent::MountRefused { mount }
+    })
+}
+
+/// A step's news for the game: the protagonist in a saddle it was not in
+/// (`rode`, before the step), and hits on combatants not hostile to who hit.
+fn news(run: &Run, rode: Option<CombatantId>, events: &[CombatEvent]) -> Vec<HostEvent> {
+    let entity = |id: &CombatantId| run.bodies.get(id).copied();
+    let mut out: Vec<HostEvent> = events
+        .iter()
+        .filter_map(|e| match e {
+            CombatEvent::Damaged {
+                target,
+                source: Some(by),
+                ..
+            } if by != target && !run.world.hostile(*by, *target) => Some(HostEvent::Hit {
+                attacker: entity(by)?,
+                target: entity(target)?,
+            }),
+            _ => None,
+        })
+        .collect();
+    if let Some(p) = run.player
+        && let Some(m) = run.world.combatant(p).and_then(|c| c.mount)
+        && rode != Some(m)
+        && let (Some(rider), Some(mount)) = (entity(&p), entity(&m))
+    {
+        out.push(HostEvent::Mounted { rider, mount });
+    }
+    out
+}
+
 fn react(ctx: &mut EngineContext, run: &mut Run, event: &CombatEvent) {
     match event {
         CombatEvent::Damaged {
@@ -4645,6 +4715,64 @@ mod tests {
             crew.iter().map(|(_, _, b)| b.as_ref().expect("a body").source).collect();
         assert_eq!(faces.len(), 4);
         assert!((encounter_extent("lampmen") - 8.0).abs() < 1e-6);
+    }
+
+    /// A mount the game refuses stays put when reached for; one it allows is
+    /// mounted and told; a hit on a combatant not hostile to who hit is told,
+    /// a hit on a foe is not.
+    #[test]
+    fn the_game_gates_mounting_and_hears_of_bystanders_hit() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        let player = run.player.unwrap();
+        let id_of = |run: &Run, name: &str| run.world.combatants().find(|c| c.name == name).map(|c| c.id).unwrap();
+        let elk = id_of(&run, "Frost-elk");
+        let feet = run.world.combatant(player).unwrap().position;
+        run.world.combatant_mut(elk).unwrap().position = feet + Vec3::X;
+        let elk_entity = run.bodies[&elk];
+        let reach = || somnium_combat::Command {
+            mount: true,
+            ..Default::default()
+        };
+        let refused = std::collections::HashSet::from([elk_entity]);
+        let mut cmd = reach();
+        assert_eq!(
+            gate_mount(&run, &refused, player, &mut cmd),
+            Some(HostEvent::MountRefused { mount: elk_entity })
+        );
+        assert!(!cmd.mount, "the reach is dropped");
+        let mut cmd = reach();
+        assert_eq!(gate_mount(&run, &Default::default(), player, &mut cmd), None);
+        assert!(cmd.mount);
+        run.world.command(player, cmd);
+        run.world.step(1.0 / 60.0, &somnium_combat::OpenField, run.nav.as_ref());
+        let events = run.world.drain_events();
+        assert_eq!(run.world.combatant(player).unwrap().mount, Some(elk));
+        assert!(news(&run, None, &events).contains(&HostEvent::Mounted {
+            rider: run.bodies[&player],
+            mount: elk_entity
+        }));
+        assert!(news(&run, Some(elk), &[]).is_empty(), "told once, on climbing up");
+        let foe = run.world.combatants().find(|c| run.world.hostile(player, c.id)).map(|c| c.id).expect("a raider");
+        let hit = |target| CombatEvent::Damaged {
+            target,
+            source: Some(player),
+            amount: 5.0,
+            kind: DamageType::Cut,
+            point: Vec3::ZERO,
+            critical: false,
+            flags: HitFlags::default(),
+        };
+        assert!(!run.world.hostile(player, elk), "his own mount is no foe");
+        assert_eq!(
+            news(&run, Some(elk), &[hit(elk), hit(foe)]),
+            vec![HostEvent::Hit {
+                attacker: run.bodies[&player],
+                target: elk_entity
+            }]
+        );
     }
 
     #[test]
