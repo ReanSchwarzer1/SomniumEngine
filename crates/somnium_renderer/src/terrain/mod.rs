@@ -1125,8 +1125,10 @@ impl TerrainData {
         let far = dx.hypot(dz);
         if far <= self.geometry_stream_distance {
             // A few chunks a frame, nearest first: each one is rebuilt from the heights (and its BLAS) when it lands,
-            // and a whole window at once stalled the frame.
-            const CHUNKS_PER_FRAME: usize = 64;
+            // and a whole window at once stalled the frame. 64 still cost 40-120 ms frames as a window returned
+            // (Rimeborn's Kaelmar and Greyham, 19 Oct); 16 spreads it thinner. The window starts 800 m out, so the
+            // nearest-first order fills what is seen long before the last chunk lands.
+            const CHUNKS_PER_FRAME: usize = 16;
             let capacity = self.chunk_vertex_capacity;
             let span = self.desc.chunk_cells as f32 * self.desc.cell_size;
             let mut waiting: Vec<(f32, usize)> = self
