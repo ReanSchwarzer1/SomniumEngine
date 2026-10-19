@@ -552,8 +552,8 @@ struct Faces {
 /// riding crops and pistols green, canes white, unseen blue), `watch`,
 /// `lance` and `knights` are factions. Lamp-men wear WS3's Lamp-men of their
 /// Lamp (`lampman_NN`, the bosses by age: the Varga's 21 or 15, the
-/// Castellane's 10 or 18); the watch its guards; the Lance and the knights
-/// its lances.
+/// Castellane's 10 or 18, amber 28, green 32, blue 30); the watch its guards;
+/// the Lance and the knights its lances.
 fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
     use Archetype::{Brute, Duelist, Rifleman, Skirmisher, Spearman};
     use WeaponKind::{Axe, Knife, LanceGlaive, LatticeRifle, Spear, Sword, Unarmed};
@@ -616,18 +616,18 @@ fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
     };
     const AMBER_MEN: Faces = Faces {
         family: "lampman",
-        leaders: &[],
-        others: &[1, 6, 11],
+        leaders: &[28],
+        others: &[1, 6, 11, 25, 31],
     };
     const GREEN_MEN: Faces = Faces {
         family: "lampman",
-        leaders: &[],
-        others: &[3, 8, 13],
+        leaders: &[32],
+        others: &[3, 8, 13, 26, 29],
     };
     const BLUE_MEN: Faces = Faces {
         family: "lampman",
-        leaders: &[],
-        others: &[4, 9, 14],
+        leaders: &[30],
+        others: &[4, 9, 14, 27, 33],
     };
     const GUARDS: Faces = Faces {
         family: "guard",
@@ -5246,7 +5246,7 @@ mod tests {
     fn a_lamp_crew_stands_along_its_street() {
         use crate::skinned_crowd::SkinnedBody;
         let content = std::env::temp_dir().join("somnium_combat_crew");
-        for n in 0..25 {
+        for n in 0..34 {
             let path = content.join(format!("characters/lampman_{n:02}/lampman_{n:02}.glb"));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"").unwrap();
@@ -5285,6 +5285,24 @@ mod tests {
         assert!(varga(&[21, 15]).contains(&boss.source));
         let men = varga(&[2, 7, 12, 17, 19, 23]);
         assert!(crew.iter().filter(|(_, c, _)| !c.leader).all(|(_, _, b)| men.contains(&b.as_ref().unwrap().source)));
+        // Every Lamp's crew wears four different men, its boss its own.
+        for (colour, boss) in [("amber", 28u8), ("green", 32), ("blue", 30), ("white", 10)] {
+            let mut world = World::new();
+            let made = build_encounter(&mut world, &format!("lampmen {colour}"), Vec3::ZERO, Vec3::X, false, Some(&content))
+                .expect("a crew");
+            let worn: Vec<(bool, AssetId)> = made
+                .iter()
+                .filter_map(|e| {
+                    let leader = world.get::<CombatantComponent>(*e)?.leader;
+                    Some((leader, world.get::<SkinnedBody>(*e)?.source))
+                })
+                .collect();
+            let distinct: std::collections::BTreeSet<AssetId> = worn.iter().map(|w| w.1).collect();
+            assert_eq!((worn.len(), distinct.len()), (4, 4), "{colour}");
+            if colour != "white" {
+                assert!(worn.iter().any(|w| w.0 && varga(&[boss]).contains(&w.1)), "{colour}'s boss");
+            }
+        }
         assert!((encounter_extent("lampmen") - 8.0).abs() < 1e-6);
     }
 
