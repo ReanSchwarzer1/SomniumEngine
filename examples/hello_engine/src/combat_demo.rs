@@ -1401,6 +1401,9 @@ const PATCH_CELL: f32 = 2.0;
 const PATCH_REACH: f32 = 32.0;
 /// The middle of a patch's cell id, apart from any baked tile's.
 const PATCH_LAYER: i64 = 1 << 40;
+/// Over a group's feet, the height from which an indoor patch is cast for:
+/// above the heads, below an upper floor.
+const INDOOR_HEAD: f32 = 2.2;
 
 /// The navigation patch round a woken encounter, where no navmesh was baked:
 /// the ground's height every [`PATCH_CELL`] metres from a cast down through
@@ -1419,11 +1422,22 @@ fn patch(
     let snap = |v: f32| (v / PATCH_CELL).floor() * PATCH_CELL;
     let (x0, z0) = (snap(at.x - half), snap(at.z - half));
     let side = ((2.0 * half) / PATCH_CELL).ceil() * PATCH_CELL + PATCH_CELL;
-    let ground = |x: f32, z: f32| {
-        let (top, bottom) = (Vec3::new(x, at.y + 60.0, z), Vec3::new(x, at.y - 60.0, z));
-        let y = query
+    let cast = |top: Vec3, bottom: Vec3| {
+        query
             .sweep(top, bottom, 0.05)
-            .map(|h| top.y + (bottom.y - top.y) * h.fraction - 0.05)?;
+            .map(|h| top.y + (bottom.y - top.y) * h.fraction - 0.05)
+    };
+    // Indoors (a roof over the group and a floor at its feet: the Varga
+    // warehouse's store) the ground is cast for from just over the heads, so
+    // the patch is the floor and its walls, not the roof. Out of doors it is
+    // cast for from high above, as ever.
+    let down = Vec3::new(at.x, at.y - 60.0, at.z);
+    let roof = cast(Vec3::new(at.x, at.y + 60.0, at.z), down);
+    let floor = cast(Vec3::new(at.x, at.y + INDOOR_HEAD, at.z), down);
+    let indoors = matches!((roof, floor), (Some(r), Some(f)) if r > at.y + INDOOR_HEAD && (f - at.y).abs() < 1.5);
+    let from = if indoors { at.y + INDOOR_HEAD } else { at.y + 60.0 };
+    let ground = |x: f32, z: f32| {
+        let y = cast(Vec3::new(x, from, z), Vec3::new(x, at.y - 60.0, z))?;
         let deep = pools.water_surface(x, z).is_some_and(|w| w > y + 0.5);
         (!deep).then_some(y)
     };
@@ -5465,6 +5479,70 @@ mod tests {
         assert!(demo.set_player(&world, other_entity), "already him");
     }
 
+    /// Jolt worlds built at once in one process fault (its global set-up):
+    /// the tests that build one hold this.
+    static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A post inside a roofed house (the Varga warehouse's store) gets a patch
+    /// of its floor, walled in, not of its roof: a path across the room keeps
+    /// to the floor and goes out by the door.
+    #[test]
+    fn an_indoor_post_gets_a_patch_of_its_floor() {
+        let (mut world, mut demo) = host_with(&[]);
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        let inside = Vec3::new(-4.0, 0.0, -2.0);
+        {
+            let run = demo.run.as_mut().unwrap();
+            run.world.combatant_mut(hero).unwrap().position = inside;
+            run.walkers.get_mut(&hero).unwrap().feet = inside;
+        }
+        world.spawn((
+            Name::new("Store post"),
+            Transform::from_translation(Vec3::new(2.0, 0.0, 1.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "lampmen".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let _jolt = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
+        let slab = |size: Vec3, at: Vec3| Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, at);
+        // A 16 x 12 house: walls 4.2 m high, a door 2 m wide in the south
+        // wall, an upper floor at 4.2 and a roof at 8.
+        solid_bodies(
+            &mut physics,
+            vec![
+                slab(Vec3::new(300.0, 1.0, 300.0), Vec3::new(0.0, -0.5, 0.0)),
+                slab(Vec3::new(16.0, 4.2, 0.4), Vec3::new(0.0, 2.1, 6.0)),
+                slab(Vec3::new(0.4, 4.2, 12.0), Vec3::new(-8.0, 2.1, 0.0)),
+                slab(Vec3::new(0.4, 4.2, 12.0), Vec3::new(8.0, 2.1, 0.0)),
+                slab(Vec3::new(7.0, 4.2, 0.4), Vec3::new(-4.5, 2.1, -6.0)),
+                slab(Vec3::new(7.0, 4.2, 0.4), Vec3::new(4.5, 2.1, -6.0)),
+                slab(Vec3::new(16.4, 0.3, 12.4), Vec3::new(0.0, 4.35, 0.0)),
+                slab(Vec3::new(16.4, 0.3, 12.4), Vec3::new(0.0, 8.15, 0.0)),
+            ],
+        );
+        let run = demo.run.as_mut().unwrap();
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, Some(&mut physics), run, f32::INFINITY);
+        let nav = run.nav.as_ref().expect("a patch");
+        let across = nav
+            .path(Vec3::new(-6.0, 0.0, -3.0), Vec3::new(6.0, 0.0, 4.0), 1.0)
+            .expect("across the room");
+        assert!(across.points.iter().all(|p| p.y.abs() < 0.3), "on the floor: {:?}", across.points);
+        let out = nav
+            .path(Vec3::new(5.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -14.0), 1.0)
+            .expect("out of the house");
+        let through_wall = |p: &Vec3| p.z < -5.0 && p.z > -7.0 && p.x.abs() > 1.2;
+        assert!(
+            out.points.windows(2).all(|w| !through_wall(&w[0].lerp(w[1], 0.5))) && out.points.iter().all(|p| p.y.abs() < 0.3),
+            "by the door: {:?}",
+            out.points
+        );
+    }
+
     #[test]
     fn the_sandbox_builds_and_fights_without_a_window() {
         let mut world = World::new();
@@ -6010,6 +6088,7 @@ mod tests {
         let mut run = build(&world).expect("a fight");
         assert!(run.nav.is_none(), "no solids, nothing baked");
         run.encounters = Some(encounters_asleep(&world));
+        let _jolt = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
         let house = Vec3::new(20.0, 3.0, 0.0);
         solid_bodies(
