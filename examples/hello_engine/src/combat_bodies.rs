@@ -97,6 +97,13 @@ pub fn pose_of(
                 .map_or(total, |w| w.clip_time(total));
             return (clip, Timing::At(time));
         }
+        Action::Guard { .. } if stance(c.weapon.kind).is_some() => {
+            let (guard, _) = stance(c.weapon.kind).unwrap();
+            return (guard.into(), Timing::Loop(1.0));
+        }
+        Action::Aim { .. } if c.weapon.kind == WeaponKind::Bow => {
+            return ("Bow_Aim_Loop|Idle_Loop".into(), Timing::Loop(1.0));
+        }
         Action::Guard { t } => {
             let clip = "Sword_Aether_Rimeguard_Block|Sword_Basic_Block|Idle_Loop";
             let hold = seconds(clip).map_or(0.3, |s| s * 0.5);
@@ -186,6 +193,12 @@ pub fn pose_of(
         return (clip.into(), Timing::Loop(rate.clamp(0.6, 1.6)));
     }
     if speed < 0.25 {
+        // A spearman (the watch, a garrison) stands sentry out of a fight and
+        // on guard in one; an axe or knife on guard with it out.
+        if let Some((guard, sentry)) = stance(c.weapon.kind) {
+            let clip = if drawn { guard } else { sentry };
+            return (clip.into(), Timing::Loop(1.0));
+        }
         let clip = if drawn {
             "Sword_Aether_Idle_Loop|Sword_Basic_Idle_Loop|Idle_Neutral_Loop|Idle_Loop"
         } else {
@@ -262,6 +275,26 @@ fn piece_for(kind: WeaponKind) -> Option<(&'static str, bool)> {
         WeaponKind::Spear | WeaponKind::LanceGlaive => Some(("spear", false)),
         WeaponKind::Axe => Some(("axe", false)),
         WeaponKind::Bow => Some(("bow", false)),
+        _ => None,
+    }
+}
+
+/// A weapon's own stances (on guard, and standing out of a fight), where WS3
+/// made them; a sword's are the blade's idles and blocks.
+fn stance(kind: WeaponKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        WeaponKind::Spear | WeaponKind::LanceGlaive => Some((
+            "Spear_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Spear_Sentry_Loop|Idle_Neutral_Loop|Idle_Loop",
+        )),
+        WeaponKind::Axe => Some((
+            "Axe_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Idle_Neutral_Loop|Idle_Loop",
+        )),
+        WeaponKind::Knife => Some((
+            "Knife_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Idle_Neutral_Loop|Idle_Loop",
+        )),
         _ => None,
     }
 }
@@ -665,6 +698,47 @@ mod tests {
 
     /// clips.json's gear table gives each piece once, only where its file is
     /// there; a weapon kind names its piece and whether it is sheathed.
+    /// The watch: a spearman stands sentry, and on guard (drawn or guarding)
+    /// holds the spear's guard; a sword still blocks.
+    #[test]
+    fn spearmen_stand_sentry_and_guard() {
+        let mut w = CombatWorld::new(somnium_combat::CombatRules::default());
+        let id = w.spawn(CombatantDesc::new(
+            "Watchman",
+            somnium_combat::TeamId(0),
+            Vec3::ZERO,
+            somnium_combat::weapon::spear(),
+        ));
+        let c = w.combatant_mut(id).unwrap();
+        c.velocity = Vec3::ZERO;
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+                .0
+                .starts_with("Spear_Sentry_Loop")
+        );
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, true, None)
+                .0
+                .starts_with("Spear_Guard_Loop")
+        );
+        c.action = Action::Guard { t: 0.1 };
+        assert_eq!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None),
+            (
+                "Spear_Guard_Loop|Idle_Neutral_Loop|Idle_Loop".into(),
+                Timing::Loop(1.0)
+            )
+        );
+        let (mut w, id) = fighter();
+        let c = w.combatant_mut(id).unwrap();
+        c.action = Action::Guard { t: 0.1 };
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+                .0
+                .starts_with("Sword_Aether_Rimeguard_Block")
+        );
+    }
+
     #[test]
     fn weapons_are_ws3_gear_by_kind() {
         let dir = std::env::temp_dir().join(format!("combat_gear_{}", std::process::id()));
