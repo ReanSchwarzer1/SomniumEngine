@@ -144,6 +144,15 @@ pub struct LifeTableComponent {
     pub reach: f32,
     /// Live: towns housed so far.
     pub adopted: u32,
+    /// Metres past `reach` where people sleep (not stepped at all) until the
+    /// view comes back: a streamed world's unload margin.
+    pub asleep_margin: f32,
+    /// Villagers drawn at once, the nearest out of doors.
+    pub villagers: u32,
+    /// Beasts drawn at once, the nearest.
+    pub beasts: u32,
+    /// Carts drawn at once, the nearest.
+    pub carts: u32,
 }
 
 impl Component for LifeTableComponent {}
@@ -155,6 +164,10 @@ impl Default for LifeTableComponent {
             file: String::new(),
             reach: 700.0,
             adopted: 0,
+            asleep_margin: 300.0,
+            villagers: 160,
+            beasts: 48,
+            carts: 16,
         }
     }
 }
@@ -218,6 +231,10 @@ pub fn register(registry: &mut TypeRegistry) {
             file { group: "Life", doc: "A realm's places (spots, lanes, roads), relative to the project: a game's tool writes it from its settlements." },
             reach { group: "Life", min: 0.0, unit: "m", doc: "How near the view comes to a town's edge before its people are housed; they live on, cheaply, after." },
             adopted { group: "Live", read_only: true, flags: LIVE },
+            asleep_margin { group: "Life", min: 0.0, unit: "m", doc: "Metres past Reach where people sleep, not stepped at all, and catch up when the view returns: match a streamed world's unload margin." },
+            villagers { group: "Bodies", min: 0, max: 2000, doc: "Villagers drawn at once, the nearest out of doors." },
+            beasts { group: "Bodies", min: 0, max: 2000, doc: "Beasts drawn at once, the nearest." },
+            carts { group: "Bodies", min: 0, max: 500, doc: "Carts drawn at once, the nearest." },
         }
     });
 }

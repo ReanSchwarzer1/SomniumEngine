@@ -824,18 +824,22 @@ struct Links {
     seen: usize,
 }
 
-/// Metres past a Life Table's reach where its towns sleep (not stepped at all).
-const ASLEEP_PAST_REACH: f32 = 300.0;
-
 /// A Life Table's places and which have been housed.
 struct TableRun {
     entity: Entity,
     table: LifeTable,
     adopted: Vec<bool>,
     reach: f32,
+    /// Its component's settings: the sleeping margin and the bodies drawn.
+    settings: LifeTableComponent,
     count: u32,
     /// Each housed place's table entry, by its index in life.
     of_life: HashMap<usize, usize>,
+}
+
+/// How many bodies of a kind a pool holds: its Life Table's setting, else the default.
+fn bodies(table: &Option<TableRun>, of: fn(&LifeTableComponent) -> u32, default: usize) -> usize {
+    table.as_ref().map_or(default, |t| of(&t.settings) as usize)
 }
 
 impl TableRun {
@@ -870,6 +874,7 @@ fn load_table(world: &World, root: Option<&std::path::Path>) -> Option<TableRun>
                 adopted: vec![false; table.places.len()],
                 table,
                 reach: settings.reach,
+                settings: settings.clone(),
                 count: 0,
                 of_life: HashMap::new(),
             })
@@ -1215,7 +1220,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                VILLAGER_BODIES,
+                bodies(&table, |s| s.villagers, VILLAGER_BODIES),
                 "Villager",
                 (!skinned_people).then_some(MeshKind::Cylinder),
                 true,
@@ -1227,7 +1232,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                BEAST_BODIES,
+                bodies(&table, |s| s.beasts, BEAST_BODIES),
                 "Beast",
                 (!skinned_beasts).then_some(MeshKind::Cube),
                 false,
@@ -1239,7 +1244,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                CART_BODIES,
+                bodies(&table, |s| s.carts, CART_BODIES),
                 "Cart",
                 (!skinned_carts).then_some(MeshKind::Cube),
                 false,
@@ -1262,7 +1267,7 @@ impl LifeDemo {
             life: LifeWorld::new(LodConfig {
                 asleep: table
                     .as_ref()
-                    .map_or(f32::INFINITY, |t| t.reach + ASLEEP_PAST_REACH),
+                    .map_or(f32::INFINITY, |t| t.reach + t.settings.asleep_margin),
                 ..LodConfig::default()
             }),
             visuals: Vec::new(),
@@ -2060,10 +2065,16 @@ mod tests {
             Name::new("Realm"),
             LifeTableComponent {
                 file: "data/realm.json".into(),
+                asleep_margin: 100.0,
+                villagers: 24,
                 ..Default::default()
             },
         ));
         let mut run = LifeDemo::start(&mut world, Some(&root)).expect("a table is life");
+        // Its settings: the bodies drawn and where people sleep (a streamed world's margins).
+        assert_eq!(run.villagers.slots.len(), 24);
+        assert_eq!(run.beasts.slots.len(), BEAST_BODIES);
+        assert_eq!(run.life.lod.asleep, 700.0 + 100.0);
         assert_eq!(run.life.place_count(), 0, "nobody before the view comes");
         assert_eq!(adopt_near(&mut run, Vec3::ZERO), 1);
         assert_eq!(adopt_near(&mut run, Vec3::ZERO), 0, "once");
