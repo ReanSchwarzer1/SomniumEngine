@@ -554,10 +554,17 @@ impl BoatHost {
                 .iter_with::<Parent>()
                 .any(|(_, p)| p.entity == entity)
                 || ctx.world.get::<MeshKind>(entity).is_some();
+            // Its own mesh, else rb-architecture's hull for its kind, else a plain one.
             let hull = if has_mesh {
                 Vec::new()
             } else {
-                plain_hull(ctx.world, entity, &kind, authored.scale)
+                let file = format!("props/boats/boat_{}.glb", kind.name);
+                let nodes = crate::combat_bodies::mesh_nodes(&ctx.config.content_root.join(&file));
+                if nodes.is_empty() {
+                    plain_hull(ctx.world, entity, &kind, authored.scale)
+                } else {
+                    hull_mesh(ctx.world, entity, &file, &nodes, authored.scale)
+                }
             };
             self.afloat.push(Afloat {
                 entity,
@@ -738,6 +745,33 @@ fn name_of(world: &World, e: Entity) -> String {
     world
         .get::<Name>(e)
         .map_or_else(|| "Boat".into(), |n| n.as_str().to_string())
+}
+
+/// rb-architecture's hull for the kind (`assets/props/boats/boat_<kind>.glb`:
+/// its origin the hull box's middle, +Z the bow), every mesh node of it.
+fn hull_mesh(world: &mut World, boat: Entity, file: &str, nodes: &[u32], scale: Vec3) -> Vec<Entity> {
+    nodes
+        .iter()
+        .map(|&node| {
+            world.spawn((
+                Name::new("Boat hull"),
+                Transform {
+                    scale: Vec3::ONE / scale.max(Vec3::splat(1e-3)),
+                    ..Default::default()
+                },
+                WorldTransform::identity(),
+                Parent { entity: boat },
+                somnium_core::ImportedMesh {
+                    source: format!("assets/{file}"),
+                    node,
+                },
+                somnium_core::MaterialComponent {
+                    asset: somnium_asset::database::AssetId::NONE,
+                    runtime_id: 0,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// A plain hull (bottom and two sides) for a boat with no mesh of its own.

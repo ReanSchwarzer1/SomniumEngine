@@ -370,7 +370,7 @@ impl Skin {
 }
 
 /// The nodes of a glTF binary that carry meshes, from its JSON chunk.
-fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
+pub(crate) fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
