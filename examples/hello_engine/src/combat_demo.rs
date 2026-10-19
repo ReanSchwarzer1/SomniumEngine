@@ -5445,8 +5445,10 @@ mod tests {
         let mut world = World::new();
         spawn_sandbox(&mut world, &json!({})).expect("preset builds");
         somnium_core::propagate_transforms(&mut world);
-        let mut demo = CombatDemo::default();
-        demo.run = Some(build(&world).expect("a fight"));
+        let mut demo = CombatDemo {
+            run: Some(build(&world).expect("a fight")),
+            ..Default::default()
+        };
         let (caelan, other, other_entity) = {
             let run = demo.run.as_ref().unwrap();
             let caelan = run.player.unwrap();
