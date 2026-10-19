@@ -42,6 +42,21 @@ BY_AREA = {"green": "Green", "market": "Market", "parade": "Green", "yard": "Gre
 INDOOR = {"Home", "Work", "Inn", "Chapel"}
 ROAD_KINDS = {"road", "highway"}
 LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
+
+# Looks: WS3's crowd contract (WS3_CHARACTERS.md, "The crowd contract"). Bodies by somnium_life role; the rest of the
+# crowd_* adults are farmers, labourers and anyone a role has no bodies for.
+ELDERS = {2, 3, 10, 16, 19, 25, 31}
+CHILDREN = {4, 5, 12, 17, 23, 26, 30}
+TRADES = {"Smith": "smith", "Priest": "priest", "Keeper": "keeper", "Herder": "herder"}
+BEASTS = {"Sheep": "sheep", "Cow": "march_cow", "Goat": "goat", "Pig": "pig", "Hen": "hen", "Dog": "sheepdog"}
+POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Run_F_Loop", "Talk": "Talk_Loop",
+         "Work": "Bench_Work_Loop", "Farm": "Hoe_Loop", "Tend": "Farm_Water", "Trade": "Haggle_Loop",
+         "Pray": "Kneel_Pray_Loop", "Sit": "Sit_Idle_Loop", "Drive": "Drive_Reins_Loop", "Play": "Child_Tag"}
+CHILD_POSES = {"Idle": "Child_Idle_Loop", "Walk": "Child_Walk_F_Loop", "Run": "Child_Run_F_Loop",
+               "Play": "Child_Hopscotch"}
+ELDER_POSES = {"Idle": "Idle_Old_Loop", "Walk": "Loco_Old_Walk_F_Loop"}
+BEAST_POSES = {"Graze": "Graze_Loop", "Walk": "Walk_F_Loop", "Run": "Trot_F_Loop", "Idle": "Idle_Loop"}
+WALK_SPEED, RUN_SPEED = 0.86, 1.52  # Loco_Walk_F_Loop's and Loco_Run_F_Loop's root speeds (clips.json)
 SNAP = 3.0  # a street's end this close to another street joins it
 
 
@@ -146,6 +161,27 @@ def building_spots(buildings, plots_by_id, dx, dy, dz):
     return spots
 
 
+def looks_of(rimeborn: Path):
+    """WS3's bodies that exist on disk, as somnium_life looks (paths relative to the assets folder)."""
+    chars, creatures = rimeborn / "assets/characters", rimeborn / "assets/creatures"
+    body = lambda name: f"characters/{name}/{name}.glb"  # noqa: E731
+    have = lambda name: (chars / name / f"{name}.glb").exists()  # noqa: E731
+    crowd = [f"crowd_{i:02}" for i in range(64) if have(f"crowd_{i:02}")]
+    numbered = lambda prefix: [n for n in (f"{prefix}_{i:02}" for i in range(16)) if have(n)]  # noqa: E731
+    adults = [body(n) for n in crowd if int(n[-2:]) not in ELDERS | CHILDREN]
+    villagers = {"default": adults, "Farmer": adults, "Labourer": adults,
+                 "Elder": [body(n) for n in crowd if int(n[-2:]) in ELDERS],
+                 "Child": [body(n) for n in crowd if int(n[-2:]) in CHILDREN]}
+    for role, prefix in TRADES.items():
+        villagers[role] = [body(n) for n in numbered(prefix)]
+    villagers = {k: v for k, v in villagers.items() if v}
+    beasts = {kind: f"creatures/{name}/{name}.glb" for kind, name in BEASTS.items()
+              if (creatures / name / f"{name}.glb").exists()}
+    return {"villagers": villagers, "beasts": beasts, "poses": POSES, "child_poses": CHILD_POSES,
+            "elder_poses": ELDER_POSES, "beast_poses": BEAST_POSES, "walk_speed": WALK_SPEED,
+            "run_speed": RUN_SPEED}
+
+
 def build(rimeborn: Path):
     sys.path.insert(0, str(rimeborn / "tools"))
     import world_frame  # noqa: E402  (Rimeborn's anchors; read only)
@@ -218,7 +254,10 @@ def build(rimeborn: Path):
             fullest[name] = p
     places = list(fullest.values())
     table = {"version": 1, "frame": f"{WORLD} (compose_tyffir.py's world)",
-             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places}
+             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks_of(rimeborn)}
+    looks = table["looks"]
+    report.append(f"  looks: {sum(len(v) for v in looks['villagers'].values())} bodies over "
+                  f"{len(looks['villagers'])} roles, {len(looks['beasts'])} beasts")
     return table, report
 
 

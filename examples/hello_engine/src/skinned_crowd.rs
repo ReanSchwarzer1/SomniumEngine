@@ -651,10 +651,17 @@ impl SkinnedBodies {
                 AnimationStep::Evaluate { .. }
             );
             if due || !body.posed {
+                // A clip the file lacks: one never posed plays its first (not
+                // the bind pose); one posed holds its last.
+                let first = || shared.asset.clips.values().next();
                 let clip = if settings.clip.is_empty() {
-                    shared.asset.clips.values().next()
+                    first()
                 } else {
-                    shared.asset.clips.get(&settings.clip)
+                    shared
+                        .asset
+                        .clips
+                        .get(&settings.clip)
+                        .or_else(|| if body.posed { None } else { first() })
                 };
                 if let Some(clip) = clip
                     && let Ok(pose) =

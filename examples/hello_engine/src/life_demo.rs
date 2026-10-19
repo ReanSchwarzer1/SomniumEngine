@@ -458,6 +458,23 @@ fn spawn_village(world: &mut World, args: &Value) -> Result<Vec<Entity>, String>
     Ok(out)
 }
 
+/// Add a Life Table naming `SOMNIUM_LIFE_TABLE` (a capture hook); whether one was.
+pub fn table_at_startup(world: &mut World) -> bool {
+    let Ok(file) = std::env::var("SOMNIUM_LIFE_TABLE") else {
+        return false;
+    };
+    world.spawn((
+        Name::new("Life Table (capture)"),
+        Transform::default(),
+        WorldTransform::identity(),
+        LifeTableComponent {
+            file,
+            ..Default::default()
+        },
+    ));
+    true
+}
+
 /// Build the village at the origin outside the Create menu (a capture hook):
 /// `SOMNIUM_LIFE_VILLAGE=1`, `SOMNIUM_LIFE_HOMES` for its size.
 pub fn spawn_at_startup(world: &mut World) -> Result<usize, String> {

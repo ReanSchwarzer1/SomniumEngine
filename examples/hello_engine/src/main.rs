@@ -1719,6 +1719,13 @@ impl GameApp for HelloGame {
         if let Some(count) = skinned_crowd::spawn_at_startup(ctx.world) {
             info!("SOMNIUM_SKINNED_CROWD - {count} skinned bodies spawned");
         }
+        // Evidence hook, inert unless set: `SOMNIUM_LIFE_TABLE=<file>` adds a
+        // Life Table naming that file, and Play keeps the editor camera (no
+        // walker), for captures over a realm's towns.
+        if life_demo::table_at_startup(ctx.world) {
+            self.play_character = false;
+            info!("SOMNIUM_LIFE_TABLE - a Life Table for the capture, no walker");
+        }
         // Evidence hook, inert unless set: `SOMNIUM_LIFE_VILLAGE=1` builds the
         // Living Village (`SOMNIUM_LIFE_HOMES` houses) for a capture run.
         if std::env::var("SOMNIUM_LIFE_VILLAGE").as_deref() == Ok("1") {
