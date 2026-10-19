@@ -6,7 +6,9 @@
 //! village keeps its day at a sliver of the cost. Agents are spread across
 //! ticks by id, so no tick takes all the mid-range ones at once; and a budget
 //! caps how many out-of-sight steps one tick may take (the rest wait a tick,
-//! still owed their time).
+//! still owed their time). Beyond `asleep` (where a game's cells are
+//! unloaded) nobody steps at all: they keep what they are owed and catch up in
+//! one step when the view comes back, to wherever their day has taken them.
 
 use glam::{Vec2, Vec3};
 
@@ -23,6 +25,9 @@ pub struct LodConfig {
     pub far_stride: u32,
     /// Most mid and far steps one tick may take.
     pub budget: usize,
+    /// Beyond this nobody steps until the view comes nearer (unbounded by
+    /// default, so everything is at least far).
+    pub asleep: f32,
 }
 
 impl Default for LodConfig {
@@ -33,6 +38,7 @@ impl Default for LodConfig {
             mid_stride: 4,
             far_stride: 30,
             budget: 256,
+            asleep: f32::INFINITY,
         }
     }
 }
@@ -47,6 +53,8 @@ pub enum Tier {
     Mid,
     /// Far off: rarely, coarsely. A host need not draw it.
     Far,
+    /// Beyond `asleep`: not stepped at all; it catches up when it wakes.
+    Asleep,
 }
 
 impl LodConfig {
@@ -65,8 +73,10 @@ impl LodConfig {
             Tier::Near
         } else if d2 <= self.far * self.far {
             Tier::Mid
-        } else {
+        } else if d2 <= self.asleep * self.asleep {
             Tier::Far
+        } else {
+            Tier::Asleep
         }
     }
 
@@ -75,6 +85,7 @@ impl LodConfig {
     pub fn due(&self, tier: Tier, tick: u64, id: u32) -> bool {
         let stride = match tier {
             Tier::Near => return true,
+            Tier::Asleep => return false,
             Tier::Mid => self.mid_stride,
             Tier::Far => self.far_stride,
         };

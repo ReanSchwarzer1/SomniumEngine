@@ -536,6 +536,44 @@ fn some_households_keep_a_dog_that_roams_its_door() {
     });
 }
 
+/// Beyond `asleep` (its cells unloaded) a town is not stepped at all; when the
+/// view comes back each wakes owed the hours and catches up at once, out at
+/// the day's work rather than abed where the view left them.
+#[test]
+fn an_unloaded_town_sleeps_and_catches_up_when_the_view_returns() {
+    let lod = LodConfig {
+        asleep: 1_000.0,
+        ..LodConfig::default()
+    };
+    let mut w = LifeWorld::new(lod);
+    let town = Vec3::new(3_000.0, 0.0, 0.0);
+    let place = w.add_place(village(town));
+    w.populate(place, 5);
+    let before: Vec<Vec3> = w.villagers().iter().map(|v| v.position).collect();
+    day(&mut w, 5.0, 9.0, 0.0, &[Vec3::ZERO], |w, _| {
+        let s = w.stats();
+        assert_eq!((s.near, s.mid, s.far, s.stepped), (0, 0, 0, 0));
+        assert!(s.asleep >= 5);
+    });
+    let now: Vec<Vec3> = w.villagers().iter().map(|v| v.position).collect();
+    assert_eq!(now, before, "nobody moved while asleep");
+    day(&mut w, 9.0, 9.1, 0.0, &[town], |_, _| {});
+    assert_eq!(w.stats().asleep, 0);
+    let abed = w
+        .villagers()
+        .iter()
+        .filter(|v| v.activity == Activity::Sleep)
+        .count();
+    assert_eq!(abed, 0, "awake and about at nine");
+    assert!(
+        w.villagers()
+            .iter()
+            .zip(&before)
+            .any(|(v, b)| flat(v.position, *b) > 5.0),
+        "gone about their day"
+    );
+}
+
 #[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());

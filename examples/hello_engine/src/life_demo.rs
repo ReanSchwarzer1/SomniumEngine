@@ -748,6 +748,9 @@ struct Links {
     seen: usize,
 }
 
+/// Metres past a Life Table's reach where its towns sleep (not stepped at all).
+const ASLEEP_PAST_REACH: f32 = 300.0;
+
 /// A Life Table's places and which have been housed.
 struct TableRun {
     entity: Entity,
@@ -1159,7 +1162,14 @@ impl LifeDemo {
             .find(|(_, t)| t.enabled)
             .map(|(_, t)| (t.hour, t.eclipse));
         let mut run = Run {
-            life: LifeWorld::new(LodConfig::default()),
+            // A table's towns sleep a little past the reach they are housed at
+            // (where a game's cells unload), and catch up when the view returns.
+            life: LifeWorld::new(LodConfig {
+                asleep: table
+                    .as_ref()
+                    .map_or(f32::INFINITY, |t| t.reach + ASLEEP_PAST_REACH),
+                ..LodConfig::default()
+            }),
             visuals: Vec::new(),
             villagers,
             beasts,
@@ -1352,6 +1362,7 @@ impl LifeDemo {
                 near = s.near,
                 mid = s.mid,
                 far = s.far,
+                asleep = s.asleep,
                 stepped = s.stepped,
                 step_ms = run.step_ms,
                 write_ms = run.write_ms,
@@ -1381,7 +1392,7 @@ impl LifeDemo {
             "outdoors": out,
             "beasts": run.life.beasts().len(),
             "carts": run.life.carts().len(),
-            "lod": {"near": s.near, "mid": s.mid, "far": s.far, "stepped": s.stepped, "deferred": s.deferred},
+            "lod": {"near": s.near, "mid": s.mid, "far": s.far, "asleep": s.asleep, "stepped": s.stepped, "deferred": s.deferred},
             "step_ms": run.step_ms,
             "write_ms": run.write_ms,
             "bodies": {
@@ -1403,7 +1414,7 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         life.villagers()
             .iter()
             .enumerate()
-            .filter(|(i, v)| v.visible && v.tier != Tier::Far && !run.villagers.own.contains(i))
+            .filter(|(i, v)| v.visible && v.tier < Tier::Far && !run.villagers.own.contains(i))
             .map(|(i, v)| (i, near(v.position)))
             .collect(),
     );
@@ -1428,7 +1439,7 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         life.beasts()
             .iter()
             .enumerate()
-            .filter(|(i, b)| b.tier != Tier::Far && !run.beasts.own.contains(i))
+            .filter(|(i, b)| b.tier < Tier::Far && !run.beasts.own.contains(i))
             .map(|(i, b)| (i, near(b.position)))
             .collect(),
     );
@@ -1452,7 +1463,7 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         life.carts()
             .iter()
             .enumerate()
-            .filter(|(i, c)| c.tier != Tier::Far && !run.carts.own.contains(i))
+            .filter(|(i, c)| c.tier < Tier::Far && !run.carts.own.contains(i))
             .map(|(i, c)| (i, near(c.position)))
             .collect(),
     );
@@ -1525,15 +1536,15 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         let (shown, position, facing) = match which {
             Visual::Villager(i) => {
                 let v = &run.life.villagers()[*i];
-                (v.visible && v.tier != Tier::Far, v.position, v.facing)
+                (v.visible && v.tier < Tier::Far, v.position, v.facing)
             }
             Visual::Beast(i) => {
                 let b = &run.life.beasts()[*i];
-                (b.tier != Tier::Far, b.position, b.facing)
+                (b.tier < Tier::Far, b.position, b.facing)
             }
             Visual::Cart(i) => {
                 let c = &run.life.carts()[*i];
-                (c.tier != Tier::Far, c.position, c.facing)
+                (c.tier < Tier::Far, c.position, c.facing)
             }
         };
         let look = if shown {
@@ -1686,7 +1697,7 @@ mod tests {
             .life
             .villagers()
             .iter()
-            .filter(|v| v.visible && v.tier != Tier::Far)
+            .filter(|v| v.visible && v.tier < Tier::Far)
             .map(|v| v.position.distance(focus))
             .collect();
         assert!(
@@ -1709,7 +1720,7 @@ mod tests {
             .villagers()
             .iter()
             .enumerate()
-            .filter(|(i, v)| v.visible && v.tier != Tier::Far && !drawn.contains(i))
+            .filter(|(i, v)| v.visible && v.tier < Tier::Far && !drawn.contains(i))
             .map(|(_, v)| v.position.distance(focus))
             .fold(f32::INFINITY, f32::min);
         assert!(far_drawn <= near_left, "{far_drawn} > {near_left}");
@@ -1917,6 +1928,14 @@ mod tests {
             1,
             "Yonder, on the way there"
         );
+        // Here is 2.5 km behind the view now, past the reach and its margin: asleep.
+        let clock = Clock {
+            hour: 9.0,
+            eclipse: 0.0,
+        };
+        run.life
+            .step(0.5, clock, &[Vec3::new(2_500.0, 0.0, 0.0)], &Flat);
+        assert!(run.life.stats().asleep >= 5, "the town behind sleeps");
         let _ = std::fs::remove_dir_all(root);
     }
 

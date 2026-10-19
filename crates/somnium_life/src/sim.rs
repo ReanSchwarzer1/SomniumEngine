@@ -224,6 +224,8 @@ pub struct Stats {
     pub stepped: usize,
     /// Agents due but held over by the budget.
     pub deferred: usize,
+    /// Agents asleep (beyond `LodConfig::asleep`), not stepped.
+    pub asleep: usize,
 }
 
 /// A place's derived data: lanes as a graph, roads by distance.
@@ -713,6 +715,7 @@ impl LifeWorld {
                 Tier::Near => stats.near += 1,
                 Tier::Mid => stats.mid += 1,
                 Tier::Far => stats.far += 1,
+                Tier::Asleep => stats.asleep += 1,
             }
             *owed += dt;
             if !lod.due(tier, tick, id.0) {
