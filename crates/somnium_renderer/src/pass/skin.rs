@@ -188,7 +188,21 @@ impl SkinPass {
         pool: &wgpu::Buffer,
         palettes: &SkinningPalettes,
     ) {
-        if palettes.is_empty() {
+        self.record_instances(device, queue, encoder, pool, palettes, palettes.instances());
+    }
+
+    /// [`Self::record`] for `instances` alone, some of `palettes`' own (those whose pose changed this frame): nothing
+    /// is uploaded or dispatched when it is empty.
+    pub fn record_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pool: &wgpu::Buffer,
+        palettes: &SkinningPalettes,
+        instances: &[SkinInstance],
+    ) {
+        if palettes.is_empty() || instances.is_empty() {
             return;
         }
 
@@ -203,19 +217,15 @@ impl SkinPass {
                 storage_buffer::<[f32; 16]>(device, "Skin palettes", self.palette_capacity);
             self.bind_group = None;
         }
-        if palettes.instances().len() > self.instance_capacity {
-            self.instance_capacity = palettes.instances().len().next_power_of_two();
+        if instances.len() > self.instance_capacity {
+            self.instance_capacity = instances.len().next_power_of_two();
             self.instances =
                 storage_buffer::<SkinInstance>(device, "Skin instances", self.instance_capacity);
             self.bind_group = None;
         }
 
         queue.write_buffer(&self.palettes, 0, bytemuck::cast_slice(&matrices));
-        queue.write_buffer(
-            &self.instances,
-            0,
-            bytemuck::cast_slice(palettes.instances()),
-        );
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
 
         if self.bound_pool_size != Some(pool.size()) {
             self.bind_group = None;
@@ -246,7 +256,9 @@ impl SkinPass {
             })
         });
 
-        let (x, y, z) = palettes.dispatch();
+        // `SkinningPalettes::dispatch`'s grid, over these instances: a row per instance, as wide as the widest.
+        let widest = instances.iter().map(|i| i.vertex_count).max().unwrap_or(0);
+        let (x, y, z) = (widest.div_ceil(WORKGROUP_SIZE), instances.len() as u32, 1);
         if x == 0 || y == 0 {
             return;
         }
@@ -258,7 +270,6 @@ impl SkinPass {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(1, &*bind_group, &[]);
         pass.dispatch_workgroups(x, y, z);
-        let _ = WORKGROUP_SIZE;
     }
 }
 

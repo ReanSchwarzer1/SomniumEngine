@@ -331,6 +331,20 @@ impl ShadowPass {
         casters: &[ShadowCaster],
         dirty: [bool; NUM_CASCADES],
     ) {
+        self.record_with_batches(encoder, atlas_view, global_bind_group, casters, dirty, None);
+    }
+
+    /// [`Self::record`], and the instance batches' casters into each redrawn cascade
+    /// (`crate::instance_batch`), culled on the GPU for this frame.
+    pub fn record_with_batches(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        atlas_view: &wgpu::TextureView,
+        global_bind_group: &wgpu::BindGroup,
+        casters: &[ShadowCaster],
+        dirty: [bool; NUM_CASCADES],
+        batches: Option<crate::instance_batch::BatchShadowDraws<'_>>,
+    ) {
         if !dirty.into_iter().any(|dirty| dirty) {
             return;
         }
@@ -384,6 +398,21 @@ impl ShadowPass {
                     opaque_bound = opaque;
                 }
                 rpass.draw(0..c.index_count, c.instance_index..(c.instance_index + 1));
+            }
+            if let Some(batches) = &batches {
+                // Foliage is alpha-tested: the reference pipeline, with the cutout stage.
+                rpass.set_pipeline(&self.pipeline);
+                let region = (cascade as u64) * u64::from(batches.capacity) * crate::indirect::ARGS_SIZE;
+                match batches.counts {
+                    Some(counts) => rpass.multi_draw_indirect_count(
+                        batches.args,
+                        region,
+                        counts,
+                        (cascade * std::mem::size_of::<u32>()) as u64,
+                        batches.slots,
+                    ),
+                    None => rpass.multi_draw_indirect(batches.args, region, batches.slots),
+                }
             }
         }
     }

@@ -1207,6 +1207,10 @@ pub struct Engine<G: GameApp> {
     /// Each terrain's painted foliage binned by ground cell (`foliage_grid`), and this frame's visit list.
     foliage_grids: std::collections::HashMap<u32, crate::foliage_grid::FoliageGrid>,
     foliage_visit: Vec<usize>,
+    /// `SOMNIUM_FOLIAGE_BATCHES=1`: the instance batches painted foliage is drawn with (`foliage_batches.rs`).
+    foliage_batches: crate::foliage_batches::FoliageBatches,
+    /// `somnium.PropSet` entities' batches and colliders (`prop_set.rs`, `app_prop_sets.rs`).
+    prop_sets: crate::prop_set::PropSets,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -1807,6 +1811,8 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_batch: Vec::new(),
             foliage_grids: std::collections::HashMap::new(),
             foliage_visit: Vec::new(),
+            foliage_batches: Default::default(),
+            prop_sets: Default::default(),
             foliage_stroke_seed: 0,
             foliage_painting: false,
             foliage_refusal_reported: false,
@@ -4012,6 +4018,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.foliage_meshes = std::array::from_fn(|_| None);
                 self.foliage_lod_meshes = std::array::from_fn(|_| None);
                 self.foliage_failed = [false; 256];
+                // A new renderer holds no batches.
+                self.foliage_batches = Default::default();
+                self.prop_sets.reset_gpu();
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
@@ -5717,6 +5726,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
         self.submit_terrains();
         self.submit_foliage();
+        self.update_prop_sets();
         self.submit_decals();
         self.sync_terrain_colliders();
         if let Some(r) = &mut self.renderer {
@@ -8953,6 +8963,10 @@ impl<G: GameApp> Engine<G> {
         if let Some(r) = self.renderer.as_mut() {
             r.profiler.cpu_begin("Foliage");
         }
+        let batched = crate::foliage_batches::enabled();
+        if batched {
+            self.foliage_batches.begin_frame();
+        }
 
         for (
             terrain_id,
@@ -9019,11 +9033,57 @@ impl<G: GameApp> Engine<G> {
                     kind_lod[k] = lod.distance * lod.distance;
                 }
             }
+            // `SOMNIUM_FOLIAGE_BATCHES=1`: this terrain's foliage as instance batches, one per ground cell and kind,
+            // set as cells come within reach, and each copy's parts chosen by distance on the GPU
+            // (`foliage_batches.rs`). Not with a falloff curve, which scales every copy every frame. The painted
+            // instances then skip the per-instance loop below; anything else it draws still goes through it.
+            let painted_batched = batched && lod_falloff.is_empty();
+            if painted_batched {
+                let piece = |p: &FoliagePart| crate::foliage_batches::Piece {
+                    vertex_offset: p.vertex_offset,
+                    index_offset: p.index_offset,
+                    index_count: p.index_count,
+                    material_id: p.material_id,
+                    local: p.local,
+                    is_leaf: p.is_leaf,
+                };
+                let mut parts: [Option<Vec<somnium_renderer::instance_batch::BatchPart>>; 256] =
+                    std::array::from_fn(|_| None);
+                for &kind in &kinds {
+                    let k = kind as usize;
+                    let Some(Some(near)) = self.foliage_meshes.get(k) else {
+                        continue;
+                    };
+                    let near: Vec<_> = near.iter().map(piece).collect();
+                    let lod: Option<Vec<_>> = self.foliage_lod_meshes[k].as_ref().map(|m| m.iter().map(piece).collect());
+                    parts[k] = Some(crate::foliage_batches::kind_parts(
+                        kind,
+                        &near,
+                        lod.as_deref(),
+                        crate::foliage_batches::KindDistances {
+                            cull_sq: kind_cull[k],
+                            shadow_sq: kind_shadow[k],
+                            lod_sq: kind_lod[k],
+                            legacy_lod: lod_distance,
+                            legacy_impostor: impostor_distance,
+                        },
+                    ));
+                }
+                let copies = self.foliage_batches.terrain(
+                    terrain_id,
+                    t.edit_revision,
+                    &t.painted_foliage,
+                    model,
+                    camera_local,
+                    &parts,
+                );
+                counts.submitted_instances = counts.submitted_instances.saturating_add(copies);
+            }
             // Only the ground cells within the farthest kind's reach are visited.
             let reach_sq = kinds.iter().map(|k| kind_cull[*k as usize]).fold(0.0_f32, f32::max);
             let reach = if reach_sq >= f32::MAX { f32::INFINITY } else { reach_sq.sqrt() };
             self.foliage_visit.clear();
-            if let Some(grid) = self.foliage_grids.get(&terrain_id) {
+            if let Some(grid) = self.foliage_grids.get(&terrain_id).filter(|_| !painted_batched) {
                 grid.visit([camera_local.x, camera_local.z], reach, |i| self.foliage_visit.push(i));
             }
             let focus_local = crate::ground_cover::view_focus(
@@ -9195,6 +9255,18 @@ impl<G: GameApp> Engine<G> {
                         transform,
                         casts_shadow,
                     });
+                }
+            }
+        }
+        if batched {
+            self.foliage_batches.end_frame();
+            let changes = std::mem::take(&mut self.foliage_batches.changes);
+            if let Some(r) = self.renderer.as_mut() {
+                for id in changes.remove {
+                    r.remove_instance_batch(id);
+                }
+                for (id, batch) in &changes.set {
+                    r.set_instance_batch(*id, batch);
                 }
             }
         }
@@ -14315,5 +14387,7 @@ mod story_host;
 
 #[path = "app_cell_streaming.rs"]
 mod cell_streaming_host;
+#[path = "app_prop_sets.rs"]
+mod prop_sets_host;
 
 include!("app_project_foliage.rs");

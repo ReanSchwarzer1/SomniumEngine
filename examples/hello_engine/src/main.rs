@@ -728,6 +728,8 @@ pub struct HelloGame {
     cutaways: somnium_core::cutaway::Cutaways,
     /// Levels of detail not drawn this frame (somnium_core::lod_group).
     lods: somnium_core::lod_group::Lods,
+    /// Foliage verdicts for the mesh loop, found once a frame per parent (somnium_core::foliage_visibility).
+    imported_draws: somnium_core::foliage_visibility::ImportedDraws,
     interactions: authoring_demo::InteractionDemo,
     work_demo: fracture_demo::Demo,
     /// The combat sandbox (Create > Examples > Combat Sandbox), while Play runs it.
@@ -841,6 +843,7 @@ impl HelloGame {
         Self {
             play_character: true,
             cutaways: Default::default(),
+            imported_draws: Default::default(),
             lods: Default::default(),
             interactions: Default::default(),
             work_demo: Default::default(),
@@ -2649,6 +2652,7 @@ impl GameApp for HelloGame {
                 somnium_core::cutaway::viewer(ctx.world).unwrap_or(renderer.camera_pos),
             );
             self.lods.update(ctx.world, renderer.camera_pos);
+            self.imported_draws.begin_frame();
 
             // Phase 11.5A-2: Use WorldTransform for rendering instead of Transform::to_matrix().
             let required = ComponentSet::from_ids(vec![
@@ -2699,11 +2703,13 @@ impl GameApp for HelloGame {
                     let material =
                         unsafe { archetype.column(mat_col).get::<MaterialComponent>(row) };
                     let entity = archetype.entities()[row];
-                    let Some(casts_shadow) = somnium_core::foliage_visibility::imported_draw(
-                        ctx.world,
-                        entity,
-                        renderer.camera_pos,
-                    ) else {
+                    // The level test first: most of a region's parts are levels not drawn this frame.
+                    if self.lods.is_hidden(entity) {
+                        continue;
+                    }
+                    let Some(casts_shadow) =
+                        self.imported_draws.draw_row(ctx.world, archetype, row, entity, renderer.camera_pos)
+                    else {
                         continue;
                     };
                     let paint = if painted {
@@ -2725,9 +2731,6 @@ impl GameApp for HelloGame {
                         material_id: material.runtime_id,
                         transform: wt.0,
                     };
-                    if self.lods.is_hidden(entity) {
-                        continue;
-                    }
                     // An opened roof keeps shading the room it covers.
                     if self.cutaways.is_shadow_only(entity) {
                         renderer.submit_shadow_only(command);

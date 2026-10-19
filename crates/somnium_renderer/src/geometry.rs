@@ -86,7 +86,7 @@ pub struct GeometryPool {
     /// vertex offset means existing `DrawCommand` call sites need no changes —
     /// the renderer looks the box up when it builds the cull buffer, and a draw
     /// with no entry is simply never culled.
-    aabbs: std::collections::HashMap<u32, ([f32; 3], [f32; 3])>,
+    aabbs: crate::fast_hash::FastMap<u32, ([f32; 3], [f32; 3])>,
 
     /// Phase 15D: per-mesh clusters, keyed by `vertex_offset` like `aabbs`.
     ///
@@ -94,13 +94,13 @@ pub struct GeometryPool {
     /// which are remeshed continuously as the camera moves — paying the sort on
     /// every remesh would cost more than the culling saves, and a chunk is
     /// already small enough to cull as a unit.
-    meshlets: std::collections::HashMap<u32, Vec<crate::meshlet::Meshlet>>,
+    meshlets: crate::fast_hash::FastMap<u32, Vec<crate::meshlet::Meshlet>>,
     /// Bumped whenever any mesh's bounds or clusters change, so a cache of
     /// cull data built from them knows to rebuild.
     bounds_revision: u64,
 
     /// Packed unsigned triangle SDF per static mesh (Phase 24P).
-    sdf_bricks: std::collections::HashMap<u32, std::sync::Arc<MeshSdfBrick>>,
+    sdf_bricks: crate::fast_hash::FastMap<u32, std::sync::Arc<MeshSdfBrick>>,
 
     /// Reserved vertex spans, `offset -> capacity` (Phase 25A-2).
     ///
@@ -188,10 +188,10 @@ impl GeometryPool {
             next_vertex: 0,
             next_index: 0,
             free_blocks: Vec::new(),
-            aabbs: std::collections::HashMap::new(),
-            meshlets: std::collections::HashMap::new(),
+            aabbs: Default::default(),
+            meshlets: Default::default(),
             bounds_revision: 0,
-            sdf_bricks: std::collections::HashMap::new(),
+            sdf_bricks: Default::default(),
             vertex_spans: std::collections::HashMap::new(),
             index_spans: std::collections::HashMap::new(),
             free_vertex_spans: Vec::new(),

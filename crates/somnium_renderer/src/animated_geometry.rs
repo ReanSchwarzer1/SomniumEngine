@@ -4,11 +4,26 @@
 //! Each frame, before the skin pass overwrites the posed vertices, they are
 //! copied aside: last frame's pose, which the velocity pass reads to give a
 //! skinned surface its own motion (C2 in the engine features record).
+//!
+//! Only a registration whose palette changed is skinned again (open-world
+//! render scale, 19 Oct 2026): a crowd sampled at 10 Hz in the distance held
+//! the same pose for several frames and was re-skinned every one. The first
+//! frame after a skin still copies its pose aside, so the previous pose then
+//! equals the current one and the surface reads as still; after that a still
+//! registration costs nothing until its palette changes.
+//!
+//! Registering and removing cost the same however many are registered (asked
+//! by rb-combat for crowds, 19 Oct 2026): a new skin is checked alone against
+//! running totals, and joins the palettes and the previous-pose buffer at
+//! their ends, so no other registration is laid out or skinned again. A removed
+//! one leaves its palette slot and its previous-pose span unused until holes
+//! outweigh what is live; then (or when the palettes' own budget would refuse
+//! a new one) everything is laid out again once, compactly.
 use crate::{
     context::RenderContext,
     geometry::{GeometryPool, MeshAllocation},
     pass::skin::SkinPass,
-    skinning::{SkinnedHandle, SkinningPalettes},
+    skinning::{SkinBudget, SkinError, SkinnedHandle, SkinningPalettes},
 };
 use glam::Mat4;
 use somnium_anim::{Skeleton, Skin};
@@ -29,6 +44,10 @@ struct Entry {
     /// is still to be made (new or moved: it takes this frame's pose, so no motion).
     prev_base: u32,
     fresh: bool,
+    /// The palette differs from the pose its posed vertices hold: skin it this frame.
+    changed: bool,
+    /// Skinned last frame: copy its pose aside once more, so the previous pose catches up with it.
+    settle: bool,
 }
 #[derive(Default)]
 /// Owns posed geometry and batches validated joint palettes for the GPU.
@@ -42,6 +61,15 @@ pub struct AnimatedGeometry {
     prev_capacity: u64,
     /// Bumped whenever `prev` is a new buffer, so bind groups that read it are remade.
     prev_generation: u64,
+    /// The pool buffer the posed vertices were last written into (a new one holds none of them).
+    pool_size: u64,
+    /// Registrations skinned by the last [`Self::record`] (a measure for crowds).
+    skinned: usize,
+    /// Posed vertices of the live registrations, and of removed ones still holding palette slots and spans.
+    live_vertices: u32,
+    dead_vertices: u32,
+    /// Where the next registration's last pose goes in the previous-pose buffer.
+    prev_end: u32,
 }
 
 const VERTEX_BYTES: u64 = std::mem::size_of::<somnium_asset::Vertex>() as u64;
@@ -57,6 +85,22 @@ impl AnimatedGeometry {
         rest: u32,
         vertices: &[somnium_asset::Vertex],
     ) -> Result<(AnimatedMeshId, u32), String> {
+        self.register_with(&ctx.device, &ctx.queue, pool, pass, skeleton, skin, rest, vertices)
+    }
+
+    /// [`Self::register`] on a device and queue (a test has no window for a [`RenderContext`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn register_with(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pool: &mut GeometryPool,
+        pass: &mut SkinPass,
+        skeleton: &Skeleton,
+        skin: &Skin,
+        rest: u32,
+        vertices: &[somnium_asset::Vertex],
+    ) -> Result<(AnimatedMeshId, u32), String> {
         if vertices.is_empty() {
             return Err("Animated mesh has no vertices".into());
         }
@@ -65,31 +109,49 @@ impl AnimatedGeometry {
             .checked_add(1)
             .ok_or("Animated mesh identifier exhausted")?;
         let bounds = pool.mesh_aabb(rest).ok_or("Rest mesh has no bounds")?;
-        // Validate budgets and bindings before allocating GPU memory.
-        let mut validation = SkinningPalettes::default();
-        for entry in self.entries.values() {
-            validation
-                .register(
-                    &entry.skeleton,
-                    &entry.skin,
-                    entry.rest,
-                    entry.posed.vertex_offset,
-                    entry.skin.bindings.len() as u32,
-                    entry.bounds,
-                )
-                .map_err(|e| format!("Skin registration: {e:?}"))?;
+        // Validate budgets and bindings before allocating GPU memory: the new skin alone, against running totals,
+        // with the checks and errors `SkinningPalettes::register` makes, in its order.
+        let vertex_count = vertices.len() as u32;
+        let budget = SkinBudget::default();
+        let refused = |e: SkinError| format!("Skin registration: {e:?}");
+        if skeleton.len() > somnium_anim::MAX_JOINTS_PER_SKELETON {
+            return Err(refused(SkinError::TooManyJoints {
+                joints: skeleton.len(),
+                limit: somnium_anim::MAX_JOINTS_PER_SKELETON,
+            }));
         }
-        validation
-            .register(skeleton, skin, rest, 0, vertices.len() as u32, bounds)
-            .map_err(|e| format!("Skin registration: {e:?}"))?;
-        let posed = pool.upload_mesh_pooled(&ctx.queue, vertices, &[], 0);
+        if skin.bindings.len() != vertices.len() {
+            return Err(refused(SkinError::BindingCountMismatch { vertices: vertices.len(), bindings: skin.bindings.len() }));
+        }
+        if !skin.fits(skeleton) {
+            return Err(refused(SkinError::SkinDoesNotFitSkeleton));
+        }
+        if self.entries.len() as u32 >= budget.max_instances {
+            return Err(refused(SkinError::InstanceBudget { limit: budget.max_instances }));
+        }
+        let remaining = budget.max_posed_vertices.saturating_sub(self.live_vertices);
+        if vertex_count > remaining {
+            return Err(refused(SkinError::PosedVertexBudget { wanted: vertex_count, remaining }));
+        }
+        let posed = pool.upload_mesh_pooled(queue, vertices, &[], 0);
         if posed.vertex_capacity < vertices.len() as u32 {
             return Err("Posed geometry budget exhausted".into());
         }
-        pass.upload_bindings(&ctx.device, &ctx.queue, rest, &skin.bindings);
+        pass.upload_bindings(device, queue, rest, &skin.bindings);
         self.next = next;
         let id = AnimatedMeshId(self.next);
         let offset = posed.vertex_offset;
+        // At the ends of the palettes and the previous poses, unless a full layout is due anyway (or the palettes,
+        // holding removed ones' slots, would refuse it: then the layout is due).
+        let handle = if self.dirty {
+            None
+        } else {
+            self.palettes.register(skeleton, skin, rest, posed.vertex_offset, vertex_count, bounds).ok()
+        };
+        self.dirty |= handle.is_none();
+        let prev_base = self.prev_end;
+        self.prev_end += vertex_count;
+        self.live_vertices += vertex_count;
         self.entries.insert(
             id,
             Entry {
@@ -99,12 +161,13 @@ impl AnimatedGeometry {
                 posed,
                 bounds,
                 matrices: vec![Mat4::IDENTITY; skeleton.len()],
-                handle: None,
-                prev_base: 0,
+                handle,
+                prev_base,
                 fresh: true,
+                changed: true,
+                settle: false,
             },
         );
-        self.dirty = true;
         Ok((id, offset))
     }
     /// Posed mesh origins identify visible draws that lack deformation motion vectors.
@@ -131,16 +194,32 @@ impl AnimatedGeometry {
         if matrices.len() != entry.matrices.len() || matrices.iter().any(|m| !m.is_finite()) {
             return false;
         }
-        entry.matrices.copy_from_slice(matrices);
+        if entry.matrices.as_slice() != matrices {
+            entry.matrices.copy_from_slice(matrices);
+            entry.changed = true;
+        }
         true
+    }
+
+    /// Registrations the last frame skinned; the rest kept their pose.
+    #[must_use]
+    pub fn skinned_last_frame(&self) -> usize {
+        self.skinned
     }
     /// Free posed geometry; the caller may now free the corresponding rest mesh.
     pub fn remove(&mut self, id: AnimatedMeshId, pool: &mut GeometryPool) -> bool {
         let Some(entry) = self.entries.remove(&id) else {
             return false;
         };
+        let vertex_count = entry.skin.bindings.len() as u32;
         pool.free_mesh(entry.posed);
-        self.dirty = true;
+        // Its palette slot and previous-pose span stay unused (nothing skins a handle no entry holds) until the holes
+        // outweigh what is live.
+        self.live_vertices -= vertex_count;
+        self.dead_vertices += vertex_count;
+        if self.dead_vertices > self.live_vertices.max(1 << 16) {
+            self.dirty = true;
+        }
         true
     }
     /// Rebuild changed registrations and refresh conservative posed bounds before culling.
@@ -166,11 +245,14 @@ impl AnimatedGeometry {
             for entry in self.entries.values_mut() {
                 entry.prev_base = base;
                 entry.fresh = true;
+                entry.changed = true;
                 base += entry.posed.vertex_count;
             }
+            (self.prev_end, self.dead_vertices) = (base, 0);
             self.dirty = false;
         }
-        for entry in self.entries.values() {
+        // A still registration's palette and bounds are what they were.
+        for entry in self.entries.values().filter(|entry| entry.changed) {
             if let Some(handle) = entry.handle {
                 self.palettes.set_palette(handle, &entry.matrices);
                 if let Some(bounds) = self.palettes.posed_bounds(handle) {
@@ -188,24 +270,40 @@ impl AnimatedGeometry {
         pool: &GeometryPool,
         pass: &mut SkinPass,
     ) {
-        let needed = self
-            .entries
-            .values()
-            .map(|entry| u64::from(entry.posed.vertex_count) * VERTEX_BYTES)
-            .sum::<u64>()
-            .max(VERTEX_BYTES);
+        self.record_with(&ctx.device, &ctx.queue, encoder, pool, pass);
+    }
+
+    /// [`Self::record`] on a device and queue.
+    pub(crate) fn record_with(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pool: &GeometryPool,
+        pass: &mut SkinPass,
+    ) {
+        // Up to the last span laid, removed ones' holes included.
+        let needed = (u64::from(self.prev_end) * VERTEX_BYTES).max(VERTEX_BYTES);
         if self.prev.is_none() || self.prev_capacity < needed {
             let capacity = needed.next_power_of_two();
-            self.prev = Some(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            self.prev = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Previous posed vertices"),
                 size: capacity,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // COPY_SRC: read back by the tests.
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
             self.prev_capacity = capacity;
             self.prev_generation += 1;
             for entry in self.entries.values_mut() {
                 entry.fresh = true;
+                entry.changed = true;
+            }
+        }
+        if self.pool_size != pool.vertex_buffer.size() {
+            self.pool_size = pool.vertex_buffer.size();
+            for entry in self.entries.values_mut() {
+                entry.changed = true;
             }
         }
         let prev = self.prev.as_ref().expect("made above");
@@ -218,19 +316,38 @@ impl AnimatedGeometry {
                 u64::from(entry.posed.vertex_count) * VERTEX_BYTES,
             );
         };
-        for entry in self.entries.values().filter(|entry| !entry.fresh) {
+        // Last frame's pose aside: for a registration about to be skinned, and once for one skinned last frame.
+        for entry in self.entries.values().filter(|entry| !entry.fresh && (entry.changed || entry.settle)) {
             copy(encoder, entry);
         }
-        pass.record(
-            &ctx.device,
-            &ctx.queue,
+        let instances = self.palettes.instances();
+        let skin: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| entry.changed || entry.fresh)
+            .filter_map(|entry| entry.handle.and_then(|h| instances.get(h.0 as usize)).copied())
+            .collect();
+        self.skinned = skin.len();
+        pass.record_instances(
+            device,
+            queue,
             encoder,
             &pool.vertex_buffer,
             &self.palettes,
+            &skin,
         );
-        for entry in self.entries.values_mut().filter(|entry| entry.fresh) {
-            copy(encoder, entry);
-            entry.fresh = false;
+        for entry in self.entries.values_mut() {
+            if entry.fresh {
+                copy(encoder, entry);
+                (entry.fresh, entry.settle) = (false, false);
+            } else {
+                entry.settle = entry.changed;
+            }
+            entry.changed = false;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "animated_geometry_tests.rs"]
+mod gpu_tests;

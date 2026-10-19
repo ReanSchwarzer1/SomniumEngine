@@ -57,6 +57,8 @@ pub struct IndirectDrawBuffer {
     len: usize,
     /// CPU-side staging, reused across frames.
     staging: Vec<DrawIndirectArgs>,
+    /// Arguments past the uploaded ones that the GPU writes itself (instance batches); 0 without them.
+    extent: usize,
 }
 
 /// Starting capacity in draws. The visibility buffer's 10-bit instance ID caps
@@ -71,6 +73,7 @@ impl IndirectDrawBuffer {
             capacity: INITIAL_CAPACITY,
             len: 0,
             staging: Vec::with_capacity(INITIAL_CAPACITY),
+            extent: 0,
         }
     }
 
@@ -88,14 +91,35 @@ impl IndirectDrawBuffer {
         })
     }
 
-    /// Number of draws in the buffer after the last [`Self::update`].
+    /// Number of draws in the buffer after the last [`Self::update`], or the [`Self::set_extent`] past them.
     pub fn len(&self) -> usize {
-        self.len
+        self.len.max(self.extent)
     }
 
     /// Whether the buffer holds no draws.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
+    }
+
+    /// Room for `extent` arguments, so an upload of fewer does not reallocate and lose what the GPU writes past
+    /// them. Returns whether the buffer is new.
+    pub fn reserve_extent(&mut self, device: &wgpu::Device, extent: usize) -> bool {
+        if extent <= self.capacity {
+            return false;
+        }
+        let mut cap = self.capacity.max(1);
+        while cap < extent {
+            cap *= 2;
+        }
+        self.buffer = Self::alloc(device, cap);
+        self.capacity = cap;
+        true
+    }
+
+    /// Draw `extent` arguments from now on (0: just the uploaded ones). Instance batches write theirs on the GPU past
+    /// the uploaded ones (`crate::instance_batch`).
+    pub fn set_extent(&mut self, extent: usize) {
+        self.extent = extent;
     }
 
     /// Upload a pre-built argument list (Phase 15F builds one arg per cluster).

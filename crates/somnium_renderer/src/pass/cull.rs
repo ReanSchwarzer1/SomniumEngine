@@ -32,6 +32,8 @@ pub struct CullPass {
     capacity: usize,
     /// CPU staging for the AABB array, reused across frames.
     staging: Vec<GpuCullAabb>,
+    /// Draws past the staged bounds whose bounds the GPU writes (instance batches); 0 without them.
+    extent: usize,
 }
 
 /// Starting capacity in draws (matches the indirect buffer's).
@@ -175,7 +177,38 @@ impl CullPass {
             count_buffer: Self::alloc_counts(device),
             capacity: INITIAL_CAPACITY,
             staging: Vec::with_capacity(INITIAL_CAPACITY),
+            extent: 0,
         }
+    }
+
+    /// Room for `extent` draws, keeping the staged bounds (re-sent if the buffers are new). Returns whether they
+    /// are, so the bounds the GPU writes past the staged ones are written again (`crate::instance_batch`).
+    pub fn reserve_extent(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, extent: usize) -> bool {
+        if extent <= self.capacity {
+            return false;
+        }
+        let mut cap = self.capacity.max(1);
+        while cap < extent {
+            cap *= 2;
+        }
+        self.aabb_buffer = Self::alloc_aabbs(device, cap);
+        self.flags_buffer = Self::alloc_flags(device, cap);
+        self.compact_buffer = Self::alloc_compact(device, cap);
+        self.capacity = cap;
+        if !self.staging.is_empty() {
+            queue.write_buffer(&self.aabb_buffer, 0, bytemuck::cast_slice(&self.staging));
+        }
+        true
+    }
+
+    /// Cull `extent` draws from the next [`Self::update`] on (0: just the staged ones).
+    pub fn set_extent(&mut self, extent: usize) {
+        self.extent = extent;
+    }
+
+    /// The bounds the cull reads, parallel to the indirect arguments.
+    pub fn aabb_buffer(&self) -> &wgpu::Buffer {
+        &self.aabb_buffer
     }
 
     fn alloc_flags(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -260,7 +293,7 @@ impl CullPass {
 
         let mut params = GpuCullParams {
             planes: crate::culling::frustum_planes(view_proj),
-            draw_count: self.staging.len() as u32,
+            draw_count: self.staging.len().max(self.extent) as u32,
             disabled: u32::from(disabled),
             phase: 0,
             occlusion_enabled: u32::from(occlusion_enabled),

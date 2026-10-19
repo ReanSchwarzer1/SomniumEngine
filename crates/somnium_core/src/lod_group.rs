@@ -7,7 +7,7 @@
 //! shadows included, through a runtime set: nothing authored or saved changes, and a scene without a `LodGroup`
 //! draws exactly as before.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use glam::Vec3;
 use somnium_ecs::component_schema;
@@ -65,7 +65,9 @@ struct Group {
 pub struct Lods {
     groups: Vec<Group>,
     built_for: usize,
-    hidden: HashSet<Entity>,
+    /// By entity index, the generation + 1 of a skipped entity (0: drawn). A region's draw loop asks for every mesh
+    /// every frame; a set of every part of every level not chosen cost a cache miss a mesh (`tests/draw_loop_scale.rs`).
+    hidden: Vec<u32>,
 }
 
 impl Lods {
@@ -95,7 +97,7 @@ impl Lods {
             }
         }
         if changed {
-            self.hidden.clear();
+            self.hidden.fill(0);
             for group in &self.groups {
                 let Some(choice) = group.active else { continue };
                 if choice == Some(usize::MAX) {
@@ -103,7 +105,14 @@ impl Lods {
                 }
                 for (i, level) in group.levels.iter().enumerate() {
                     if Some(i) != choice {
-                        self.hidden.extend(level.iter().copied());
+                        for entity in level {
+                            let slot = entity.index() as usize;
+                            if slot >= self.hidden.len() {
+                                self.hidden.resize(slot + 1, 0);
+                            }
+                            // ponytail: a generation of u32::MAX wraps to "drawn"; four billion reuses of one slot.
+                            self.hidden[slot] = entity.generation().wrapping_add(1);
+                        }
                     }
                 }
             }
@@ -113,12 +122,12 @@ impl Lods {
     /// Whether this entity belongs to a level not drawn this frame.
     #[must_use]
     pub fn is_hidden(&self, entity: Entity) -> bool {
-        !self.hidden.is_empty() && self.hidden.contains(&entity)
+        self.hidden.get(entity.index() as usize).is_some_and(|&g| g != 0 && g == entity.generation().wrapping_add(1))
     }
 
     fn rebuild(&mut self, world: &World) {
         self.built_for = world.entity_count();
-        self.hidden.clear();
+        self.hidden.fill(0);
         let roots: Vec<Entity> = world.entities_with::<LodGroupComponent>().collect();
         self.groups.clear();
         if roots.is_empty() {
