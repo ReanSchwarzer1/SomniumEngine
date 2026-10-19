@@ -37,6 +37,8 @@ pub struct PropSetComponent {
     pub source: String,
     /// The source's mesh nodes each copy draws (the ordinals an `ImportedMesh` uses); empty: every one.
     pub parts: Vec<u32>,
+    /// Instead of `parts`: every mesh node whose name starts with this (a kit's `barrel/`).
+    pub part_prefix: String,
     /// One per copy, in the set's frame: position (x, y, z) and yaw (radians about +Y).
     pub copies: Vec<[f32; 4]>,
     /// Empty, or one uniform scale per copy.
@@ -67,6 +69,7 @@ impl Default for PropSetComponent {
             enabled: true,
             source: String::new(),
             parts: Vec::new(),
+            part_prefix: String::new(),
             copies: Vec::new(),
             scales: Vec::new(),
             rotations: Vec::new(),
@@ -91,6 +94,7 @@ pub(crate) fn register(registry: &mut TypeRegistry) {
             enabled { group: "Prop Set", doc: "Off: nothing draws or collides." },
             source { group: "Prop Set", doc: "The glTF every copy draws, project-relative (as an Imported Mesh names it)." },
             parts { group: "Prop Set", advanced: true, doc: "Which of the source's mesh nodes draw (Imported Mesh ordinals); empty: all." },
+            part_prefix { group: "Prop Set", doc: "Instead of Parts: every mesh node whose name starts with this (a kit's barrel/)." },
             copies { group: "Copies", advanced: true, read_only: true, doc: "Per copy, in this entity's frame: x, y, z and yaw (radians)." },
             scales { group: "Copies", advanced: true, read_only: true, doc: "Empty, or a uniform scale per copy." },
             rotations { group: "Copies", advanced: true, read_only: true, doc: "Empty, or a rotation per copy (x, y, z, w), instead of its yaw." },
@@ -150,20 +154,27 @@ pub(crate) fn batch_id(entity: Entity, group: usize) -> u64 {
     ID_SPACE | (u64::from(entity.index()) << 8) | group.min(255) as u64
 }
 
-/// `set`'s batches with its entity at `world`, one per tint group, over `parts` (the source's uploaded nodes).
+/// The parts of a source (its uploaded nodes, named `names`) each copy of `set` draws.
+#[must_use]
+pub(crate) fn chosen_parts(set: &PropSetComponent, parts: &[SourcePart], names: &[String]) -> Vec<SourcePart> {
+    if !set.part_prefix.is_empty() {
+        parts.iter().zip(names).filter(|(_, name)| name.starts_with(&set.part_prefix)).map(|(p, _)| *p).collect()
+    } else if set.parts.is_empty() {
+        parts.to_vec()
+    } else {
+        set.parts.iter().filter_map(|&p| parts.get(p as usize).copied()).collect()
+    }
+}
+
+/// `set`'s batches with its entity at `world`, one per tint group, drawing `chosen` ([`chosen_parts`]).
 /// `tinted(material, tint)` gives the material a tinted copy draws with.
 pub(crate) fn batches(
     entity: Entity,
     set: &PropSetComponent,
     world: Mat4,
-    parts: &[SourcePart],
+    chosen: &[SourcePart],
     mut tinted: impl FnMut(u32, [f32; 3]) -> u32,
 ) -> Vec<(u64, InstanceBatch)> {
-    let chosen: Vec<SourcePart> = if set.parts.is_empty() {
-        parts.to_vec()
-    } else {
-        set.parts.iter().filter_map(|&p| parts.get(p as usize).copied()).collect()
-    };
     if chosen.is_empty() || set.copies.is_empty() {
         return Vec::new();
     }
@@ -236,7 +247,7 @@ fn mix(h: &mut u64, word: u32) {
 fn content_hash(set: &PropSetComponent) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     mix(&mut h, u32::from(set.enabled) | u32::from(set.casts_shadow) << 1 | u32::from(set.collide_bounds) << 2);
-    for byte in set.source.bytes() {
+    for byte in set.source.bytes().chain([0]).chain(set.part_prefix.bytes()) {
         mix(&mut h, u32::from(byte));
     }
     let floats = set
@@ -360,7 +371,8 @@ impl PropSetPlanner {
 /// A set's source on its way to the GPU: decoded on a thread, then uploaded.
 pub(crate) enum PropSource {
     Loading(std::sync::mpsc::Receiver<Result<somnium_asset::LoadedScene, String>>),
-    Ready(Vec<SourcePart>),
+    /// Its uploaded nodes and their names.
+    Ready(Vec<SourcePart>, Vec<String>),
     Failed,
 }
 
@@ -419,6 +431,11 @@ mod tests {
         set.scales = vec![1.0, 2.0];
         let world = Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0));
         let out = batches(Entity::DANGLING, &set, world, &[part(1, 7, 0.0), part(2, 8, 0.5)], |m, _| m);
+        let names = ["barrel/oak".to_string(), "barrel/iron".to_string(), "cart/boards".to_string()];
+        let kit = [part(1, 7, 0.0), part(2, 8, 0.0), part(3, 9, 0.0)];
+        let by_prefix = PropSetComponent { part_prefix: "barrel/".into(), ..barrels(1) };
+        assert_eq!(chosen_parts(&by_prefix, &kit, &names).len(), 2);
+        assert_eq!(chosen_parts(&barrels(1), &kit, &names).len(), 3, "no parts named: every node");
         assert_eq!(out.len(), 1);
         let batch = &out[0].1;
         assert_eq!(batch.parts.len(), 2);
@@ -437,7 +454,8 @@ mod tests {
         set.tint_of = vec![9, 0, 0];
         set.draw_distance = 80.0;
         let mut made = Vec::new();
-        let out = batches(Entity::DANGLING, &set, Mat4::IDENTITY, &[part(1, 7, 0.0), part(2, 8, 0.0)], |m, t| {
+        let chosen = chosen_parts(&set, &[part(1, 7, 0.0), part(2, 8, 0.0)], &[String::new(), String::new()]);
+        let out = batches(Entity::DANGLING, &set, Mat4::IDENTITY, &chosen, |m, t| {
             made.push((m, t));
             100 + m
         });
@@ -598,6 +616,22 @@ mod tests {
                 houses * props
             );
         }
+    }
+
+    /// A scene `tools/prop_sets.py` wrote loads through the engine's loader with its sets whole:
+    /// `PROP_SET_SCENE=<file> cargo test -p somnium_core --lib prop_set::tests::a_converted_scene -- --ignored`.
+    #[test]
+    #[ignore = "reads a scene named by PROP_SET_SCENE"]
+    fn a_converted_scene_loads_with_its_sets() {
+        let Ok(path) = std::env::var("PROP_SET_SCENE") else { return };
+        let mut world = World::new();
+        let registry = crate::reflect_registry::component_registry();
+        crate::scene_schema::load_scene_schema(&mut world, &registry, &path).expect("the scene loads");
+        let sets: Vec<usize> = world.iter_with::<PropSetComponent>().map(|(_, s)| s.copies.len()).collect();
+        println!("{path}: {} entities, {} prop sets, {} copies", world.entity_count(), sets.len(), sets.iter().sum::<usize>());
+        assert!(!sets.is_empty() && sets.iter().all(|&n| n > 0));
+        let mut planner = PropSetPlanner::default();
+        assert_eq!(planner.plan(&world).build.len(), sets.len(), "every set is planned on its first frame");
     }
 
     #[test]

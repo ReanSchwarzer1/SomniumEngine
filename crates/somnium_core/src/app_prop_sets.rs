@@ -68,6 +68,7 @@ impl<G: GameApp> Engine<G> {
                                 transform: n.transform,
                             })
                             .collect(),
+                        nodes.iter().map(|n| n.entity_name.clone()).collect(),
                     );
                 }
                 Ok(Err(error)) => {
@@ -81,9 +82,10 @@ impl<G: GameApp> Engine<G> {
         for (entity, signature, at) in plan.build {
             let Some(set) = self.world.get::<PropSetComponent>(entity) else { continue };
             // Not decoded yet: the planner asks again next frame.
-            let Some(PropSource::Ready(parts)) = self.prop_sets.sources.get(&set.source) else { continue };
+            let Some(PropSource::Ready(parts, names)) = self.prop_sets.sources.get(&set.source) else { continue };
+            let chosen = crate::prop_set::chosen_parts(set, parts, names);
             let tinted = &mut self.prop_sets.tinted;
-            let batches = crate::prop_set::batches(entity, set, at, parts, |material, tint| {
+            let batches = crate::prop_set::batches(entity, set, at, &chosen, |material, tint| {
                 *tinted.entry((material, tint.map(f32::to_bits))).or_insert_with(|| {
                     let mut copy = renderer.materials_pool.get(material).unwrap_or_else(|| {
                         renderer.materials_pool.get(0).expect("the pool has a default material")
@@ -95,11 +97,6 @@ impl<G: GameApp> Engine<G> {
                 })
             });
             // The chosen parts' bounds, in the copy's frame, for `collide_bounds`.
-            let chosen: Vec<&SourcePart> = if set.parts.is_empty() {
-                parts.iter().collect()
-            } else {
-                set.parts.iter().filter_map(|&p| parts.get(p as usize)).collect()
-            };
             let bounds = chosen.iter().filter_map(|p| {
                 let (min, max) = renderer.geometry.mesh_aabb(p.vertex_offset)?;
                 Some(somnium_renderer::culling::transform_aabb(p.transform, glam::Vec3::from(min), glam::Vec3::from(max)))
