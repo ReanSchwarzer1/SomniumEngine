@@ -65,6 +65,13 @@ pub fn pose_of(
         let time = seconds(clip).map_or(fallback, |s| fraction.clamp(0.0, 1.0) * s);
         (clip.to_string(), Timing::At(time))
     };
+    // A parry opens the riposte window: the blade meets the blow.
+    if now < c.riposte_until && matches!(c.action, Action::Guard { .. } | Action::Idle) {
+        return (
+            "Sword_Meridian_Parry_Mid|Sword_Aether_Rimeguard_Block|Idle_Loop".into(),
+            Timing::Once,
+        );
+    }
     match &c.action {
         Action::Dead => return ("Death_F|Death".into(), Timing::Once),
         Action::Attack(a) => {
@@ -589,6 +596,19 @@ mod tests {
         assert!(
             matches!(t, Timing::At(s) if (s - 0.4).abs() < 1e-4),
             "halfway through: {t:?}"
+        );
+        c.action = Action::Guard { t: 0.1 };
+        c.riposte_until = 2.0;
+        assert!(
+            pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table))
+                .0
+                .starts_with("Sword_Meridian_Parry_Mid")
+        );
+        c.riposte_until = f64::NEG_INFINITY;
+        assert!(
+            pose_of(c, Some(Mode::Ground), 1.0, true, Some(&table))
+                .0
+                .starts_with("Sword_Aether_Rimeguard_Block")
         );
         c.action = Action::Dead;
         assert_eq!(
