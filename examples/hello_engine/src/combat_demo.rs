@@ -329,6 +329,9 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         };
         spawn_camp(world, root, camp, content, &mut out);
     }
+    if only == Some("lampmen") {
+        spawn_crew(world, root, Vec3::ZERO, content, &mut out);
+    }
     Ok(out)
 }
 
@@ -391,14 +394,7 @@ fn spawn_camp(
     content: Option<&std::path::Path>,
     out: &mut Vec<Entity>,
 ) {
-    let home = world
-        .get::<Transform>(root)
-        .map_or(camp, |t| t.translation + camp);
-    // ponytail: the 100 m cell the camp stands in picks its faces, so a camp whose
-    // survivors drift over a cell's edge between wakes changes faces (unseen at
-    // the wake's 120 m); key it by the encounter if that ever shows.
-    let first = ((home.x / 100.0).floor() as i64 * 7 + (home.z / 100.0).floor() as i64 * 3)
-        .rem_euclid(BANDITS as i64) as usize;
+    let first = first_face(world, root, camp);
     for (i, (name, archetype, weapon, leader)) in [
         ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
         (
@@ -440,6 +436,67 @@ fn spawn_camp(
 
 /// WS3's bandits (`characters/bandit_00` to `bandit_09`).
 const BANDITS: usize = 10;
+
+/// The first of a group's four bandit faces (three apart round ten), by where
+/// it stands: `local` under `root`.
+fn first_face(world: &World, root: Entity, local: Vec3) -> usize {
+    let home = world
+        .get::<Transform>(root)
+        .map_or(local, |t| t.translation + local);
+    // ponytail: the 100 m cell the group stands in picks its faces, so a group whose
+    // survivors drift over a cell's edge between wakes changes faces (unseen at
+    // the wake's 120 m); key it by the encounter if that ever shows.
+    ((home.x / 100.0).floor() as i64 * 7 + (home.z / 100.0).floor() as i64 * 3).rem_euclid(BANDITS as i64)
+        as usize
+}
+
+/// A Lamp crew on its street (Vespergate's back streets): its boss, two knives
+/// and a rifleman strung along the street (+Z), facing the boss. With a
+/// `content` root they wear WS3's bandits, until there are Lamp-men.
+fn spawn_crew(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    out: &mut Vec<Entity>,
+) {
+    let first = first_face(world, root, at);
+    for (i, (name, archetype, weapon, along)) in [
+        ("Lamp-man boss", Archetype::Duelist, WeaponKind::Knife, 0.0),
+        ("Lamp-man (knife)", Archetype::Skirmisher, WeaponKind::Knife, 2.5),
+        ("Lamp-man (lookout)", Archetype::Skirmisher, WeaponKind::Knife, -2.5),
+        ("Lamp-man (rifle)", Archetype::Rifleman, WeaponKind::LatticeRifle, -6.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Side to side within an alley's 4 m.
+        let side = if i % 2 == 0 { 0.6 } else { -0.6 };
+        let spot = at + Vec3::new(side, 0.0, along);
+        let facing = if along == 0.0 { Vec3::Z } else { at - spot };
+        let leader = i == 0;
+        let n = out.len();
+        out.extend(fighter(
+            world,
+            root,
+            name,
+            spot,
+            facing,
+            CombatantComponent {
+                team: 1,
+                archetype: archetype as u32,
+                weapon: weapon as u32,
+                max_health: if leader { 130.0 } else { 90.0 },
+                armor: 1.0,
+                speed: if weapon == WeaponKind::Knife { 4.3 } else { 4.0 },
+                leader,
+                ..CombatantComponent::default()
+            },
+        ));
+        let b = (first + i * 3) % BANDITS;
+        wear(world, out[n], content, &format!("characters/bandit_{b:02}/bandit_{b:02}"));
+    }
+}
 
 /// Dress a fighter in WS3's skinned body `<stem>.glb` (its `_lod1` and `_lod2`
 /// beside it) when `content` has the file: in Play it draws through it
@@ -1092,7 +1149,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; lampmen: a Lamp crew on a street (a boss, two knives and a rifleman)." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -1157,18 +1214,18 @@ fn build_encounter(
     }
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
-        part @ ("wolves" | "bandits") => args["only"] = json!(part),
-        other => return Err(format!("no kind {other:?} (try wilds, wolves or bandits)")),
+        part @ ("wolves" | "bandits" | "lampmen") => args["only"] = json!(part),
+        other => return Err(format!("no kind {other:?} (try wilds, wolves, bandits or lampmen)")),
     }
     spawn_wilds(world, &args)
 }
 
 /// How far an encounter of `kind` spreads from its centre, metres.
 fn encounter_extent(kind: &str) -> f32 {
-    if kind.trim().eq_ignore_ascii_case("wilds") {
-        25.0
-    } else {
-        6.0
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "wilds" => 25.0,
+        "lampmen" => 8.0,
+        _ => 6.0,
     }
 }
 
@@ -2338,9 +2395,9 @@ impl CombatDemo {
     }
 
     /// The scene's Combat Encounter and Combat Patrol entities (each with its
-    /// kind, lowercased: `wolves`, `bandits`, `wilds`) whose encounter woke and
-    /// whose fighters have all fallen since the last call. Each comes once:
-    /// a cleared encounter never wakes again.
+    /// kind, lowercased: `wolves`, `bandits`, `lampmen`, `wilds`) whose
+    /// encounter woke and whose fighters have all fallen since the last call.
+    /// Each comes once: a cleared encounter never wakes again.
     pub fn take_cleared(&mut self) -> Vec<(Entity, String)> {
         self.run
             .as_mut()
@@ -4549,6 +4606,45 @@ mod tests {
         }
         assert!(run.world.combatants().all(|c| !c.name.starts_with("Bandit") || !c.alive()));
         assert!(demo.take_cleared().is_empty());
+    }
+
+    /// A Lamp crew: a boss, two knives and a rifleman strung along its
+    /// street, each by its own name (survivors are remembered by name), in
+    /// four different bodies where the project has them.
+    #[test]
+    fn a_lamp_crew_stands_along_its_street() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_crew");
+        for n in 0..BANDITS {
+            let path = content.join(format!("characters/bandit_{n:02}/bandit_{n:02}.glb"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+        let mut world = World::new();
+        let made = build_encounter(&mut world, "lampmen", Vec3::new(5.0, 0.0, 9.0), Vec3::X, false, Some(&content))
+            .expect("a crew");
+        let crew: Vec<(String, CombatantComponent, Option<SkinnedBody>)> = made
+            .iter()
+            .filter_map(|e| {
+                let c = world.get::<CombatantComponent>(*e)?.clone();
+                let name = world.get::<Name>(*e)?.as_str().to_string();
+                Some((name, c, world.get::<SkinnedBody>(*e).cloned()))
+            })
+            .collect();
+        let names: std::collections::BTreeSet<&str> = crew.iter().map(|(n, ..)| n.as_str()).collect();
+        assert_eq!((crew.len(), names.len()), (4, 4), "{names:?}");
+        assert_eq!(crew.iter().filter(|(_, c, _)| c.leader).count(), 1);
+        assert_eq!(
+            crew.iter()
+                .filter(|(_, c, _)| c.weapon_kind() == WeaponKind::Knife)
+                .count(),
+            3
+        );
+        assert!(crew.iter().any(|(_, c, _)| c.weapon_kind() == WeaponKind::LatticeRifle));
+        let faces: std::collections::BTreeSet<AssetId> =
+            crew.iter().map(|(_, _, b)| b.as_ref().expect("a body").source).collect();
+        assert_eq!(faces.len(), 4);
+        assert!((encounter_extent("lampmen") - 8.0).abs() < 1e-6);
     }
 
     #[test]
