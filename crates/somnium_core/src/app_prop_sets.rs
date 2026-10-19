@@ -20,7 +20,7 @@ impl<G: GameApp> Engine<G> {
                 }
                 if let Some(physics) = self.physics.as_mut() {
                     for body in bodies {
-                        physics.remove_body(body);
+                        physics.destroy_body(body);
                     }
                 }
             }
@@ -115,7 +115,7 @@ impl<G: GameApp> Engine<G> {
             let mut bodies = Vec::new();
             if let Some(physics) = self.physics.as_mut() {
                 for body in old_bodies {
-                    physics.remove_body(body);
+                    physics.destroy_body(body);
                 }
                 for (position, rotation, half_extents) in boxes {
                     bodies.push(physics.create_body(RigidBodyDescriptor {
