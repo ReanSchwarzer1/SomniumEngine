@@ -72,6 +72,8 @@ export type HelloSkinnedBody = {
 	lod2: Asset?,
 	lod1_beyond: number,
 	lod2_beyond: number,
+	still_beyond: number,
+	driven: boolean,
 }
 
 --- `hello.SkinnedSocket` (schema version 1).
