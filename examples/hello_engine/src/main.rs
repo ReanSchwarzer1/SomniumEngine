@@ -23,7 +23,7 @@ mod animated_preview;
 mod skinned_crowd;
 mod authoring_demo;
 mod combat_bodies;
-mod combat_demo;
+pub mod combat_demo;
 mod life_demo;
 mod dreams_fixture;
 mod fracture_demo;
@@ -784,6 +784,19 @@ pub struct HelloGame {
 }
 
 impl HelloGame {
+    /// The combat sandbox's host: a game reads the running fight from it (its
+    /// HUD view and events) and sets what it draws itself.
+    #[must_use]
+    pub fn combat(&self) -> &combat_demo::CombatDemo {
+        &self.combat
+    }
+
+    /// The combat host, to change: say `show_hud = false` when the game draws
+    /// its own HUD, and take its events each frame.
+    pub fn combat_mut(&mut self) -> &mut combat_demo::CombatDemo {
+        &mut self.combat
+    }
+
     fn spawn_map_audio(&self, ctx: &mut EngineContext, result: &MapLoadResult) {
         let wave_path = match result.kind {
             MapKind::Coastal => "audio/ambient/coastal_waves_cc0.flac",
