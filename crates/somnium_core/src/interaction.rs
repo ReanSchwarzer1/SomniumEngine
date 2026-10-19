@@ -43,6 +43,28 @@ pub struct Interactable {
     pub open_angle: f32,
     /// One-shot native preview request, consumed by the game.
     pub preview_requested: bool,
+    // Added for the isometric layer (`crate::interact`, `crate::door`; Rimeborn, 19 Oct 2026). Nothing that existed
+    // before reads them, so TSF's hand interactions behave as they did.
+    /// Half the angle, degrees, either side of the player's facing it can be picked in (isometric targeting).
+    pub cone: f32,
+    /// A world-state condition the game evaluates; while false the action is refused. Empty: only `locked` locks.
+    pub requires: String,
+    /// A door's leaf, metres: along the entity's +X from the hinge (its origin) to the free edge.
+    pub leaf_width: f32,
+    /// A door's leaf, up from the hinge.
+    pub leaf_height: f32,
+    /// A door's leaf, through it (for its box).
+    pub leaf_thickness: f32,
+    /// A static box fills a closed door's leaf.
+    pub blocks: bool,
+    /// Entities under a door's parent whose names start with this swing with it (a building's `Door / ` parts).
+    pub leaves: String,
+    /// Seconds a door takes to swing fully open or shut.
+    pub swing_duration: f32,
+    /// Seconds a door stays open before closing by itself, once nobody is in its swing; 0 stays open.
+    pub close_after: f32,
+    /// A door is open: how it starts, and its state while the door system runs.
+    pub open: bool,
 }
 impl Component for Interactable {}
 impl Default for Interactable {
@@ -60,6 +82,16 @@ impl Default for Interactable {
             hand_grip: -1.0,
             open_angle: 90.0,
             preview_requested: false,
+            cone: 75.0,
+            requires: String::new(),
+            leaf_width: 0.9,
+            leaf_height: 2.0,
+            leaf_thickness: 0.06,
+            blocks: true,
+            leaves: String::new(),
+            swing_duration: 0.9,
+            close_after: 0.0,
+            open: false,
         }
     }
 }
@@ -79,6 +111,16 @@ pub fn register_schema(registry: &mut TypeRegistry) {
             hand_grip { group:"Contact",min:-1.0,max:1.0,doc:"-1 uses the action default; 0 is a flat palm, 1 a closed grip." },
             open_angle { group:"Door",min:-170.0,max:170.0,unit:"deg" },
             preview_requested { group:"Preview",doc:"Request the same interaction during Play." },
+            cone { group:"Isometric",min:5.0,max:180.0,unit:"deg",doc:"Either side of the player's facing it can be picked in by the isometric layer. 180: any direction." },
+            requires { group:"Availability",doc:"A world-state condition (the game's: a story fact or expression). While false the action is refused and the prompt says Locked. Empty: only Locked locks." },
+            leaf_width { group:"Door",min:0.1,max:6.0,unit:"m",doc:"The leaf along +X from the hinge (this entity's origin) to its free edge." },
+            leaf_height { group:"Door",min:0.1,max:8.0,unit:"m" },
+            leaf_thickness { group:"Door",min:0.01,max:0.5,unit:"m" },
+            blocks { group:"Door",doc:"A static box fills the leaf while the door is closed." },
+            leaves { group:"Door",doc:"Entities under this door's parent whose names start with this swing with it (a building's 'Door / ' parts). Its children always swing." },
+            swing_duration { group:"Door",min:0.1,max:5.0,unit:"s" },
+            close_after { group:"Door",min:0.0,max:60.0,unit:"s",doc:"Closes by itself this long after opening, once nobody is in its swing. 0 stays open." },
+            open { group:"Door",doc:"Open now: how it starts, and its state while playing." },
         }
     };
     if let Some(field) = schema.fields.iter_mut().find(|field| field.name == "kind") {

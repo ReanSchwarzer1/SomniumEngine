@@ -71,6 +71,10 @@ pub mod foliage_visibility;
 pub mod i18n;
 pub mod input_actions;
 pub mod interaction;
+/// Isometric targeting, the interact key and the prompt over `somnium.Interactable` (Rimeborn, 19 Oct 2026).
+pub mod interact;
+/// Doors of `somnium.Interactable` that swing about their hinge (Rimeborn, 19 Oct 2026).
+pub mod door;
 pub mod jobs;
 pub mod landscape;
 /// Failing-fixture flicker applied to local lights at submission.
