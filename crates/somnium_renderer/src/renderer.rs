@@ -4147,6 +4147,11 @@ impl SomniumRenderer {
             match self.frame_gen_finish(ctx, &mut encoder) {
                 Some((acquired, view)) => (Some(acquired), view),
                 None => {
+                    // No swap chain image (a minimised or contended window): nothing is presented, but the frame's
+                    // work still runs. It holds the BLAS builds `raytrace_pass.build` has already taken off its
+                    // pending list; dropping the encoder left those structures unbuilt for the next frame's TLAS
+                    // ("Blas is used before it is built", a fatal validation error; Rimeborn, 19 Oct).
+                    ctx.queue.submit([encoder.finish()]);
                     self.clear_frame_queues();
                     return;
                 }
