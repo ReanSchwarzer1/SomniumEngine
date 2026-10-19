@@ -110,6 +110,19 @@ impl Lift {
         self.shape.rise + self.cross + self.shape.fall
     }
 
+    /// How high it is, 0 (the rig's own view) to 1 (the top, crossing or holding), eased as the camera moves. At the
+    /// top the camera sees far past the cells streamed around either place, so a game crossfades to its world map
+    /// from about 0.6 up and back out below it on the fall (DUAL_PROTAGONISTS 3).
+    #[must_use]
+    pub fn altitude(&self) -> f32 {
+        match self.phase {
+            LiftPhase::Rising => ease(self.t / self.shape.rise.max(1e-3)),
+            LiftPhase::Crossing | LiftPhase::Holding => 1.0,
+            LiftPhase::Falling => 1.0 - ease(self.t / self.shape.fall.max(1e-3)),
+            LiftPhase::Done => 0.0,
+        }
+    }
+
     /// Advance by `dt`; `ready` says whether the destination can be shown (its cells are in). Returns the camera pose
     /// and the phase it is now in.
     pub fn update(&mut self, dt: f32, ready: bool) -> (CameraPose, LiftPhase) {
@@ -239,6 +252,27 @@ mod tests {
             t += 1.0 / 60.0;
         }
         assert!((t - LiftShape::default().fall).abs() < 0.05, "{t}");
+    }
+
+    #[test]
+    fn altitude_rises_to_one_holds_there_and_comes_back_down() {
+        let (rig, settings) = rig_at(Vec3::ZERO);
+        let mut lift = Lift::new(&rig, &settings, Vec3::new(2000.0, 0.0, 0.0), LiftShape::default());
+        assert_eq!(lift.altitude(), 0.0);
+        let mut last = 0.0;
+        let mut peaked = false;
+        while lift.phase() != LiftPhase::Done {
+            lift.update(1.0 / 60.0, true);
+            let a = lift.altitude();
+            assert!((0.0..=1.0).contains(&a));
+            if lift.phase() == LiftPhase::Rising {
+                assert!(a >= last, "it only rises on the rise");
+            }
+            peaked |= a == 1.0;
+            last = a;
+        }
+        assert!(peaked);
+        assert_eq!(lift.altitude(), 0.0, "landed: the rig's own view");
     }
 
     #[test]

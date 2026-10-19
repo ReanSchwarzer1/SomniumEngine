@@ -59,7 +59,10 @@ impl<G: GameApp> Engine<G> {
             self.unload_cell(index);
         }
 
-        let focus = self.renderer.as_ref().map(|renderer| renderer.camera_pos);
+        // The camera, unless the view is pinned (a protagonist switch's camera is up, crossing land nobody sees).
+        let pinned = self.world.take_cache::<cells::Holds>();
+        let focus = pinned.pinned().or_else(|| self.renderer.as_ref().map(|renderer| renderer.camera_pos));
+        self.world.put_cache(pinned);
         let first_fill = !self.cell_streamer.filled;
         self.schedule_cells(&settings, focus);
         if first_fill && !self.cell_streamer.reading.is_empty() {
@@ -123,9 +126,10 @@ impl<G: GameApp> Engine<G> {
         let (load, unload) = match focus {
             Some(focus) if settings.enabled => cells::plan_many(
                 &streamer.cells,
-                &std::iter::once([focus.x, focus.z]).chain(holds.points()).collect::<Vec<_>>(),
+                [focus.x, focus.z],
                 settings.load_radius,
                 settings.unload_margin,
+                &holds.discs(),
                 |index| streamer.loaded.contains_key(&index) || streamer.reading.contains_key(&index),
             ),
             Some(_) => (Vec::new(), streamer.loaded.keys().chain(streamer.reading.keys()).copied().collect()),
@@ -143,7 +147,7 @@ impl<G: GameApp> Engine<G> {
             }
         }
         let streamer = &self.cell_streamer;
-        holds.mark_ready(&streamer.cells, settings.load_radius, |index| {
+        holds.mark_ready(&streamer.cells, |index| {
             streamer.loaded.contains_key(&index) || streamer.failed.contains_key(&index)
         });
         self.world.put_cache(holds);
