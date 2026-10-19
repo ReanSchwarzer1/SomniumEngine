@@ -23,6 +23,8 @@
 //! [`Interaction`] bundles the interactor, the doors and the prompt for a game to drive in four calls. Nothing here
 //! runs unless a game calls it, so TSF's own use of `somnium.Interactable` (first-person hands) is untouched.
 
+use std::collections::HashMap;
+
 use glam::{Mat4, Vec2, Vec3};
 use somnium_ecs::{ComponentId, ComponentSet, Entity, World};
 use somnium_input::{Action, ActionMap, Binding, ControlPath, InputSystem};
@@ -30,7 +32,7 @@ use somnium_input::{Action, ActionMap, Binding, ControlPath, InputSystem};
 use crate::door::{DoorEvent, Doors};
 use crate::interaction::{Interactable, InteractionEvent, InteractionSession};
 use crate::story_actor::CastMemberComponent;
-use crate::{EngineContext, EngineEvent, InputState, Parent, SimulationState, WorldTransform};
+use crate::{EngineContext, EngineEvent, InputState, Parent, SimulationState, Transform, WorldTransform};
 
 /// `Interactable::kind`s.
 pub const KIND_DOOR: u32 = 0;
@@ -108,7 +110,7 @@ pub fn remove_with_children(world: &mut World, roots: &[Entity]) {
     if roots.is_empty() {
         return;
     }
-    let mut children: std::collections::HashMap<Entity, Vec<Entity>> = std::collections::HashMap::new();
+    let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
     for (entity, parent) in world.iter_with::<Parent>() {
         children.entry(parent.entity).or_default().push(entity);
     }
@@ -173,30 +175,129 @@ const CLOSE: f32 = 0.45;
 /// How much better another thing must score before the target changes (no flicker between two doors).
 const STICKY: f32 = 0.08;
 
+/// A cast member's facing cone for talk, degrees (the interactable default).
+const CAST_CONE: f32 = 75.0;
+/// The squares interactables are filed in, metres.
+const PLACE_CELL: f32 = 4.0;
+
+fn place_cell(at: Vec3) -> (i32, i32) {
+    ((at.x / PLACE_CELL).floor() as i32, (at.z / PLACE_CELL).floor() as i32)
+}
+
+/// An entity's world frame from its local transforms: right on the frame it arrives, before propagation. An entity
+/// with no `Transform` keeps its `WorldTransform`.
+fn local_frame(world: &World, entity: Entity) -> Mat4 {
+    if world.get::<Transform>(entity).is_none() {
+        return world.get::<WorldTransform>(entity).map_or(Mat4::IDENTITY, |w| w.0);
+    }
+    let (mut frame, mut at) = (Mat4::IDENTITY, entity);
+    for _ in 0..64 {
+        frame = world.get::<Transform>(at).map_or(Mat4::IDENTITY, Transform::to_matrix) * frame;
+        match world.get::<Parent>(at).map(|p| p.entity).filter(|p| *p != Entity::DANGLING) {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    frame
+}
+
+/// A set of entities kept as one slot per entity index (its generation + 1): membership in O(1), no hashing. A
+/// despawned entity's slot reads as absent once its index is reused.
+#[derive(Default)]
+pub(crate) struct Marks(Vec<u32>);
+
+impl Marks {
+    pub(crate) fn contains(&self, entity: Entity) -> bool {
+        self.0.get(entity.index() as usize) == Some(&entity.generation().wrapping_add(1))
+    }
+
+    pub(crate) fn insert(&mut self, entity: Entity) {
+        let i = entity.index() as usize;
+        if i >= self.0.len() {
+            self.0.resize(i + 1, 0);
+        }
+        self.0[i] = entity.generation().wrapping_add(1);
+    }
+}
+
+/// The interactables that stay put (all but cast members, who walk), filed by where their anchors are when they
+/// arrive: a frame's pick looks at the few squares around the player, whatever a city holds. Filing happens only
+/// when the world's population of interactables moves (a cell came or went). An interactable that moves after it
+/// arrives (on a cart) is found where it arrived; put moving ones on a cast member.
+#[derive(Default)]
+struct Places {
+    cells: HashMap<(i32, i32), Vec<(Entity, Vec3)>>,
+    filed: Marks,
+    /// Entries filed, gone ones included until a sweep.
+    entries: usize,
+    population: u64,
+    /// The longest reach filed: how far around the player a pick looks.
+    reach: f32,
+}
+
+impl Places {
+    fn update(&mut self, world: &World) {
+        let id = ComponentId::of::<Interactable>();
+        let population = world.population_tick(id);
+        if population == self.population {
+            return;
+        }
+        self.population = population;
+        let mut live = 0;
+        for (entity, thing) in world.iter_with::<Interactable>() {
+            live += 1;
+            if self.filed.contains(entity) || world.get::<CastMemberComponent>(entity).is_some() {
+                continue;
+            }
+            let at = local_frame(world, entity).transform_point3(thing.anchor);
+            self.cells.entry(place_cell(at)).or_default().push((entity, at));
+            self.filed.insert(entity);
+            self.entries += 1;
+            self.reach = self.reach.max(thing.reach);
+        }
+        // Gone ones are passed over by the pick; once they outnumber the living, they are swept.
+        if self.entries > 2 * live + 1024 {
+            for list in self.cells.values_mut() {
+                list.retain(|&(e, _)| world.has_component(e, id));
+            }
+            self.cells.retain(|_, list| !list.is_empty());
+            self.entries = self.cells.values().map(Vec::len).sum();
+        }
+    }
+}
+
 /// The interactable `actor` would use: within reach of the eye, inside its cone, the best of distance (as a share of
-/// reach) and facing. `current` keeps the last target unless another is clearly better. One pass over the
-/// interactables' own columns, and one over the cast members (talk) that have no interactable.
+/// reach) and facing. `current` keeps the last target unless another is clearly better. Files the world's
+/// interactables first; an [`Interactor`] keeps its filing from frame to frame.
 #[must_use]
 pub fn pick(world: &World, actor: Actor, current: Option<Entity>) -> Option<(Entity, Vec3)> {
+    let mut places = Places::default();
+    places.update(world);
+    pick_in(world, &places, actor, current)
+}
+
+/// [`pick`] among filed places: the squares within the longest reach of the eye, and the cast members' own columns
+/// (they move, so they are not filed; a cast member with no interactable is talk).
+fn pick_in(world: &World, places: &Places, actor: Actor, current: Option<Entity>) -> Option<(Entity, Vec3)> {
     let forward = Vec3::new(actor.forward.x, 0.0, actor.forward.z).normalize_or_zero();
     let id = ComponentId::of::<Interactable>();
-    let required = ComponentSet::from_ids(vec![id, ComponentId::of::<WorldTransform>()]);
+    let cast_id = ComponentId::of::<CastMemberComponent>();
+    let required = ComponentSet::from_ids(vec![cast_id, ComponentId::of::<WorldTransform>()]);
     let mut best: Option<(Entity, Vec3, f32)> = None;
     let mut kept: Option<(Entity, Vec3, f32)> = None;
-    let mut consider = |entity: Entity, frame: Mat4, thing: &Interactable| {
-        let at = frame.transform_point3(thing.anchor);
+    let mut consider = |entity: Entity, at: Vec3, reach: f32, cone: f32| {
         let to = at - actor.eye;
-        if to.length() > thing.reach {
+        if to.length() > reach {
             return;
         }
         let along = Vec2::new(to.x, to.z);
         let distance = along.length();
         let facing =
             if distance < CLOSE || forward == Vec3::ZERO { 1.0 } else { (forward.x * along.x + forward.z * along.y) / distance };
-        if facing < thing.cone.to_radians().cos() {
+        if facing < cone.to_radians().cos() {
             return;
         }
-        let score = to.length() / thing.reach.max(1e-3) + 0.5 * (1.0 - facing);
+        let score = to.length() / reach.max(1e-3) + 0.5 * (1.0 - facing);
         if Some(entity) == current {
             kept = Some((entity, at, score));
         }
@@ -204,25 +305,33 @@ pub fn pick(world: &World, actor: Actor, current: Option<Entity>) -> Option<(Ent
             best = Some((entity, at, score));
         }
     };
-    for (entity, cast) in world.iter_with::<CastMemberComponent>() {
-        if cast.speaker.is_empty() || world.get::<Interactable>(entity).is_some() {
-            continue;
-        }
-        if let Some(frame) = world.get::<WorldTransform>(entity) {
-            consider(entity, frame.0, &cast_talk(&cast.speaker));
+    let (lo, hi) = (place_cell(actor.eye - Vec3::splat(places.reach)), place_cell(actor.eye + Vec3::splat(places.reach)));
+    for x in lo.0..=hi.0 {
+        for z in lo.1..=hi.1 {
+            for &(entity, at) in places.cells.get(&(x, z)).into_iter().flatten() {
+                if let Some(thing) = world.get::<Interactable>(entity).filter(|t| t.enabled) {
+                    consider(entity, at, thing.reach, thing.cone);
+                }
+            }
         }
     }
     for archetype in world.query_archetypes(&required, &ComponentSet::empty()) {
-        let col = archetype.column_index(id).expect("queried for it");
+        let cast_col = archetype.column_index(cast_id).expect("queried for it");
         let world_col = archetype.column_index(ComponentId::of::<WorldTransform>()).expect("queried for it");
-        for row in 0..archetype.len() {
+        let own_col = archetype.column_index(id);
+        for (row, &entity) in archetype.entities().iter().enumerate() {
             // SAFETY: each column is the one `column_index` found for that component's id; `row` is this archetype's.
-            let thing = unsafe { archetype.column(col).get::<Interactable>(row) };
-            if !thing.enabled {
-                continue;
-            }
             let frame = unsafe { archetype.column(world_col).get::<WorldTransform>(row) }.0;
-            consider(archetype.entities()[row], frame, thing);
+            let own = own_col.map(|c| unsafe { archetype.column(c).get::<Interactable>(row) });
+            match own {
+                Some(thing) if thing.enabled => consider(entity, frame.transform_point3(thing.anchor), thing.reach, thing.cone),
+                Some(_) => {}
+                None => {
+                    if !unsafe { archetype.column(cast_col).get::<CastMemberComponent>(row) }.speaker.is_empty() {
+                        consider(entity, frame.transform_point3(Vec3::Y * CAST_HEIGHT), CAST_REACH, CAST_CONE);
+                    }
+                }
+            }
         }
     }
     match (kept, best) {
@@ -238,13 +347,14 @@ pub struct Interactor {
     session: InteractionSession,
     /// The interactable the session is reaching for.
     reaching: Option<Entity>,
+    places: Places,
 }
 
 impl Default for Interactor {
     fn default() -> Self {
         let mut input = InputSystem::new();
         input.add_map(interact_map());
-        Self { input, target: None, session: InteractionSession::default(), reaching: None }
+        Self { input, target: None, session: InteractionSession::default(), reaching: None, places: Places::default() }
     }
 }
 
@@ -313,7 +423,9 @@ impl Interactor {
         self.input.update(dt);
         let pressed = self.input.just_activated(ACTION);
         let current = self.target.as_ref().map(|t| t.entity);
-        self.target = actor.and_then(|actor| pick(world, actor, current)).and_then(|(entity, at)| {
+        self.places.update(world);
+        let places = &self.places;
+        self.target = actor.and_then(|actor| pick_in(world, places, actor, current)).and_then(|(entity, at)| {
             let thing = config(world, entity)?;
             let refused = thing.locked || (!thing.requires.trim().is_empty() && !allowed(&thing.requires));
             let prompt = if refused {
@@ -398,6 +510,7 @@ impl Interaction {
                 let interactor = &mut self.interactor;
                 (interactor.target, interactor.reaching) = (None, None);
                 interactor.session = InteractionSession::default();
+                interactor.places = Places::default();
                 None
             }
             SimulationState::Paused => None,

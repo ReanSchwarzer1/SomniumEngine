@@ -319,3 +319,105 @@ fn a_lever_swings_like_a_door_and_blocks_nothing_and_a_well_does_not_swing() {
     assert!(world.get::<Interactable>(base).unwrap().open, "pulled");
     assert_eq!(world.get::<Transform>(bucket).unwrap().translation, Vec3::Y * 0.5);
 }
+
+/// A city's density: `buildings` each with a door (two named leaves) and five other interactables (a stall, two
+/// pick-ups, a sign, a seat), and `people` cast members, on a 14 m grid of plots.
+fn city(world: &mut World, buildings: usize, people: usize, first: usize) {
+    let plot = |b: usize| Vec3::new((b % 100) as f32 * 14.0, 0.0, (b / 100) as f32 * 14.0);
+    for b in first..first + buildings {
+        let at = plot(b);
+        let root = world.spawn((Transform::from_translation(at), WorldTransform(Mat4::from_translation(at)), Name::new("house")));
+        for m in ["Door / boards", "Door / iron"] {
+            world.spawn((Transform::default(), WorldTransform(Mat4::IDENTITY), Name::new(m), Parent { entity: root }));
+        }
+        let (t, d) = crate::door::door_at_hinge(Vec3::new(0.3, 0.0, -3.0), 0.0, 0.9, 1.9, -1.0, "Door / ");
+        world.spawn((t, WorldTransform(Mat4::IDENTITY), Parent { entity: root }, d));
+        for (k, kind) in [KIND_OPERATE, KIND_COLLECT, KIND_COLLECT, KIND_INSPECT, KIND_SIT].into_iter().enumerate() {
+            let p = Vec3::new(-4.0 + k as f32 * 1.5, 0.0, -5.0);
+            world.spawn((Transform::from_translation(p), WorldTransform(Mat4::IDENTITY), Parent { entity: root }, interactable(kind, "x")));
+        }
+    }
+    for p in 0..people {
+        let at = plot(first + p * buildings.max(1) / people.max(1)) + Vec3::new(2.0, 0.0, -7.0);
+        cast(world, at, "townsfolk");
+    }
+    propagate_transforms(world);
+}
+
+/// What the layer costs a frame as a city fills (release, `--ignored --nocapture`): it should stay flat.
+#[test]
+#[ignore = "measure: cargo test --release -p somnium_core interact::tests::measure_city_density -- --ignored --nocapture"]
+fn measure_city_density() {
+    let (_jolt, mut physics) = physics();
+    for (buildings, people) in [(400, 50), (4000, 500)] {
+        let mut world = World::new();
+        city(&mut world, buildings, people, 0);
+        let mut interaction = Interaction::default();
+        // Beside the door of a building in the middle.
+        let b = buildings / 2;
+        let eye = Vec3::new((b % 100) as f32 * 14.0 + 0.75, 1.6, (b / 100) as f32 * 14.0 - 2.5);
+        let actor = Actor { eye, forward: Vec3::NEG_Z };
+        let start = std::time::Instant::now();
+        interaction.play(&mut world, &mut physics, Some(actor), &|_| true, 1.0 / 60.0);
+        let first = start.elapsed();
+        for _ in 0..10 {
+            interaction.play(&mut world, &mut physics, Some(actor), &|_| true, 1.0 / 60.0);
+        }
+        let frames = 2000u32;
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            interaction.play(&mut world, &mut physics, Some(actor), &|_| true, 1.0 / 60.0);
+        }
+        let idle = start.elapsed() / frames;
+        assert!(interaction.interactor.target().is_some(), "beside a door, something is picked");
+        // Twenty walkers going in and out of their own doors somewhere in the city, every frame.
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            for w in 0..20usize {
+                let b = (w * 7919) % buildings;
+                let door = Vec3::new((b % 100) as f32 * 14.0 + 0.75, 1.0, (b / 100) as f32 * 14.0 - 2.4);
+                crate::door::request_pass(&mut world, door);
+            }
+            interaction.play(&mut world, &mut physics, Some(actor), &|_| true, 1.0 / 60.0);
+        }
+        let walkers = start.elapsed() / frames;
+        // A cell streams in: fifty more buildings.
+        city(&mut world, 50, 5, buildings);
+        let start = std::time::Instant::now();
+        interaction.play(&mut world, &mut physics, Some(actor), &|_| true, 1.0 / 60.0);
+        let install = start.elapsed();
+        println!(
+            "{} interactables, {people} cast, {} entities: first frame {first:?}; a frame {idle:?}; with 20 walkers' passes {walkers:?}; a 50-building cell arriving {install:?}",
+            buildings * 6,
+            world.entity_count()
+        );
+    }
+}
+
+
+#[test]
+fn the_filing_follows_cells_coming_and_going_and_cast_members_walking() {
+    let mut world = World::new();
+    let mut interactor = Interactor::default();
+    interactor.update(&world, Some(STANDING), &|_| true, 0.016);
+    assert_eq!(interactor.target(), None);
+    // A cell streams in with a sign in front of the player; it is found, unpropagated as it is.
+    let t = Transform::from_translation(Vec3::new(0.0, 1.5, 1.0));
+    let sign = world.spawn((t, WorldTransform(Mat4::IDENTITY), interactable(KIND_INSPECT, "notice")));
+    interactor.update(&world, Some(STANDING), &|_| true, 0.016);
+    assert_eq!(interactor.target().map(|t| t.entity), Some(sign));
+    // The cell goes; the sign is never picked again, even as its index is reused far away.
+    world.despawn(sign);
+    let elsewhere = world.spawn((Transform::from_translation(Vec3::new(500.0, 0.0, 0.0)), WorldTransform(Mat4::IDENTITY), interactable(KIND_INSPECT, "far")));
+    interactor.update(&world, Some(STANDING), &|_| true, 0.016);
+    assert_eq!(interactor.target(), None, "{elsewhere:?} is half a kilometre off");
+    // A cast member walks up to the player: they are looked at where they stand now.
+    let walker = cast(&mut world, Vec3::new(0.0, 0.0, 30.0), "pilgrim");
+    propagate_transforms(&mut world);
+    interactor.update(&world, Some(STANDING), &|_| true, 0.016);
+    assert_eq!(interactor.target(), None);
+    world.get_mut::<Transform>(walker).unwrap().translation = Vec3::new(0.0, 0.0, 1.5);
+    propagate_transforms(&mut world);
+    interactor.update(&world, Some(STANDING), &|_| true, 0.016);
+    assert_eq!(interactor.target().map(|t| t.entity), Some(walker));
+}

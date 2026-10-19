@@ -22,7 +22,10 @@ Inspect, Use), and an open door says "Close". The interact key (E by default) us
 - Within 0.45 m along the ground, the facing no longer matters, so a player standing in a doorway can still close
   the door.
 - The current target holds until another is clearly better, so two doors side by side do not flicker.
-- One pass over the interactables picks the target: about 1.2 µs a frame for 400 (release build).
+- The pick looks only at the interactables filed near the player (4 m squares), and at the cast members, so a
+  frame costs the same however many a city holds (see **What it costs**).
+- Interactables are filed where they are when they arrive. One that moves later (cargo on a cart) is still found
+  where it arrived. Put things that walk on a cast member: cast members are looked at where they stand each frame.
 
 ## Using it
 
@@ -180,14 +183,28 @@ The prompt shows whichever key is bound.
 
 ## What it costs
 
-A town cell of 400 buildings (6,000 entities), each with a door of two named parts, in a release build:
+The whole layer (`Interaction::play`) in a release build. Each building has a door of two named parts, a stall,
+two pick-ups, a sign and a seat, so six interactables (`interact::tests::measure_city_density`):
 
-| | Cost |
-|---|---|
-| Finding the doors and their leaves, and making their boxes (once, as they arrive) | about 3 ms |
-| Every frame while no door moves | 0.3 to 1.5 µs |
-| Picking the target among 400 interactables, every frame | 1.2 µs |
+| | 400 buildings, 2,400 interactables, 50 cast | 4,000 buildings, 24,000 interactables, 500 cast |
+|---|---|---|
+| A frame, the player beside a door | 0.7 µs | 2.2 µs |
+| A frame with 20 walkers going through doorways | 5 µs | 10 µs |
+| A cell of 50 buildings arriving | 0.4 ms | 1.8 ms |
+| The first frame of play (everything arrives) | 1.8 ms | 20 ms |
 
-Idle doors are never looked at one by one. Each frame walks the interactables once, with one component query and
-no lookups, to check that they are last frame's. Only doors that are swinging, or waiting to close, are touched.
-Nothing is written while every door rests.
+On the city side, the frame's extra 1.5 µs is the cast members, about 3 ns each, looked at where they stand.
+Interactables add nothing. On the same machine the layer used to cost 191 µs a frame at the city's density, and a
+cell arriving 5.3 ms.
+
+How it stays flat:
+- **Arrivals.** The world counts, per component, the entities that gained or lost it (`World::population_tick`).
+  While that and the interactables' change tick are as they were, nothing arrived, went or was written, and the
+  frame reads two counters.
+- **The cell-arrival walk.** When a cell does arrive, one walk of the interactables finds the new ones, at an O(1)
+  mark each.
+- **The leaf search.** A new door's leaves are found in one walk of the world's parented and named entities. At
+  1.2 ms of the 1.8, this is most of a cell's arrival, against the 6 ms the cell's own spawning took.
+- **Doors.** A frame touches only doors that are swinging or waiting to close. Nothing is written while every door
+  rests.
+- **Passes.** A walker's pass looks only at the doorways filed near it.

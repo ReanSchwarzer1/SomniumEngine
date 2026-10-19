@@ -12,10 +12,11 @@
 //! `open` is both the authored start and the live state: the system writes it when a door is used, and a game or
 //! script that sets it swings the door. Villagers and other walkers open doors through [`Doors::pass`].
 //!
-//! Idle doors cost nothing: each frame walks the interactables (one component query, no lookups) to see that they are
-//! the ones of the last frame, and touches only doors that are moving or waiting to close.
+//! Idle doors cost nothing, however many: the world's population and change ticks for `Interactable` say whether any
+//! arrived, went or was written; only then are they walked. A frame touches only doors that are moving or waiting
+//! to close, and a walker's pass looks only at the doorways filed near it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use somnium_ecs::{ComponentId, Entity, World};
@@ -23,7 +24,7 @@ use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::world::PhysicsWorld;
 
-use crate::interact::{KIND_DOOR, Used};
+use crate::interact::{KIND_DOOR, Marks, Used};
 use crate::interaction::Interactable;
 use crate::{Name, Parent, Transform};
 
@@ -86,6 +87,12 @@ pub const PASS_REACH: f32 = 2.0;
 pub const PASS_HEIGHT: f32 = 2.0;
 /// Seconds a door a walker opened stays open, whatever its own `close_after`.
 pub const PASS_CLOSE: f32 = 1.5;
+/// The squares doorways are filed in for passes, metres.
+const PASS_CELL: f32 = 4.0;
+
+fn pass_cell(at: Vec3) -> (i32, i32) {
+    ((at.x / PASS_CELL).floor() as i32, (at.z / PASS_CELL).floor() as i32)
+}
 
 struct Leaf {
     entity: Entity,
@@ -118,16 +125,18 @@ struct Bound {
 #[derive(Default)]
 pub struct Doors {
     bound: HashMap<Entity, Bound>,
-    /// The door archetypes' entities at the last sync, in order, and the doors' change tick then.
-    seen: Vec<Entity>,
+    /// The interactables' population and change ticks at the last sync: equal ticks, nothing to look at.
+    seen_population: u64,
     seen_tick: u64,
+    /// The bound doors by doorway, in `PASS_CELL` squares, for walkers' passes.
+    by_cell: HashMap<(i32, i32), Vec<Entity>>,
     /// Doors swinging or waiting to close.
     active: Vec<Entity>,
     clock: f32,
     /// What happened since the last update returned (a pass between updates included).
     events: Vec<DoorEvent>,
     /// Every interactable seen at the last change, and those first seen this frame (for `gone_when`).
-    known: HashSet<Entity>,
+    known: Marks,
     arrived: Vec<Entity>,
 }
 
@@ -198,11 +207,15 @@ impl Doors {
     /// closes [`PASS_CLOSE`] seconds later. Returns the door, if there is one within [`PASS_REACH`] along the ground
     /// and [`PASS_HEIGHT`] up or down.
     pub fn pass(&mut self, world: &mut World, physics: &mut PhysicsWorld, at: Vec3) -> Option<Entity> {
-        let door = self
-            .bound
-            .iter()
+        // The doorway squares a reach around `at` can touch.
+        let (lo, hi) = (pass_cell(at - Vec3::splat(PASS_REACH)), pass_cell(at + Vec3::splat(PASS_REACH)));
+        let door = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|cell| self.by_cell.get(&cell))
+            .flatten()
+            .filter_map(|e| Some((*e, self.bound.get(e)?)))
             .filter(|(_, b)| (b.doorway.y - at.y).abs() <= PASS_HEIGHT)
-            .map(|(&e, b)| (e, (b.doorway - at).with_y(0.0).length_squared()))
+            .map(|(e, b)| (e, (b.doorway - at).with_y(0.0).length_squared()))
             .filter(|&(_, d)| d <= PASS_REACH * PASS_REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1))?
             .0;
@@ -286,52 +299,51 @@ impl Doors {
         }
     }
 
-    /// Find doors that arrived, forget ones that went, and follow `open` written by others. Costs one walk of the
-    /// interactables, compared with the last frame's, when nothing changed.
+    /// Find doors that arrived, forget ones that went, and follow `open` written by others. When no interactable
+    /// arrived, went or was written (the world's population and change ticks for it), it costs two counter reads.
     fn sync(&mut self, world: &mut World, physics: &mut PhysicsWorld) {
         self.arrived.clear();
-        let tick = world.change_tick(ComponentId::of::<Interactable>());
-        let mut count = 0;
-        let mut same = true;
-        for (entity, _) in world.iter_with::<Interactable>() {
-            same &= self.seen.get(count) == Some(&entity);
-            count += 1;
-        }
-        if same && count == self.seen.len() && tick == self.seen_tick {
-            return;
-        }
-        self.seen.clear();
-        self.seen.extend(world.entities_with::<Interactable>());
-        self.seen_tick = tick;
-        let present: HashSet<Entity> = self.seen.iter().copied().collect();
-        self.arrived.extend(self.seen.iter().copied().filter(|e| !self.known.contains(e)));
-        let gone: Vec<Entity> = self.bound.keys().copied().filter(|e| !present.contains(e)).collect();
-        for door in gone {
-            if let Some(body) = self.bound.remove(&door).and_then(|b| b.body) {
-                physics.destroy_body(body);
+        let id = ComponentId::of::<Interactable>();
+        let (population, tick) = (world.population_tick(id), world.change_tick(id));
+        if population != self.seen_population {
+            self.seen_population = population;
+            // One walk for who is new (an O(1) mark each); of the bound doors, who went.
+            let arrived: Vec<Entity> = world.entities_with::<Interactable>().filter(|&e| !self.known.contains(e)).collect();
+            for &e in &arrived {
+                self.known.insert(e);
+            }
+            let gone: Vec<Entity> = self.bound.keys().copied().filter(|&e| !world.has_component(e, id)).collect();
+            for door in gone {
+                if let Some(bound) = self.bound.remove(&door) {
+                    if let Some(list) = self.by_cell.get_mut(&pass_cell(bound.doorway)) {
+                        list.retain(|&e| e != door);
+                    }
+                    if let Some(body) = bound.body {
+                        physics.destroy_body(body);
+                    }
+                }
+            }
+            let doors: Vec<Entity> = arrived
+                .iter()
+                .copied()
+                .filter(|&e| world.get::<Interactable>(e).is_some_and(|d| d.enabled && (d.kind == KIND_DOOR || d.swings)))
+                .collect();
+            self.arrived = arrived;
+            if !doors.is_empty() {
+                self.bind(world, physics, &doors);
             }
         }
-        let arrived: Vec<Entity> = self
-            .seen
-            .iter()
-            .copied()
-            .filter(|e| {
-                !self.bound.contains_key(e)
-                    && world.get::<Interactable>(*e).is_some_and(|d| d.enabled && (d.kind == KIND_DOOR || d.swings))
-            })
-            .collect();
-        self.known = present;
-        if !arrived.is_empty() {
-            self.bind(world, physics, &arrived);
-        }
-        // `open` written by a game or script.
-        let moved: Vec<(Entity, bool)> = self
-            .bound
-            .iter()
-            .filter_map(|(&e, b)| world.get::<Interactable>(e).filter(|d| d.open != b.goal).map(|d| (e, d.open)))
-            .collect();
-        for (door, open) in moved {
-            self.set_goal(world, physics, door, open, None);
+        if tick != self.seen_tick {
+            // `open` written by a game or script.
+            let moved: Vec<(Entity, bool)> = self
+                .bound
+                .iter()
+                .filter_map(|(&e, b)| world.get::<Interactable>(e).filter(|d| d.open != b.goal).map(|d| (e, d.open)))
+                .collect();
+            for (door, open) in moved {
+                self.set_goal(world, physics, door, open, None);
+            }
+            self.seen_tick = world.change_tick(id);
         }
     }
 
@@ -344,6 +356,7 @@ impl Doors {
             } else {
                 bound.body = bound.block.map(|block| block_body(physics, block));
             }
+            self.by_cell.entry(pass_cell(bound.doorway)).or_default().push(door);
             self.bound.insert(door, bound);
         }
     }
@@ -353,11 +366,14 @@ impl Doors {
     fn bound_for(world: &World, doors: &[Entity]) -> Vec<(Entity, Bound, bool)> {
         let parent_of = |e: Entity| world.get::<Parent>(e).map(|p| p.entity).filter(|p| *p != Entity::DANGLING);
         let local = |e: Entity| world.get::<Transform>(e).map_or(Mat4::IDENTITY, Transform::to_matrix);
-        let is_door: HashSet<Entity> = doors.iter().copied().collect();
+        let mut is_door = Marks::default();
+        for &door in doors {
+            is_door.insert(door);
+        }
         let mut leaves: HashMap<Entity, Vec<Entity>> = HashMap::new();
         // Children of the doors.
         for (e, parent) in world.iter_with::<Parent>() {
-            if is_door.contains(&parent.entity) {
+            if is_door.contains(parent.entity) {
                 leaves.entry(parent.entity).or_default().push(e);
             }
         }
@@ -370,12 +386,15 @@ impl Doors {
             }
         }
         if !by_root.is_empty() {
-            let prefixes: Vec<String> = by_root.values().flatten().map(|(_, p)| p.clone()).collect();
+            // Each distinct prefix once (a cell's doors share `Door / `), compared on the name's bytes.
+            let mut prefixes: Vec<String> = by_root.values().flatten().map(|(_, p)| p.clone()).collect();
+            prefixes.sort_unstable();
+            prefixes.dedup();
             for (e, name) in world.iter_with::<Name>() {
-                let name = name.as_str();
-                if is_door.contains(&e) || !prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+                if !prefixes.iter().any(|p| name.0.starts_with(p.as_bytes())) || is_door.contains(e) {
                     continue;
                 }
+                let name = name.as_str();
                 let mut up = parent_of(e);
                 for _ in 0..16 {
                     let Some(ancestor) = up else { break };
