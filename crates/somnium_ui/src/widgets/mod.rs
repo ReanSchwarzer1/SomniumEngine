@@ -21,6 +21,8 @@ pub mod dialogue_presenter;
 pub mod journal_screen;
 pub mod notice_stack;
 pub mod objective_markers;
+/// The interact prompt over the thing the player would use (`somnium_core::interact`).
+pub mod interact_prompt;
 pub mod gradient_editor;
 pub mod grid;
 pub mod image;

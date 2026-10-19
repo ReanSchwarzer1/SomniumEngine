@@ -32,6 +32,10 @@ const BASELINE: &[(&str, usize)] = &[
     ("crates/somnium_core/src/authoring/transaction.rs", 3),
     ("crates/somnium_core/src/clipboard.rs", 8),
     ("crates/somnium_core/src/editor_commands.rs", 12),
+    // 19 Oct 2026: not a world scan. The isometric pick reads the entity of the row it scores, inside a query over
+    // the archetypes holding Interactable and WorldTransform. Per frame by design: 1.2 us for 400 interactables
+    // from the two columns, against 15 us through iter_with plus a WorldTransform lookup for each.
+    ("crates/somnium_core/src/interact.rs", 1),
     ("crates/somnium_core/src/map.rs", 1),
     ("crates/somnium_core/src/prefab.rs", 7),
     ("crates/somnium_core/src/save_game/editor.rs", 1),
