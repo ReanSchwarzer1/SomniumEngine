@@ -2239,6 +2239,11 @@ pub struct CombatDemo {
     hud_events: VecDeque<CombatEvent>,
     /// Mounts the protagonist may not take now, the game's say (someone else's horse before the story allows it).
     pub refused_mounts: std::collections::HashSet<Entity>,
+    /// The protagonist sits in a boat at this seat (feet, its facing the bow), carried: the boats' host
+    /// (`boats.rs`) rows it and sets this every fixed step; WASD and E are the boat's meanwhile.
+    pub aboard: Option<Mat4>,
+    /// E was the boats' this frame (boarding or stepping off), not a mount's.
+    pub take_e: bool,
     events: Vec<HostEvent>,
 }
 
@@ -2280,6 +2285,8 @@ impl Default for CombatDemo {
             show_hud: true,
             hud_events: VecDeque::new(),
             refused_mounts: Default::default(),
+            aboard: None,
+            take_e: false,
             events: Vec::new(),
         }
     }
@@ -2540,7 +2547,44 @@ impl CombatDemo {
             };
         }
         self.events.extend(gate_mount(run, &self.refused_mounts, player, &mut cmd));
+        if std::mem::take(&mut self.take_e) || self.aboard.is_some() {
+            cmd.mount = false;
+        }
+        if self.aboard.is_some() {
+            // The oars have the movement keys.
+            cmd.move_dir = Vec3::ZERO;
+            cmd.sprint = false;
+            cmd.dodge = false;
+            cmd.climb = false;
+        }
         run.world.command(player, cmd);
+    }
+
+    /// The protagonist's feet and whether they ride, while a fight runs.
+    pub fn player_feet(&self) -> Option<(Vec3, bool)> {
+        let run = self.run.as_ref()?;
+        let c = run.world.combatant(run.player?)?;
+        Some((c.position, c.mount.is_some()))
+    }
+
+    /// Off a boat: the protagonist stands (or falls, or swims) from `feet`.
+    pub fn disembark(&mut self, feet: Vec3) {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(player) = run.player else {
+            return;
+        };
+        if let Some(c) = run.world.combatant_mut(player) {
+            c.position = feet;
+            c.velocity = Vec3::ZERO;
+        }
+        if let Some(walker) = run.walkers.get_mut(&player) {
+            walker.feet = feet;
+            walker.velocity = Vec3::ZERO;
+            walker.mode = Mode::Air;
+        }
     }
 
     /// What the fight told the game since it last asked.
@@ -2583,6 +2627,21 @@ impl CombatDemo {
         for (id, event) in walk(&mut run.world, &mut run.walkers, dt, &terrain) {
             log_locomotion(run, id, event);
         }
+        // In a boat the protagonist is carried at its seat, facing the bow.
+        if let (Some(player), Some(seat)) = (run.player, self.aboard) {
+            let (_, turn, feet) = seat.to_scale_rotation_translation();
+            if let Some(c) = run.world.combatant_mut(player) {
+                c.position = feet;
+                c.velocity = Vec3::ZERO;
+                c.facing = turn * Vec3::Z;
+            }
+            if let Some(walker) = run.walkers.get_mut(&player) {
+                walker.feet = feet;
+                walker.velocity = Vec3::ZERO;
+                walker.mode = Mode::Air;
+            }
+        }
+        run.skins.seated = self.aboard.and(run.player);
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
         self.events.extend(news(run, rode, &events));

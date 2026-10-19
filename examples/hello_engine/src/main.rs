@@ -22,6 +22,7 @@
 mod animated_preview;
 mod skinned_crowd;
 mod authoring_demo;
+mod boats;
 mod combat_bodies;
 pub mod combat_demo;
 mod life_demo;
@@ -737,6 +738,8 @@ pub struct HelloGame {
     work_demo: fracture_demo::Demo,
     /// The combat sandbox (Create > Examples > Combat Sandbox), while Play runs it.
     combat: combat_demo::CombatDemo,
+    /// Boats to board and row (hello.Boat), while Play runs.
+    boats: boats::BoatHost,
     /// Ambient life (Create > Examples > Living Village), while Play runs it.
     life: life_demo::LifeDemo,
     animated_previews: animated_preview::Previews,
@@ -864,6 +867,7 @@ impl HelloGame {
             interactions: Default::default(),
             work_demo: Default::default(),
             combat: Default::default(),
+            boats: Default::default(),
             life: Default::default(),
             animated_previews: Default::default(),
             skinned: Default::default(),
@@ -1209,12 +1213,13 @@ impl GameApp for HelloGame {
         authoring_demo::register(registration);
         fracture_demo::register(registration);
         combat_demo::register(registration);
+        boats::register(registration);
         life_demo::register(registration);
         animated_preview::register(registration);
         skinned_crowd::register(registration);
     }
     fn authoring_state(&self) -> serde_json::Value {
-        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state(),"life":self.life.state(),"skinned":self.skinned.state()})
+        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state(),"life":self.life.state(),"skinned":self.skinned.state(),"boats":self.boats.state()})
     }
 
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
@@ -1788,6 +1793,7 @@ impl GameApp for HelloGame {
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
         self.work_demo.event(event);
         self.combat.event(event);
+        self.boats.event(event);
         self.life.event(event);
         if play_session(ctx)
             && matches!(
@@ -1923,6 +1929,7 @@ impl GameApp for HelloGame {
         if !play_session(ctx) {
             return;
         }
+        self.boats.fixed(ctx, &mut self.combat);
         self.combat.fixed(ctx);
 
         let (eye, forward) = self
@@ -2144,15 +2151,18 @@ impl GameApp for HelloGame {
                 spawn_player(self, ctx);
             }
             self.life.begin(ctx);
+            self.boats.begin(ctx);
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
             self.work_demo.reset(ctx.world);
             self.combat.end(ctx);
+            self.boats.end(ctx);
             self.life.end(ctx);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
         if playing {
+            self.boats.update(ctx, &mut self.combat);
             self.combat.update(ctx);
             self.life.update(ctx);
         }
