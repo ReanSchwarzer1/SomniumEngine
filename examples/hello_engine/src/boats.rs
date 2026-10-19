@@ -1,8 +1,8 @@
 //! Boats you board and row (Rimeborn's Act VI slice): a **Boat**
-//! (`hello.Boat`) is a Jolt hull floated on the project's water map
-//! (`data/boats/water.json`, from `tools/rimeborn_boat_water.py`): lakes at
-//! their level, rivers on their sloped surface with a current downstream,
-//! canals still, the sea everywhere else at its level.
+//! (`hello.Boat`) is a Jolt hull floated on the project's water surface
+//! (`data/scatter/water_surfaces.json`, WS1's `tools/water_surfaces.py`): a
+//! lake at its level inside its outline, else a river or canal reach on its
+//! sloped surface (a river's current downstream, a canal still), else the sea.
 //!
 //! In Play the protagonist (the combat host's player) boards with E within
 //! reach of a hull, sits at its seat and rows or sails with WASD (W ahead, S
@@ -133,8 +133,8 @@ pub fn kind_of(name: &str) -> Kind {
 pub const CURRENT: f32 = 0.6;
 /// How far from its hull a boat can be boarded.
 const REACH: f32 = 1.5;
-/// Where a boat's water was looked for: its project's map.
-pub const WATER_MAP: &str = "data/boats/water.json";
+/// Where a boat's water is looked for, in its project (WS1's water surface).
+pub const WATER_MAP: &str = "data/scatter/water_surfaces.json";
 
 /// The water at a point: its surface and how it moves.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,6 +147,10 @@ pub struct Surface {
 struct MapFile {
     #[serde(default)]
     sea_level: Option<f32>,
+    /// Where the scene's origin is in the file's frame (WS1 writes world
+    /// metres; the composed scene is the eirvane frame), taken off every point.
+    #[serde(default)]
+    scene_origin: Option<[f32; 3]>,
     #[serde(default)]
     lakes: Vec<LakeFile>,
     #[serde(default)]
@@ -156,18 +160,17 @@ struct MapFile {
 #[derive(Deserialize)]
 struct LakeFile {
     level: f32,
-    x: Vec<f32>,
-    z: Vec<f32>,
+    #[serde(default)]
+    frozen: bool,
+    outline: Vec<[f32; 2]>,
 }
 
 #[derive(Deserialize)]
 struct RiverFile {
     #[serde(default)]
     canal: bool,
-    x: Vec<f32>,
-    z: Vec<f32>,
-    surface: Vec<f32>,
-    width: Vec<f32>,
+    /// `[x, z, surface, half_width]` downstream, a fifth value its speed where WS1 gives one.
+    pts: Vec<Vec<f32>>,
 }
 
 struct Lake {
@@ -178,10 +181,11 @@ struct Lake {
 }
 
 struct River {
-    canal: bool,
     points: Vec<Vec2>,
     surface: Vec<f32>,
     half: Vec<f32>,
+    /// Its current downstream at each point (m/s; none on a canal).
+    speed: Vec<f32>,
 }
 
 /// River segments by the cells they cross.
@@ -200,19 +204,22 @@ fn cell(p: Vec2) -> (i32, i32) {
 }
 
 impl WaterMap {
-    /// From `tools/rimeborn_boat_water.py`'s JSON.
+    /// From WS1's water surface JSON (`tools/water_surfaces.py`). Frozen lakes
+    /// are ice, not water.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let file: MapFile = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let o = file.scene_origin.unwrap_or_default();
+        let (ox, oy, oz) = (o[0], o[1], o[2]);
         let lakes = file
             .lakes
             .into_iter()
-            .filter(|l| l.x.len() >= 3 && l.x.len() == l.z.len())
+            .filter(|l| !l.frozen && l.outline.len() >= 3)
             .map(|l| {
-                let outline: Vec<Vec2> =
-                    l.x.iter()
-                        .zip(&l.z)
-                        .map(|(x, z)| Vec2::new(*x, *z))
-                        .collect();
+                let outline: Vec<Vec2> = l
+                    .outline
+                    .iter()
+                    .map(|p| Vec2::new(p[0] - ox, p[1] - oz))
+                    .collect();
                 let min = outline
                     .iter()
                     .copied()
@@ -224,7 +231,7 @@ impl WaterMap {
                     .reduce(Vec2::max)
                     .unwrap_or_default();
                 Lake {
-                    level: l.level,
+                    level: l.level - oy,
                     outline,
                     min,
                     max,
@@ -234,22 +241,26 @@ impl WaterMap {
         let rivers: Vec<River> = file
             .rivers
             .into_iter()
-            .filter(|r| {
-                r.x.len() >= 2
-                    && [r.z.len(), r.surface.len(), r.width.len()]
-                        .iter()
-                        .all(|n| *n == r.x.len())
-            })
+            .filter(|r| r.pts.len() >= 2 && r.pts.iter().all(|p| p.len() >= 4))
             .map(|r| River {
-                canal: r.canal,
                 points: r
-                    .x
+                    .pts
                     .iter()
-                    .zip(&r.z)
-                    .map(|(x, z)| Vec2::new(*x, *z))
+                    .map(|p| Vec2::new(p[0] - ox, p[1] - oz))
                     .collect(),
-                surface: r.surface,
-                half: r.width.iter().map(|w| w * 0.5).collect(),
+                surface: r.pts.iter().map(|p| p[2] - oy).collect(),
+                half: r.pts.iter().map(|p| p[3]).collect(),
+                speed: r
+                    .pts
+                    .iter()
+                    .map(|p| {
+                        if r.canal {
+                            0.0
+                        } else {
+                            p.get(4).copied().unwrap_or(CURRENT)
+                        }
+                    })
+                    .collect(),
             })
             .collect();
         let mut cells: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
@@ -271,17 +282,31 @@ impl WaterMap {
             }
         }
         Ok(Self {
-            sea_level: file.sea_level,
+            sea_level: file.sea_level.map(|l| l - oy),
             lakes,
             rivers,
             cells,
         })
     }
 
-    /// The water over `at` (world x, z): a river's sloped surface and current
-    /// where one runs, else a lake's level inside its outline, else the sea's.
+    /// The water over `at` (the scene's x, z), as WS1 queries it: a lake's
+    /// level inside its outline, else the nearest river or canal reach within
+    /// its half width (the surface interpolated along it, its current
+    /// downstream), else the sea's level (a hull above it floats on nothing).
     #[must_use]
     pub fn surface(&self, at: Vec2) -> Option<Surface> {
+        let still = |height| Surface {
+            height,
+            current: Vec3::ZERO,
+        };
+        // ponytail: every lake's box is tried; a grid like the rivers' if the map grows past a few hundred lakes.
+        if let Some(l) = self
+            .lakes
+            .iter()
+            .find(|l| at.cmpge(l.min).all() && at.cmple(l.max).all() && inside(&l.outline, at))
+        {
+            return Some(still(l.level));
+        }
         let mut best: Option<(f32, Surface)> = None;
         for &(i, j) in self.cells.get(&cell(at)).into_iter().flatten() {
             let r = &self.rivers[i as usize];
@@ -289,33 +314,20 @@ impl WaterMap {
             let along = b - a;
             let t = ((at - a).dot(along) / along.length_squared().max(1e-6)).clamp(0.0, 1.0);
             let d = at.distance(a + along * t);
-            let half = r.half[j] + (r.half[j + 1] - r.half[j]) * t;
-            if d > half || best.is_some_and(|(e, _)| e <= d) {
+            let lerp = |v: &[f32]| v[j] + (v[j + 1] - v[j]) * t;
+            if d > lerp(&r.half) || best.is_some_and(|(e, _)| e <= d) {
                 continue;
             }
-            let flow = if r.canal { 0.0 } else { CURRENT };
-            let way = along.normalize_or_zero() * flow;
+            let way = along.normalize_or_zero() * lerp(&r.speed);
             best = Some((
                 d,
                 Surface {
-                    height: r.surface[j] + (r.surface[j + 1] - r.surface[j]) * t,
+                    height: lerp(&r.surface),
                     current: Vec3::new(way.x, 0.0, way.y),
                 },
             ));
         }
-        if let Some((_, s)) = best {
-            return Some(s);
-        }
-        let still = |height| Surface {
-            height,
-            current: Vec3::ZERO,
-        };
-        // ponytail: every lake's box is tried; a grid like the rivers' if the map grows past a few hundred lakes.
-        self.lakes
-            .iter()
-            .find(|l| at.cmpge(l.min).all() && at.cmple(l.max).all() && inside(&l.outline, at))
-            .map(|l| still(l.level))
-            .or_else(|| self.sea_level.map(still))
+        best.map(|(_, s)| s).or_else(|| self.sea_level.map(still))
     }
 }
 
@@ -758,12 +770,14 @@ mod tests {
     static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn map() -> WaterMap {
-        // A square lake at 10 m round (0, 0); a river from (100, 0) east, falling 2 m over 100 m, 8 m wide; a canal.
+        // In world metres with the scene's origin at (1000, 0, 2000): a square lake at 10 m round the scene's (0, 0);
+        // a river from the scene's (100, 0) east, falling 2 m over 100 m, 8 m wide; a canal; a frozen lake.
         WaterMap::from_json(
-            r#"{"sea_level": 0.0,
-            "lakes": [{"level": 10.0, "x": [-20, 20, 20, -20], "z": [-20, -20, 20, 20]}],
-            "rivers": [{"x": [100, 150, 200], "z": [0, 0, 0], "surface": [8, 7, 6], "width": [8, 8, 8]},
-                       {"canal": true, "x": [0, 0], "z": [100, 200], "surface": [0.6, 0.6], "width": [10, 10]}]}"#,
+            r#"{"sea_level": 0.0, "scene_origin": [1000, 0, 2000],
+            "lakes": [{"level": 10.0, "outline": [[980, 1980], [1020, 1980], [1020, 2020], [980, 2020]]},
+                      {"level": 50.0, "frozen": true, "outline": [[1300, 2300], [1340, 2300], [1340, 2340], [1300, 2340]]}],
+            "rivers": [{"pts": [[1100, 2000, 8, 4], [1150, 2000, 7, 4], [1200, 2000, 6, 4]]},
+                       {"canal": true, "pts": [[1000, 2100, 0.6, 5], [1000, 2200, 0.6, 5]]}]}"#,
         )
         .unwrap()
     }
@@ -789,6 +803,11 @@ mod tests {
             m.surface(Vec2::new(4.0, 150.0)).unwrap().current,
             Vec3::ZERO,
             "a canal"
+        );
+        assert_eq!(
+            m.surface(Vec2::new(320.0, 320.0)).unwrap().height,
+            0.0,
+            "a frozen lake is ice: the sea's"
         );
         let none = WaterMap::from_json(r#"{"lakes": [], "rivers": []}"#).unwrap();
         assert!(none.surface(Vec2::ZERO).is_none(), "no sea, no water");
