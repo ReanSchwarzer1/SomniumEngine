@@ -1251,6 +1251,11 @@ struct Encounter {
     along: f32,
     /// A pack shadowing the protagonist (at dusk): its homes are off its own.
     shadowing: bool,
+    /// The scene's Combat Encounter or Combat Patrol entity it came from (the
+    /// latest copy, when its cell streams back in).
+    source: Option<Entity>,
+    /// Woken, and every one of its fighters fell: told once, never woken again.
+    cleared: bool,
     /// Awake: its entities, fighters (and where each stood when it woke)
     /// and colliders.
     entities: Vec<Entity>,
@@ -1271,10 +1276,24 @@ fn encounters_asleep(world: &World) -> Dormancy<Encounter> {
 /// is known by its kind and where it was placed (to half a metre), so a cell
 /// that streams out and back in brings its encounters only once.
 fn enlist_encounters(world: &World, set: &mut Dormancy<Encounter>) {
-    let mut known: std::collections::BTreeSet<(String, [i64; 3])> = (0..set.len())
-        .filter_map(|i| set.data(GroupId(i as u32)))
-        .map(|r| r.home.clone())
+    let mut known: BTreeMap<(String, [i64; 3]), GroupId> = (0..set.len())
+        .map(|i| GroupId(i as u32))
+        .filter_map(|id| Some((set.data(id)?.home.clone(), id)))
         .collect();
+    // The entity a record names is the latest copy of its encounter (a cell
+    // that streamed out and back in brings a new one).
+    fn seen(
+        set: &mut Dormancy<Encounter>,
+        known: &BTreeMap<(String, [i64; 3]), GroupId>,
+        home: &(String, [i64; 3]),
+        e: Entity,
+    ) -> bool {
+        let id = known.get(home).copied();
+        if let Some(record) = id.and_then(|id| set.data_mut(id)) {
+            record.source = Some(e);
+        }
+        id.is_some()
+    }
     for (e, c) in world.iter_with::<CombatEncounterComponent>() {
         if !c.enabled {
             continue;
@@ -1285,20 +1304,22 @@ fn enlist_encounters(world: &World, set: &mut Dormancy<Encounter>) {
             c.kind.trim().to_ascii_lowercase(),
             at.to_array().map(|v| (v * 2.0).round() as i64),
         );
-        if !known.insert(home.clone()) {
+        if seen(set, &known, &home, e) {
             continue;
         }
-        set.add(
+        let id = set.add(
             at,
             encounter_extent(&c.kind),
             Encounter {
                 kind: c.kind.clone(),
                 floor: c.floor,
                 facing: m.transform_vector3(Vec3::Z),
-                home,
+                home: home.clone(),
+                source: Some(e),
                 ..Encounter::default()
             },
         );
+        known.insert(home, id);
     }
     for (e, c) in world.iter_with::<CombatPatrolComponent>() {
         if !c.enabled {
@@ -1310,23 +1331,25 @@ fn enlist_encounters(world: &World, set: &mut Dormancy<Encounter>) {
             format!("patrol {}", c.kind.trim().to_ascii_lowercase()),
             at.to_array().map(|v| (v * 2.0).round() as i64),
         );
-        if !known.insert(home.clone()) {
+        if seen(set, &known, &home, e) {
             continue;
         }
-        set.add(
+        let id = set.add(
             at,
             encounter_extent(&c.kind),
             Encounter {
                 kind: c.kind.clone(),
                 floor: c.floor,
                 facing: way,
-                home,
+                home: home.clone(),
                 route,
                 closed,
                 speed: c.speed.max(0.0),
+                source: Some(e),
                 ..Encounter::default()
             },
         );
+        known.insert(home, id);
     }
 }
 
@@ -1527,6 +1550,7 @@ fn tend_encounters(
         enlist_encounters(world, set);
         walk_asleep(set, elapsed);
     }
+    note_cleared(run);
     let watchers: Vec<Vec3> = run
         .player
         .and_then(|p| run.world.combatant(p))
@@ -1555,6 +1579,29 @@ fn tend_encounters(
         && let Some(physics) = physics
     {
         repatch(physics, run);
+    }
+}
+
+/// Awake encounters whose fighters have all fallen, each told once (its
+/// scene entity and kind into `run.cleared`). Asleep it remembers no
+/// survivors, so it never wakes again.
+fn note_cleared(run: &mut Run) {
+    let Some(set) = run.encounters.as_mut() else {
+        return;
+    };
+    let awake: Vec<GroupId> = set.awake().collect();
+    for id in awake {
+        let Some(record) = set.data_mut(id) else {
+            continue;
+        };
+        let fallen = |m: &CombatantId| run.world.combatant(*m).is_none_or(|c| !c.alive());
+        if record.cleared || record.members.is_empty() || !record.members.iter().all(fallen) {
+            continue;
+        }
+        record.cleared = true;
+        if let Some(source) = record.source {
+            run.cleared.push((source, record.kind.trim().to_ascii_lowercase()));
+        }
     }
 }
 
@@ -1971,6 +2018,9 @@ struct Run {
     /// The project's content root: woken wolves and bandits wear WS3's bodies
     /// where it has them.
     content: Option<std::path::PathBuf>,
+    /// Encounters cleared since the game last took them (see
+    /// [`CombatDemo::take_cleared`]).
+    cleared: Vec<(Entity, String)>,
 }
 
 struct Hud {
@@ -2285,6 +2335,17 @@ impl CombatDemo {
     /// a game's HUD: damage, healing, parries, broken poise, statuses, deaths.
     pub fn take_hud_events(&mut self) -> Vec<CombatEvent> {
         self.hud_events.drain(..).collect()
+    }
+
+    /// The scene's Combat Encounter and Combat Patrol entities (each with its
+    /// kind, lowercased: `wolves`, `bandits`, `wilds`) whose encounter woke and
+    /// whose fighters have all fallen since the last call. Each comes once:
+    /// a cleared encounter never wakes again.
+    pub fn take_cleared(&mut self) -> Vec<(Entity, String)> {
+        self.run
+            .as_mut()
+            .map(|run| std::mem::take(&mut run.cleared))
+            .unwrap_or_default()
     }
 
     /// Build the fight from the scene's authored fighters, ground and wind.
@@ -2689,6 +2750,7 @@ fn build(world: &World) -> Option<Run> {
         readouts: HashMap::new(),
         skins: Default::default(),
         content: None,
+        cleared: Vec::new(),
     })
 }
 
@@ -4423,6 +4485,70 @@ mod tests {
         // A project without WS3's files: shapes only.
         let (_, _, bare) = wake_wilds(None);
         assert!(bare.values().all(Option::is_none));
+    }
+
+    /// An encounter whose fighters all fall is told once, as the scene's
+    /// entity (the latest copy, after its cell streamed back in) and its kind,
+    /// and never wakes again.
+    #[test]
+    fn a_cleared_camp_is_told_once_and_stays_cleared() {
+        let mut world = World::new();
+        let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));
+        fighter(&mut world, root, "Protagonist", Vec3::ZERO, Vec3::X, CombatantComponent::protagonist());
+        let camp = |world: &mut World| {
+            world.spawn((
+                Name::new("Encounter bandits 12"),
+                Transform::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: "Bandits".into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ))
+        };
+        let first = camp(&mut world);
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let bandits: Vec<CombatantId> = run
+            .world
+            .combatants()
+            .filter(|c| c.name.starts_with("Bandit"))
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(bandits.len(), 4);
+        // Its cell streams out and back in: a new entity for the same camp.
+        world.despawn(first);
+        let copy = camp(&mut world);
+        somnium_core::propagate_transforms(&mut world);
+        let mut demo = CombatDemo {
+            run: Some(run),
+            ..CombatDemo::default()
+        };
+        let run = demo.run.as_mut().unwrap();
+        tend_encounters(&mut world, None, run, TEND_EVERY);
+        assert!(demo.take_cleared().is_empty(), "still standing");
+        let run = demo.run.as_mut().unwrap();
+        for (n, b) in bandits.iter().enumerate() {
+            run.world.combatant_mut(*b).unwrap().action = Action::Dead;
+            tend_encounters(&mut world, None, run, TEND_EVERY);
+            if n + 1 < bandits.len() {
+                assert!(run.cleared.is_empty(), "one still stands");
+            }
+        }
+        assert_eq!(demo.take_cleared(), vec![(copy, "bandits".to_string())]);
+        assert!(demo.take_cleared().is_empty(), "taken once");
+        // Away (asleep) and back: it does not wake, and is not told again.
+        let run = demo.run.as_mut().unwrap();
+        let hero = run.player.unwrap();
+        for at in [Vec3::new(0.0, 0.0, 600.0), Vec3::ZERO] {
+            run.world.combatant_mut(hero).unwrap().position = at;
+            run.walkers.get_mut(&hero).unwrap().feet = at;
+            tend_encounters(&mut world, None, run, TEND_EVERY);
+        }
+        assert!(run.world.combatants().all(|c| !c.name.starts_with("Bandit") || !c.alive()));
+        assert!(demo.take_cleared().is_empty());
     }
 
     #[test]
