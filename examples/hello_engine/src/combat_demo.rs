@@ -3859,7 +3859,8 @@ mod tests {
         run.skins
             .dress(&mut world, &run.bodies, &run.world, &mut run.spawned);
         assert_eq!(run.skins.count(), 2);
-        assert!(world.get::<SkinnedBody>(hero).is_none() && world.get::<MeshKind>(hero).is_none());
+        assert!(world.get::<SkinnedBody>(hero).is_none());
+        assert!(world.get::<somnium_core::EditorFlags>(hero).is_some_and(|f| f.hidden), "its cylinder is hidden");
         let body_of = |world: &World, name: &str| {
             world
                 .iter_with::<SkinnedBody>()
@@ -3903,7 +3904,8 @@ mod tests {
         assert!(world.get::<SkinnedBody>(body).unwrap().clip.contains("Block"));
         let skins = std::mem::take(&mut run.skins);
         skins.end(&mut world);
-        assert!(world.get::<SkinnedBody>(hero).is_some() && world.get::<MeshKind>(hero).is_some());
+        assert!(world.get::<SkinnedBody>(hero).is_some());
+        assert!(!world.get::<somnium_core::EditorFlags>(hero).is_some_and(|f| f.hidden), "shown again at Stop");
     }
 
     #[test]

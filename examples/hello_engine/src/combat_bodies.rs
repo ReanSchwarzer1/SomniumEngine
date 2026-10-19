@@ -27,7 +27,7 @@ use somnium_combat::CombatantId;
 use somnium_combat::clips::ClipTable;
 use somnium_combat::mount::Herding;
 use somnium_combat::world::{Action, CastPhase, CombatWorld, Combatant, Phase};
-use somnium_core::{MeshKind, Name, Parent, Transform, WorldTransform};
+use somnium_core::{EditorFlags, MeshKind, Name, Parent, Transform, WorldTransform};
 use somnium_ecs::{Entity, World};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -260,9 +260,9 @@ pub struct Skins {
     table: Option<ClipTable>,
     seen: BTreeSet<CombatantId>,
     skins: BTreeMap<CombatantId, Skin>,
-    /// Bodies taken off fighters and shapes hidden, given back at Stop.
+    /// Bodies taken off fighters and shapes hidden (with the flags they had), given back at Stop.
     taken: Vec<(Entity, SkinnedBody)>,
-    hidden: Vec<(Entity, MeshKind)>,
+    hidden: Vec<(Entity, Option<EditorFlags>)>,
 }
 
 impl Skins {
@@ -334,11 +334,18 @@ impl Skins {
                 .filter(|(_, p)| p.entity == fighter)
                 .map(|(e, _)| e)
                 .collect();
+            // Hidden from the mesh loop (which draws their uploaded meshes, not the kinds).
             for e in std::iter::once(fighter).chain(children) {
-                if let Some(mesh) = world.get::<MeshKind>(e).copied() {
-                    let _ = world.remove_component::<MeshKind>(e);
-                    self.hidden.push((e, mesh));
+                if world.get::<MeshKind>(e).is_none() {
+                    continue;
                 }
+                let had = world.get::<EditorFlags>(e).copied();
+                let flags = EditorFlags {
+                    hidden: true,
+                    ..had.unwrap_or_default()
+                };
+                let _ = world.insert_component(e, flags);
+                self.hidden.push((e, had));
             }
             let socket = |world: &mut World, joint: &str| {
                 world.spawn((
@@ -469,8 +476,15 @@ impl Skins {
         for (e, body) in self.taken {
             let _ = world.insert_component(e, body);
         }
-        for (e, mesh) in self.hidden {
-            let _ = world.insert_component(e, mesh);
+        for (e, had) in self.hidden {
+            match had {
+                Some(flags) => {
+                    let _ = world.insert_component(e, flags);
+                }
+                None => {
+                    let _ = world.remove_component::<EditorFlags>(e);
+                }
+            }
         }
     }
 }
