@@ -141,9 +141,9 @@ A town cell of 400 buildings (6,000 entities), each with a door of two named par
 | | Cost |
 |---|---|
 | Finding the doors and their leaves, and making their boxes (once, as they arrive) | about 3 ms |
-| Every frame while no door moves | 0.3 µs |
+| Every frame while no door moves | 0.3 to 1.5 µs |
 | Picking the target among 400 interactables, every frame | 1.2 µs |
 
-Idle doors are never looked at one by one. Each frame compares the interactables' archetype entity lists with the
-last frame's, which costs about as much as copying them. Only doors that are swinging, or waiting to close, are
-touched. Nothing is written while every door rests.
+Idle doors are never looked at one by one. Each frame walks the interactables once, with one component query and
+no lookups, to check that they are last frame's. Only doors that are swinging, or waiting to close, are touched.
+Nothing is written while every door rests.

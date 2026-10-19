@@ -11,13 +11,13 @@
 //! `open` is both the authored start and the live state: the system writes it when a door is used, and a game or
 //! script that sets it swings the door. Villagers and other walkers open doors through [`Doors::pass`].
 //!
-//! Idle doors cost nothing: each frame compares the door archetypes' entity lists with the last frame's (a memory
-//! compare) and touches only doors that are moving or waiting to close.
+//! Idle doors cost nothing: each frame walks the interactables (one component query, no lookups) to see that they are
+//! the ones of the last frame, and touches only doors that are moving or waiting to close.
 
 use std::collections::{HashMap, HashSet};
 
 use glam::{Mat4, Quat, Vec3};
-use somnium_ecs::{ComponentId, ComponentSet, Entity, World};
+use somnium_ecs::{ComponentId, Entity, World};
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_physics::world::PhysicsWorld;
@@ -275,26 +275,21 @@ impl Doors {
         }
     }
 
-    /// Find doors that arrived, forget ones that went, and follow `open` written by others. Costs a compare of the
-    /// door archetypes' entity lists when nothing changed.
+    /// Find doors that arrived, forget ones that went, and follow `open` written by others. Costs one walk of the
+    /// interactables, compared with the last frame's, when nothing changed.
     fn sync(&mut self, world: &mut World, physics: &mut PhysicsWorld) {
-        let door_id = ComponentId::of::<Interactable>();
-        let required = ComponentSet::from_ids(vec![door_id]);
-        let tick = world.change_tick(door_id);
-        let mut offset = 0;
+        let tick = world.change_tick(ComponentId::of::<Interactable>());
+        let mut count = 0;
         let mut same = true;
-        for archetype in world.query_archetypes(&required, &ComponentSet::empty()) {
-            let entities = archetype.entities();
-            same &= self.seen.get(offset..offset + entities.len()) == Some(entities);
-            offset += entities.len();
+        for (entity, _) in world.iter_with::<Interactable>() {
+            same &= self.seen.get(count) == Some(&entity);
+            count += 1;
         }
-        if same && offset == self.seen.len() && tick == self.seen_tick {
+        if same && count == self.seen.len() && tick == self.seen_tick {
             return;
         }
         self.seen.clear();
-        for archetype in world.query_archetypes(&required, &ComponentSet::empty()) {
-            self.seen.extend_from_slice(archetype.entities());
-        }
+        self.seen.extend(world.entities_with::<Interactable>());
         self.seen_tick = tick;
         let present: HashSet<Entity> = self.seen.iter().copied().collect();
         let gone: Vec<Entity> = self.bound.keys().copied().filter(|e| !present.contains(e)).collect();
