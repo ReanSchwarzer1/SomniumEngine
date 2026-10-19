@@ -555,6 +555,8 @@ struct Run {
     fights: usize,
     /// Doors near villagers have passed through, all told.
     doors: usize,
+    /// The scene has doors to open (somnium_core::door): only then are passes sent.
+    has_doors: bool,
     /// A Life Table's places, housed as the view comes near.
     table: Option<TableRun>,
     /// A Life Table's looks: what the pooled people and beasts wear.
@@ -1283,6 +1285,7 @@ impl LifeDemo {
             health: HashMap::new(),
             fights: 0,
             doors: 0,
+            has_doors: false,
             table,
             dress_as,
             gear: HashMap::new(),
@@ -1383,6 +1386,10 @@ impl LifeDemo {
         if run.synced >= 1.0 || (run.synced >= 0.25 && ctx.world.entity_count() != run.links.seen) {
             run.synced = 0.0;
             sync(ctx.world, run);
+            run.has_doors = ctx
+                .world
+                .iter_with::<somnium_core::interaction::Interactable>()
+                .any(|(_, i)| i.kind == somnium_core::interact::KIND_DOOR);
             run.fights += hear_fights(ctx.world, run);
             if let Some(at) = ctx.renderer.as_ref().map(|r| r.camera_pos)
                 && adopt_near(run, at) > 0
@@ -1446,8 +1453,13 @@ impl LifeDemo {
             &focus,
             &ground,
         );
-        // The doors near villagers pass. A game opens its own: with
-        // somnium_core::door (claude/rb-interactable), `request_pass(world, at)` for each.
+        // The doors near villagers pass open for them (somnium_core::door), in a
+        // scene that has doors (nobody would take the requests otherwise).
+        if run.has_doors {
+            for &at in run.life.door_passes() {
+                somnium_core::door::request_pass(ctx.world, at);
+            }
+        }
         run.doors += run.life.door_passes().len();
         if let Some(at) = focus.first() {
             run.life.keep_clear(*at, 0.7);
