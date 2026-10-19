@@ -432,3 +432,5 @@ impl GameStateStack {
 
 /// Designer slot profiles and Play-session operations.
 pub mod editor;
+/// A game's save slots: the story and the game's own state (Rimeborn, 19 Oct 2026).
+pub mod game;
