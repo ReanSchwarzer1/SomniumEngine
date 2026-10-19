@@ -88,7 +88,7 @@ const MARK_ALPHA: [u8; 3] = [235, 150, 70];
 const MARK_LOOK: [u8; 3] = [214, 206, 186];
 const MARK_ALARM: [u8; 3] = [178, 64, 52];
 
-fn material(name: &str) -> MaterialComponent {
+pub(crate) fn material(name: &str) -> MaterialComponent {
     MaterialComponent {
         asset: AssetId::from_relative_path(std::path::Path::new(&format!(
             "materials/combat/{name}.sommat"
@@ -913,6 +913,30 @@ pub fn spawn_at_startup(world: &mut World) -> Result<usize, String> {
             )));
         }
     }
+    // Capture hooks: `SOMNIUM_COMBAT_BODY=<glb>` dresses the player in a skinned
+    // body (its `_lod1`, `_lod2` beside it), `SOMNIUM_COMBAT_MOUNT_BODY=<glb>` the
+    // first mount.
+    let dress = |world: &mut World, var: &str, pick: &dyn Fn(&CombatantComponent) -> bool| {
+        let Ok(glb) = std::env::var(var) else {
+            return;
+        };
+        let Some(e) = world.iter_with::<CombatantComponent>().find(|(_, c)| pick(c)).map(|(e, _)| e) else {
+            return;
+        };
+        let level = |k: &str| {
+            glb.strip_suffix(".glb")
+                .map_or(AssetId::NONE, |stem| AssetId::from_relative_path(format!("{stem}_{k}.glb")))
+        };
+        let body = crate::skinned_crowd::SkinnedBody {
+            source: AssetId::from_relative_path(&glb),
+            lod1: level("lod1"),
+            lod2: level("lod2"),
+            ..Default::default()
+        };
+        let _ = world.insert_component(e, body);
+    };
+    dress(world, "SOMNIUM_COMBAT_BODY", &|c| c.player);
+    dress(world, "SOMNIUM_COMBAT_MOUNT_BODY", &|c| c.mount != 0);
     Ok(spawned.len())
 }
 
@@ -1869,6 +1893,8 @@ struct Run {
     /// `nav` holds woken encounters' patches (no navmesh was baked).
     patched: bool,
     readouts: HashMap<Entity, (i32, i32, i32, &'static str)>,
+    /// Fighters and mounts drawn as their Skinned Bodies (the shapes stand in for the rest).
+    skins: crate::combat_bodies::Skins,
 }
 
 struct Hud {
@@ -2168,6 +2194,9 @@ impl CombatDemo {
             stand_on_ground(ctx, run);
             spawn_pools(ctx.world, run);
             group_under_effects(ctx.world, run);
+            // Fighters that carry a Skinned Body draw through it (Caelan, a horse).
+            run.skins = crate::combat_bodies::Skins::new(Some(&ctx.config.content_root));
+            run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
             // Those already near wake now, the rest as the protagonist comes.
             tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
             run.log.push_back(
@@ -2181,6 +2210,7 @@ impl CombatDemo {
         let Some(run) = self.run.take() else {
             return;
         };
+        run.skins.end(ctx.world);
         for (entity, transform) in run.restore {
             if let Some(t) = ctx.world.get_mut::<Transform>(entity) {
                 *t = transform;
@@ -2296,6 +2326,9 @@ impl CombatDemo {
         });
         tend_encounters(ctx.world, Some(&mut *ctx.physics), run, dt);
         write_scene(ctx, run);
+        // Bodies for fighters that woke this frame, and every body's pose.
+        run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
+        run.skins.write(ctx.world, &run.world, &run.walkers, dt);
     }
 
     /// HUD text (once a frame, before the UI is drawn).
@@ -2359,6 +2392,7 @@ impl CombatDemo {
             });
         json!({
             "running": true,
+            "bodies": run.skins.count(),
             "time": run.world.time(),
             "locomotion": locomotion,
             "fighters": fighters,
@@ -2522,6 +2556,7 @@ fn build(world: &World) -> Option<Run> {
         tended: 0.0,
         patched: false,
         readouts: HashMap::new(),
+        skins: Default::default(),
     })
 }
 
@@ -4094,6 +4129,83 @@ mod tests {
             walker.feet,
             walker.mode
         );
+    }
+
+    /// A fighter carrying a Skinned Body draws through it: a driven body of
+    /// its own at its feet, its shapes hidden, its sword sheathed until it
+    /// fights; a mount gets a saddle; Stop gives everything back.
+    #[test]
+    fn fighters_with_bodies_draw_through_them() {
+        use crate::skinned_crowd::{SkinnedBody, SkinnedSocket};
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        let pick = |world: &World, f: &dyn Fn(&CombatantComponent, &str) -> bool| {
+            world
+                .iter_with::<CombatantComponent>()
+                .find(|(e, c)| f(c, world.get::<Name>(*e).map_or("", |n| n.as_str())))
+                .map(|(e, _)| e)
+                .unwrap()
+        };
+        let hero = pick(&world, &|c, _| c.player);
+        let elk = pick(&world, &|_, n| n == "Frost-elk");
+        for e in [hero, elk] {
+            world
+                .insert_component(e, SkinnedBody::default())
+                .unwrap();
+        }
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.skins = crate::combat_bodies::Skins::new(None);
+        run.skins
+            .dress(&mut world, &run.bodies, &run.world, &mut run.spawned);
+        assert_eq!(run.skins.count(), 2);
+        assert!(world.get::<SkinnedBody>(hero).is_none());
+        assert!(world.get::<somnium_core::EditorFlags>(hero).is_some_and(|f| f.hidden), "its cylinder is hidden");
+        let body_of = |world: &World, name: &str| {
+            world
+                .iter_with::<SkinnedBody>()
+                .find(|(e, _)| world.get::<Name>(*e).is_some_and(|n| n.as_str() == name))
+                .map(|(e, b)| (e, b.clone()))
+                .unwrap()
+        };
+        let hero_name = world.get::<Name>(hero).unwrap().as_str().to_string();
+        let (body, look) = body_of(&world, &format!("{hero_name} body"));
+        assert!(look.driven);
+        let sword = world
+            .iter_with::<SkinnedSocket>()
+            .find(|(e, _)| world.get::<Parent>(*e).is_some_and(|p| p.entity == body))
+            .map(|(e, s)| (e, s.joint.clone()))
+            .expect("a sword socket");
+        assert_eq!(sword.1, "sheath");
+        let (elk_body, _) = body_of(&world, "Frost-elk body");
+        assert!(
+            world
+                .iter_with::<SkinnedSocket>()
+                .any(|(e, s)| s.joint == "saddle" && world.get::<Parent>(e).is_some_and(|p| p.entity == elk_body))
+        );
+        let terrain = boxes(&world, &run);
+        for _ in 0..60 {
+            let open = somnium_combat::OpenField;
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+            run.skins
+                .write(&mut world, &run.world, &run.walkers, 1.0 / 60.0);
+        }
+        let player = run.player.unwrap();
+        let feet = run.world.combatant(player).unwrap().position;
+        let at = world.get::<Transform>(body).unwrap().translation;
+        assert!(at.distance(feet) < 1e-3, "the body stands at the feet");
+        assert!(!world.get::<SkinnedBody>(body).unwrap().clip.is_empty());
+        // Raising the guard draws the blade.
+        run.world.combatant_mut(player).unwrap().action = Action::Guard { t: 0.1 };
+        run.skins
+            .write(&mut world, &run.world, &run.walkers, 1.0 / 60.0);
+        assert_eq!(world.get::<SkinnedSocket>(sword.0).unwrap().joint, "weapon_r");
+        assert!(world.get::<SkinnedBody>(body).unwrap().clip.contains("Block"));
+        let skins = std::mem::take(&mut run.skins);
+        skins.end(&mut world);
+        assert!(world.get::<SkinnedBody>(hero).is_some());
+        assert!(!world.get::<somnium_core::EditorFlags>(hero).is_some_and(|f| f.hidden), "shown again at Stop");
     }
 
     #[test]

@@ -51,7 +51,8 @@ LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
 
 # Looks: WS3's crowd contract (WS3_CHARACTERS.md, "The crowd contract"). Bodies by somnium_life role: crowd_* children
 # and elders by their age (SOURCE.json), the other crowd_* adults farmers, labourers and anyone a role has no bodies for.
-TRADES = {"Smith": "smith", "Priest": "priest", "Keeper": "keeper", "Herder": "herder"}
+# A trade's body families (the Cinder's forge hands are smiths).
+TRADES = {"Smith": ("smith", "forge"), "Priest": ("priest",), "Keeper": ("keeper",), "Herder": ("herder",)}
 BEASTS = {"Sheep": "sheep", "Cow": "march_cow", "Goat": "goat", "Pig": "pig", "Hen": "hen", "Dog": "sheepdog"}
 POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Jog_F_Loop", "Talk": "Talk_Loop",
          "Work": "Bench_Work_Loop", "Farm": "Hoe_Loop", "Tend": "Farm_Water", "Trade": "Haggle_Loop",
@@ -75,7 +76,10 @@ CART_POSES = {"Drive": "Walk_F_Loop", "Idle": "Idle_Loop"}
 WALK_SPEED, RUN_SPEED = 0.86, 5.6
 SNAP = 3.0  # a street's end this close to another street joins it
 CHILD_BELOW, ELDER_FROM = 16, 50  # a body's age (SOURCE.json) that makes it a child's or an elder's (WS3's elders: 52+)
-NOT_VILLAGERS = {"guard"}  # families WS3 casts as set pieces, not people on a routine
+# Families WS3 casts as set pieces, not people on a routine (with folk_by_region.json's own list): the watch, the
+# garrison, bandits, and Valdremar's courtiers at the Lancehall and halls.
+NOT_VILLAGERS = {"guard", "lance", "bandit", "court"}
+MIN_OWN = 6  # a town's own bodies of a kind, fewer than this, are joined by the table's (no clones)
 
 
 def front(az_deg):
@@ -95,6 +99,62 @@ def door(position, az, depth):
     fx, fz = front(az)
     reach = depth * 0.5 + 0.6
     return [position[0] + fx * reach, position[1], position[2] + fz * reach]
+
+
+def rotate(q, v):
+    """`v` turned by the quaternion `q` (x, y, z, w)."""
+    x, y, z, w = q
+    tx, ty, tz = 2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0])
+    return (v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx))
+
+
+class Bounds(dict):
+    """Each building's bounds by its library name, read when first asked (WS2's `<lib>.building.json`)."""
+
+    def __init__(self, rimeborn: Path):
+        super().__init__()
+        self.paths = {p.name[: -len(".building.json")]: p for p in (rimeborn / "assets/architecture").rglob("*.building.json")
+                      if "_lod" not in p.name}
+
+    def get(self, lib, default=None):
+        if lib not in self and lib in self.paths:
+            try:
+                self[lib] = json.loads(self.paths[lib].read_text(encoding="utf-8")).get("bounds_local")
+            except (OSError, ValueError):
+                self[lib] = None
+        return super().get(lib, default)
+
+
+def door_record(b, bounds, near):
+    """The point 0.6 m out from the middle of one of a building's door leaves, in its placement's frame: of WS2's
+    `doors_gltf_local` (a hinge in the building's glTF frame, a width), the sane one (within the building's bounds,
+    Blender axes: x, depth, up) nearest `near`, front doors first. The leaf runs along the wall its hinge is on, toward
+    that wall's middle, and out is away from the building (rb-story's doors open within 2 m of the point). None without
+    a sane record."""
+    doors, q = b.get("doors_gltf_local") or [], b.get("rotation_quat_xyzw")
+    if not doors or not q or not bounds:
+        return None
+    (x0, y0, _), (x1, y1, _) = bounds
+    half_w, half_d = max(-x0, x1, 0.01), max(-y0, y1, 0.01)
+    if max(half_w, half_d) > 100.0:  # a building file whose geometry strays (some rows): its records too
+        return None
+    at, best = b["position_local"], None
+    for d in doors:
+        hx, hy, hz = d["hinge"]
+        if abs(hx) > half_w + 1.0 or abs(hz) > half_d + 1.0:
+            continue
+        leaf = 0.5 * d.get("width", 1.0)
+        toward = lambda v: -math.copysign(leaf, v) if abs(v) > 1e-3 else leaf  # noqa: E731
+        if abs(hx) / half_w > abs(hz) / half_d:  # a side wall: the leaf along z, out along x
+            local = (hx + math.copysign(0.6, hx), hy, hz + toward(hz))
+        else:
+            local = (hx + toward(hx), hy, hz + math.copysign(0.6, hz))
+        r = rotate(q, local)
+        point = [at[0] + r[0], at[1] + r[1], at[2] + r[2]]
+        rank = ("front" not in d.get("name", ""), math.dist((point[0], point[2]), (near[0], near[2])))
+        if best is None or rank < best[0]:
+            best = (rank, point)
+    return best[1] if best else None
 
 
 def lanes_of(streets, dx, dz, height):
@@ -164,7 +224,7 @@ def area_spot(a, dx, dz):
             "radius": round(radius, 2), "label": a["name"]}
 
 
-def building_spots(buildings, plots_by_id, dx, dy, dz):
+def building_spots(buildings, plots_by_id, dx, dy, dz, bounds=None):
     spots = []
     for b in buildings:
         kind = kind_of(b)
@@ -173,7 +233,10 @@ def building_spots(buildings, plots_by_id, dx, dy, dz):
         plot = plots_by_id.get(b.get("plot"))
         depth = plot["size"][1] if plot else 8.0
         p = b["position_local"]
-        at = door([p[0] + dx, p[1] + dy, p[2] + dz], b["yaw_front_az_deg"], depth)
+        # Its real door where WS2's record has one (a church's west door), else the front's middle.
+        middle = door(p, b["yaw_front_az_deg"], depth)
+        real = door_record(b, (bounds or {}).get(b.get("lib")), middle) or middle
+        at = [real[0] + dx, real[1] + dy, real[2] + dz]
         spots.append({"kind": kind, "position": [round(v, 3) for v in at],
                       "radius": 0.5 if kind in INDOOR else 6.0, "label": b["id"]})
     return spots
@@ -224,8 +287,8 @@ def looks_of(rimeborn: Path):
     villagers = {"default": adults, "Farmer": adults, "Labourer": adults,
                  "Elder": [body(n) for n in crowd if stage[n] == "Elder"],
                  "Child": [body(n) for n in crowd if stage[n] == "Child"]}
-    for role, prefix in TRADES.items():
-        villagers[role] = [body(n) for n in numbered(prefix)]
+    for role, prefixes in TRADES.items():
+        villagers[role] = [body(n) for prefix in prefixes for n in numbered(prefix)]
     villagers = {k: v for k, v in villagers.items() if v}
     beasts = {kind: f"creatures/{name}/{name}.glb" for kind, name in BEASTS.items()
               if (creatures / name / f"{name}.glb").exists()}
@@ -270,10 +333,27 @@ def people_index(rimeborn: Path):
     return index
 
 
-def people_of(rimeborn: Path, name: str, index):
-    """The bodies WS3 casts in `name` (its char_<place>_people scene), by somnium_life role name; {} without one."""
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    scene = rimeborn / "scenes" / f"char_{slug}_people.scene.json"
+def folk_of(rimeborn: Path):
+    """WS3's roster by region (`assets/characters/folk_by_region.json`): each region's bodies by somnium_life role (only
+    those built), each peopled place's region by its slug, and the families that are not villagers. Empty without it."""
+    try:
+        d = json.loads((rimeborn / "assets/characters/folk_by_region.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}, set()
+    built = lambda p: (rimeborn / "assets" / p).exists()  # noqa: E731
+    regions = {r: {role: [p for p in paths if built(p)] for role, paths in roles.items()}
+               for r, roles in d.get("regions", {}).items()}
+    return regions, d.get("places", {}), set(d.get("not_villagers", []))
+
+
+def slug_of(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def people_of(rimeborn: Path, name: str, index, skip=frozenset(NOT_VILLAGERS)):
+    """The bodies WS3 casts in `name` (its char_<place>_people scene), by somnium_life role name; {} without one.
+    Families in `skip` are set pieces, not villagers."""
+    scene = rimeborn / "scenes" / f"char_{slug_of(name)}_people.scene.json"
     if not scene.exists():
         return {}
     roles = {}
@@ -287,9 +367,9 @@ def people_of(rimeborn: Path, name: str, index):
             if source not in index:
                 continue  # a beast, a cart horse, or not a WS3 person
             path, family, age = index[source]
-            if family in NOT_VILLAGERS:
+            if family in skip:
                 continue
-            trade = next((role for role, prefix in TRADES.items() if prefix == family), None)
+            trade = next((role for role, prefixes in TRADES.items() if family in prefixes), None)
             role = trade or age_stage(age)
             roles.setdefault(role, set()).add(path)
     return {role: sorted(paths) for role, paths in sorted(roles.items())}
@@ -308,6 +388,10 @@ def build(rimeborn: Path):
     tdx, tdy, tdz = shift("tyffir")
     places, report = [], []
     index = people_index(rimeborn)
+    looks = looks_of(rimeborn)
+    bounds = Bounds(rimeborn)
+    regions, region_of, not_villagers = folk_of(rimeborn)
+    skip = NOT_VILLAGERS | not_villagers
 
     def add(name, centre, radius, spots, lanes, roads):
         if not any(s["kind"] == "Home" for s in spots):
@@ -315,7 +399,20 @@ def build(rimeborn: Path):
             return
         entry = {"centre": [round(v, 3) for v in centre], "radius": radius, "seed": zlib.crc32(name.encode("utf-8")),
                  "place": {"name": name, "spots": spots, "lanes": lanes, "roads": roads}}
-        people = people_of(rimeborn, name, index)
+        people = people_of(rimeborn, name, index, skip)
+        # WS3's scenes keep only set pieces now (life owns whoever moves): a kind a town has fewer than MIN_OWN bodies of
+        # of its own (no children at all, a village's herder and two hands) is joined by its region's roster (a Fjord
+        # town's children are Fjord children), then, still short, by the table's crowd lists, so its folk are not clones.
+        region = regions.get(region_of.get(slug_of(name), ""), {})
+        for role in sorted(set(people) | set(region)):
+            own = set(people.get(role, []))
+            if len(own) < MIN_OWN:
+                own |= set(region.get(role, []))
+            table = looks["villagers"].get(role)
+            if len(own) < MIN_OWN and table and role in ("default", "Child", "Elder"):
+                own |= set(table)
+            if own:
+                people[role] = sorted(own)
         if people:
             entry["people"] = people
         places.append(entry)
@@ -333,7 +430,7 @@ def build(rimeborn: Path):
             report.append(f"  {d['settlement']}: not in WS1's site plan, left out")
             continue
         plots = {pl["id"]: pl for pl in site["plots"]}
-        spots = building_spots(d["buildings"], plots, tdx, tdy, tdz)
+        spots = building_spots(d["buildings"], plots, tdx, tdy, tdz, bounds)
         spots += [area_spot(a, tdx, tdz) for a in site["areas"] if a["use"] in BY_AREA]
         lanes, roads = lanes_of(site["streets"], tdx, tdz, heights_from(site["plots"], site["ground_y"]))
         add(d["settlement"], (site["x"] + tdx, site["ground_y"], site["z"] + tdz), float(site["radius_m"]),
@@ -345,7 +442,7 @@ def build(rimeborn: Path):
             continue
         d = json.loads(f.read_text(encoding="utf-8"))
         name = d.get("settlement") or f.stem.replace("_", " ").title()
-        spots = building_spots(d.get("buildings", []), {}, 0.0, 0.0, 0.0)
+        spots = building_spots(d.get("buildings", []), {}, 0.0, 0.0, 0.0, bounds)
         site = by_name.get(name.lower())
         lanes, roads = [], []
         if site:
@@ -371,7 +468,7 @@ def build(rimeborn: Path):
             fullest[name] = p
     places = list(fullest.values())
     table = {"version": 1, "frame": f"{WORLD} (compose_tyffir.py's world)",
-             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks_of(rimeborn)}
+             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks}
     looks = table["looks"]
     # Every body anyone may wear, by its height: gear is sized to its holder.
     worn = {b for bodies in looks["villagers"].values() for b in bodies}

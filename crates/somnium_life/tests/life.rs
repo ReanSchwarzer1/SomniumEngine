@@ -574,6 +574,68 @@ fn an_unloaded_town_sleeps_and_catches_up_when_the_view_returns() {
     );
 }
 
+/// Near villagers ask for the doors they pass: their home's as they step out,
+/// the work or chapel door a little before they step in, each once; a town
+/// nobody is near asks for none.
+#[test]
+fn near_villagers_ask_for_the_doors_they_pass() {
+    let mut w = LifeWorld::new(LodConfig::default());
+    let place = village(Vec3::ZERO);
+    let indoor: Vec<Vec3> = place
+        .spots
+        .iter()
+        .filter(|s| s.kind.indoor())
+        .map(|s| s.position)
+        .collect();
+    let homes: Vec<Vec3> = place
+        .spots
+        .iter()
+        .filter(|s| s.kind == SpotKind::Home)
+        .map(|s| s.position)
+        .collect();
+    let p = w.add_place(place);
+    w.populate(p, 5);
+    let mut asked: Vec<Vec3> = Vec::new();
+    let mut entering_early = 0;
+    day(&mut w, 5.0, 9.0, 0.0, &[Vec3::ZERO], |w, _| {
+        let passes = w.door_passes();
+        for (i, a) in passes.iter().enumerate() {
+            assert!(indoor.contains(a), "a door is an indoor spot's: {a}");
+            assert!(!passes[..i].contains(a), "each once a step");
+        }
+        // Asked for while still outside it: someone is near the door and visible.
+        entering_early += passes
+            .iter()
+            .filter(|a| !homes.contains(a))
+            .filter(|a| {
+                w.villagers().iter().any(|v| {
+                    v.visible && flat(v.position, **a) > 0.05 && flat(v.position, **a) < 3.0
+                })
+            })
+            .count();
+        asked.extend_from_slice(passes);
+    });
+    assert!(
+        asked.iter().any(|a| homes.contains(a)),
+        "out of their homes in the morning"
+    );
+    assert!(
+        asked.iter().any(|a| !homes.contains(a)),
+        "in at work or the chapel"
+    );
+    assert!(
+        entering_early > 0,
+        "the door is asked for before it is reached"
+    );
+    // A town 2 km away: nobody near, nobody asks.
+    let mut far = LifeWorld::new(LodConfig::default());
+    let p = far.add_place(village(Vec3::new(2_000.0, 0.0, 0.0)));
+    far.populate(p, 5);
+    day(&mut far, 5.0, 9.0, 0.0, &[Vec3::ZERO], |w, _| {
+        assert!(w.door_passes().is_empty());
+    });
+}
+
 #[test]
 fn a_place_that_streams_back_keeps_its_people() {
     let mut w = LifeWorld::new(LodConfig::default());

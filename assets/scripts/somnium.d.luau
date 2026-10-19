@@ -72,6 +72,8 @@ export type HelloSkinnedBody = {
 	lod2: Asset?,
 	lod1_beyond: number,
 	lod2_beyond: number,
+	still_beyond: number,
+	driven: boolean,
 }
 
 --- `hello.SkinnedSocket` (schema version 1).
@@ -214,6 +216,26 @@ export type SomniumCastMember = {
 	mark: string, -- engine-owned; reading only
 }
 
+--- `somnium.CellStreaming` (schema version 1).
+export type SomniumCellStreaming = {
+	enabled: boolean,
+	manifest: string,
+	load_radius: number,
+	unload_margin: number,
+	cells_per_frame: number,
+	loaded_cells: number, -- engine-owned; reading only
+	pending_cells: number, -- engine-owned; reading only
+	streamed_entities: number, -- engine-owned; reading only
+	status: string, -- engine-owned; reading only
+}
+
+--- `somnium.CombatEncounter` (schema version 1).
+export type SomniumCombatEncounter = {
+	enabled: boolean,
+	kind: string,
+	floor: boolean,
+}
+
 --- `somnium.CombatSurface` (schema version 1).
 export type SomniumCombatSurface = {
 	surface: number --[[ Bare | Grass | Water | Ice | Snow | Burning | Ash | Stone ]],
@@ -318,6 +340,16 @@ export type SomniumInteractable = {
 	hand_grip: number,
 	open_angle: number,
 	preview_requested: boolean,
+	cone: number,
+	requires: string,
+	leaf_width: number,
+	leaf_height: number,
+	leaf_thickness: number,
+	blocks: boolean,
+	leaves: string,
+	swing_duration: number,
+	close_after: number,
+	open: boolean,
 }
 
 --- `somnium.IsometricCamera` (schema version 1).
@@ -355,6 +387,10 @@ export type SomniumLifeTable = {
 	file: string,
 	reach: number,
 	adopted: number, -- engine-owned; reading only
+	asleep_margin: number,
+	villagers: number,
+	beasts: number,
+	carts: number,
 }
 
 --- `somnium.Light` (schema version 1).
@@ -710,6 +746,12 @@ export type SomniumTerrain = {
 	virtual_texture_evictions: number, -- engine-owned; reading only
 }
 
+--- `somnium.TerrainStreaming` (schema version 1).
+export type SomniumTerrainStreaming = {
+	geometry_distance: number,
+	own_area: Vec4,
+}
+
 --- `somnium.TimeOfDay` (schema version 1).
 export type SomniumTimeOfDay = {
 	enabled: boolean,
@@ -902,6 +944,8 @@ export type SelfComponents = {
 	cameraSettings: SomniumCameraSettings?,
 	cart: SomniumCart?,
 	castMember: SomniumCastMember?,
+	cellStreaming: SomniumCellStreaming?,
+	combatEncounter: SomniumCombatEncounter?,
 	combatSurface: SomniumCombatSurface?,
 	combatant: SomniumCombatant?,
 	cutaway: SomniumCutaway?,
@@ -940,6 +984,7 @@ export type SelfComponents = {
 	stagedMirror: SomniumStagedMirror?,
 	surfaceTags: SomniumSurfaceTags?,
 	terrain: SomniumTerrain?,
+	terrainStreaming: SomniumTerrainStreaming?,
 	timeOfDay: SomniumTimeOfDay?,
 	transform: SomniumTransform?,
 	uiCanvas: SomniumUiCanvas?,

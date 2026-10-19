@@ -33,10 +33,11 @@ pub use crowd::Bodies;
 pub use lod::{LodConfig, Tier};
 pub use place::{LaneGraph, Place, Spot, SpotKind};
 pub use routine::{Activity, Role, Routine};
-pub use table::{GearPiece, LifeTable, TableLooks, TablePlace};
 pub use sim::{
-    AgentId, Beast, BeastKind, Cart, Flat, Ground, LifeWorld, Stats, Villager, VillagerDesc,
+    AgentId, Beast, BeastKind, Cart, DOOR_LEAD, Flat, Ground, LifeWorld, Stats, Villager,
+    VillagerDesc,
 };
+pub use table::{GearPiece, LifeTable, TableLooks, TablePlace};
 
 /// The time of day life runs on.
 #[derive(Clone, Copy, Debug, PartialEq)]

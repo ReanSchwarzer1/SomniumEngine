@@ -553,6 +553,10 @@ struct Run {
     health: HashMap<Entity, f32>,
     /// Alarms rung by fights, all told.
     fights: usize,
+    /// Doors near villagers have passed through, all told.
+    doors: usize,
+    /// The scene has doors to open (somnium_core::door): only then are passes sent.
+    has_doors: bool,
     /// A Life Table's places, housed as the view comes near.
     table: Option<TableRun>,
     /// A Life Table's looks: what the pooled people and beasts wear.
@@ -822,18 +826,22 @@ struct Links {
     seen: usize,
 }
 
-/// Metres past a Life Table's reach where its towns sleep (not stepped at all).
-const ASLEEP_PAST_REACH: f32 = 300.0;
-
 /// A Life Table's places and which have been housed.
 struct TableRun {
     entity: Entity,
     table: LifeTable,
     adopted: Vec<bool>,
     reach: f32,
+    /// Its component's settings: the sleeping margin and the bodies drawn.
+    settings: LifeTableComponent,
     count: u32,
     /// Each housed place's table entry, by its index in life.
     of_life: HashMap<usize, usize>,
+}
+
+/// How many bodies of a kind a pool holds: its Life Table's setting, else the default.
+fn bodies(table: &Option<TableRun>, of: fn(&LifeTableComponent) -> u32, default: usize) -> usize {
+    table.as_ref().map_or(default, |t| of(&t.settings) as usize)
 }
 
 impl TableRun {
@@ -868,6 +876,7 @@ fn load_table(world: &World, root: Option<&std::path::Path>) -> Option<TableRun>
                 adopted: vec![false; table.places.len()],
                 table,
                 reach: settings.reach,
+                settings: settings.clone(),
                 count: 0,
                 of_life: HashMap::new(),
             })
@@ -1213,7 +1222,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                VILLAGER_BODIES,
+                bodies(&table, |s| s.villagers, VILLAGER_BODIES),
                 "Villager",
                 (!skinned_people).then_some(MeshKind::Cylinder),
                 true,
@@ -1225,7 +1234,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                BEAST_BODIES,
+                bodies(&table, |s| s.beasts, BEAST_BODIES),
                 "Beast",
                 (!skinned_beasts).then_some(MeshKind::Cube),
                 false,
@@ -1237,7 +1246,7 @@ impl LifeDemo {
             &mut spawned,
             effects,
             (
-                CART_BODIES,
+                bodies(&table, |s| s.carts, CART_BODIES),
                 "Cart",
                 (!skinned_carts).then_some(MeshKind::Cube),
                 false,
@@ -1260,7 +1269,7 @@ impl LifeDemo {
             life: LifeWorld::new(LodConfig {
                 asleep: table
                     .as_ref()
-                    .map_or(f32::INFINITY, |t| t.reach + ASLEEP_PAST_REACH),
+                    .map_or(f32::INFINITY, |t| t.reach + t.settings.asleep_margin),
                 ..LodConfig::default()
             }),
             visuals: Vec::new(),
@@ -1275,6 +1284,8 @@ impl LifeDemo {
             greeted: 0,
             health: HashMap::new(),
             fights: 0,
+            doors: 0,
+            has_doors: false,
             table,
             dress_as,
             gear: HashMap::new(),
@@ -1375,6 +1386,10 @@ impl LifeDemo {
         if run.synced >= 1.0 || (run.synced >= 0.25 && ctx.world.entity_count() != run.links.seen) {
             run.synced = 0.0;
             sync(ctx.world, run);
+            run.has_doors = ctx
+                .world
+                .iter_with::<somnium_core::interaction::Interactable>()
+                .any(|(_, i)| i.kind == somnium_core::interact::KIND_DOOR);
             run.fights += hear_fights(ctx.world, run);
             if let Some(at) = ctx.renderer.as_ref().map(|r| r.camera_pos)
                 && adopt_near(run, at) > 0
@@ -1438,6 +1453,14 @@ impl LifeDemo {
             &focus,
             &ground,
         );
+        // The doors near villagers pass open for them (somnium_core::door), in a
+        // scene that has doors (nobody would take the requests otherwise).
+        if run.has_doors {
+            for &at in run.life.door_passes() {
+                somnium_core::door::request_pass(ctx.world, at);
+            }
+        }
+        run.doors += run.life.door_passes().len();
         if let Some(at) = focus.first() {
             run.life.keep_clear(*at, 0.7);
             run.greeted += run.life.notice(*at, 3.5).len();
@@ -1483,6 +1506,7 @@ impl LifeDemo {
             "places": run.life.place_count(),
             "places_loaded": run.links.places.len(),
             "greeted": run.greeted,
+            "doors": run.doors,
             "table": run.table.as_ref().map(|t| json!({"places": t.table.places.len(), "adopted": t.count})),
             "fights": run.fights,
             "villagers": run.life.villagers().len(),
@@ -2053,10 +2077,16 @@ mod tests {
             Name::new("Realm"),
             LifeTableComponent {
                 file: "data/realm.json".into(),
+                asleep_margin: 100.0,
+                villagers: 24,
                 ..Default::default()
             },
         ));
         let mut run = LifeDemo::start(&mut world, Some(&root)).expect("a table is life");
+        // Its settings: the bodies drawn and where people sleep (a streamed world's margins).
+        assert_eq!(run.villagers.slots.len(), 24);
+        assert_eq!(run.beasts.slots.len(), BEAST_BODIES);
+        assert_eq!(run.life.lod.asleep, 700.0 + 100.0);
         assert_eq!(run.life.place_count(), 0, "nobody before the view comes");
         assert_eq!(adopt_near(&mut run, Vec3::ZERO), 1);
         assert_eq!(adopt_near(&mut run, Vec3::ZERO), 0, "once");
@@ -2102,7 +2132,7 @@ mod tests {
                     name: "Dressed".into(),
                     spots,
                     lanes: vec![vec![Vec3::new(-10.0, 2.0, 4.0), Vec3::new(100.0, 2.0, 4.0)]],
-                    roads: Vec::new(),
+                    roads: vec![vec![Vec3::new(-20.0, 2.0, 12.0), Vec3::new(110.0, 2.0, 12.0)]],
                 },
             }],
             looks: Some(
@@ -2228,6 +2258,28 @@ mod tests {
             }
         }
         assert!(holding > 0, "somebody holds something");
+        // The road's carts are their horses, walking or standing.
+        let mut horses = 0;
+        for (slot, (e, _)) in run.carts.slots.iter().enumerate() {
+            let Some(i) = run.carts.bodies.holder(slot) else {
+                continue;
+            };
+            let b = world
+                .get::<crate::skinned_crowd::SkinnedBody>(*e)
+                .expect("a cart wears its horse");
+            assert_eq!(
+                b.source,
+                AssetId::from_relative_path("creatures/cart_horse/cart_horse.glb")
+            );
+            let want = run
+                .dress_as
+                .as_ref()
+                .unwrap()
+                .cart_clip(run.life.carts()[i].pose);
+            assert_eq!(b.clip, want.unwrap_or_default());
+            horses += 1;
+        }
+        assert!(horses > 0, "a cart on the road");
         // The view leaves: every slot is parked, and holds nothing.
         let away = Vec3::new(9_000.0, 0.0, 0.0);
         run.life.step(0.5, Clock::at(11.0), &[away], &Flat);

@@ -22,6 +22,7 @@
 mod animated_preview;
 mod skinned_crowd;
 mod authoring_demo;
+mod combat_bodies;
 mod combat_demo;
 mod life_demo;
 mod dreams_fixture;
