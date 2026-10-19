@@ -471,6 +471,8 @@ pub struct Skins {
     skins: BTreeMap<CombatantId, Skin>,
     /// Bodies taken off fighters and shapes hidden (with the flags they had), given back at Stop.
     taken: Vec<(Entity, SkinnedBody)>,
+    /// A fighter sitting in a boat (the combat host sets it): it rows, or sits.
+    pub seated: Option<CombatantId>,
     hidden: Vec<(Entity, Option<EditorFlags>)>,
 }
 
@@ -672,7 +674,11 @@ impl Skins {
             let drawn = now - skin.fought < SHEATHE_AFTER;
             let mode = walkers.get(id).map(|w| w.mode);
             let steed = c.mount.and_then(|m| combat.combatant(m));
-            let (clip, timing) = pose_of(c, steed, mode, now, drawn, self.table.as_ref());
+            let (clip, timing) = if self.seated == Some(*id) && matches!(c.action, Action::Idle) {
+                ("Row_Loop|Sit_Idle_Loop".to_string(), Timing::Loop(1.0))
+            } else {
+                pose_of(c, steed, mode, now, drawn, self.table.as_ref())
+            };
             if clip != skin.clip {
                 skin.clip.clone_from(&clip);
                 skin.clock = 0.0;

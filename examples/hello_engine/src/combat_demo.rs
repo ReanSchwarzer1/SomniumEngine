@@ -2509,6 +2509,11 @@ pub struct CombatDemo {
     hud_events: VecDeque<CombatEvent>,
     /// Mounts the protagonist may not take now, the game's say (someone else's horse before the story allows it).
     pub refused_mounts: std::collections::HashSet<Entity>,
+    /// The protagonist sits in a boat at this seat (feet, its facing the bow), carried: the boats' host
+    /// (`boats.rs`) rows it and sets this every fixed step; WASD and E are the boat's meanwhile.
+    pub aboard: Option<Mat4>,
+    /// E was the boats' this frame (boarding or stepping off), not a mount's.
+    pub take_e: bool,
     events: Vec<HostEvent>,
     /// Factions the game has turned against the protagonist, and those hunting
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
@@ -2577,6 +2582,8 @@ impl Default for CombatDemo {
             show_hud: true,
             hud_events: VecDeque::new(),
             refused_mounts: Default::default(),
+            aboard: None,
+            take_e: false,
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
@@ -2862,7 +2869,133 @@ impl CombatDemo {
             };
         }
         self.events.extend(gate_mount(run, &self.refused_mounts, player, &mut cmd));
+        if std::mem::take(&mut self.take_e) || self.aboard.is_some() {
+            cmd.mount = false;
+        }
+        if self.aboard.is_some() {
+            // The oars have the movement keys.
+            cmd.move_dir = Vec3::ZERO;
+            cmd.sprint = false;
+            cmd.dodge = false;
+            cmd.climb = false;
+        }
         run.world.command(player, cmd);
+    }
+
+    /// The protagonist's feet and whether they ride, while a fight runs.
+    pub fn player_feet(&self) -> Option<(Vec3, bool)> {
+        let run = self.run.as_ref()?;
+        let c = run.world.combatant(run.player?)?;
+        Some((c.position, c.mount.is_some()))
+    }
+
+    /// Put the protagonist back from a save: at `feet`, facing `yaw` (about +Y,
+    /// +Z ahead), with `health`, on a mount if `riding` (the nearest free one,
+    /// brought beside them) or on foot. Whatever they were doing is dropped, so
+    /// a load mid-swing does not land the swing. False with no fight running.
+    pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let Some(player) = run.player else {
+            return false;
+        };
+        if run.world.combatant(player).is_some_and(|c| c.mount.is_some()) {
+            somnium_combat::mount::dismount(&mut run.world, player);
+        }
+        let facing = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+        let Some(c) = run.world.combatant_mut(player) else {
+            return false;
+        };
+        c.position = feet;
+        c.velocity = Vec3::ZERO;
+        c.facing = facing;
+        c.action = Action::Idle;
+        c.lock = None;
+        c.command = somnium_combat::Command::default();
+        c.riposte_until = 0.0;
+        c.vitals.health.current = health.clamp(0.0, c.vitals.health.max);
+        let mut place = |id: CombatantId, at: Vec3| {
+            if let Some(walker) = run.walkers.get_mut(&id) {
+                walker.feet = at;
+                walker.velocity = Vec3::ZERO;
+                walker.mode = Mode::Air;
+            }
+        };
+        place(player, feet);
+        if riding && let Some(steed) = somnium_combat::mount::nearest_free(&run.world, player) {
+            let beside = feet + Vec3::new(facing.z, 0.0, -facing.x) * 1.2;
+            if let Some(m) = run.world.combatant_mut(steed) {
+                m.position = beside;
+                m.velocity = Vec3::ZERO;
+                m.facing = facing;
+            }
+            place(steed, beside);
+            let _ = somnium_combat::mount::mount(&mut run.world, player, steed);
+        }
+        true
+    }
+
+    /// Make the fighter at `entity` the played one (the dual protagonists'
+    /// switch, DP-1, at `hand_over`): input, lock-on and the HUD follow him, his
+    /// own brain gone. The one left keeps his body as an ordinary fighter of his
+    /// style (his authored archetype's brain, home where he stands), his command
+    /// and lock-on dropped. False when no fight runs or `entity` is not one of
+    /// its fighters.
+    pub fn set_player(&mut self, world: &World, entity: Entity) -> bool {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let Some(new) = run.bodies.iter().find_map(|(id, e)| (*e == entity).then_some(*id)) else {
+            return false;
+        };
+        if run.player == Some(new) {
+            return true;
+        }
+        if let Some(c) = run.world.combatant_mut(new) {
+            c.brain = None;
+            c.command = somnium_combat::Command::default();
+        }
+        if let Some(old) = run.player {
+            let archetype = run
+                .bodies
+                .get(&old)
+                .and_then(|e| world.get::<CombatantComponent>(*e))
+                .map_or(Archetype::Companion, CombatantComponent::archetype);
+            if let Some(c) = run.world.combatant_mut(old) {
+                c.command = somnium_combat::Command::default();
+                c.lock = None;
+                // ponytail: his style's default profile (no spells of his own); the component's spell list if his
+                // AI should cast them.
+                let mut brain = ai::BrainDesc::new(archetype);
+                brain.home = Some(c.position);
+                c.brain = Some(ai::Brain::new(brain, old));
+            }
+        }
+        run.player = Some(new);
+        true
+    }
+
+    /// Off a boat: the protagonist stands (or falls, or swims) from `feet`.
+    pub fn disembark(&mut self, feet: Vec3) {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(player) = run.player else {
+            return;
+        };
+        if let Some(c) = run.world.combatant_mut(player) {
+            c.position = feet;
+            c.velocity = Vec3::ZERO;
+        }
+        if let Some(walker) = run.walkers.get_mut(&player) {
+            walker.feet = feet;
+            walker.velocity = Vec3::ZERO;
+            walker.mode = Mode::Air;
+        }
     }
 
     /// What the fight told the game since it last asked.
@@ -2905,6 +3038,21 @@ impl CombatDemo {
         for (id, event) in walk(&mut run.world, &mut run.walkers, dt, &terrain) {
             log_locomotion(run, id, event);
         }
+        // In a boat the protagonist is carried at its seat, facing the bow.
+        if let (Some(player), Some(seat)) = (run.player, self.aboard) {
+            let (_, turn, feet) = seat.to_scale_rotation_translation();
+            if let Some(c) = run.world.combatant_mut(player) {
+                c.position = feet;
+                c.velocity = Vec3::ZERO;
+                c.facing = turn * Vec3::Z;
+            }
+            if let Some(walker) = run.walkers.get_mut(&player) {
+                walker.feet = feet;
+                walker.velocity = Vec3::ZERO;
+                walker.mode = Mode::Air;
+            }
+        }
+        run.skins.seated = self.aboard.and(run.player);
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
         self.events.extend(news(run, rode, &events));
@@ -5253,6 +5401,68 @@ mod tests {
         let run = demo.run.as_ref().unwrap();
         let cat = run.world.combatants().find(|c| c.name == "Harrowcat").expect("woken");
         assert!(run.world.hostile(run.player.unwrap(), cat.id));
+    }
+
+    /// A load puts the protagonist back where the save had him, at its health,
+    /// mid-swing no longer; riding, on the nearest mount brought beside him;
+    /// on foot, off it.
+    #[test]
+    fn a_load_puts_the_protagonist_back() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut demo = CombatDemo::default();
+        assert!(!demo.restore_player(Vec3::ZERO, 0.0, 1.0, false), "no fight, nothing to restore");
+        demo.run = Some(build(&world).expect("a fight"));
+        let player = demo.run.as_ref().unwrap().player.unwrap();
+        let feet = Vec3::new(30.0, 0.0, -12.0);
+        assert!(demo.restore_player(feet, std::f32::consts::FRAC_PI_2, 55.0, true));
+        let run = demo.run.as_ref().unwrap();
+        let c = run.world.combatant(player).unwrap();
+        let elk = c.mount.expect("riding");
+        assert!(matches!(c.action, Action::Idle));
+        assert!((c.vitals.health.current - 55.0).abs() < 1e-4);
+        assert!((c.facing - Vec3::X).length() < 1e-4, "a quarter turn faces +X");
+        let steed = run.world.combatant(elk).unwrap().position;
+        assert!(Vec3::new(steed.x - feet.x, 0.0, steed.z - feet.z).length() < 1.5, "the mount was brought: {steed}");
+        assert!(demo.restore_player(feet, 0.0, 999.0, false));
+        let c = demo.run.as_ref().unwrap().world.combatant(player).unwrap();
+        assert!(c.mount.is_none(), "on foot");
+        assert!(c.vitals.health.current <= c.vitals.health.max, "health within its pool");
+    }
+
+    /// The switch makes another fighter the played one: he has no brain now,
+    /// and the one left has one (his style's), his command and lock-on dropped.
+    #[test]
+    fn the_switch_hands_the_fight_to_the_other_protagonist() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut demo = CombatDemo::default();
+        demo.run = Some(build(&world).expect("a fight"));
+        let (caelan, other, other_entity) = {
+            let run = demo.run.as_ref().unwrap();
+            let caelan = run.player.unwrap();
+            let (other, e) = run
+                .bodies
+                .iter()
+                .find(|(id, _)| {
+                    **id != caelan && run.world.combatant(**id).is_some_and(|c| c.brain.is_some() && c.mount_def.is_none())
+                })
+                .map(|(id, e)| (*id, *e))
+                .expect("another fighter");
+            (caelan, other, e)
+        };
+        demo.run.as_mut().unwrap().world.combatant_mut(caelan).unwrap().lock = Some(other);
+        let nobody = world.spawn((Name::new("nobody"),));
+        assert!(!demo.set_player(&world, nobody), "not a fighter");
+        assert!(demo.set_player(&world, other_entity));
+        let run = demo.run.as_ref().unwrap();
+        assert_eq!(run.player, Some(other));
+        assert!(run.world.combatant(other).unwrap().brain.is_none(), "his own brain gone: he is played");
+        let left = run.world.combatant(caelan).unwrap();
+        assert!(left.brain.is_some() && left.lock.is_none(), "the one left fights as anyone would");
+        assert!(demo.set_player(&world, other_entity), "already him");
     }
 
     #[test]
