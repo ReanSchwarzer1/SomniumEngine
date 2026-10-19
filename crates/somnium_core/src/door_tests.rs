@@ -163,7 +163,12 @@ fn a_walker_opens_the_door_it_passes_and_it_closes_behind_them_locked_or_not() {
     doors.update(&mut world, &mut physics, None, &[], 1.0 / 60.0);
     let doorway = world_of(&world, door).transform_point3(Vec3::new(0.5 * WIDTH, 1.0, 0.0));
     assert_eq!(doors.pass(&mut world, &mut physics, doorway + Vec3::new(5.0, 0.0, 0.0)), None, "too far");
-    assert_eq!(doors.pass(&mut world, &mut physics, doorway + Vec3::new(0.6, -1.0, 0.0)), Some(door));
+    assert_eq!(doors.pass(&mut world, &mut physics, doorway + Vec3::new(0.6, 3.0, 0.0)), None, "a storey up");
+    // The life sim's door point: on the ground, 0.6 m out from the front's middle, which at a cottage is 0.73 m
+    // aside from the leaf's middle (rb-combat, 19 Oct).
+    let root = world.get::<Parent>(door).unwrap().entity;
+    let out = world_of(&world, root).transform_vector3(Vec3::new(-0.6, 0.0, 0.73));
+    assert_eq!(doors.pass(&mut world, &mut physics, doorway + out - Vec3::Y), Some(door));
     assert!(world.get::<Interactable>(door).unwrap().open);
     let events = run(&mut doors, &mut world, &mut physics, &[], 1.0);
     assert_eq!(events, vec![DoorEvent::Opening(door)], "still open for them");

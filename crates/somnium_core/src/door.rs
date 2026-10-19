@@ -77,8 +77,12 @@ pub fn clear_passes(world: &mut World) {
     drop(world.take_cache::<Passes>());
 }
 
-/// How near a walker's doorway point must be to a door's for [`Doors::pass`], metres.
-pub const PASS_REACH: f32 = 1.2;
+/// How near a walker's doorway point must be to a door's for [`Doors::pass`], metres along the ground. Generous: the
+/// life sim's door point is on the ground about 0.6 m out from the building's front middle, which can be most of a
+/// leaf aside from the door itself; the nearest door wins.
+pub const PASS_REACH: f32 = 2.0;
+/// And up or down from it, metres (within a storey).
+pub const PASS_HEIGHT: f32 = 2.0;
 /// Seconds a door a walker opened stays open, whatever its own `close_after`.
 pub const PASS_CLOSE: f32 = 1.5;
 
@@ -180,12 +184,14 @@ impl Doors {
     }
 
     /// A walker (a villager, a guard) goes through a doorway at `at`: the door there opens, ignoring its lock, and
-    /// closes [`PASS_CLOSE`] seconds later. Returns the door, if there is one within [`PASS_REACH`].
+    /// closes [`PASS_CLOSE`] seconds later. Returns the door, if there is one within [`PASS_REACH`] along the ground
+    /// and [`PASS_HEIGHT`] up or down.
     pub fn pass(&mut self, world: &mut World, physics: &mut PhysicsWorld, at: Vec3) -> Option<Entity> {
         let door = self
             .bound
             .iter()
-            .map(|(&e, b)| (e, (b.doorway - at).length_squared()))
+            .filter(|(_, b)| (b.doorway.y - at.y).abs() <= PASS_HEIGHT)
+            .map(|(&e, b)| (e, (b.doorway - at).with_y(0.0).length_squared()))
             .filter(|&(_, d)| d <= PASS_REACH * PASS_REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1))?
             .0;

@@ -101,7 +101,8 @@ editor, where they can be moved and tuned, and nothing reads the building file a
 
 `somnium_core::door::request_pass(world, at)` says that a walker is going through the doorway at `at`. Any system
 holding the world can call it, such as the life sim or the AI. On the doors' next update:
-- the door whose doorway lies within 1.2 m swings open, whatever its lock;
+- the nearest door whose doorway lies within 2 m along the ground (and a storey up or down) swings open, whatever
+  its lock;
 - it closes 1.5 s after it has finished opening.
 
 ## Driving it from a game
