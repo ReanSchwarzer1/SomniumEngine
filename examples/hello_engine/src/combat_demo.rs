@@ -437,6 +437,11 @@ fn spawn_camp(
     }
 }
 
+/// Jolt worlds built at once in one test process fault (its global set-up):
+/// every test that builds one (here, `boats`) holds this.
+#[cfg(test)]
+pub(crate) static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A harrowcat (ECOLOGY_AND_BESTIARY: long, silent and black-furred, as tall
 /// as a pony; it hunts alone in the forests near the Spires and in the
 /// Taigan): a wolf's brain and jaws (its bite and its pounce play the cat's
@@ -532,14 +537,24 @@ fn faction_kind(name: &str) -> Option<String> {
 /// health and armour. The first leads.
 type Member = (&'static str, Archetype, WeaponKind, f32, f32);
 
-/// A band of `kind`: its team, the WS3 family its faces come from (and how
-/// many there are), and its members. `lampmen` alone is the always-hostile
-/// crew it was; `lampmen <colour>` (ACT6_PLACES_AND_CAST 4.3: knives red,
-/// clubs amber, riding crops and pistols green, canes white, unseen blue),
-/// `watch`, `lance` and `knights` are factions. Lamp-men wear WS3's bandits
-/// until there are Lamp-men; the watch its guards; the Lance and the knights
+/// The bodies a band wears: WS3's `<family>_NN`, its leader's from `leaders`
+/// (or, with none, from `others`) and the rest from `others`, in turn.
+#[derive(Clone, Copy)]
+struct Faces {
+    family: &'static str,
+    leaders: &'static [u8],
+    others: &'static [u8],
+}
+
+/// A band of `kind`: its team, the bodies it wears, and its members.
+/// `lampmen` alone is the always-hostile crew it was (the Varga's guards);
+/// `lampmen <colour>` (ACT6_PLACES_AND_CAST 4.3: knives red, clubs amber,
+/// riding crops and pistols green, canes white, unseen blue), `watch`,
+/// `lance` and `knights` are factions. Lamp-men wear WS3's Lamp-men of their
+/// Lamp (`lampman_NN`, the bosses by age: the Varga's 21 or 15, the
+/// Castellane's 10 or 18); the watch its guards; the Lance and the knights
 /// its lances.
-fn band_of(kind: &str) -> Option<(u32, (&'static str, usize), &'static [Member])> {
+fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
     use Archetype::{Brute, Duelist, Rifleman, Skirmisher, Spearman};
     use WeaponKind::{Axe, Knife, LanceGlaive, LatticeRifle, Spear, Sword, Unarmed};
     const RED: &[Member] = &[
@@ -588,18 +603,53 @@ fn band_of(kind: &str) -> Option<(u32, (&'static str, usize), &'static [Member])
         ("Knight (axe)", Brute, Axe, 170.0, 6.0),
         ("Knight (glaive)", Spearman, LanceGlaive, 170.0, 6.0),
     ];
-    const BANDIT: (&str, usize) = ("bandit", BANDITS);
+    // WS3's Lamp-men by Lamp (rb-characters, 19 Oct).
+    const VARGA: Faces = Faces {
+        family: "lampman",
+        leaders: &[21, 15],
+        others: &[2, 7, 12, 17, 19, 23],
+    };
+    const CASTELLANE: Faces = Faces {
+        family: "lampman",
+        leaders: &[10, 18],
+        others: &[0, 5, 16, 20, 22, 24],
+    };
+    const AMBER_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[1, 6, 11],
+    };
+    const GREEN_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[3, 8, 13],
+    };
+    const BLUE_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[4, 9, 14],
+    };
+    const GUARDS: Faces = Faces {
+        family: "guard",
+        leaders: &[],
+        others: &[0, 1, 2, 3, 4, 5, 6, 7],
+    };
+    const LANCES: Faces = Faces {
+        family: "lance",
+        leaders: &[],
+        others: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    };
     let kind = kind.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     let (faction, faces, members) = match kind.as_str() {
-        "lampmen" => return Some((1, BANDIT, RED)),
-        "lampmen red" => ("lamp_red", BANDIT, RED),
-        "lampmen white" => ("lamp_white", BANDIT, WHITE),
-        "lampmen amber" => ("lamp_amber", BANDIT, AMBER),
-        "lampmen green" => ("lamp_green", BANDIT, GREEN),
-        "lampmen blue" => ("lamp_blue", BANDIT, BLUE),
-        "watch" => ("watch", ("guard", 8), WATCH),
-        "lance" => ("lance", ("lance", 10), LANCE),
-        "knights" => ("knights", ("lance", 10), KNIGHTS),
+        "lampmen" => return Some((1, VARGA, RED)),
+        "lampmen red" => ("lamp_red", VARGA, RED),
+        "lampmen white" => ("lamp_white", CASTELLANE, WHITE),
+        "lampmen amber" => ("lamp_amber", AMBER_MEN, AMBER),
+        "lampmen green" => ("lamp_green", GREEN_MEN, GREEN),
+        "lampmen blue" => ("lamp_blue", BLUE_MEN, BLUE),
+        "watch" => ("watch", GUARDS, WATCH),
+        "lance" => ("lance", LANCES, LANCE),
+        "knights" => ("knights", LANCES, KNIGHTS),
         _ => return None,
     };
     Some((u32::from(faction_team(faction)?.0), faces, members))
@@ -610,8 +660,8 @@ const LINE: [f32; 4] = [0.0, 2.5, -2.5, -6.0];
 
 /// A band strung along its street or road (+Z) within an alley's 4 m, facing
 /// its leader: a Lamp crew, a watch post, a Lance patrol, knights. With a
-/// `content` root each wears one of WS3's `faces` (`<family>_NN`), all
-/// different.
+/// `content` root each wears one of WS3's `faces`, which (as far as there are
+/// enough) all differ.
 #[allow(clippy::too_many_arguments)]
 fn spawn_line(
     world: &mut World,
@@ -619,12 +669,22 @@ fn spawn_line(
     at: Vec3,
     content: Option<&std::path::Path>,
     team: u32,
-    faces: (&str, usize),
+    faces: Faces,
     members: &[Member],
     out: &mut Vec<Entity>,
 ) {
-    let (family, count) = faces;
+    let count = faces.others.len();
     let first = first_face(world, root, at, count);
+    // Called only with `count` > 0.
+    let face = |i: usize| -> u8 {
+        if faces.leaders.is_empty() {
+            faces.others[(first + i) % count]
+        } else if i == 0 {
+            faces.leaders[first % faces.leaders.len()]
+        } else {
+            faces.others[(first + i - 1) % count]
+        }
+    };
     for (i, &(name, archetype, weapon, health, armor)) in members.iter().enumerate() {
         let along = LINE[i % LINE.len()] - 6.0 * (i / LINE.len()) as f32;
         let side = if i % 2 == 0 { 0.6 } else { -0.6 };
@@ -648,8 +708,10 @@ fn spawn_line(
                 ..CombatantComponent::default()
             },
         ));
-        let b = (first + i * 3) % count.max(1);
-        wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
+        if count > 0 {
+            let (family, b) = (faces.family, face(i));
+            wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
+        }
     }
 }
 
@@ -5173,8 +5235,8 @@ mod tests {
     fn a_lamp_crew_stands_along_its_street() {
         use crate::skinned_crowd::SkinnedBody;
         let content = std::env::temp_dir().join("somnium_combat_crew");
-        for n in 0..BANDITS {
-            let path = content.join(format!("characters/bandit_{n:02}/bandit_{n:02}.glb"));
+        for n in 0..25 {
+            let path = content.join(format!("characters/lampman_{n:02}/lampman_{n:02}.glb"));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"").unwrap();
         }
@@ -5202,6 +5264,16 @@ mod tests {
         let faces: std::collections::BTreeSet<AssetId> =
             crew.iter().map(|(_, _, b)| b.as_ref().expect("a body").source).collect();
         assert_eq!(faces.len(), 4);
+        // The Varga's own: the boss one of its two, the rest its men.
+        let varga = |n: &[u8]| -> Vec<AssetId> {
+            n.iter()
+                .map(|n| AssetId::from_relative_path(format!("characters/lampman_{n:02}/lampman_{n:02}.glb")))
+                .collect()
+        };
+        let boss = crew.iter().find(|(_, c, _)| c.leader).and_then(|(_, _, b)| b.as_ref()).unwrap();
+        assert!(varga(&[21, 15]).contains(&boss.source));
+        let men = varga(&[2, 7, 12, 17, 19, 23]);
+        assert!(crew.iter().filter(|(_, c, _)| !c.leader).all(|(_, _, b)| men.contains(&b.as_ref().unwrap().source)));
         assert!((encounter_extent("lampmen") - 8.0).abs() < 1e-6);
     }
 
@@ -5479,9 +5551,7 @@ mod tests {
         assert!(demo.set_player(&world, other_entity), "already him");
     }
 
-    /// Jolt worlds built at once in one process fault (its global set-up):
-    /// the tests that build one hold this.
-    static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::JOLT;
 
     /// A post inside a roofed house (the Varga warehouse's store) gets a patch
     /// of its floor, walled in, not of its roof: a path across the room keeps
