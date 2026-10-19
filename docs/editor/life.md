@@ -41,7 +41,8 @@ A **Life Table** names every town of a realm in one file (**File**, relative to 
 
 - Towns more than 300 m beyond the reach sleep. Nobody there is stepped, and when you come back they catch up at once to wherever their day has taken them.
 - Villagers stand on the scene's terrain.
-- When the file has **looks** (bodies by role and clips by pose), the pooled people and beasts wear them as Skinned Bodies (below) instead of shapes. Each person keeps one body of their role's.
+- When the file has **looks** (bodies by role and clips by pose), the pooled people and beasts wear them as Skinned Bodies (below) instead of shapes. Each person keeps one body of their role's, and each town can name its own folk.
+- A trade has its own clips (a smith at work hammers), and whatever a clip holds (the hoe, the hammer, the besom) is put in the hand, sized to the body.
 
 ## Cost
 
@@ -66,6 +67,9 @@ Measured in a release build (the 150-home village, 344 agents): life costs about
   - Far bodies are posed less often. Past 160 m they are not drawn and cost the GPU nothing.
   - **LOD 1** and **LOD 2** (lighter files with the same skeleton and clips) draw beyond their distances (20 m and 60 m by default).
   - The parts of a body that share a skin are posed as one, so a body of many materials costs one registration. At most four bodies are posed for the first time each frame, nearest first, so a crowd walking into view does not stall a frame.
+  - Beyond **Still Beyond** (160 m), and past the budget below, a body holds one pose of its clip, drawn as a plain mesh out to 400 m, so a town's people stay in view from its edge at almost no cost.
+  - **Clip** may list alternatives, `A|B`: the body plays the first its file has.
+  - With **Driven** on, the game sets **Time** every frame (a combat move's moment) instead of the body's own clock.
   - However close they stand, they keep within a budget of posed vertices (1.6 M by default; the renderer skins about 2 M): the nearest keep full detail, and a packed market is drawn lighter from the back. The `skinned` state reports the vertices in use against the budget.
 - **Skinned Socket**, on an entity under a Skinned Body, makes that entity follow one of the body's joints (`weapon_r`, `sheath`, `back`). The entity's own Transform is its offset from the joint. Put a sword under it and the sword stays in the hand.
 
@@ -78,3 +82,4 @@ Measured in a release build (the 150-home village, 344 agents): life costs about
 | `SOMNIUM_LIFE_HOUR=h` | Starts the day at hour `h` |
 | `SOMNIUM_SKINNED_CROWD=n` | Lays out `n` skinned bodies at the origin |
 | `SOMNIUM_LIFE_TABLE=file` | Adds a Life Table naming `file`, and Play keeps the editor camera |
+| `SOMNIUM_SKINNED_BODIES=file` | Lays out the skinned bodies a JSON file lists, with what they hold |
