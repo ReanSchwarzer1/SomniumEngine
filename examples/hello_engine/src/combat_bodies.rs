@@ -97,6 +97,13 @@ pub fn pose_of(
                 .map_or(total, |w| w.clip_time(total));
             return (clip, Timing::At(time));
         }
+        Action::Guard { .. } if stance(c.weapon.kind).is_some() => {
+            let (guard, _) = stance(c.weapon.kind).unwrap();
+            return (guard.into(), Timing::Loop(1.0));
+        }
+        Action::Aim { .. } if c.weapon.kind == WeaponKind::Bow => {
+            return ("Bow_Aim_Loop|Idle_Loop".into(), Timing::Loop(1.0));
+        }
         Action::Guard { t } => {
             let clip = "Sword_Aether_Rimeguard_Block|Sword_Basic_Block|Idle_Loop";
             let hold = seconds(clip).map_or(0.3, |s| s * 0.5);
@@ -186,6 +193,12 @@ pub fn pose_of(
         return (clip.into(), Timing::Loop(rate.clamp(0.6, 1.6)));
     }
     if speed < 0.25 {
+        // A spearman (the watch, a garrison) stands sentry out of a fight and
+        // on guard in one; an axe or knife on guard with it out.
+        if let Some((guard, sentry)) = stance(c.weapon.kind) {
+            let clip = if drawn { guard } else { sentry };
+            return (clip.into(), Timing::Loop(1.0));
+        }
         let clip = if drawn {
             "Sword_Aether_Idle_Loop|Sword_Basic_Idle_Loop|Idle_Neutral_Loop|Idle_Loop"
         } else {
@@ -266,6 +279,26 @@ fn piece_for(kind: WeaponKind) -> Option<(&'static str, bool)> {
     }
 }
 
+/// A weapon's own stances (on guard, and standing out of a fight), where WS3
+/// made them; a sword's are the blade's idles and blocks.
+fn stance(kind: WeaponKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        WeaponKind::Spear | WeaponKind::LanceGlaive => Some((
+            "Spear_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Spear_Sentry_Loop|Idle_Neutral_Loop|Idle_Loop",
+        )),
+        WeaponKind::Axe => Some((
+            "Axe_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Idle_Neutral_Loop|Idle_Loop",
+        )),
+        WeaponKind::Knife => Some((
+            "Knife_Guard_Loop|Idle_Neutral_Loop|Idle_Loop",
+            "Idle_Neutral_Loop|Idle_Loop",
+        )),
+        _ => None,
+    }
+}
+
 /// One fighter's body.
 struct Skin {
     body: Entity,
@@ -273,10 +306,54 @@ struct Skin {
     weapon: Option<(Entity, String, bool)>,
     /// A mount's saddle socket, where its rider sits.
     saddle: Option<Entity>,
+    /// A rider's pelvis socket (made when it first mounts), the point that sits on the saddle.
+    pelvis: Option<Entity>,
     clip: String,
     clock: f32,
     /// When it last fought (the blade comes out, and stays out a while).
     fought: f64,
+}
+
+impl Skin {
+    /// The body and everything placed on it (despawn does not reach children).
+    fn despawn(self, world: &mut World) {
+        let mut parts = vec![self.body];
+        parts.extend(self.saddle);
+        parts.extend(self.pelvis);
+        if let Some((socket, _, _)) = self.weapon {
+            parts.extend(
+                world
+                    .iter_with::<Parent>()
+                    .filter(|(_, p)| p.entity == socket)
+                    .map(|(e, _)| e)
+                    .collect::<Vec<_>>(),
+            );
+            parts.push(socket);
+        }
+        for e in parts {
+            world.despawn(e);
+        }
+    }
+}
+
+/// Where a body's pelvis is in the body's own frame, as last posed (its socket
+/// is placed with the pose); nothing until the socket has been placed.
+fn pelvis_offset(world: &World, body: Entity, pelvis: Entity) -> Vec3 {
+    let (Some(b), Some(p)) = (
+        world.get::<WorldTransform>(body),
+        world.get::<WorldTransform>(pelvis),
+    ) else {
+        return Vec3::ZERO;
+    };
+    if p.0 == Mat4::IDENTITY {
+        return Vec3::ZERO;
+    }
+    let offset = b.0.inverse().transform_point3(p.0.w_axis.truncate());
+    if offset.length() < 2.0 {
+        offset
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Each gear piece `clips.json` names (its `gear` table, clip to pieces), once, where its file is there.
@@ -483,6 +560,7 @@ impl Skins {
                     body,
                     weapon,
                     saddle,
+                    pelvis: None,
                     clip: String::new(),
                     clock: 0.0,
                     fought: f64::NEG_INFINITY,
@@ -501,6 +579,17 @@ impl Skins {
         dt: f32,
     ) {
         let now = combat.time();
+        // A fighter gone from the fight (its encounter fell asleep) takes its
+        // body, sockets and gear with it; waking again is a new fighter.
+        let gone: Vec<CombatantId> = self
+            .skins
+            .keys()
+            .filter(|id| combat.combatant(**id).is_none())
+            .copied()
+            .collect();
+        for id in gone {
+            self.skins.remove(&id).expect("listed").despawn(world);
+        }
         // Saddles where they were last drawn (a frame behind the mount's pose).
         let saddles: BTreeMap<CombatantId, Mat4> = self
             .skins
@@ -547,8 +636,21 @@ impl Skins {
                 .filter(|s| s.w_axis.truncate().distance(c.position) < 3.0);
             let (at, turn) = match seat {
                 Some(s) => {
+                    // Its pelvis on the saddle (the body's origin is its feet).
+                    let body = skin.body;
+                    let pelvis = *skin.pelvis.get_or_insert_with(|| {
+                        world.spawn((
+                            Name::new("pelvis"),
+                            Transform::default(),
+                            WorldTransform::identity(),
+                            Parent { entity: body },
+                            SkinnedSocket {
+                                joint: "pelvis".into(),
+                            },
+                        ))
+                    });
                     let (_, r, t) = s.to_scale_rotation_translation();
-                    (t, r)
+                    (t - r * pelvis_offset(world, body, pelvis), r)
                 }
                 None => (c.position, yaw(c.facing)),
             };
@@ -577,8 +679,12 @@ impl Skins {
         }
     }
 
-    /// Give the fighters their bodies and shapes back (Stop).
+    /// Give the fighters their bodies and shapes back (Stop), the bodies made
+    /// for them gone with their sockets and gear.
     pub fn end(self, world: &mut World) {
+        for (_, skin) in self.skins {
+            skin.despawn(world);
+        }
         for (e, body) in self.taken {
             let _ = world.insert_component(e, body);
         }
@@ -665,6 +771,131 @@ mod tests {
 
     /// clips.json's gear table gives each piece once, only where its file is
     /// there; a weapon kind names its piece and whether it is sheathed.
+    /// A fighter whose encounter falls asleep leaves the fight: its body,
+    /// sockets and blade go with it, and nothing is written for it again.
+    #[test]
+    fn a_sleeping_fighter_takes_its_body_away() {
+        let (mut combat, id) = fighter();
+        let mut world = World::new();
+        let caelan = world.spawn((
+            Name::new("Caelan"),
+            Transform::default(),
+            WorldTransform::identity(),
+            SkinnedBody::default(),
+        ));
+        let mut skins = Skins::new(None);
+        let mut spawned = Vec::new();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(id, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        assert_eq!(skins.count(), 1);
+        let parts: Vec<Entity> = world
+            .iter_with::<Name>()
+            .filter(|(_, n)| n.as_str() != "Caelan")
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(parts.len(), 3, "the body, its sheath and the blade");
+        combat.despawn(id);
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert_eq!(skins.count(), 0);
+        assert!(
+            parts.iter().all(|e| world.get::<Name>(*e).is_none()),
+            "all despawned"
+        );
+        assert!(
+            world.get::<Name>(caelan).is_some(),
+            "the fighter's own entity is its encounter's"
+        );
+        // At Stop, a body still in the fight goes the same way.
+        let again = combat.spawn(CombatantDesc::new(
+            "Caelan",
+            somnium_combat::TeamId(0),
+            Vec3::ZERO,
+            somnium_combat::weapon::sword(),
+        ));
+        world
+            .insert_component(caelan, SkinnedBody::default())
+            .unwrap();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(again, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        assert_eq!(world.iter_with::<Name>().count(), 4);
+        skins.end(&mut world);
+        assert_eq!(
+            world.iter_with::<Name>().count(),
+            1,
+            "only the fighter is left"
+        );
+    }
+
+    /// A rider's pelvis offset is read from its socket as posed, in the
+    /// body's own frame; an unplaced socket gives none.
+    #[test]
+    fn a_rider_sits_by_its_pelvis() {
+        let mut world = World::new();
+        let turn = Quat::from_rotation_y(1.0);
+        let body = world.spawn((WorldTransform(Mat4::from_rotation_translation(
+            turn,
+            Vec3::new(5.0, 0.0, 2.0),
+        )),));
+        let pelvis = world.spawn((WorldTransform::identity(),));
+        assert_eq!(
+            pelvis_offset(&world, body, pelvis),
+            Vec3::ZERO,
+            "not placed yet"
+        );
+        let posed = Vec3::new(5.0, 0.0, 2.0) + turn * Vec3::new(0.0, 0.92, -0.1);
+        world.get_mut::<WorldTransform>(pelvis).unwrap().0 = Mat4::from_translation(posed);
+        assert!(pelvis_offset(&world, body, pelvis).distance(Vec3::new(0.0, 0.92, -0.1)) < 1e-4);
+    }
+
+    /// The watch: a spearman stands sentry, and on guard (drawn or guarding)
+    /// holds the spear's guard; a sword still blocks.
+    #[test]
+    fn spearmen_stand_sentry_and_guard() {
+        let mut w = CombatWorld::new(somnium_combat::CombatRules::default());
+        let id = w.spawn(CombatantDesc::new(
+            "Watchman",
+            somnium_combat::TeamId(0),
+            Vec3::ZERO,
+            somnium_combat::weapon::spear(),
+        ));
+        let c = w.combatant_mut(id).unwrap();
+        c.velocity = Vec3::ZERO;
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+                .0
+                .starts_with("Spear_Sentry_Loop")
+        );
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, true, None)
+                .0
+                .starts_with("Spear_Guard_Loop")
+        );
+        c.action = Action::Guard { t: 0.1 };
+        assert_eq!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None),
+            (
+                "Spear_Guard_Loop|Idle_Neutral_Loop|Idle_Loop".into(),
+                Timing::Loop(1.0)
+            )
+        );
+        let (mut w, id) = fighter();
+        let c = w.combatant_mut(id).unwrap();
+        c.action = Action::Guard { t: 0.1 };
+        assert!(
+            pose_of(c, Some(Mode::Ground), 10.0, false, None)
+                .0
+                .starts_with("Sword_Aether_Rimeguard_Block")
+        );
+    }
+
     #[test]
     fn weapons_are_ws3_gear_by_kind() {
         let dir = std::env::temp_dir().join(format!("combat_gear_{}", std::process::id()));
