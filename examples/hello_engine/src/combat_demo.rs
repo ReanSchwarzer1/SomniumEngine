@@ -437,6 +437,11 @@ fn spawn_camp(
     }
 }
 
+/// Jolt worlds built at once in one test process fault (its global set-up):
+/// every test that builds one (here, `boats`) holds this.
+#[cfg(test)]
+pub(crate) static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A harrowcat (ECOLOGY_AND_BESTIARY: long, silent and black-furred, as tall
 /// as a pony; it hunts alone in the forests near the Spires and in the
 /// Taigan): a wolf's brain and jaws (its bite and its pounce play the cat's
@@ -532,14 +537,24 @@ fn faction_kind(name: &str) -> Option<String> {
 /// health and armour. The first leads.
 type Member = (&'static str, Archetype, WeaponKind, f32, f32);
 
-/// A band of `kind`: its team, the WS3 family its faces come from (and how
-/// many there are), and its members. `lampmen` alone is the always-hostile
-/// crew it was; `lampmen <colour>` (ACT6_PLACES_AND_CAST 4.3: knives red,
-/// clubs amber, riding crops and pistols green, canes white, unseen blue),
-/// `watch`, `lance` and `knights` are factions. Lamp-men wear WS3's bandits
-/// until there are Lamp-men; the watch its guards; the Lance and the knights
+/// The bodies a band wears: WS3's `<family>_NN`, its leader's from `leaders`
+/// (or, with none, from `others`) and the rest from `others`, in turn.
+#[derive(Clone, Copy)]
+struct Faces {
+    family: &'static str,
+    leaders: &'static [u8],
+    others: &'static [u8],
+}
+
+/// A band of `kind`: its team, the bodies it wears, and its members.
+/// `lampmen` alone is the always-hostile crew it was (the Varga's guards);
+/// `lampmen <colour>` (ACT6_PLACES_AND_CAST 4.3: knives red, clubs amber,
+/// riding crops and pistols green, canes white, unseen blue), `watch`,
+/// `lance` and `knights` are factions. Lamp-men wear WS3's Lamp-men of their
+/// Lamp (`lampman_NN`, the bosses by age: the Varga's 21 or 15, the
+/// Castellane's 10 or 18); the watch its guards; the Lance and the knights
 /// its lances.
-fn band_of(kind: &str) -> Option<(u32, (&'static str, usize), &'static [Member])> {
+fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
     use Archetype::{Brute, Duelist, Rifleman, Skirmisher, Spearman};
     use WeaponKind::{Axe, Knife, LanceGlaive, LatticeRifle, Spear, Sword, Unarmed};
     const RED: &[Member] = &[
@@ -588,18 +603,53 @@ fn band_of(kind: &str) -> Option<(u32, (&'static str, usize), &'static [Member])
         ("Knight (axe)", Brute, Axe, 170.0, 6.0),
         ("Knight (glaive)", Spearman, LanceGlaive, 170.0, 6.0),
     ];
-    const BANDIT: (&str, usize) = ("bandit", BANDITS);
+    // WS3's Lamp-men by Lamp (rb-characters, 19 Oct).
+    const VARGA: Faces = Faces {
+        family: "lampman",
+        leaders: &[21, 15],
+        others: &[2, 7, 12, 17, 19, 23],
+    };
+    const CASTELLANE: Faces = Faces {
+        family: "lampman",
+        leaders: &[10, 18],
+        others: &[0, 5, 16, 20, 22, 24],
+    };
+    const AMBER_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[1, 6, 11],
+    };
+    const GREEN_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[3, 8, 13],
+    };
+    const BLUE_MEN: Faces = Faces {
+        family: "lampman",
+        leaders: &[],
+        others: &[4, 9, 14],
+    };
+    const GUARDS: Faces = Faces {
+        family: "guard",
+        leaders: &[],
+        others: &[0, 1, 2, 3, 4, 5, 6, 7],
+    };
+    const LANCES: Faces = Faces {
+        family: "lance",
+        leaders: &[],
+        others: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    };
     let kind = kind.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     let (faction, faces, members) = match kind.as_str() {
-        "lampmen" => return Some((1, BANDIT, RED)),
-        "lampmen red" => ("lamp_red", BANDIT, RED),
-        "lampmen white" => ("lamp_white", BANDIT, WHITE),
-        "lampmen amber" => ("lamp_amber", BANDIT, AMBER),
-        "lampmen green" => ("lamp_green", BANDIT, GREEN),
-        "lampmen blue" => ("lamp_blue", BANDIT, BLUE),
-        "watch" => ("watch", ("guard", 8), WATCH),
-        "lance" => ("lance", ("lance", 10), LANCE),
-        "knights" => ("knights", ("lance", 10), KNIGHTS),
+        "lampmen" => return Some((1, VARGA, RED)),
+        "lampmen red" => ("lamp_red", VARGA, RED),
+        "lampmen white" => ("lamp_white", CASTELLANE, WHITE),
+        "lampmen amber" => ("lamp_amber", AMBER_MEN, AMBER),
+        "lampmen green" => ("lamp_green", GREEN_MEN, GREEN),
+        "lampmen blue" => ("lamp_blue", BLUE_MEN, BLUE),
+        "watch" => ("watch", GUARDS, WATCH),
+        "lance" => ("lance", LANCES, LANCE),
+        "knights" => ("knights", LANCES, KNIGHTS),
         _ => return None,
     };
     Some((u32::from(faction_team(faction)?.0), faces, members))
@@ -610,8 +660,8 @@ const LINE: [f32; 4] = [0.0, 2.5, -2.5, -6.0];
 
 /// A band strung along its street or road (+Z) within an alley's 4 m, facing
 /// its leader: a Lamp crew, a watch post, a Lance patrol, knights. With a
-/// `content` root each wears one of WS3's `faces` (`<family>_NN`), all
-/// different.
+/// `content` root each wears one of WS3's `faces`, which (as far as there are
+/// enough) all differ.
 #[allow(clippy::too_many_arguments)]
 fn spawn_line(
     world: &mut World,
@@ -619,12 +669,22 @@ fn spawn_line(
     at: Vec3,
     content: Option<&std::path::Path>,
     team: u32,
-    faces: (&str, usize),
+    faces: Faces,
     members: &[Member],
     out: &mut Vec<Entity>,
 ) {
-    let (family, count) = faces;
+    let count = faces.others.len();
     let first = first_face(world, root, at, count);
+    // Called only with `count` > 0.
+    let face = |i: usize| -> u8 {
+        if faces.leaders.is_empty() {
+            faces.others[(first + i) % count]
+        } else if i == 0 {
+            faces.leaders[first % faces.leaders.len()]
+        } else {
+            faces.others[(first + i - 1) % count]
+        }
+    };
     for (i, &(name, archetype, weapon, health, armor)) in members.iter().enumerate() {
         let along = LINE[i % LINE.len()] - 6.0 * (i / LINE.len()) as f32;
         let side = if i % 2 == 0 { 0.6 } else { -0.6 };
@@ -648,8 +708,10 @@ fn spawn_line(
                 ..CombatantComponent::default()
             },
         ));
-        let b = (first + i * 3) % count.max(1);
-        wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
+        if count > 0 {
+            let (family, b) = (faces.family, face(i));
+            wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
+        }
     }
 }
 
@@ -1401,6 +1463,9 @@ const PATCH_CELL: f32 = 2.0;
 const PATCH_REACH: f32 = 32.0;
 /// The middle of a patch's cell id, apart from any baked tile's.
 const PATCH_LAYER: i64 = 1 << 40;
+/// Over a group's feet, the height from which an indoor patch is cast for:
+/// above the heads, below an upper floor.
+const INDOOR_HEAD: f32 = 2.2;
 
 /// The navigation patch round a woken encounter, where no navmesh was baked:
 /// the ground's height every [`PATCH_CELL`] metres from a cast down through
@@ -1419,11 +1484,22 @@ fn patch(
     let snap = |v: f32| (v / PATCH_CELL).floor() * PATCH_CELL;
     let (x0, z0) = (snap(at.x - half), snap(at.z - half));
     let side = ((2.0 * half) / PATCH_CELL).ceil() * PATCH_CELL + PATCH_CELL;
-    let ground = |x: f32, z: f32| {
-        let (top, bottom) = (Vec3::new(x, at.y + 60.0, z), Vec3::new(x, at.y - 60.0, z));
-        let y = query
+    let cast = |top: Vec3, bottom: Vec3| {
+        query
             .sweep(top, bottom, 0.05)
-            .map(|h| top.y + (bottom.y - top.y) * h.fraction - 0.05)?;
+            .map(|h| top.y + (bottom.y - top.y) * h.fraction - 0.05)
+    };
+    // Indoors (a roof over the group and a floor at its feet: the Varga
+    // warehouse's store) the ground is cast for from just over the heads, so
+    // the patch is the floor and its walls, not the roof. Out of doors it is
+    // cast for from high above, as ever.
+    let down = Vec3::new(at.x, at.y - 60.0, at.z);
+    let roof = cast(Vec3::new(at.x, at.y + 60.0, at.z), down);
+    let floor = cast(Vec3::new(at.x, at.y + INDOOR_HEAD, at.z), down);
+    let indoors = matches!((roof, floor), (Some(r), Some(f)) if r > at.y + INDOOR_HEAD && (f - at.y).abs() < 1.5);
+    let from = if indoors { at.y + INDOOR_HEAD } else { at.y + 60.0 };
+    let ground = |x: f32, z: f32| {
+        let y = cast(Vec3::new(x, from, z), Vec3::new(x, at.y - 60.0, z))?;
         let deep = pools.water_surface(x, z).is_some_and(|w| w > y + 0.5);
         (!deep).then_some(y)
     };
@@ -5170,8 +5246,8 @@ mod tests {
     fn a_lamp_crew_stands_along_its_street() {
         use crate::skinned_crowd::SkinnedBody;
         let content = std::env::temp_dir().join("somnium_combat_crew");
-        for n in 0..BANDITS {
-            let path = content.join(format!("characters/bandit_{n:02}/bandit_{n:02}.glb"));
+        for n in 0..25 {
+            let path = content.join(format!("characters/lampman_{n:02}/lampman_{n:02}.glb"));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"").unwrap();
         }
@@ -5199,6 +5275,16 @@ mod tests {
         let faces: std::collections::BTreeSet<AssetId> =
             crew.iter().map(|(_, _, b)| b.as_ref().expect("a body").source).collect();
         assert_eq!(faces.len(), 4);
+        // The Varga's own: the boss one of its two, the rest its men.
+        let varga = |n: &[u8]| -> Vec<AssetId> {
+            n.iter()
+                .map(|n| AssetId::from_relative_path(format!("characters/lampman_{n:02}/lampman_{n:02}.glb")))
+                .collect()
+        };
+        let boss = crew.iter().find(|(_, c, _)| c.leader).and_then(|(_, _, b)| b.as_ref()).unwrap();
+        assert!(varga(&[21, 15]).contains(&boss.source));
+        let men = varga(&[2, 7, 12, 17, 19, 23]);
+        assert!(crew.iter().filter(|(_, c, _)| !c.leader).all(|(_, _, b)| men.contains(&b.as_ref().unwrap().source)));
         assert!((encounter_extent("lampmen") - 8.0).abs() < 1e-6);
     }
 
@@ -5476,6 +5562,68 @@ mod tests {
         let left = run.world.combatant(caelan).unwrap();
         assert!(left.brain.is_some() && left.lock.is_none(), "the one left fights as anyone would");
         assert!(demo.set_player(&world, other_entity), "already him");
+    }
+
+    use super::JOLT;
+
+    /// A post inside a roofed house (the Varga warehouse's store) gets a patch
+    /// of its floor, walled in, not of its roof: a path across the room keeps
+    /// to the floor and goes out by the door.
+    #[test]
+    fn an_indoor_post_gets_a_patch_of_its_floor() {
+        let (mut world, mut demo) = host_with(&[]);
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        let inside = Vec3::new(-4.0, 0.0, -2.0);
+        {
+            let run = demo.run.as_mut().unwrap();
+            run.world.combatant_mut(hero).unwrap().position = inside;
+            run.walkers.get_mut(&hero).unwrap().feet = inside;
+        }
+        world.spawn((
+            Name::new("Store post"),
+            Transform::from_translation(Vec3::new(2.0, 0.0, 1.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "lampmen".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let _jolt = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
+        let slab = |size: Vec3, at: Vec3| Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, at);
+        // A 16 x 12 house: walls 4.2 m high, a door 2 m wide in the south
+        // wall, an upper floor at 4.2 and a roof at 8.
+        solid_bodies(
+            &mut physics,
+            vec![
+                slab(Vec3::new(300.0, 1.0, 300.0), Vec3::new(0.0, -0.5, 0.0)),
+                slab(Vec3::new(16.0, 4.2, 0.4), Vec3::new(0.0, 2.1, 6.0)),
+                slab(Vec3::new(0.4, 4.2, 12.0), Vec3::new(-8.0, 2.1, 0.0)),
+                slab(Vec3::new(0.4, 4.2, 12.0), Vec3::new(8.0, 2.1, 0.0)),
+                slab(Vec3::new(7.0, 4.2, 0.4), Vec3::new(-4.5, 2.1, -6.0)),
+                slab(Vec3::new(7.0, 4.2, 0.4), Vec3::new(4.5, 2.1, -6.0)),
+                slab(Vec3::new(16.4, 0.3, 12.4), Vec3::new(0.0, 4.35, 0.0)),
+                slab(Vec3::new(16.4, 0.3, 12.4), Vec3::new(0.0, 8.15, 0.0)),
+            ],
+        );
+        let run = demo.run.as_mut().unwrap();
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, Some(&mut physics), run, f32::INFINITY);
+        let nav = run.nav.as_ref().expect("a patch");
+        let across = nav
+            .path(Vec3::new(-6.0, 0.0, -3.0), Vec3::new(6.0, 0.0, 4.0), 1.0)
+            .expect("across the room");
+        assert!(across.points.iter().all(|p| p.y.abs() < 0.3), "on the floor: {:?}", across.points);
+        let out = nav
+            .path(Vec3::new(5.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -14.0), 1.0)
+            .expect("out of the house");
+        let through_wall = |p: &Vec3| p.z < -5.0 && p.z > -7.0 && p.x.abs() > 1.2;
+        assert!(
+            out.points.windows(2).all(|w| !through_wall(&w[0].lerp(w[1], 0.5))) && out.points.iter().all(|p| p.y.abs() < 0.3),
+            "by the door: {:?}",
+            out.points
+        );
     }
 
     #[test]
@@ -6023,6 +6171,7 @@ mod tests {
         let mut run = build(&world).expect("a fight");
         assert!(run.nav.is_none(), "no solids, nothing baked");
         run.encounters = Some(encounters_asleep(&world));
+        let _jolt = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut physics = somnium_physics::world::PhysicsWorld::new(Default::default());
         let house = Vec3::new(20.0, 3.0, 0.0);
         solid_bodies(
