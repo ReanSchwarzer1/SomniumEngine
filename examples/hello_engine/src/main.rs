@@ -911,6 +911,13 @@ impl HelloGame {
         self.combat.set_player(world, entity)
     }
 
+    /// Places brains and life think near as well as the protagonist and the view: a second place the game holds
+    /// streamed (the protagonists' switch: `cell_streaming::held_points`), so the far half of a joint mission moves.
+    pub fn set_focus_points(&mut self, points: &[Vec3]) {
+        self.combat.focus_points = points.to_vec();
+        self.life.focus_points = points.to_vec();
+    }
+
     /// Put the protagonist back from a save (out of any boat): see `CombatDemo::restore_player`.
     pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
         self.boats.cast_off();
@@ -920,6 +927,11 @@ impl HelloGame {
     /// The life sim's people (positions, roles, who is out of doors), while Play runs it.
     pub fn life(&self) -> Option<&somnium_life::LifeWorld> {
         self.life.world()
+    }
+
+    /// Where a person (the off-screen protagonist) is now, found in the Life Table where his place is not adopted.
+    pub fn person_at(&self, id: somnium_life::AgentId) -> Option<somnium_life::PersonAt> {
+        self.life.person_at(id)
     }
 
     /// The life sim to change while Play runs it: the off-screen protagonist adopted as a person with a schedule

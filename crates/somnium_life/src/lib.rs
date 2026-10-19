@@ -35,7 +35,7 @@ pub use place::{LaneGraph, Place, Spot, SpotKind};
 pub use routine::{Activity, Role, Routine};
 pub use sim::{
     AgentId, Beast, BeastKind, Cart, DOOR_LEAD, Flat, Ground, LifeWorld, PersonAt, Schedule,
-    ScheduleEntry, SpotRef, Stats, Villager, VillagerDesc,
+    ScheduleBlock, SpotRef, Stats, Villager, VillagerDesc,
 };
 pub use table::{GearPiece, LifeTable, TableLooks, TablePlace};
 

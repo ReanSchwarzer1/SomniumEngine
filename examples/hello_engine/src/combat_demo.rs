@@ -2514,6 +2514,8 @@ pub struct CombatDemo {
     pub aboard: Option<Mat4>,
     /// E was the boats' this frame (boarding or stepping off), not a mount's.
     pub take_e: bool,
+    /// Points brains think near as well as the protagonist and the camera (a second place the game holds streamed).
+    pub focus_points: Vec<Vec3>,
     events: Vec<HostEvent>,
     /// Factions the game has turned against the protagonist, and those hunting
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
@@ -2584,6 +2586,7 @@ impl Default for CombatDemo {
             refused_mounts: Default::default(),
             aboard: None,
             take_e: false,
+            focus_points: Vec::new(),
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
@@ -3023,6 +3026,7 @@ impl CombatDemo {
         if let Some(camera) = run.camera {
             focus.push(world_matrix(ctx.world, camera).transform_point3(Vec3::ZERO));
         }
+        focus.extend_from_slice(&self.focus_points);
         run.world.set_focus(&focus);
         let editor = &ctx.navigation.cells.world;
         let nav = editor

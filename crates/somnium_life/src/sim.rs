@@ -8,7 +8,7 @@ use glam::{Vec2, Vec3};
 use std::collections::HashMap;
 
 mod person;
-pub use person::{PersonAt, Schedule, ScheduleEntry, SpotRef};
+pub use person::{PersonAt, Schedule, ScheduleBlock, SpotRef};
 
 /// What a villager's day follows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -287,6 +287,11 @@ pub struct LifeWorld {
     door_passes: Vec<Vec3>,
     /// People with days of their own ([`LifeWorld::adopt_person`]).
     persons: Vec<person::Person>,
+    /// Hours of the world's day counted since the first step, and the hour last stepped at (persons' clock).
+    person_hours: f64,
+    last_hour: Option<f32>,
+    /// Game hours on the road between two places (keys, the smaller first).
+    travel: HashMap<(u64, u64), f32>,
 }
 
 impl LifeWorld {
@@ -309,6 +314,9 @@ impl LifeWorld {
             keyed: HashMap::new(),
             door_passes: Vec::new(),
             persons: Vec::new(),
+            person_hours: 0.0,
+            last_hour: None,
+            travel: HashMap::new(),
         }
     }
 
@@ -770,6 +778,10 @@ impl LifeWorld {
         };
         for (i, v) in self.villagers.iter_mut().enumerate() {
             v.tier = lod.tier(v.position, focus);
+            // A person (the off-screen protagonist) is never asleep: his day goes on.
+            if v.goal != Goal::Routine && v.tier == Tier::Asleep {
+                v.tier = Tier::Far;
+            }
             sort(v.tier, v.id, &mut v.owed, Who::Villager(i), &mut stats);
         }
         for (i, b) in self.beasts.iter_mut().enumerate() {

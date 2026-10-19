@@ -790,6 +790,8 @@ pub struct LifeDemo {
     idle: f32,
     /// B was pressed: ring the alarm bell next frame.
     bell: bool,
+    /// Points life steps near as well as the view (a second place the game holds streamed: the far protagonist's).
+    pub focus_points: Vec<Vec3>,
 }
 
 fn role_material(role: Role) -> &'static str {
@@ -1338,6 +1340,24 @@ impl LifeDemo {
         self.run.as_ref().map(|r| &r.life)
     }
 
+    /// Where a person is now (`LifeWorld::person_at` at life's clock), his
+    /// standing found in the Life Table where his place is not adopted: what
+    /// the protagonists' switch lifts to.
+    pub fn person_at(&self, id: somnium_life::AgentId) -> Option<somnium_life::PersonAt> {
+        let run = self.run.as_ref()?;
+        let mut at = run.life.person_at(
+            id,
+            Clock {
+                hour: run.hour,
+                eclipse: run.eclipse,
+            },
+        )?;
+        if at.position.is_none() && at.travelling_to.is_none() {
+            at.position = run.table.as_ref().and_then(|t| t.table.spot_position(at.place, &at.spot));
+        }
+        Some(at)
+    }
+
     /// The life sim to change (a person to adopt or release), while Play runs it.
     pub fn world_mut(&mut self) -> Option<&mut LifeWorld> {
         self.run.as_mut().map(|r| &mut r.life)
@@ -1428,12 +1448,13 @@ impl LifeDemo {
             _ => run.hour = (run.hour + dt / SECONDS_PER_HOUR).rem_euclid(24.0),
         }
         run.eclipse = tod.map_or(0.0, |t| t.2);
-        let focus: Vec<Vec3> = ctx
+        let mut focus: Vec<Vec3> = ctx
             .renderer
             .as_ref()
             .map(|r| r.camera_pos)
             .into_iter()
             .collect();
+        focus.extend_from_slice(&self.focus_points);
         if ring && let Some(at) = focus.first() {
             let frightened = run.life.alarm(*at, BELL_REACH, BELL_SECONDS);
             info!(frightened, "life: the alarm bell");
