@@ -20,6 +20,15 @@
 //! are merged into one posed mesh at load, drawn part by part: one
 //! registration and one palette a body, not one a part.
 //!
+//! Beyond **Still Beyond** (160 m by default), and whoever the budget cannot
+//! cover even at their coarsest, a body holds one pose of its clip: baked
+//! once per file and clip on the CPU into a plain mesh that shares the rest
+//! indices, and drawn out to the crowd's still cull (400 m) with nothing
+//! skinned for it, so a town's people stay in view from its edge. Its
+//! sockets ride the held pose. **Driven** hands the clock to the game: it sets
+//! **Time** every frame (a combat move's warped clip time) and the body shows
+//! that moment.
+//!
 //! A **Skinned Socket** (`hello.SkinnedSocket`) on an entity under a Skinned
 //! Body makes it follow one of the body's joints (`weapon_r`, `sheath`,
 //! `back`...): its own Transform is its offset from the joint, and it and
@@ -58,6 +67,13 @@ pub struct SkinnedBody {
     pub lod2: AssetId,
     pub lod1_beyond: f32,
     pub lod2_beyond: f32,
+    /// Beyond this (or when the posed-vertex budget is spent) the body holds
+    /// one pose of its clip, drawn as a plain mesh: no posed vertices, no
+    /// skinning, out to the crowd's still cull.
+    pub still_beyond: f32,
+    /// The host sets `time` every frame (combat: a move's warped clip time)
+    /// and the body shows that moment, not its own clock.
+    pub driven: bool,
 }
 
 impl Component for SkinnedBody {}
@@ -81,6 +97,8 @@ impl Default for SkinnedBody {
             lod2: AssetId::NONE,
             lod1_beyond: 20.0,
             lod2_beyond: 60.0,
+            still_beyond: STILL_BEYOND,
+            driven: false,
         }
     }
 }
@@ -97,6 +115,8 @@ fn schema(r: &mut TypeRegistry) {
             lod2 { group: "LOD", asset_kind_mask: somnium_asset::database::ASSET_KIND_MESH, display_name: "LOD 2", doc: "Fewer still; drawn beyond LOD 2 Beyond (only with LOD 1 set)." },
             lod1_beyond { group: "LOD", min: 0.0, unit: "m", display_name: "LOD 1 Beyond" },
             lod2_beyond { group: "LOD", min: 0.0, unit: "m", display_name: "LOD 2 Beyond" },
+            still_beyond { group: "LOD", min: 0.0, unit: "m", display_name: "Still Beyond", doc: "Beyond this (or past the posed-vertex budget) the body holds one pose, drawn as a plain mesh: nothing is skinned for it." },
+            driven { group: "Body", doc: "The game sets Time every frame (a combat move's clip time); the body shows that moment instead of running its own clock." },
         }
     });
     r.register(component_schema! {
@@ -215,6 +235,16 @@ struct Shared {
     users: usize,
     /// Posed vertices one body of it costs.
     vertices: u32,
+    /// One held pose per clip, for still bodies.
+    stills: HashMap<String, Still>,
+}
+
+/// A held pose: baked on the CPU into plain meshes (one per merged mesh,
+/// sharing its rest indices), and its joints, for the sockets of the bodies
+/// holding it.
+struct Still {
+    meshes: Vec<MeshAllocation>,
+    model: Vec<Mat4>,
 }
 
 struct Body {
@@ -254,6 +284,9 @@ struct Stats {
     /// Skinned meshes registered last frame, and bodies left waiting their turn.
     registered: usize,
     waiting: usize,
+    /// Bodies drawn holding a pose (of `drawn`), and held poses baked.
+    still: usize,
+    baked: usize,
     frames: u32,
     reported: f32,
 }
@@ -266,6 +299,10 @@ pub struct SkinnedBodies {
     /// renderer re-checks every registered skin for each new one, so a crowd
     /// coming into view (or changing level) all at once would stall a frame.
     pub registers_per_frame: usize,
+    /// How far still bodies are drawn.
+    pub still_cull: f32,
+    /// Held poses baked a frame at most.
+    pub stills_per_frame: usize,
     shared: HashMap<AssetId, Shared>,
     bodies: HashMap<Entity, Body>,
     failed: HashMap<AssetId, String>,
@@ -282,6 +319,8 @@ impl Default for SkinnedBodies {
         Self {
             vertex_budget: VERTEX_BUDGET,
             registers_per_frame: REGISTERS_PER_FRAME,
+            still_cull: STILL_CULL,
+            stills_per_frame: STILLS_PER_FRAME,
             shared: HashMap::new(),
             bodies: HashMap::new(),
             failed: HashMap::new(),
@@ -360,6 +399,7 @@ fn load(
         meshes,
         users: 0,
         vertices,
+        stills: HashMap::new(),
     })
 }
 
@@ -422,6 +462,97 @@ const VERTEX_BUDGET: u32 = 1_600_000;
 
 /// Skinned meshes registered a frame, by default.
 const REGISTERS_PER_FRAME: usize = 4;
+
+/// Where a body holds one pose, by default: the old cull, so nothing that
+/// animated before stops.
+const STILL_BEYOND: f32 = 160.0;
+
+/// How far still bodies are drawn, by default: a town's people seen from its
+/// edge.
+const STILL_CULL: f32 = 400.0;
+
+/// Held poses baked a frame, by default (each is one CPU skinning of a body).
+const STILLS_PER_FRAME: usize = 4;
+
+/// One pose of a body's clip, skinned on the CPU into plain vertices per
+/// merged mesh (positions and normals by the weighted joints), with its joints.
+#[allow(clippy::type_complexity)]
+fn hold_pose(
+    shared: &Shared,
+    clip: &str,
+    time: f32,
+) -> Option<(Vec<Vec<somnium_asset::Vertex>>, Vec<Mat4>)> {
+    let skeleton = &shared.asset.skeleton;
+    let clip = shared
+        .asset
+        .clips
+        .get(clip)
+        .or_else(|| shared.asset.clips.values().next())?;
+    let pose = clip.sample(skeleton, time, Playback::LOOPING).ok()?;
+    let mut model = vec![Mat4::IDENTITY; skeleton.len()];
+    if !pose.to_model_space(skeleton, &mut model) {
+        return None;
+    }
+    let palette: Vec<Mat4> = model
+        .iter()
+        .zip(skeleton.inverse_bind())
+        .map(|(m, inv)| *m * *inv)
+        .collect();
+    let meshes = shared
+        .meshes
+        .iter()
+        .map(|m| {
+            m.vertices
+                .iter()
+                .zip(&m.skin.bindings)
+                .map(|(v, b)| skin_vertex(v, b, &palette))
+                .collect()
+        })
+        .collect();
+    Some((meshes, model))
+}
+
+/// A vertex moved by its joints, as the GPU skin pass would.
+fn skin_vertex(
+    v: &somnium_asset::Vertex,
+    b: &somnium_anim::SkinBinding,
+    palette: &[Mat4],
+) -> somnium_asset::Vertex {
+    let (p, n) = (Vec3::from(v.position), Vec3::from(v.normal));
+    let (mut position, mut normal, mut total) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+    for (joint, weight) in b.joints.iter().zip(b.weights) {
+        if weight <= 0.0 {
+            continue;
+        }
+        let Some(m) = palette.get(usize::from(*joint)) else {
+            continue;
+        };
+        position += m.transform_point3(p) * weight;
+        normal += m.transform_vector3(n) * weight;
+        total += weight;
+    }
+    if total <= 0.0 {
+        return *v;
+    }
+    somnium_asset::Vertex {
+        position: (position / total).to_array(),
+        normal: normal.normalize_or(n).to_array(),
+        uv: v.uv,
+    }
+}
+
+/// How many of the bodies, nearest first at their fitted sizes, the budget
+/// covers; the rest hold a pose.
+fn within_budget(budget: u32, sizes: &[u32]) -> usize {
+    let mut used = 0u64;
+    sizes
+        .iter()
+        .take_while(|s| {
+            used += u64::from(**s);
+            used <= u64::from(budget)
+        })
+        .count()
+}
 
 /// Whether a body of `meshes` skinned meshes may register this frame, with
 /// `registered` already: within `cap`, and always the frame's first (a body
@@ -538,6 +669,7 @@ impl SkinnedBodies {
             "register_ms": s.register_ms,
             "registered": s.registered,
             "waiting": s.waiting,
+            "still": s.still,
             "sources": self.shared.len(),
             "posed_vertices": [s.posed, self.vertex_budget],
             "errors": self.failed.values().collect::<Vec<_>>(),
@@ -593,11 +725,15 @@ impl SkinnedBodies {
                 for m in shared.meshes {
                     r.geometry.free_mesh(m.rest);
                 }
+                for held in shared.stills.into_values().flat_map(|s| s.meshes) {
+                    r.geometry.free_mesh(held);
+                }
             }
         }
         let started = Instant::now();
         let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
         let (mut registered, mut waiting, mut register_ms) = (0, 0, 0.0);
+        let (mut still, mut baked) = (0, 0);
         for id in wanted_ids {
             if self.shared.contains_key(&id) || self.failed.contains_key(&id) {
                 continue;
@@ -626,7 +762,7 @@ impl SkinnedBodies {
                     .iter()
                     .map_while(|id| self.shared.get(id).map(|s| s.vertices))
                     .collect();
-                if distance > self.lod.cull || sizes.is_empty() {
+                if distance > b.still_beyond.min(self.lod.cull) || sizes.is_empty() {
                     return None;
                 }
                 let current = self.bodies.get(e).map_or(0, |x| x.level);
@@ -647,6 +783,13 @@ impl SkinnedBodies {
             .zip(fit(self.vertex_budget, &wants, &sizes))
             .map(|(p, level)| (p.1, level))
             .collect();
+        // Whoever the budget cannot cover even at their coarsest holds a pose.
+        let covered = within_budget(
+            self.vertex_budget,
+            &plan.iter().map(|p| p.3[fitted[&p.1]]).collect::<Vec<_>>(),
+        );
+        let held: std::collections::HashSet<Entity> =
+            plan.iter().skip(covered).map(|p| p.1).collect();
         let planned = started.elapsed().as_secs_f64() * 1000.0;
         // Nearest first, so the bodies posed first under the frame's cap are the ones closest.
         wanted.sort_by(|a, b| {
@@ -656,12 +799,18 @@ impl SkinnedBodies {
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
-            // Culled (or not loaded): the level it had; it is not drawn.
-            let level = fitted
-                .get(&e)
-                .copied()
-                .unwrap_or_else(|| self.bodies.get(&e).map_or(0, |b| b.level))
-                .min(ids.len() - 1);
+            let hold = distance > settings.still_beyond.min(self.lod.cull) || held.contains(&e);
+            // Holding a pose: its coarsest level's. Culled (or not loaded): the
+            // level it had; it is not drawn.
+            let level = if hold {
+                ids.len() - 1
+            } else {
+                fitted
+                    .get(&e)
+                    .copied()
+                    .unwrap_or_else(|| self.bodies.get(&e).map_or(0, |b| b.level))
+                    .min(ids.len() - 1)
+            };
             let id = ids[level];
             if !self.shared.contains_key(&id) {
                 continue;
@@ -697,16 +846,94 @@ impl SkinnedBodies {
                     posed: false,
                 }
             });
-            if running {
+            if settings.driven {
+                body.clock = settings.time;
+                body.owed += dt;
+            } else if running {
                 body.clock += dt * settings.speed;
                 body.owed += dt;
             }
-            if distance > self.lod.cull {
+            if hold {
+                // Nothing skinned for it: one held pose of its clip, as a plain mesh.
                 if !body.skins.is_empty() {
                     unregister(r, body);
                 }
+                if distance > self.still_cull {
+                    continue;
+                }
+                let clip = if settings.clip.is_empty() {
+                    shared
+                        .asset
+                        .clips
+                        .keys()
+                        .next()
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    settings.clip.clone()
+                };
+                if !shared.stills.contains_key(&clip) {
+                    if baked >= self.stills_per_frame {
+                        continue;
+                    }
+                    baked += 1;
+                    // A moment a little into the clip, the same for everyone of this file and clip.
+                    let Some((verts, model)) = hold_pose(shared, &clip, 0.4) else {
+                        continue;
+                    };
+                    let mut allocations = Vec::new();
+                    for v in &verts {
+                        let a = r.geometry.upload_mesh_pooled(&gpu.queue, v, &[], 0);
+                        if a.vertex_count as usize != v.len() {
+                            r.geometry.free_mesh(a);
+                            break;
+                        }
+                        allocations.push(a);
+                    }
+                    if allocations.len() != verts.len() {
+                        for a in allocations {
+                            r.geometry.free_mesh(a);
+                        }
+                        continue;
+                    }
+                    shared.stills.insert(
+                        clip.clone(),
+                        Still {
+                            meshes: allocations,
+                            model,
+                        },
+                    );
+                }
+                let held = &shared.stills[&clip];
+                body.matrix = matrix;
+                // Its sockets ride the held pose.
+                if body.model.len() == held.model.len() {
+                    body.model.copy_from_slice(&held.model);
+                    body.posed = true;
+                }
+                for (m, a) in shared.meshes.iter().zip(&held.meshes) {
+                    for &(first, count, material) in &m.parts {
+                        r.submit(somnium_renderer::command::DrawCommand {
+                            paint: 0,
+                            sort_key: somnium_renderer::command::SortKey::new(
+                                0,
+                                material as u16,
+                                a.vertex_offset,
+                            ),
+                            vertex_offset: a.vertex_offset,
+                            index_offset: m.rest.index_offset + first,
+                            index_count: count,
+                            material_id: material,
+                            transform: matrix,
+                            casts_shadow: true,
+                        });
+                    }
+                }
+                drawn += 1;
+                still += 1;
                 continue;
             }
+            let fresh = body.skins.is_empty();
             if body.skins.is_empty() {
                 if body.retry.is_some_and(|at| Instant::now() < at) {
                     continue;
@@ -750,7 +977,7 @@ impl SkinnedBodies {
                 self.lod.step(distance, &mut body.owed),
                 AnimationStep::Evaluate { .. }
             );
-            if due || !body.posed {
+            if due || !body.posed || fresh {
                 // A clip the file lacks: one never posed plays its first (not
                 // the bind pose); one posed holds its last.
                 let first = || shared.asset.clips.values().next();
@@ -818,6 +1045,8 @@ impl SkinnedBodies {
         s.register_peak_ms = s.register_peak_ms.max(register_ms);
         s.registered = registered;
         s.waiting = waiting;
+        s.still = still;
+        s.baked += baked;
         s.reported += dt;
         if s.bodies > 0 && s.reported >= 10.0 {
             s.reported = 0.0;
@@ -831,6 +1060,8 @@ impl SkinnedBodies {
                 register_ms = s.register_ms,
                 register_peak_ms = s.register_peak_ms,
                 waiting = s.waiting,
+                still = s.still,
+                baked = s.baked,
                 "skinned crowd"
             );
             s.register_peak_ms = 0.0;
@@ -911,6 +1142,7 @@ mod tests {
                 meshes: Vec::new(),
                 users: 1,
                 vertices: 0,
+                stills: HashMap::new(),
             },
         );
         bodies.bodies.insert(
@@ -988,6 +1220,107 @@ mod tests {
         );
         assert_eq!(parts, &vec![(0, 3, 10), (3, 3, 11)]);
         assert_eq!(merged[1].3, vec![(0, 3, 13)]);
+    }
+
+    /// A vertex skinned on the CPU moves as its joints do: wholly by one,
+    /// halfway between two, untouched with no weight.
+    #[test]
+    fn a_held_pose_skins_vertices_by_their_joints() {
+        use somnium_anim::SkinBinding;
+        let v = somnium_asset::Vertex {
+            position: [0.0, 1.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.5, 0.5],
+        };
+        let palette = [
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+            Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        ];
+        let one = SkinBinding {
+            joints: [1, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        let moved = skin_vertex(&v, &one, &palette);
+        assert_eq!(moved.position, [2.0, 1.0, 0.0]);
+        assert_eq!(moved.uv, v.uv);
+        let half = SkinBinding {
+            joints: [0, 1, 0, 0],
+            weights: [0.5, 0.5, 0.0, 0.0],
+        };
+        assert_eq!(skin_vertex(&v, &half, &palette).position, [1.0, 1.0, 0.0]);
+        let turned = SkinBinding {
+            joints: [2, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        let n = Vec3::from(skin_vertex(&v, &turned, &palette).normal);
+        assert!(
+            (n - Vec3::X).length() < 1e-5,
+            "the normal turns with the joint: {n}"
+        );
+        let none = SkinBinding {
+            joints: [0, 0, 0, 0],
+            weights: [0.0; 4],
+        };
+        assert_eq!(skin_vertex(&v, &none, &palette).position, v.position);
+    }
+
+    /// The demo rig's held pose bends its tube as the clip does, and gives
+    /// the joints its sockets ride.
+    #[test]
+    fn a_held_pose_is_the_clip_at_that_moment() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/models/animation_demo.gltf");
+        let asset = AnimatedAsset::load(&path).expect("the demo rig");
+        let merged = merge_by_skin(asset.scene.meshes.iter().map(|m| (m, 0)));
+        let meshes = merged
+            .into_iter()
+            .map(|(skin, vertices, _, parts)| Merged {
+                rest: MeshAllocation {
+                    vertex_offset: 0,
+                    vertex_count: 0,
+                    index_offset: 0,
+                    index_count: 0,
+                    material_id: 0,
+                    vertex_capacity: 0,
+                    index_capacity: 0,
+                },
+                skin,
+                vertices,
+                parts,
+            })
+            .collect();
+        let shared = Shared {
+            asset,
+            meshes,
+            users: 0,
+            vertices: 0,
+            stills: HashMap::new(),
+        };
+        let clip = shared.asset.clips.keys().next().unwrap().clone();
+        let (verts, model) = hold_pose(&shared, &clip, 0.5).expect("a pose");
+        assert_eq!(verts.len(), shared.meshes.len());
+        assert_eq!(verts[0].len(), shared.meshes[0].vertices.len());
+        assert_eq!(model.len(), shared.asset.skeleton.len());
+        let bent = verts[0]
+            .iter()
+            .zip(&shared.meshes[0].vertices)
+            .map(|(a, b)| Vec3::from(a.position).distance(Vec3::from(b.position)))
+            .fold(0.0, f32::max);
+        assert!(bent > 0.01, "the tube bends ({bent} m)");
+        assert!(
+            hold_pose(&shared, "No Such Clip", 0.5).is_some(),
+            "an unknown clip holds the first"
+        );
+    }
+
+    /// The budget covers the nearest bodies at their fitted sizes; the rest hold a pose.
+    #[test]
+    fn past_the_budget_bodies_hold_a_pose() {
+        assert_eq!(within_budget(100, &[40, 40, 40]), 2);
+        assert_eq!(within_budget(120, &[40, 40, 40]), 3);
+        assert_eq!(within_budget(10, &[40]), 0);
+        assert_eq!(within_budget(10, &[]), 0);
     }
 
     /// A frame registers skinned meshes up to its cap; its first body always goes.
