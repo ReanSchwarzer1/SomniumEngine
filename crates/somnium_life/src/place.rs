@@ -302,10 +302,13 @@ impl LaneGraph {
     #[must_use]
     pub fn new(lanes: &[Vec<Vec3>]) -> Self {
         let mut g = Self::default();
+        // Nodes by JOIN-wide cells, so a junction is found among its
+        // neighbours rather than among every point of a city's streets.
+        let mut near: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
         for lane in lanes {
             let mut previous: Option<usize> = None;
             for &p in lane {
-                let node = g.node(p);
+                let node = g.node(p, &mut near);
                 if let Some(a) = previous
                     && a != node
                 {
@@ -331,13 +334,25 @@ impl LaneGraph {
         g
     }
 
-    fn node(&mut self, p: Vec3) -> usize {
-        // ponytail: linear search for a junction; a grid when lanes pass a few thousand points.
-        if let Some(i) = self.nodes.iter().position(|n| flat(*n, p) < JOIN) {
+    /// The first node within [`JOIN`] of `p` (a junction), else a new one.
+    fn node(&mut self, p: Vec3, near: &mut HashMap<(i32, i32), Vec<usize>>) -> usize {
+        let cell = ((p.x / JOIN).floor() as i32, (p.z / JOIN).floor() as i32);
+        let mut found: Option<usize> = None;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for &i in near.get(&(cell.0 + dx, cell.1 + dz)).into_iter().flatten() {
+                    if flat(self.nodes[i], p) < JOIN && found.is_none_or(|f| i < f) {
+                        found = Some(i);
+                    }
+                }
+            }
+        }
+        if let Some(i) = found {
             return i;
         }
         self.nodes.push(p);
         self.edges.push(Vec::new());
+        near.entry(cell).or_default().push(self.nodes.len() - 1);
         self.nodes.len() - 1
     }
 
@@ -534,6 +549,62 @@ impl RoadPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Junctions join through the grid exactly as a scan of every node would
+    /// join them (the first node within reach), and a city's worth of street
+    /// points builds without a quadratic search.
+    #[test]
+    fn junctions_join_as_a_full_scan_would() {
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let mut unit = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1_u64 << 53) as f32
+        };
+        // Streets that meet: endpoints land near others' points.
+        let lanes: Vec<Vec<Vec3>> = (0..60)
+            .map(|_| {
+                let start = Vec3::new(unit() * 80.0, 0.0, unit() * 80.0);
+                (0..8)
+                    .map(|k| start + Vec3::new(k as f32 * 2.0, 0.0, unit() * 1.5))
+                    .collect()
+            })
+            .collect();
+        let g = LaneGraph::new(&lanes);
+        // The same by a scan of every node.
+        let mut nodes: Vec<Vec3> = Vec::new();
+        let mut want = Vec::new();
+        for lane in &lanes {
+            for &p in lane {
+                let i = nodes
+                    .iter()
+                    .position(|n| flat(*n, p) < JOIN)
+                    .unwrap_or_else(|| {
+                        nodes.push(p);
+                        nodes.len() - 1
+                    });
+                want.push(i);
+            }
+        }
+        assert_eq!(g.nodes, nodes);
+        let big: Vec<Vec<Vec3>> = (0..100)
+            .map(|i| {
+                (0..110)
+                    .map(|k| Vec3::new(k as f32 * 4.0, 0.0, i as f32 * 9.0))
+                    .collect()
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let g = LaneGraph::new(&big);
+        assert_eq!(g.nodes.len(), 11_000);
+        assert!(
+            started.elapsed().as_secs_f32() < 2.0,
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = want;
+    }
 
     /// The grid finds the same nearest lane point as looking at every segment,
     /// near the lanes and far from them.
