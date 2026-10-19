@@ -758,6 +758,15 @@ struct TableRun {
     adopted: Vec<bool>,
     reach: f32,
     count: u32,
+    /// Each housed place's table entry, by its index in life.
+    of_life: HashMap<usize, usize>,
+}
+
+impl TableRun {
+    /// The own people of the table place life's place `index` came from.
+    fn people(&self, index: usize) -> Option<&std::collections::BTreeMap<String, Vec<String>>> {
+        Some(&self.table.places[*self.of_life.get(&index)?].people)
+    }
 }
 
 /// Read the scene's Life Table, if it has one.
@@ -786,6 +795,7 @@ fn load_table(world: &World, root: Option<&std::path::Path>) -> Option<TableRun>
                 table,
                 reach: settings.reach,
                 count: 0,
+                of_life: HashMap::new(),
             })
         }
         Err(error) => {
@@ -807,7 +817,8 @@ fn adopt_near(run: &mut Run, at: Vec3) -> usize {
         .collect();
     for &i in &near {
         let p = &t.table.places[i];
-        run.life.adopt_place(p.key(), p.place.clone(), Some(p.seed));
+        let (index, _) = run.life.adopt_place(p.key(), p.place.clone(), Some(p.seed));
+        t.of_life.insert(index, i);
         t.adopted[i] = true;
     }
     t.count += near.len() as u32;
@@ -1424,7 +1435,12 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         if let Some(i) = holder {
             let v = &life.villagers()[i];
             if let (true, Some(looks)) = (run.villagers.skinned, &run.dress_as) {
-                let (look, clip) = (looks.body(v.role, v.id.0), looks.clip(v.role, v.pose));
+                // The town's own folk, where its table entry names them.
+                let look = match run.table.as_ref().and_then(|t| t.people(v.place)) {
+                    Some(people) => looks.body_in(people, v.role, v.id.0),
+                    None => looks.body(v.role, v.id.0),
+                };
+                let clip = looks.clip(v.role, v.pose);
                 wear(world, body, &v.name, look, clip, v.id.0);
                 continue;
             }
@@ -1885,6 +1901,7 @@ mod tests {
             centre: [x, 0.0, 0.0],
             radius: 30.0,
             seed: 3,
+            people: Default::default(),
             place: Place {
                 name: name.into(),
                 spots: (0..5)
@@ -1956,6 +1973,9 @@ mod tests {
                 centre: [40.0, 2.0, 0.0],
                 radius: 60.0,
                 seed: 9,
+                // The town's own folk for its adults; its children are the table's.
+                people: serde_json::from_value(json!({"default": ["characters/kael_00/kael_00.glb"]}))
+                    .unwrap(),
                 place: Place {
                     name: "Dressed".into(),
                     spots,
@@ -1965,7 +1985,10 @@ mod tests {
             }],
             looks: Some(
                 serde_json::from_value(json!({
-                    "villagers": {"default": ["characters/crowd_00/crowd_00.glb"]},
+                    "villagers": {
+                        "default": ["characters/crowd_00/crowd_00.glb"],
+                        "Child": ["characters/crowd_04/crowd_04.glb"]
+                    },
                     "poses": {"Walk": "Loco_Walk_F_Loop", "Idle": "Idle_Neutral_Loop", "Play": "Child_Tag"},
                     "child_poses": {"Walk": "Child_Walk_F_Loop", "Idle": "Child_Idle_Loop"},
                     "walk_speed": 0.86
@@ -2013,13 +2036,20 @@ mod tests {
             let b = world
                 .get::<crate::skinned_crowd::SkinnedBody>(*e)
                 .expect("dressed");
+            let who = if v.role == Role::Child {
+                "crowd_04"
+            } else {
+                "kael_00"
+            };
             assert_eq!(
                 b.source,
-                AssetId::from_relative_path("characters/crowd_00/crowd_00.glb")
+                AssetId::from_relative_path(format!("characters/{who}/{who}.glb")),
+                "{:?} wears the town's own folk",
+                v.role
             );
             assert_eq!(
                 b.lod1,
-                AssetId::from_relative_path("characters/crowd_00/crowd_00_lod1.glb")
+                AssetId::from_relative_path(format!("characters/{who}/{who}_lod1.glb"))
             );
             let want = run
                 .dress_as

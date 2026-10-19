@@ -6,11 +6,15 @@ built, as a place in the composed world's frame (eirvane: compose_tyffir.py's WO
     Market, and a Pen at a byre's door so a farmstead keeps beasts;
   - a spot for each of WS1's open areas (green, market, parade, yard);
   - its streets (WS1's site plan) as lanes people walk, thinned to about 12 m with each street's ends snapped onto the
-    street they meet so junctions join; roads and highways are also roads carts drive.
+    street they meet so junctions join; roads and highways are also roads carts drive;
+  - its own people (WS3's `scenes/char_<place>_people.scene.json`): the bodies it casts there, by role. Children and
+    elders by the body's age (SOURCE.json), smiths, priests, keepers and herders by their family, anyone else as the
+    town's adults; guards stay WS3's set pieces. Over the table's looks (WS3's crowd contract).
 
 Reads (only): <rimeborn>/data/scatter/tyffir_places.json (WS1: places, streets, plots, areas; tyffir-local),
 <rimeborn>/data/placements/realm/*.json (WS2: the realm's buildings; tyffir-local), <rimeborn>/data/placements/*.json
-(WS2: the Eirvane tile's towns and farmsteads; eirvane frame), <rimeborn>/tools/world_frame.py (the anchors).
+(WS2: the Eirvane tile's towns and farmsteads; eirvane frame), <rimeborn>/tools/world_frame.py (the anchors),
+<rimeborn>/scenes/char_*_people.scene.json and <rimeborn>/assets/characters/*/SOURCE.json (WS3: who lives where).
 
   python tools/rimeborn_life_places.py --rimeborn games/Rimeborn      # writes games/Rimeborn/data/life/tyffir_life.json
   python tools/rimeborn_life_places.py --rimeborn <dir> --out <file.json>
@@ -18,6 +22,7 @@ Reads (only): <rimeborn>/data/scatter/tyffir_places.json (WS1: places, streets, 
 import argparse
 import json
 import math
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -43,10 +48,8 @@ INDOOR = {"Home", "Work", "Inn", "Chapel"}
 ROAD_KINDS = {"road", "highway"}
 LANE_STEP = 3  # keep every third street point (WS1 spaces them 4 m)
 
-# Looks: WS3's crowd contract (WS3_CHARACTERS.md, "The crowd contract"). Bodies by somnium_life role; the rest of the
-# crowd_* adults are farmers, labourers and anyone a role has no bodies for.
-ELDERS = {2, 3, 10, 16, 19, 25, 31}
-CHILDREN = {4, 5, 12, 17, 23, 26, 30}
+# Looks: WS3's crowd contract (WS3_CHARACTERS.md, "The crowd contract"). Bodies by somnium_life role: crowd_* children
+# and elders by their age (SOURCE.json), the other crowd_* adults farmers, labourers and anyone a role has no bodies for.
 TRADES = {"Smith": "smith", "Priest": "priest", "Keeper": "keeper", "Herder": "herder"}
 BEASTS = {"Sheep": "sheep", "Cow": "march_cow", "Goat": "goat", "Pig": "pig", "Hen": "hen", "Dog": "sheepdog"}
 POSES = {"Idle": "Idle_Neutral_Loop", "Walk": "Loco_Walk_F_Loop", "Run": "Loco_Run_F_Loop", "Talk": "Talk_Loop",
@@ -58,6 +61,8 @@ ELDER_POSES = {"Idle": "Idle_Old_Loop", "Walk": "Loco_Old_Walk_F_Loop"}
 BEAST_POSES = {"Graze": "Graze_Loop", "Walk": "Walk_F_Loop", "Run": "Trot_F_Loop", "Idle": "Idle_Loop"}
 WALK_SPEED, RUN_SPEED = 0.86, 1.52  # Loco_Walk_F_Loop's and Loco_Run_F_Loop's root speeds (clips.json)
 SNAP = 3.0  # a street's end this close to another street joins it
+CHILD_BELOW, ELDER_FROM = 16, 50  # a body's age (SOURCE.json) that makes it a child's or an elder's (WS3's elders: 52+)
+NOT_VILLAGERS = {"guard"}  # families WS3 casts as set pieces, not people on a routine
 
 
 def front(az_deg):
@@ -161,6 +166,19 @@ def building_spots(buildings, plots_by_id, dx, dy, dz):
     return spots
 
 
+def age_of(folder: Path) -> float:
+    """A WS3 body's age, from its SOURCE.json (30 when it has none)."""
+    try:
+        return float(json.loads((folder / "SOURCE.json").read_text(encoding="utf-8")).get("age", 30))
+    except (OSError, ValueError):
+        return 30.0
+
+
+def age_stage(age: float) -> str:
+    """The role name a body of `age` is cast in when no trade claims it."""
+    return "Child" if age < CHILD_BELOW else "Elder" if age >= ELDER_FROM else "default"
+
+
 def looks_of(rimeborn: Path):
     """WS3's bodies that exist on disk, as somnium_life looks (paths relative to the assets folder)."""
     chars, creatures = rimeborn / "assets/characters", rimeborn / "assets/creatures"
@@ -168,10 +186,11 @@ def looks_of(rimeborn: Path):
     have = lambda name: (chars / name / f"{name}.glb").exists()  # noqa: E731
     crowd = [f"crowd_{i:02}" for i in range(64) if have(f"crowd_{i:02}")]
     numbered = lambda prefix: [n for n in (f"{prefix}_{i:02}" for i in range(16)) if have(n)]  # noqa: E731
-    adults = [body(n) for n in crowd if int(n[-2:]) not in ELDERS | CHILDREN]
+    stage = {n: age_stage(age_of(chars / n)) for n in crowd}
+    adults = [body(n) for n in crowd if stage[n] == "default"]
     villagers = {"default": adults, "Farmer": adults, "Labourer": adults,
-                 "Elder": [body(n) for n in crowd if int(n[-2:]) in ELDERS],
-                 "Child": [body(n) for n in crowd if int(n[-2:]) in CHILDREN]}
+                 "Elder": [body(n) for n in crowd if stage[n] == "Elder"],
+                 "Child": [body(n) for n in crowd if stage[n] == "Child"]}
     for role, prefix in TRADES.items():
         villagers[role] = [body(n) for n in numbered(prefix)]
     villagers = {k: v for k, v in villagers.items() if v}
@@ -180,6 +199,53 @@ def looks_of(rimeborn: Path):
     return {"villagers": villagers, "beasts": beasts, "poses": POSES, "child_poses": CHILD_POSES,
             "elder_poses": ELDER_POSES, "beast_poses": BEAST_POSES, "walk_speed": WALK_SPEED,
             "run_speed": RUN_SPEED}
+
+
+def asset_id(rel: str) -> str:
+    """somnium_asset::AssetId::from_relative_path: FNV-1a 128 over the normalised relative path."""
+    h = 0x6C62272E07BB014262B821756295C58D
+    for b in rel.replace(chr(92), "/").strip("/").lower().encode("utf-8"):
+        h = ((h ^ b) * 0x0000000001000000000000000000013B) % (1 << 128)
+    return f"{h or 1:032x}"
+
+
+def people_index(rimeborn: Path):
+    """Every person body WS3 made: the asset id of it and of each variant (its LODs, the lighter `_placed` copies the
+    people scenes use) -> (the full body's path, family, age). Life wears the full body: it has every clip."""
+    index = {}
+    for glb in sorted((rimeborn / "assets/characters").glob("*/*.glb")):
+        name = glb.parent.name
+        if glb.stem != name and not glb.stem.startswith(f"{name}_"):
+            continue
+        age = age_of(glb.parent)
+        family = re.sub(r"_\d+r?$", "", name)
+        index[asset_id(f"characters/{name}/{glb.name}")] = (f"characters/{name}/{name}.glb", family, age)
+    return index
+
+
+def people_of(rimeborn: Path, name: str, index):
+    """The bodies WS3 casts in `name` (its char_<place>_people scene), by somnium_life role name; {} without one."""
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    scene = rimeborn / "scenes" / f"char_{slug}_people.scene.json"
+    if not scene.exists():
+        return {}
+    roles = {}
+    for line in scene.read_text(encoding="utf-8").splitlines():
+        if not line.startswith('{"entities"'):
+            continue
+        for e in json.loads(line)["entities"]:
+            comps = e.get("components", {})
+            body = comps.get("hello.SkinnedBody") or comps.get("hello.AnimatedPreview")
+            source = ((body or {}).get("fields", {}).get("source") or {}).get("$asset")
+            if source not in index:
+                continue  # a beast, a cart horse, or not a WS3 person
+            path, family, age = index[source]
+            if family in NOT_VILLAGERS:
+                continue
+            trade = next((role for role, prefix in TRADES.items() if prefix == family), None)
+            role = trade or age_stage(age)
+            roles.setdefault(role, set()).add(path)
+    return {role: sorted(paths) for role, paths in sorted(roles.items())}
 
 
 def build(rimeborn: Path):
@@ -194,14 +260,18 @@ def build(rimeborn: Path):
     by_name = {p["name"].lower(): p for p in ws1["places"]}
     tdx, tdy, tdz = shift("tyffir")
     places, report = [], []
+    index = people_index(rimeborn)
 
     def add(name, centre, radius, spots, lanes, roads):
         if not any(s["kind"] == "Home" for s in spots):
             report.append(f"  {name}: no homes, left out")
             return
-        places.append({"centre": [round(v, 3) for v in centre], "radius": radius,
-                       "seed": zlib.crc32(name.encode("utf-8")),
-                       "place": {"name": name, "spots": spots, "lanes": lanes, "roads": roads}})
+        entry = {"centre": [round(v, 3) for v in centre], "radius": radius, "seed": zlib.crc32(name.encode("utf-8")),
+                 "place": {"name": name, "spots": spots, "lanes": lanes, "roads": roads}}
+        people = people_of(rimeborn, name, index)
+        if people:
+            entry["people"] = people
+        places.append(entry)
         kinds = {}
         for s in spots:
             kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
@@ -258,6 +328,8 @@ def build(rimeborn: Path):
     looks = table["looks"]
     report.append(f"  looks: {sum(len(v) for v in looks['villagers'].values())} bodies over "
                   f"{len(looks['villagers'])} roles, {len(looks['beasts'])} beasts")
+    cast = [p for p in places if p.get("people")]
+    report.append(f"  own people: {len(cast)} of {len(places)} places (WS3's char_<place>_people scenes)")
     return table, report
 
 

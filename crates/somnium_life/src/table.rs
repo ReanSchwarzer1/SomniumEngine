@@ -61,10 +61,31 @@ impl TableLooks {
     /// The body person `who` wears, of their role's.
     #[must_use]
     pub fn body(&self, role: Role, who: u32) -> Option<&str> {
-        let list = self
-            .villagers
-            .get(Role::NAMES[role as usize])
-            .or_else(|| self.villagers.get("default"))?;
+        static NONE: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        self.body_in(&NONE, role, who)
+    }
+
+    /// The body person `who` of a place with its own `people` (bodies by role
+    /// name, as [`TablePlace::people`]) wears. A role the place names comes
+    /// first. A child then takes the table's children and never an adult's
+    /// body; an elder the table's elders, then an adult's; anyone else the
+    /// place's `default`, then the table's own for the role, then its `default`.
+    #[must_use]
+    pub fn body_in<'a>(
+        &'a self,
+        people: &'a BTreeMap<String, Vec<String>>,
+        role: Role,
+        who: u32,
+    ) -> Option<&'a str> {
+        let name = Role::NAMES[role as usize];
+        let (own, theirs) = (people.get(name), self.villagers.get(name));
+        let (adults, all) = (people.get("default"), self.villagers.get("default"));
+        let order = match role {
+            Role::Child => [own, theirs, None, None],
+            Role::Elder => [own, theirs, adults, all],
+            _ => [own, adults, theirs, all],
+        };
+        let list = order.into_iter().flatten().find(|l| !l.is_empty())?;
         // A stable pick, so the same person wears the same body each time.
         let pick = (who.wrapping_mul(2_654_435_761) >> 7) as usize % list.len().max(1);
         list.get(pick).map(String::as_str)
@@ -109,6 +130,10 @@ pub struct TablePlace {
     pub seed: u64,
     /// Its spots, lanes and roads.
     pub place: Place,
+    /// Its own people: bodies by role name (and `default` for adults of any
+    /// role), over the table's looks, so each town wears its own folk.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub people: BTreeMap<String, Vec<String>>,
 }
 
 impl TablePlace {
@@ -145,6 +170,7 @@ mod tests {
             centre: [x, 0.0, 0.0],
             radius: 40.0,
             seed: 7,
+            people: BTreeMap::new(),
             place: Place {
                 name: name.into(),
                 spots: (0..6)
@@ -229,5 +255,31 @@ mod tests {
         assert_eq!(looks.beast_body(BeastKind::Sheep), Some("sheep.glb"));
         assert_eq!(looks.beast_clip(Pose::Graze), Some("Graze_Loop"));
         assert_eq!(looks.walk_speed, Some(0.86));
+        // A town with its own folk: its adults and smiths wear them; its
+        // children, having none of their own, the table's children.
+        let people: BTreeMap<String, Vec<String>> = serde_json::from_str(
+            r#"{"default": ["kael_00.glb"], "Smith": ["smith_kael.glb"], "Child": []}"#,
+        )
+        .unwrap();
+        assert_eq!(looks.body_in(&people, Role::Farmer, 7), Some("kael_00.glb"));
+        assert_eq!(
+            looks.body_in(&people, Role::Smith, 7),
+            Some("smith_kael.glb")
+        );
+        assert_eq!(looks.body_in(&people, Role::Priest, 7), Some("kael_00.glb"));
+        assert_eq!(
+            looks.body_in(&people, Role::Elder, 7),
+            Some("kael_00.glb"),
+            "an elder with no elders' bodies wears an adult's"
+        );
+        assert_eq!(
+            looks.body_in(&people, Role::Child, 7),
+            None,
+            "never an adult's body"
+        );
+        let mut kids = looks.clone();
+        kids.villagers
+            .insert("Child".into(), vec!["child.glb".into()]);
+        assert_eq!(kids.body_in(&people, Role::Child, 7), Some("child.glb"));
     }
 }
