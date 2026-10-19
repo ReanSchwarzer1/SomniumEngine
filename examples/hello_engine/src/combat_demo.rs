@@ -58,7 +58,7 @@ use somnium_ecs::{Entity, World};
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
 use somnium_ui::message::{NodeHandle, TextMessage};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// Height of a fighter's body cylinder and the head above it.
 const BODY_HEIGHT: f32 = 1.5;
@@ -329,8 +329,11 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         };
         spawn_camp(world, root, camp, content, &mut out);
     }
-    if only == Some("lampmen") {
-        spawn_crew(world, root, Vec3::ZERO, content, &mut out);
+    if let Some((team, faces, members)) = only.and_then(band_of) {
+        spawn_line(world, root, Vec3::ZERO, content, team, faces, members, &mut out);
+    }
+    if only == Some("harrowcat") {
+        spawn_harrowcat(world, root, Vec3::ZERO, content, &mut out);
     }
     Ok(out)
 }
@@ -394,7 +397,7 @@ fn spawn_camp(
     content: Option<&std::path::Path>,
     out: &mut Vec<Entity>,
 ) {
-    let first = first_face(world, root, camp);
+    let first = first_face(world, root, camp, BANDITS);
     for (i, (name, archetype, weapon, leader)) in [
         ("Bandit chief", Archetype::Duelist, WeaponKind::Axe, true),
         (
@@ -434,47 +437,199 @@ fn spawn_camp(
     }
 }
 
-/// WS3's bandits (`characters/bandit_00` to `bandit_09`).
-const BANDITS: usize = 10;
-
-/// The first of a group's four bandit faces (three apart round ten), by where
-/// it stands: `local` under `root`.
-fn first_face(world: &World, root: Entity, local: Vec3) -> usize {
-    let home = world
-        .get::<Transform>(root)
-        .map_or(local, |t| t.translation + local);
-    // ponytail: the 100 m cell the group stands in picks its faces, so a group whose
-    // survivors drift over a cell's edge between wakes changes faces (unseen at
-    // the wake's 120 m); key it by the encounter if that ever shows.
-    ((home.x / 100.0).floor() as i64 * 7 + (home.z / 100.0).floor() as i64 * 3).rem_euclid(BANDITS as i64)
-        as usize
-}
-
-/// A Lamp crew on its street (Vespergate's back streets): its boss, two knives
-/// and a rifleman strung along the street (+Z), facing the boss. With a
-/// `content` root they wear WS3's bandits, until there are Lamp-men.
-fn spawn_crew(
+/// A harrowcat (ECOLOGY_AND_BESTIARY: long, silent and black-furred, as tall
+/// as a pony; it hunts alone in the forests near the Spires and in the
+/// Taigan): a wolf's brain and jaws (its bite and its pounce play the cat's
+/// own clips) in a far heavier body, with the beasts. With a `content` root
+/// holding WS3's harrowcat it wears it.
+fn spawn_harrowcat(
     world: &mut World,
     root: Entity,
     at: Vec3,
     content: Option<&std::path::Path>,
     out: &mut Vec<Entity>,
 ) {
-    let first = first_face(world, root, at);
-    for (i, (name, archetype, weapon, along)) in [
-        ("Lamp-man boss", Archetype::Duelist, WeaponKind::Knife, 0.0),
-        ("Lamp-man (knife)", Archetype::Skirmisher, WeaponKind::Knife, 2.5),
-        ("Lamp-man (lookout)", Archetype::Skirmisher, WeaponKind::Knife, -2.5),
-        ("Lamp-man (rifle)", Archetype::Rifleman, WeaponKind::LatticeRifle, -6.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        // Side to side within an alley's 4 m.
+    let n = out.len();
+    out.extend(beast(
+        world,
+        root,
+        "Harrowcat",
+        at,
+        Vec3::Z,
+        Vec3::new(0.9, 1.4, 2.6),
+        "dark",
+        CombatantComponent {
+            team: 2,
+            archetype: Archetype::Wolf as u32,
+            weapon: WeaponKind::Fangs as u32,
+            max_health: 320.0,
+            max_stamina: 200.0,
+            poise: 90.0,
+            armor: 3.0,
+            speed: 6.5,
+            leader: true,
+            ..CombatantComponent::default()
+        },
+    ));
+    wear(world, out[n], content, "creatures/harrowcat/harrowcat");
+}
+
+/// WS3's bandits (`characters/bandit_00` to `bandit_09`).
+const BANDITS: usize = 10;
+
+/// The first of a group's faces (three apart round `count`), by where it
+/// stands: `local` under `root`.
+fn first_face(world: &World, root: Entity, local: Vec3, count: usize) -> usize {
+    let home = world
+        .get::<Transform>(root)
+        .map_or(local, |t| t.translation + local);
+    // ponytail: the 100 m cell the group stands in picks its faces, so a group whose
+    // survivors drift over a cell's edge between wakes changes faces (unseen at
+    // the wake's 120 m); key it by the encounter if that ever shows.
+    ((home.x / 100.0).floor() as i64 * 7 + (home.z / 100.0).floor() as i64 * 3).rem_euclid(count.max(1) as i64)
+        as usize
+}
+
+/// The factions a game turns against the protagonist
+/// ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]):
+/// the five Lamps of Vespergate, its watch, Tyffir's Lance and the Margrave's
+/// knights. Each is a team of its own from [`FACTION_TEAM`] on, neutral to the
+/// party until it is turned.
+pub const FACTIONS: [&str; 8] = [
+    "lamp_red",
+    "lamp_white",
+    "lamp_amber",
+    "lamp_green",
+    "lamp_blue",
+    "watch",
+    "lance",
+    "knights",
+];
+/// The first faction's team; the others follow in [`FACTIONS`]' order.
+const FACTION_TEAM: u16 = 16;
+
+/// A faction's team, by its name in [`FACTIONS`].
+fn faction_team(name: &str) -> Option<TeamId> {
+    let name = name.trim();
+    FACTIONS
+        .iter()
+        .position(|f| f.eq_ignore_ascii_case(name))
+        .map(|i| TeamId(FACTION_TEAM + i as u16))
+}
+
+/// The Combat Encounter kind a faction sends: `lamp_red` a `lampmen red`
+/// crew, the others their own name.
+fn faction_kind(name: &str) -> Option<String> {
+    faction_team(name)?;
+    let name = name.trim().to_ascii_lowercase();
+    Some(match name.strip_prefix("lamp_") {
+        Some(colour) => format!("lampmen {colour}"),
+        None => name,
+    })
+}
+
+/// One of a band strung along a street or road: name, archetype, weapon,
+/// health and armour. The first leads.
+type Member = (&'static str, Archetype, WeaponKind, f32, f32);
+
+/// A band of `kind`: its team, the WS3 family its faces come from (and how
+/// many there are), and its members. `lampmen` alone is the always-hostile
+/// crew it was; `lampmen <colour>` (ACT6_PLACES_AND_CAST 4.3: knives red,
+/// clubs amber, riding crops and pistols green, canes white, unseen blue),
+/// `watch`, `lance` and `knights` are factions. Lamp-men wear WS3's bandits
+/// until there are Lamp-men; the watch its guards; the Lance and the knights
+/// its lances.
+fn band_of(kind: &str) -> Option<(u32, (&'static str, usize), &'static [Member])> {
+    use Archetype::{Brute, Duelist, Rifleman, Skirmisher, Spearman};
+    use WeaponKind::{Axe, Knife, LanceGlaive, LatticeRifle, Spear, Sword, Unarmed};
+    const RED: &[Member] = &[
+        ("Lamp-man boss", Duelist, Knife, 130.0, 1.0),
+        ("Lamp-man (knife)", Skirmisher, Knife, 90.0, 1.0),
+        ("Lamp-man (lookout)", Skirmisher, Knife, 90.0, 1.0),
+        ("Lamp-man (rifle)", Rifleman, LatticeRifle, 90.0, 1.0),
+    ];
+    const WHITE: &[Member] = &[
+        ("Lamp-man boss", Duelist, Sword, 130.0, 1.0),
+        ("Lamp-man (cane)", Duelist, Sword, 90.0, 1.0),
+        ("Lamp-man (swordstick)", Duelist, Sword, 90.0, 1.0),
+        ("Lamp-man (pistol)", Rifleman, LatticeRifle, 90.0, 1.0),
+    ];
+    const AMBER: &[Member] = &[
+        ("Lamp-man boss", Brute, Unarmed, 150.0, 2.0),
+        ("Lamp-man (club)", Brute, Unarmed, 110.0, 2.0),
+        ("Lamp-man (cudgel)", Brute, Unarmed, 110.0, 2.0),
+        ("Lamp-man (knife)", Skirmisher, Knife, 90.0, 1.0),
+    ];
+    const GREEN: &[Member] = &[
+        ("Lamp-man boss", Duelist, Sword, 130.0, 1.0),
+        ("Lamp-man (crop)", Skirmisher, Unarmed, 90.0, 1.0),
+        ("Lamp-man (pistol)", Rifleman, LatticeRifle, 90.0, 1.0),
+        ("Lamp-man (second pistol)", Rifleman, LatticeRifle, 90.0, 1.0),
+    ];
+    const BLUE: &[Member] = &[
+        ("Lamp-man boss", Skirmisher, Knife, 120.0, 0.0),
+        ("Lamp-man (knife)", Skirmisher, Knife, 90.0, 0.0),
+        ("Lamp-man (shadow)", Skirmisher, Knife, 90.0, 0.0),
+        ("Lamp-man (lookout)", Skirmisher, Knife, 90.0, 0.0),
+    ];
+    const WATCH: &[Member] = &[
+        ("Watch sergeant", Duelist, Sword, 140.0, 3.0),
+        ("Watchman (spear)", Spearman, Spear, 110.0, 2.0),
+        ("Watchman (pike)", Spearman, Spear, 110.0, 2.0),
+    ];
+    const LANCE: &[Member] = &[
+        ("Lance captain", Duelist, Sword, 170.0, 4.0),
+        ("Lance rider (glaive)", Spearman, LanceGlaive, 140.0, 3.0),
+        ("Lance rider (spear)", Spearman, Spear, 140.0, 3.0),
+    ];
+    const KNIGHTS: &[Member] = &[
+        ("Knight-captain", Duelist, Sword, 200.0, 6.0),
+        ("Knight (sword)", Duelist, Sword, 170.0, 6.0),
+        ("Knight (axe)", Brute, Axe, 170.0, 6.0),
+        ("Knight (glaive)", Spearman, LanceGlaive, 170.0, 6.0),
+    ];
+    const BANDIT: (&str, usize) = ("bandit", BANDITS);
+    let kind = kind.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let (faction, faces, members) = match kind.as_str() {
+        "lampmen" => return Some((1, BANDIT, RED)),
+        "lampmen red" => ("lamp_red", BANDIT, RED),
+        "lampmen white" => ("lamp_white", BANDIT, WHITE),
+        "lampmen amber" => ("lamp_amber", BANDIT, AMBER),
+        "lampmen green" => ("lamp_green", BANDIT, GREEN),
+        "lampmen blue" => ("lamp_blue", BANDIT, BLUE),
+        "watch" => ("watch", ("guard", 8), WATCH),
+        "lance" => ("lance", ("lance", 10), LANCE),
+        "knights" => ("knights", ("lance", 10), KNIGHTS),
+        _ => return None,
+    };
+    Some((u32::from(faction_team(faction)?.0), faces, members))
+}
+
+/// Where each of a line stands along its street (+Z), the first its leader.
+const LINE: [f32; 4] = [0.0, 2.5, -2.5, -6.0];
+
+/// A band strung along its street or road (+Z) within an alley's 4 m, facing
+/// its leader: a Lamp crew, a watch post, a Lance patrol, knights. With a
+/// `content` root each wears one of WS3's `faces` (`<family>_NN`), all
+/// different.
+#[allow(clippy::too_many_arguments)]
+fn spawn_line(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    team: u32,
+    faces: (&str, usize),
+    members: &[Member],
+    out: &mut Vec<Entity>,
+) {
+    let (family, count) = faces;
+    let first = first_face(world, root, at, count);
+    for (i, &(name, archetype, weapon, health, armor)) in members.iter().enumerate() {
+        let along = LINE[i % LINE.len()] - 6.0 * (i / LINE.len()) as f32;
         let side = if i % 2 == 0 { 0.6 } else { -0.6 };
         let spot = at + Vec3::new(side, 0.0, along);
         let facing = if along == 0.0 { Vec3::Z } else { at - spot };
-        let leader = i == 0;
         let n = out.len();
         out.extend(fighter(
             world,
@@ -483,18 +638,18 @@ fn spawn_crew(
             spot,
             facing,
             CombatantComponent {
-                team: 1,
+                team,
                 archetype: archetype as u32,
                 weapon: weapon as u32,
-                max_health: if leader { 130.0 } else { 90.0 },
-                armor: 1.0,
+                max_health: health,
+                armor,
                 speed: if weapon == WeaponKind::Knife { 4.3 } else { 4.0 },
-                leader,
+                leader: i == 0,
                 ..CombatantComponent::default()
             },
         ));
-        let b = (first + i * 3) % BANDITS;
-        wear(world, out[n], content, &format!("characters/bandit_{b:02}/bandit_{b:02}"));
+        let b = (first + i * 3) % count.max(1);
+        wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
     }
 }
 
@@ -1149,7 +1304,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; lampmen: a Lamp crew on a street (a boss, two knives and a rifleman)." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -1214,8 +1369,13 @@ fn build_encounter(
     }
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
-        part @ ("wolves" | "bandits" | "lampmen") => args["only"] = json!(part),
-        other => return Err(format!("no kind {other:?} (try wilds, wolves, bandits or lampmen)")),
+        part @ ("wolves" | "bandits" | "harrowcat") => args["only"] = json!(part),
+        band if band_of(band).is_some() => args["only"] = json!(band),
+        other => {
+            return Err(format!(
+                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, lampmen [red|white|amber|green|blue], watch, lance or knights)"
+            ));
+        }
     }
     spawn_wilds(world, &args)
 }
@@ -1224,7 +1384,7 @@ fn build_encounter(
 fn encounter_extent(kind: &str) -> f32 {
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => 25.0,
-        "lampmen" => 8.0,
+        band if band_of(band).is_some() => 8.0,
         _ => 6.0,
     }
 }
@@ -1313,6 +1473,9 @@ struct Encounter {
     source: Option<Entity>,
     /// Woken, and every one of its fighters fell: told once, never woken again.
     cleared: bool,
+    /// A band its faction sent to hunt the protagonist ([`hunt`]): it walks to
+    /// him asleep and makes for him awake.
+    hunter: Option<String>,
     /// Awake: its entities, fighters (and where each stood when it woke)
     /// and colliders.
     entities: Vec<Entity>,
@@ -1468,7 +1631,7 @@ fn route_at(route: &[Vec3], closed: bool, along: f32) -> (Vec3, Vec3) {
 
 /// Patrols walk their routes while they sleep, so one is met where it would
 /// have got to; a cleared one stays where it fell.
-fn walk_asleep(set: &mut Dormancy<Encounter>, seconds: f32) {
+fn walk_asleep(set: &mut Dormancy<Encounter>, seconds: f32, hero: Option<Vec3>) {
     if seconds <= 0.0 || !seconds.is_finite() {
         return;
     }
@@ -1477,9 +1640,24 @@ fn walk_asleep(set: &mut Dormancy<Encounter>, seconds: f32) {
         if set.is_awake(id) {
             continue;
         }
+        let at = set.position(id);
         let Some(record) = set.data_mut(id) else {
             continue;
         };
+        if record.hunter.is_some() {
+            // A hunting band makes straight for him (on the ground plane).
+            let (Some(at), Some(hero)) = (at, hero) else {
+                continue;
+            };
+            if record.left.as_ref().is_some_and(Vec::is_empty) {
+                continue;
+            }
+            let way = Vec3::new(hero.x - at.x, 0.0, hero.z - at.z);
+            let step = way.normalize_or_zero() * (record.speed * seconds).min(way.length());
+            record.facing = way.normalize_or(record.facing);
+            set.move_to(id, Vec3::new(at.x + step.x, hero.y, at.z + step.z));
+            continue;
+        }
         if record.route.len() < 2 || record.left.as_ref().is_some_and(Vec::is_empty) {
             continue;
         }
@@ -1548,7 +1726,10 @@ fn lead(world: &World, run: &mut Run) {
                 && ground(centre, *h).length() <= SHADOW_REACH
         });
         let mut stepped = false;
-        let goal = if let Some(h) = trail {
+        let hunting = record.hunter.is_some();
+        let goal = if let (true, Some(h)) = (hunting, hero) {
+            Some(h)
+        } else if let Some(h) = trail {
             record.shadowing = true;
             Some(h + ground(centre, h).normalize_or(Vec3::X) * SHADOW)
         } else if record.route.len() >= 2 {
@@ -1574,6 +1755,9 @@ fn lead(world: &World, run: &mut Run) {
             });
             if let Some(brain) = run.world.combatant_mut(*m).and_then(|c| c.brain.as_mut()) {
                 brain.mind.home = Some(home);
+            }
+            if let (true, Some(player), Some(h)) = (hunting, run.player, hero) {
+                ai::alert(&mut run.world, *m, player, h);
             }
         }
         if stepped {
@@ -1603,11 +1787,16 @@ fn tend_encounters(
     }
     let elapsed = if dt.is_finite() { run.tended } else { 0.0 };
     run.tended = 0.0;
+    let hero = run
+        .player
+        .and_then(|p| run.world.combatant(p))
+        .map(|c| c.position);
     if let Some(set) = run.encounters.as_mut() {
         enlist_encounters(world, set);
-        walk_asleep(set, elapsed);
+        walk_asleep(set, elapsed, hero);
     }
     note_cleared(run);
+    hunt(run);
     let watchers: Vec<Vec3> = run
         .player
         .and_then(|p| run.world.combatant(p))
@@ -1636,6 +1825,82 @@ fn tend_encounters(
         && let Some(physics) = physics
     {
         repatch(physics, run);
+    }
+}
+
+/// How far off a hunting band sets out, how fast it walks to him asleep, and
+/// how long after one is cleared the next sets out.
+const HUNT_FROM: f32 = 260.0;
+const HUNT_SPEED: f32 = 3.5;
+const HUNT_AGAIN: f64 = 90.0;
+
+/// The bands of the factions hunting the protagonist (`run.hunting`): one at
+/// a time each, set out [`HUNT_FROM`] metres off and walking to him asleep, so
+/// they wake into the fight at the usual distance; the next [`HUNT_AGAIN`]
+/// seconds after one is cleared. A faction that stops hunting takes back its
+/// bands still asleep (they never wake); an awake one stays until it sleeps.
+fn hunt(run: &mut Run) {
+    let Some(hero) = run
+        .player
+        .and_then(|p| run.world.combatant(p))
+        .map(|c| c.position)
+    else {
+        return;
+    };
+    let now = run.world.time();
+    let Some(set) = run.encounters.as_mut() else {
+        return;
+    };
+    let (mut live, mut sent) = (BTreeSet::new(), BTreeSet::new());
+    for i in 0..set.len() {
+        let id = GroupId(i as u32);
+        let awake = set.is_awake(id);
+        let Some(record) = set.data_mut(id) else {
+            continue;
+        };
+        let Some(faction) = record.hunter.clone() else {
+            continue;
+        };
+        sent.insert(faction.clone());
+        if record.cleared || record.left.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        if !awake && !run.hunting.contains(&faction) {
+            record.left = Some(Vec::new());
+            continue;
+        }
+        live.insert(faction);
+    }
+    for faction in &run.hunting {
+        if live.contains(faction) {
+            run.hunt_due.remove(faction);
+            continue;
+        }
+        let first = !sent.contains(faction);
+        let due = *run
+            .hunt_due
+            .entry(faction.clone())
+            .or_insert(if first { now } else { now + HUNT_AGAIN });
+        let Some(kind) = faction_kind(faction).filter(|_| now >= due) else {
+            continue;
+        };
+        run.hunt_due.remove(faction);
+        // Round him by the golden angle, a new side each time.
+        let a = run.hunts as f32 * 2.399_963;
+        let way = Vec3::new(a.cos(), 0.0, a.sin());
+        run.hunts += 1;
+        set.add(
+            hero + way * HUNT_FROM,
+            encounter_extent(&kind),
+            Encounter {
+                facing: -way,
+                home: (format!("hunt {faction}"), [i64::from(run.hunts), 0, 0]),
+                hunter: Some(faction.clone()),
+                speed: HUNT_SPEED,
+                kind,
+                ..Encounter::default()
+            },
+        );
     }
 }
 
@@ -2078,6 +2343,11 @@ struct Run {
     /// Encounters cleared since the game last took them (see
     /// [`CombatDemo::take_cleared`]).
     cleared: Vec<(Entity, String)>,
+    /// Factions hunting the protagonist (the game's, [`CombatDemo::set_hunting_factions`]);
+    /// how many bands were sent; when each faction sends its next.
+    hunting: BTreeSet<String>,
+    hunts: u32,
+    hunt_due: BTreeMap<String, f64>,
 }
 
 struct Hud {
@@ -2240,6 +2510,33 @@ pub struct CombatDemo {
     /// Mounts the protagonist may not take now, the game's say (someone else's horse before the story allows it).
     pub refused_mounts: std::collections::HashSet<Entity>,
     events: Vec<HostEvent>,
+    /// Factions the game has turned against the protagonist, and those hunting
+    /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
+    hostile_factions: BTreeSet<String>,
+    hunting_factions: BTreeSet<String>,
+}
+
+/// The game's law on the fight: each faction hostile to the party when it is
+/// turned or hunting, neutral otherwise; the hunters to send.
+fn apply_law(run: &mut Run, hostile: &BTreeSet<String>, hunting: &BTreeSet<String>) {
+    for faction in FACTIONS {
+        let Some(team) = faction_team(faction) else {
+            continue;
+        };
+        let turned = hostile.contains(faction) || hunting.contains(faction);
+        let attitude = if turned { Attitude::Hostile } else { Attitude::Neutral };
+        run.world.relations.set(TeamId(0), team, attitude);
+    }
+    run.hunting.clone_from(hunting);
+}
+
+/// The known faction names among `factions`, lower case.
+fn factions_of<S: AsRef<str>>(factions: &[S]) -> BTreeSet<String> {
+    factions
+        .iter()
+        .map(|f| f.as_ref().trim().to_ascii_lowercase())
+        .filter(|f| faction_team(f).is_some())
+        .collect()
 }
 
 /// How many of the fight's events wait for a game's HUD before the oldest go.
@@ -2281,6 +2578,8 @@ impl Default for CombatDemo {
             hud_events: VecDeque::new(),
             refused_mounts: Default::default(),
             events: Vec::new(),
+            hostile_factions: BTreeSet::new(),
+            hunting_factions: BTreeSet::new(),
         }
     }
 }
@@ -2414,6 +2713,28 @@ impl CombatDemo {
     /// kind, lowercased: `wolves`, `bandits`, `lampmen`, `wilds`) whose
     /// encounter woke and whose fighters have all fallen since the last call.
     /// Each comes once: a cleared encounter never wakes again.
+    /// The factions (names in [`FACTIONS`]) the protagonist's deeds have
+    /// turned: their fighters fight him on sight; every other faction is
+    /// neutral until he strikes one of them. A game sets this as its story's
+    /// facts change (Rimeborn every half second: a Lamp whose favour is low,
+    /// the watch at Hue 3). Unknown names are ignored. Kept across Plays.
+    pub fn set_hostile_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
+        self.hostile_factions = factions_of(factions);
+        if let Some(run) = &mut self.run {
+            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+        }
+    }
+
+    /// The factions hunting the protagonist (hostile as well): each sends a
+    /// band from out of sight that walks to him and fights (the knights or
+    /// the Lance at Hue 4 and 5), another a while after one is cleared.
+    pub fn set_hunting_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
+        self.hunting_factions = factions_of(factions);
+        if let Some(run) = &mut self.run {
+            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+        }
+    }
+
     pub fn take_cleared(&mut self) -> Vec<(Entity, String)> {
         self.run
             .as_mut()
@@ -2457,6 +2778,7 @@ impl CombatDemo {
             run.skins = crate::combat_bodies::Skins::new(Some(&ctx.config.content_root));
             run.content = Some(ctx.config.content_root.clone());
             run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions);
             // Those already near wake now, the rest as the protagonist comes.
             tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
             run.log.push_back(
@@ -2832,6 +3154,9 @@ fn build(world: &World) -> Option<Run> {
         skins: Default::default(),
         content: None,
         cleared: Vec::new(),
+        hunting: BTreeSet::new(),
+        hunts: 0,
+        hunt_due: BTreeMap::new(),
     })
 }
 
@@ -2865,7 +3190,8 @@ fn organise(combat: &mut CombatWorld, ids: &[CombatantId], leaders: &[CombatantI
     teams.sort_unstable();
     teams.dedup();
     for &t in &teams {
-        if t != TeamId(0) {
+        // A faction's attitude is the game's (`apply_law`).
+        if t != TeamId(0) && t.0 < FACTION_TEAM {
             combat.relations.set(TeamId(0), t, Attitude::Hostile);
         }
     }
@@ -4773,6 +5099,160 @@ mod tests {
                 target: elk_entity
             }]
         );
+    }
+
+    /// The protagonist alone in a scene, with these encounters near him: Play's
+    /// run woken round him, in a host.
+    fn host_with(encounters: &[(&str, Vec3)]) -> (World, CombatDemo) {
+        let mut world = World::new();
+        let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));
+        fighter(&mut world, root, "Protagonist", Vec3::ZERO, Vec3::X, CombatantComponent::protagonist());
+        for (kind, at) in encounters {
+            world.spawn((
+                Name::new(&format!("Encounter {kind}")),
+                Transform::from_translation(*at),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: (*kind).into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ));
+        }
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let demo = CombatDemo {
+            run: Some(run),
+            ..CombatDemo::default()
+        };
+        (world, demo)
+    }
+
+    /// Lamp crews by colour and the watch are neutral until the game turns
+    /// their faction; a plain `lampmen` crew is hostile as it always was.
+    #[test]
+    fn factions_are_neutral_until_the_game_turns_them() {
+        let (_world, mut demo) = host_with(&[
+            ("lampmen red", Vec3::new(30.0, 0.0, 0.0)),
+            ("watch", Vec3::new(-30.0, 0.0, 0.0)),
+            ("lampmen", Vec3::new(0.0, 0.0, 30.0)),
+        ]);
+        let first = |demo: &CombatDemo, name: &str, team: Option<TeamId>| -> CombatantId {
+            let run = demo.run.as_ref().unwrap();
+            run.world
+                .combatants()
+                .find(|c| c.name == name && team.is_none_or(|t| c.team == t))
+                .map(|c| c.id)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        let red = first(&demo, "Lamp-man (rifle)", faction_team("lamp_red"));
+        let plain = first(&demo, "Lamp-man (rifle)", Some(TeamId(1)));
+        let watch = first(&demo, "Watchman (spear)", None);
+        let hostile = |demo: &CombatDemo, b| demo.run.as_ref().unwrap().world.hostile(hero, b);
+        assert!(!hostile(&demo, red) && !hostile(&demo, watch), "neutral to begin with");
+        assert!(hostile(&demo, plain), "a plain crew as before");
+        demo.set_hostile_factions(&["lamp_red", "the moon"]);
+        assert!(hostile(&demo, red) && !hostile(&demo, watch));
+        demo.set_hostile_factions(&["WATCH"]);
+        assert!(!hostile(&demo, red) && hostile(&demo, watch));
+        demo.set_hostile_factions::<&str>(&[]);
+        assert!(!hostile(&demo, watch));
+        // Every faction has a band, each member its own name.
+        for faction in FACTIONS {
+            let kind = faction_kind(faction).unwrap();
+            let (team, _, members) = band_of(&kind).unwrap_or_else(|| panic!("no band {kind}"));
+            assert_eq!(Some(TeamId(team as u16)), faction_team(faction));
+            let names: BTreeSet<&str> = members.iter().map(|m| m.0).collect();
+            assert_eq!(names.len(), members.len(), "{kind}");
+        }
+    }
+
+    /// A hunting faction sends a band from out of sight; asleep it walks to
+    /// him, wakes into the fight hostile and makes for him. When the hunt is
+    /// called off it is taken back once asleep, and no other is sent.
+    #[test]
+    fn a_hunting_faction_sends_a_band_that_finds_him() {
+        let (mut world, mut demo) = host_with(&[]);
+        demo.set_hunting_factions(&["knights"]);
+        let hunters = |demo: &CombatDemo| -> Vec<(GroupId, bool, Vec3, bool)> {
+            let set = demo.run.as_ref().unwrap().encounters.as_ref().unwrap();
+            (0..set.len())
+                .map(|i| GroupId(i as u32))
+                .filter_map(|id| {
+                    let r = set.data(id)?;
+                    r.hunter.as_ref()?;
+                    let gone = r.left.as_ref().is_some_and(Vec::is_empty);
+                    Some((id, set.is_awake(id), set.position(id)?, gone))
+                })
+                .collect()
+        };
+        tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), TEND_EVERY);
+        let sent = hunters(&demo);
+        assert_eq!(sent.len(), 1);
+        let (_, awake, at, _) = sent[0];
+        assert!(!awake && (at.length() - HUNT_FROM).abs() < 1.0, "{at}");
+        let mut woke = false;
+        for _ in 0..200 {
+            tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), TEND_EVERY);
+            if hunters(&demo)[0].1 {
+                woke = true;
+                break;
+            }
+        }
+        assert!(woke, "it came within waking distance");
+        let run = demo.run.as_ref().unwrap();
+        let hero = run.player.unwrap();
+        let knights: Vec<&somnium_combat::world::Combatant> =
+            run.world.combatants().filter(|c| c.name.starts_with("Knight")).collect();
+        assert_eq!(knights.len(), 4);
+        assert!(knights.iter().all(|k| run.world.hostile(hero, k.id)));
+        let home = knights[0].brain.as_ref().and_then(|b| b.mind.home).expect("led");
+        assert!(home.length() < 3.0, "making for him: {home}");
+        // Called off: the band sleeps once he is far, is taken back, and none follows.
+        demo.set_hunting_factions::<&str>(&[]);
+        let run = demo.run.as_mut().unwrap();
+        let far = Vec3::new(0.0, 0.0, 900.0);
+        run.world.combatant_mut(hero).unwrap().position = far;
+        run.walkers.get_mut(&hero).unwrap().feet = far;
+        for _ in 0..4 {
+            tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), TEND_EVERY);
+        }
+        let after = hunters(&demo);
+        assert_eq!(after.len(), 1, "none sent after");
+        assert!(!after[0].1 && after[0].3, "asleep and taken back: {after:?}");
+    }
+
+    /// A harrowcat hunts alone with the beasts: one heavy body with a wolf's
+    /// brain and jaws, hostile to the party, in WS3's cat where it exists.
+    #[test]
+    fn a_harrowcat_hunts_alone() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_harrowcat");
+        let file = content.join("creatures/harrowcat/harrowcat.glb");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        let mut world = World::new();
+        let made = build_encounter(&mut world, "Harrowcat", Vec3::new(40.0, 0.0, 0.0), Vec3::X, false, Some(&content))
+            .expect("a cat");
+        let cats: Vec<Entity> = made
+            .iter()
+            .copied()
+            .filter(|e| world.get::<CombatantComponent>(*e).is_some())
+            .collect();
+        assert_eq!(cats.len(), 1);
+        let c = world.get::<CombatantComponent>(cats[0]).unwrap();
+        assert_eq!((c.team, c.weapon_kind()), (2, WeaponKind::Fangs));
+        assert!(c.max_health > 300.0);
+        assert_eq!(
+            world.get::<SkinnedBody>(cats[0]).unwrap().source,
+            AssetId::from_relative_path("creatures/harrowcat/harrowcat.glb")
+        );
+        let (_world, demo) = host_with(&[("harrowcat", Vec3::new(30.0, 0.0, 0.0))]);
+        let run = demo.run.as_ref().unwrap();
+        let cat = run.world.combatants().find(|c| c.name == "Harrowcat").expect("woken");
+        assert!(run.world.hostile(run.player.unwrap(), cat.id));
     }
 
     #[test]
