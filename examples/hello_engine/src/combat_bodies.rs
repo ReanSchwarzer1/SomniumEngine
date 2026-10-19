@@ -383,6 +383,11 @@ impl Skin {
 
 /// The nodes of a glTF binary that carry meshes, from its JSON chunk.
 pub(crate) fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
+    mesh_node_names(path).into_iter().map(|(i, _)| i).collect()
+}
+
+/// The nodes of a glTF binary that carry meshes, with their names.
+pub(crate) fn mesh_node_names(path: &std::path::Path) -> Vec<(u32, String)> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
@@ -402,7 +407,15 @@ pub(crate) fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
         .flatten()
         .enumerate()
         .filter(|(_, n)| n.get("mesh").is_some())
-        .map(|(i, _)| i as u32)
+        .map(|(i, n)| {
+            (
+                i as u32,
+                n.get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
         .collect()
 }
 
@@ -1296,6 +1309,11 @@ mod tests {
         let path = std::env::temp_dir().join(format!("scabbard_{}.glb", std::process::id()));
         std::fs::write(&path, &glb).unwrap();
         assert_eq!(mesh_nodes(&path), vec![1, 2]);
+        assert_eq!(
+            mesh_node_names(&path)[1],
+            (2, "iron".to_string()),
+            "and their names (a boat's shipped oars)"
+        );
         let _ = std::fs::remove_file(path);
     }
 

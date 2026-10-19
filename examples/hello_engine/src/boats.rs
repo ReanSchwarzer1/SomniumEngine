@@ -486,6 +486,9 @@ struct Afloat {
     moored: Option<Vec3>,
     /// The plain hull drawn for a boat with no mesh of its own.
     hull: Vec<Entity>,
+    /// Its oars shipped inside (rb-architecture's `oars_shipped_*` nodes), hidden while its rower holds WS3's.
+    oars: Vec<Entity>,
+    oars_hidden: bool,
 }
 
 /// Boats in Play.
@@ -569,15 +572,26 @@ impl BoatHost {
                 .any(|(_, p)| p.entity == entity)
                 || ctx.world.get::<MeshKind>(entity).is_some();
             // Its own mesh, else rb-architecture's hull for its kind, else a plain one.
-            let hull = if has_mesh {
-                Vec::new()
+            let (hull, oars) = if has_mesh {
+                (Vec::new(), Vec::new())
             } else {
                 let file = format!("props/boats/boat_{}.glb", kind.name);
-                let nodes = crate::combat_bodies::mesh_nodes(&ctx.config.content_root.join(&file));
+                let nodes =
+                    crate::combat_bodies::mesh_node_names(&ctx.config.content_root.join(&file));
                 if nodes.is_empty() {
-                    plain_hull(ctx.world, entity, &kind, authored.scale)
+                    (
+                        plain_hull(ctx.world, entity, &kind, authored.scale),
+                        Vec::new(),
+                    )
                 } else {
-                    hull_mesh(ctx.world, entity, &file, &nodes, authored.scale)
+                    let hull = hull_mesh(ctx.world, entity, &file, &nodes, authored.scale);
+                    let oars = hull
+                        .iter()
+                        .zip(&nodes)
+                        .filter(|(_, (_, name))| name.starts_with("oars_shipped"))
+                        .map(|(e, _)| *e)
+                        .collect();
+                    (hull, oars)
                 }
             };
             self.afloat.push(Afloat {
@@ -587,6 +601,8 @@ impl BoatHost {
                 authored,
                 moored: Some(at.2),
                 hull,
+                oars,
+                oars_hidden: false,
             });
         }
         info!(
@@ -638,7 +654,27 @@ impl BoatHost {
             self.look_in = 1.0;
             self.adopt(ctx);
         }
-        for a in &self.afloat {
+        let rowed = self
+            .aboard
+            .map(|(i, _)| i)
+            .filter(|&i| self.afloat[i].kind.clip == ROW);
+        for (i, a) in self.afloat.iter_mut().enumerate() {
+            // Its shipped oars go while its rower holds WS3's, and come back after.
+            let hide = rowed == Some(i);
+            if a.oars_hidden != hide {
+                a.oars_hidden = hide;
+                for &e in &a.oars {
+                    let flags = somnium_core::EditorFlags {
+                        hidden: hide,
+                        ..ctx
+                            .world
+                            .get::<somnium_core::EditorFlags>(e)
+                            .copied()
+                            .unwrap_or_default()
+                    };
+                    let _ = ctx.world.insert_component(e, flags);
+                }
+            }
             let pose = Mat4::from_rotation_translation(
                 ctx.physics.get_rotation(a.body),
                 ctx.physics.get_position(a.body),
@@ -737,7 +773,13 @@ impl BoatHost {
                 ctx.physics.get_rotation(a.body),
                 ctx.physics.get_position(a.body),
             );
-            hull * Mat4::from_translation(a.kind.seat + Vec3::Y * a.kind.half.y)
+            // A rower faces the stern and pulls (WS3's stroke); a helmsman faces the bow.
+            let facing = if a.kind.clip == ROW {
+                Mat4::from_rotation_y(std::f32::consts::PI)
+            } else {
+                Mat4::IDENTITY
+            };
+            hull * Mat4::from_translation(a.kind.seat + Vec3::Y * a.kind.half.y) * facing
         });
     }
 
@@ -777,12 +819,12 @@ fn hull_mesh(
     world: &mut World,
     boat: Entity,
     file: &str,
-    nodes: &[u32],
+    nodes: &[(u32, String)],
     scale: Vec3,
 ) -> Vec<Entity> {
     nodes
         .iter()
-        .map(|&node| {
+        .map(|&(node, _)| {
             world.spawn((
                 Name::new("Boat hull"),
                 Transform {
