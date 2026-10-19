@@ -588,6 +588,9 @@ fn levels(b: &SkinnedBody) -> Vec<AssetId> {
 /// contract gives the renderer about 2 M, and the cast and fighters need the rest.
 const VERTEX_BUDGET: u32 = 1_600_000;
 
+/// Metres a posed body's place in the budget is kept against nearer newcomers.
+const BUDGET_KEEP: f32 = 4.0;
+
 /// Skinned meshes registered a frame, by default.
 const REGISTERS_PER_FRAME: usize = 4;
 
@@ -901,8 +904,11 @@ impl SkinnedBodies {
                 }
                 let current = self.bodies.get(e).map_or(0, |x| x.level);
                 let lines = [b.lod1_beyond, b.lod2_beyond];
+                // One already posed keeps its place against a newcomer a step
+                // nearer, so the budget's edge does not flicker as people pass.
+                let posed = self.bodies.get(e).is_some_and(|x| !x.skins.is_empty());
                 Some((
-                    distance,
+                    distance - if posed { BUDGET_KEEP } else { 0.0 },
                     *e,
                     level_for(distance, current, lines, sizes.len()),
                     sizes,
