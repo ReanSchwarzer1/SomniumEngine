@@ -63,6 +63,44 @@ pub(crate) struct ProjectEntry {
     /// How far this kind casts shadows, metres; 0 never casts. Unset: `FoliageComponent::foliage_shadow_distance`.
     #[serde(default)]
     pub shadow_distance: Option<f32>,
+    /// Generate this kind round the camera from its brush rules (layer, weight, slope, scale) instead of storing it
+    /// (`ground_cover.rs`). Unset: painted only, as before.
+    #[serde(default)]
+    pub ground_cover: Option<GroundCoverRules>,
+    /// Whether this kind is in the ray-traced scene (reflections, traced GI and shadows). Unset: yes, except
+    /// `ground_cover` kinds, whose many small instances would fill the traced scene's instance cap.
+    #[serde(default)]
+    pub ray_traced: Option<bool>,
+    /// How far from the camera this kind stays in the ray-traced scene, metres; 0 keeps it out. Unset: its
+    /// `shadow_distance` when it has one (a tree past its shadow-map reach adds little to traced shadows, GI or
+    /// reflections, and a forest within a 400 m draw distance overflows the traced scene), else everywhere.
+    #[serde(default)]
+    pub trace_distance: Option<f32>,
+}
+
+impl ProjectEntry {
+    /// Whether this kind's instances go into the ray-traced scene.
+    pub(crate) fn traced(&self) -> bool {
+        self.ray_traced.unwrap_or(self.ground_cover.is_none())
+    }
+
+    /// How far from the camera a traced kind stays in the ray-traced scene; `None` is everywhere.
+    pub(crate) fn trace_reach(&self) -> Option<f32> {
+        self.trace_distance.or(self.shadow_distance)
+    }
+}
+
+/// Procedural ground cover for one kind.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GroundCoverRules {
+    /// Candidates per square metre where its layer is full (each kept with the layer's weight).
+    pub density: f32,
+    /// Generated, and drawn, within this many metres of where the view looks (the ground under the view's centre).
+    pub radius: f32,
+    /// Tilt each instance to the ground's slope (patches of grass), instead of standing it upright (flowers).
+    #[serde(default)]
+    pub align_to_ground: bool,
 }
 
 #[derive(Deserialize)]
@@ -82,8 +120,14 @@ fn parse(bytes: &[u8]) -> Result<BTreeMap<u8, ProjectEntry>, String> {
         // A kind must draw somewhere; a shadow distance of 0 is a kind that never casts (grass, crops).
         if entry.draw_distance.is_some_and(|d| !d.is_finite() || d <= 0.0)
             || entry.shadow_distance.is_some_and(|d| !d.is_finite() || d < 0.0)
+            || entry.trace_distance.is_some_and(|d| !d.is_finite() || d < 0.0)
         {
             return Err(format!("invalid draw or shadow distance for kind {}", entry.kind));
+        }
+        if entry.ground_cover.as_ref().is_some_and(|g| {
+            !(g.density.is_finite() && g.density > 0.0 && g.density <= 8.0 && g.radius.is_finite() && g.radius > 0.0 && g.radius <= 400.0)
+        }) {
+            return Err(format!("invalid ground cover for kind {} (density 0..8 per m2, radius 0..400 m)", entry.kind));
         }
         if let Some(lod) = &entry.lod {
             if !lod.distance.is_finite()
@@ -211,6 +255,25 @@ mod tests {
         assert!(parse(&serde_json::to_vec(&document).unwrap()).is_err());
         let plain = parse(br#"{"version":1,"entries":[{"kind":131,"name":"tree","source":"t.gltf","primitives":[0]}]}"#).unwrap();
         assert_eq!((plain[&131].draw_distance, plain[&131].shadow_distance), (None, None), "unset keeps the component's");
+    }
+    #[test]
+    fn ground_cover_stays_out_of_the_traced_scene_unless_asked() {
+        let mut document = serde_json::json!({"version":1,"entries":[{
+            "kind":132,"name":"grass","source":"g.gltf","primitives":[0],"ground_cover":{"density":0.2,"radius":80.0}}]});
+        let parsed = parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(!parsed[&132].traced());
+        assert!(!parsed[&132].ground_cover.as_ref().unwrap().align_to_ground, "upright unless asked");
+        document["entries"][0]["ray_traced"] = serde_json::json!(true);
+        document["entries"][0]["ground_cover"]["align_to_ground"] = serde_json::json!(true);
+        let parsed = parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(parsed[&132].traced() && parsed[&132].ground_cover.as_ref().unwrap().align_to_ground);
+        let plain = parse(br#"{"version":1,"entries":[{"kind":131,"name":"tree","source":"t.gltf","primitives":[0]}]}"#).unwrap();
+        assert!(plain[&131].traced(), "painted kinds are traced, as before");
+        assert_eq!(plain[&131].trace_reach(), None, "everywhere, as before");
+        let tree = parse(br#"{"version":1,"entries":[{"kind":131,"name":"tree","source":"t.gltf","primitives":[0],"shadow_distance":200.0}]}"#).unwrap();
+        assert_eq!(tree[&131].trace_reach(), Some(200.0), "as far as it casts");
+        let own = parse(br#"{"version":1,"entries":[{"kind":131,"name":"tree","source":"t.gltf","primitives":[0],"shadow_distance":200.0,"trace_distance":90.0}]}"#).unwrap();
+        assert_eq!(own[&131].trace_reach(), Some(90.0));
     }
     #[test]
     fn stable_project_ids_preserve_all_selected_material_parts_and_transform() {

@@ -121,6 +121,8 @@ pub mod isometric_camera;
 /// Roofs and upper floors that open for the camera while the viewer is inside (Rimeborn, 18 Oct 2026).
 pub mod cutaway;
 pub mod lod_group;
+pub mod cell_streaming;
+pub mod ground_cover;
 /// Phase CONTROL-N: weather and the wetness it leaves.
 pub mod weather;
 /// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.

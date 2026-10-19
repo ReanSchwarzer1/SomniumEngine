@@ -406,6 +406,8 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         .filter(|e| {
             world.get::<crate::AssetEditSession>(*e).is_none()
                 && world.get::<crate::weather::PrecipitationEmitter>(*e).is_none()
+                // Streamed cells belong to their manifest, not to the scene that streams them.
+                && world.get::<crate::cell_streaming::Streamed>(*e).is_none()
         })
         .collect();
     entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")

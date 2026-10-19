@@ -2004,6 +2004,17 @@ const CONTACT_LENGTH: f32 = 0.35;
 /// a wall extending away from the camera.
 const CONTACT_THICKNESS: f32 = 0.05;
 
+/// `Instance._padding` of a draw that casts no contact shadow (Rust: `instance::NO_CONTACT_SHADOW`).
+const NO_CONTACT_SHADOW: u32 = 0x80000000u;
+
+/// Whether what the visibility buffer holds at `uv` may cast a contact shadow.
+fn casts_contact_shadow(uv: vec2<f32>) -> bool {
+    let dims = vec2<i32>(textureDimensions(vis_buffer));
+    let texel = min(vec2<i32>(uv * vec2<f32>(dims)), dims - vec2<i32>(1));
+    let vis = textureLoad(vis_buffer, texel, 0).x;
+    return vis == 0u || instances[vis - 1u]._padding != NO_CONTACT_SHADOW;
+}
+
 fn contact_shadow(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
@@ -2067,8 +2078,10 @@ fn contact_shadow(
         let diff = ray_view_depth - scene_view_depth;
 
         // The upper bound is what stops a surface far behind the ray from
-        // registering as an occluder.
-        if diff > 0.0 && diff < CONTACT_THICKNESS {
+        // registering as an occluder. Draws the CPU marked (generated grass,
+        // `exclude_from_contact_shadows`) occlude nothing here; looked up only
+        // on a hit, so a frame without them pays nothing.
+        if diff > 0.0 && diff < CONTACT_THICKNESS && casts_contact_shadow(uv) {
             // Fade with distance so the shadow ends softly instead of stopping
             // at a hard ring where the march runs out.
             occluded = max(occluded, 1.0 - f32(i) / f32(CONTACT_STEPS));

@@ -160,6 +160,12 @@ pub struct SomniumRenderer {
     /// cascade only, so the player's own hands, tools and body never dirty the cached distant ones.
     first_person: bool,
     first_person_casters: std::collections::HashSet<(u32, u32)>,
+    /// Meshes (by vertex offset) left out of this frame's traced scene (`exclude_from_tracing`).
+    untraced_meshes: std::collections::HashSet<u32>,
+    /// Meshes (by vertex offset) traced only within a distance of the camera this frame (`limit_tracing`).
+    trace_reach: std::collections::HashMap<u32, f32>,
+    /// Meshes (by vertex offset) that cast no contact shadow this frame (`exclude_from_contact_shadows`).
+    no_contact_meshes: std::collections::HashSet<u32>,
     /// Posed (skinned) meshes with a bottom-level structure of their own, rebuilt from each frame's pose.
     rt_posed: std::collections::HashSet<u32>,
     /// The cascades' split depths as last fitted, for how far a skinned caster's shadow can reach (`CasterKind`),
@@ -505,6 +511,15 @@ pub struct SomniumRenderer {
     pub terrains: Vec<crate::terrain::TerrainData>,
     /// Phase DF: one clipmap stack per terrain, same index as `terrains`.
     pub clipmaps: Vec<crate::terrain::clipmap::TerrainClipmap>,
+    /// Set only inside [`Self::create_streamed_terrain_with_asset_dir`].
+    streamed_terrain_distance: f32,
+    /// `SOMNIUM_RENDER_UNPRESENTED`: when the swap chain gives no image (a screensaver over the window, a locked
+    /// session), draw the frame into `unpresented_target` instead of dropping it, so captures and tours finish. Off,
+    /// a frame without an image is skipped as always. Frame generation stays off while it is set.
+    unpresented: bool,
+    unpresented_target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Frames left before the swap chain is asked again: a refused acquire waits out a timeout (about a second).
+    unpresented_wait: u32,
     clipmap_pass: crate::pass::terrain_clipmap::TerrainClipmapPass,
     /// Terrain ids (+ model matrices) submitted for the current frame.
     terrain_queue: Vec<(u32, glam::Mat4)>,
@@ -778,6 +793,10 @@ impl SomniumRenderer {
             && (self.debug_toggles.is_on("terrain_clipmap")
                 || self.clipmap_owned_by_virtual_texturing());
         for clipmap in &mut self.clipmaps {
+            if clipmap.is_dormant() {
+                clipmap.enabled = false;
+                continue;
+            }
             // Coming back on has to force a refresh. While it was off the
             // camera kept moving and the rings kept their old centres, so the
             // first frame back shades the ground from a cache of somewhere
@@ -1194,6 +1213,9 @@ impl SomniumRenderer {
             shadow_caster_content_revision: 0,
             first_person: false,
             first_person_casters: std::collections::HashSet::new(),
+            untraced_meshes: std::collections::HashSet::new(),
+            trace_reach: std::collections::HashMap::new(),
+            no_contact_meshes: std::collections::HashSet::new(),
             rt_posed: std::collections::HashSet::new(),
             cascade_split_depths: [f32::MAX; crate::shadow::NUM_CASCADES],
             cascade_texels: [0.0; crate::shadow::NUM_CASCADES],
@@ -1435,6 +1457,10 @@ impl SomniumRenderer {
             terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
             clipmaps: Vec::new(),
+            streamed_terrain_distance: 0.0,
+            unpresented: std::env::var_os("SOMNIUM_RENDER_UNPRESENTED").is_some(),
+            unpresented_target: None,
+            unpresented_wait: 0,
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
@@ -1708,6 +1734,77 @@ impl SomniumRenderer {
         scene: &somnium_asset::LoadedScene,
         textured: Option<&std::collections::HashSet<usize>>,
     ) -> Vec<u32> {
+        self.upload_scene_materials_prepared(ctx, scene, textured, None)
+    }
+
+    /// The textures' keys and cached chains for `indices`, on every core: the CPU half of a texture upload, safe on
+    /// any thread.
+    fn prepare_textures(
+        scene: &somnium_asset::LoadedScene,
+        indices: &[usize],
+        is_colour: &[bool],
+        compressing: bool,
+    ) -> Vec<(usize, [u8; 32], Option<PreparedChain>)> {
+        use rayon::prelude::*;
+        indices
+            .par_iter()
+            .map(|&index| {
+                let tex = &scene.textures[index];
+                let key = imported_texture_key(tex, is_colour[index]);
+                let chain = (compressing && crate::imported_bc::compressible(tex.width, tex.height)).then(|| {
+                    let alpha = crate::imported_bc::has_alpha(&tex.data);
+                    (alpha, crate::imported_bc::load(&key, tex.width, tex.height, alpha))
+                });
+                (index, key, chain)
+            })
+            .collect()
+    }
+
+    /// Whether imported textures go up as BC7 on this device: the `compressing` that
+    /// [`Self::prepare_scene_for`] needs.
+    #[must_use]
+    pub fn imported_compression(ctx: &RenderContext) -> bool {
+        crate::imported_bc::enabled(ctx.device.features())
+    }
+
+    /// The CPU half of [`Self::upload_scene_for`], made on any thread so an open world's streaming does not stall a
+    /// frame on it: every used texture's content key and cached BC7 chain, every mesh's clusters and SDF brick.
+    /// Hand it to [`Self::upload_prepared_scene_for`] with the same `scene` and `textured`.
+    #[must_use]
+    pub fn prepare_scene_for(
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        compressing: bool,
+    ) -> PreparedScene {
+        let (used_textures, is_colour, _) = Self::texture_usage(scene, textured);
+        let used: Vec<usize> = (0..scene.textures.len()).filter(|&index| used_textures[index]).collect();
+        let textures = Self::prepare_textures(scene, &used, &is_colour, compressing);
+        let meshes = {
+            use rayon::prelude::*;
+            scene.meshes.par_iter().map(|mesh| crate::geometry::prepare_mesh(&mesh.vertices, &mesh.indices)).collect()
+        };
+        PreparedScene { textures, meshes }
+    }
+
+    /// [`Self::upload_scene_for`] from a [`PreparedScene`]: only the GPU writes are left for this thread.
+    pub fn upload_prepared_scene_for(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        prepared: PreparedScene,
+    ) -> Vec<UploadedNode> {
+        let material_ids = self.upload_scene_materials_prepared(ctx, scene, textured, Some(prepared.textures));
+        self.upload_scene_meshes(ctx, scene, &material_ids, Some(prepared.meshes))
+    }
+
+    fn upload_scene_materials_prepared(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        prepared_textures: Option<Vec<(usize, [u8; 32], Option<PreparedChain>)>>,
+    ) -> Vec<u32> {
         // 1. Textures --------------------------------------------------------
         let (used_textures, is_colour, used_materials) = Self::texture_usage(scene, textured);
 
@@ -1724,20 +1821,15 @@ impl SomniumRenderer {
         let compressing = crate::imported_bc::enabled(ctx.device.features());
         let used: Vec<usize> = (0..scene.textures.len()).filter(|&index| used_textures[index]).collect();
         let mut texture_indices: Vec<Option<i32>> = vec![None; scene.textures.len()];
-        for batch in used.chunks(32) {
+        // Prepared on a streaming thread: every key is ready, so the batches below have nothing to do.
+        let ready = prepared_textures.is_some();
+        for (index, key, chain) in prepared_textures.unwrap_or_default() {
+            texture_indices[index] =
+                Some(self.upload_keyed_texture(ctx, &scene.textures[index], is_colour[index], key, chain, &mut staged));
+        }
+        for batch in used.chunks(32).filter(|_| !ready) {
             let preparing = std::time::Instant::now();
-            let prepared: Vec<(usize, [u8; 32], Option<PreparedChain>)> = {
-                use rayon::prelude::*;
-                batch.par_iter().map(|&index| {
-                    let tex = &scene.textures[index];
-                    let key = imported_texture_key(tex, is_colour[index]);
-                    let chain = (compressing && crate::imported_bc::compressible(tex.width, tex.height)).then(|| {
-                        let alpha = crate::imported_bc::has_alpha(&tex.data);
-                        (alpha, crate::imported_bc::load(&key, tex.width, tex.height, alpha))
-                    });
-                    (index, key, chain)
-                }).collect()
-            };
+            let prepared = Self::prepare_textures(scene, batch, &is_colour, compressing);
             self.texture_upload_stats.key_ms += preparing.elapsed().as_secs_f64() * 1000.0;
             for (index, key, chain) in prepared {
                 texture_indices[index] =
@@ -2116,13 +2208,24 @@ impl SomniumRenderer {
         textured: Option<&std::collections::HashSet<usize>>,
     ) -> Vec<UploadedNode> {
         let material_ids = self.upload_scene_materials_for(ctx, scene, textured);
+        self.upload_scene_meshes(ctx, scene, &material_ids, None)
+    }
+
+    fn upload_scene_meshes(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        material_ids: &[u32],
+        prepared: Option<Vec<crate::geometry::PreparedMesh>>,
+    ) -> Vec<UploadedNode> {
         // 3. Meshes ----------------------------------------------------------
         let meshing = std::time::Instant::now();
-        // Clusters and SDF bricks on every core first; the uploads stay in order.
-        let prepared: Vec<crate::geometry::PreparedMesh> = {
+        // Clusters and SDF bricks on every core first (unless a streaming thread made them); the uploads stay in
+        // order.
+        let prepared: Vec<crate::geometry::PreparedMesh> = prepared.unwrap_or_else(|| {
             use rayon::prelude::*;
             scene.meshes.par_iter().map(|mesh| crate::geometry::prepare_mesh(&mesh.vertices, &mesh.indices)).collect()
-        };
+        });
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
             .meshes
             .iter()
@@ -3102,6 +3205,27 @@ impl SomniumRenderer {
         self.submit(cmd);
     }
 
+    /// Leave every draw of the mesh at `vertex_offset` out of this frame's ray-traced scene (TLAS) while still
+    /// rasterising it: generated ground cover, whose thousands of small instances would fill the TLAS's instance cap
+    /// and switch ray-traced reflections off for the frame. Lasts one frame, like the queues.
+    pub fn exclude_from_tracing(&mut self, vertex_offset: u32) {
+        self.untraced_meshes.insert(vertex_offset);
+    }
+
+    /// Keep the draws of the mesh at `vertex_offset` in this frame's ray-traced scene only where they come within
+    /// `reach` metres of the camera (they still rasterise everywhere): painted trees out to a 400 m draw distance,
+    /// whose far thousands would overflow the traced scene's instance cap. Lasts one frame, like the queues.
+    pub fn limit_tracing(&mut self, vertex_offset: u32, reach: f32) {
+        self.trace_reach.insert(vertex_offset, reach);
+    }
+
+    /// Let the mesh at `vertex_offset` cast no screen-space contact shadow this frame (its shadow-map shadow is
+    /// unchanged): generated grass, whose short contact shadows read as dark scribbles from a high camera. Lasts
+    /// one frame, like the queues.
+    pub fn exclude_from_contact_shadows(&mut self, vertex_offset: u32) {
+        self.no_contact_meshes.insert(vertex_offset);
+    }
+
     /// Draw geometry only into shadow maps. Useful for a first-person body
     /// whose head is hidden from the primary camera but still casts a shadow.
     /// The command uses the same instance layout and clears with the frame.
@@ -3264,6 +3388,22 @@ impl SomniumRenderer {
         self.create_terrain_inner(ctx, desc, true, std::path::Path::new("assets/terrain"))
     }
 
+    /// As [`Self::create_terrain_with_asset_dir`], for an open world's terrain windows: the terrain takes
+    /// geometry-pool space only while the camera is within `geometry_distance` metres of it
+    /// ([`crate::terrain::TerrainData::stream_geometry`]), so a world of many windows fits the pool.
+    pub fn create_streamed_terrain_with_asset_dir(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+        asset_dir: &std::path::Path,
+        geometry_distance: f32,
+    ) -> u32 {
+        self.streamed_terrain_distance = geometry_distance.max(0.0);
+        let id = self.create_terrain_inner(ctx, desc, false, asset_dir);
+        self.streamed_terrain_distance = 0.0;
+        id
+    }
+
     fn create_terrain_inner(
         &mut self,
         ctx: &RenderContext,
@@ -3278,7 +3418,12 @@ impl SomniumRenderer {
             ctx.supports_bc_compression(),
             asset_dir,
         );
-        terrain.reserve_pool_spans(&mut self.geometry);
+        if self.streamed_terrain_distance > 0.0 {
+            // Spans come when the camera is near (the first frame, for a window the view starts in).
+            terrain.geometry_stream_distance = self.streamed_terrain_distance;
+        } else {
+            terrain.reserve_pool_spans(&mut self.geometry);
+        }
         if hero_bank_only {
             terrain.apply_hero_bank_gpu_budget();
         }
@@ -3372,7 +3517,12 @@ impl SomniumRenderer {
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
 
-        let clipmap = crate::terrain::clipmap::TerrainClipmap::new(&ctx.device);
+        // A streamed open-world window keeps a dormant clipmap: 1 x 1 images instead of 96 MiB it would never use.
+        let clipmap = if self.streamed_terrain_distance > 0.0 {
+            crate::terrain::clipmap::TerrainClipmap::new_dormant(&ctx.device)
+        } else {
+            crate::terrain::clipmap::TerrainClipmap::new(&ctx.device)
+        };
 
         // The `GpuMaterial` itself is nearly empty: `terrain_index` is what
         // sends the shading pass down the splat path, and everything it would
@@ -3414,6 +3564,10 @@ impl SomniumRenderer {
         self.terrains.push(terrain);
         self.clipmaps.push(clipmap);
         let last = self.clipmaps.len() - 1;
+        if self.clipmaps[last].is_dormant() {
+            // The shading pass keeps the stacks it has: a dormant clipmap's stand-ins would replace a live one's.
+            return (self.terrains.len() - 1) as u32;
+        }
         let (detail_a, detail_s) = self.clipmaps[last].detail_sampled();
         let (macro_a, macro_s) = self.clipmaps[last].macro_sampled();
         let detail_a = detail_a.clone();
@@ -3704,12 +3858,37 @@ impl SomniumRenderer {
         self.profiler.cpu_end();
         // FSR 3 frame generation: the scene goes to a picture and the swap chain
         // images are taken after it (renderer_frame_gen.rs).
-        let frame_gen_eligible = ui.is_immersive() && scene_target.is_none() && self.views.len() <= 1;
+        let frame_gen_eligible =
+            !self.unpresented && ui.is_immersive() && scene_target.is_none() && self.views.len() <= 1;
         let frame_gen_view = self.frame_gen_begin(ctx, window, game_ui.as_deref_mut(), frame_gen_eligible);
         let acquire_started = std::time::Instant::now();
-        let output = if frame_gen_view.is_some() { None } else { Some(match ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex) => tex,
-            wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+        let skip_acquire = self.unpresented && self.unpresented_wait > 0;
+        self.unpresented_wait = self.unpresented_wait.saturating_sub(1);
+        let acquired = if frame_gen_view.is_some() || skip_acquire { None } else { Some(ctx.surface.get_current_texture()) };
+        let output = if frame_gen_view.is_some() { None } else { match acquired {
+            Some(wgpu::CurrentSurfaceTexture::Success(tex)) => Some(tex),
+            Some(wgpu::CurrentSurfaceTexture::Suboptimal(tex)) => Some(tex),
+            _ if self.unpresented => {
+                if !skip_acquire {
+                    self.unpresented_wait = 120;
+                }
+                let (w, h) = (ctx.config.width.max(1), ctx.config.height.max(1));
+                if self.unpresented_target.as_ref().is_none_or(|t| (t.2, t.3) != (w, h)) {
+                    let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("unpresented frame"),
+                        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: ctx.config.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    self.unpresented_target = Some((texture, view, w, h));
+                }
+                None
+            }
             _ => {
                 tracing::warn!("Failed to acquire surface texture");
                 // The per-frame queues still have to be emptied. Returning
@@ -3720,12 +3899,16 @@ impl SomniumRenderer {
                 self.clear_frame_queues();
                 return;
             }
-        }) };
+        } };
         self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
         let surface_view = match (&output, &frame_gen_view) {
             (Some(output), _) => output.texture.create_view(&wgpu::TextureViewDescriptor::default()),
             (None, Some(picture)) => picture.clone(),
-            (None, None) => unreachable!("acquired above unless generating"),
+            (None, None) => self
+                .unpresented_target
+                .as_ref()
+                .map(|t| t.1.clone())
+                .expect("acquired above unless generating or drawing unpresented"),
         };
 
         // The picture and the chrome can be in different windows. Everything
@@ -3883,14 +4066,14 @@ impl SomniumRenderer {
         // lands in the swap chain image the UI and the present below use.
         let (output, surface_view) = if frame_gen_view.is_some() {
             match self.frame_gen_finish(ctx, &mut encoder) {
-                Some(acquired) => acquired,
+                Some((acquired, view)) => (Some(acquired), view),
                 None => {
                     self.clear_frame_queues();
                     return;
                 }
             }
         } else {
-            (output.expect("acquired above"), surface_view.clone())
+            (output, surface_view.clone())
         };
 
         // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
@@ -3905,7 +4088,10 @@ impl SomniumRenderer {
                 self.capture.record_display(
                     &ctx.device,
                     &mut encoder,
-                    &output.texture,
+                    output.as_ref().map_or_else(
+                        || &self.unpresented_target.as_ref().expect("drawn unpresented").0,
+                        |o| &o.texture,
+                    ),
                     ctx.config.width,
                     ctx.config.height,
                     ctx.config.format,
@@ -4023,7 +4209,10 @@ impl SomniumRenderer {
                 self.capture.record_ui(
                     &ctx.device,
                     &mut encoder,
-                    &output.texture,
+                    output.as_ref().map_or_else(
+                        || &self.unpresented_target.as_ref().expect("drawn unpresented").0,
+                        |o| &o.texture,
+                    ),
                     ctx.config.width,
                     ctx.config.height,
                     ctx.config.format,
@@ -4190,7 +4379,9 @@ impl SomniumRenderer {
         // so the present is ordered against submitted work explicitly rather
         // than implicitly by the texture's lifetime.
         let presenting = std::time::Instant::now();
-        ctx.queue.present(output);
+        if let Some(output) = output {
+            ctx.queue.present(output);
+        }
         self.profiler.submit_present_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
         let ms = |from: std::time::Instant, to: std::time::Instant| (to - from).as_secs_f32() * 1000.0;
         self.profiler.submit_parts_ms = [
@@ -4572,6 +4763,36 @@ impl SomniumRenderer {
             let terrain = &mut self.terrains[id as usize];
             terrain.model = model;
             let local_cam = model.inverse().transform_point3(self.camera_pos);
+            // A window that gave its chunks back drops their BLAS too, or each return leaks a window's worth.
+            for offset in terrain.stream_geometry(&mut self.geometry, local_cam) {
+                self.raytrace_pass.unregister_mesh(offset);
+            }
+            // WS1-18: a streamed window with no geometry draws nothing, so its splat maps (~134 MB at 2048^2 x 8)
+            // go too, and come back, re-uploaded from the CPU weights, as its first chunks return. The bindless
+            // slots keep their numbers and point at the dummy image meanwhile.
+            if terrain.geometry_stream_distance > 0.0 {
+                let resident = terrain.chunks.iter().any(|c| c.vertex_offset != crate::terrain::UNALLOCATED);
+                if resident == terrain.splatmap.is_parked() {
+                    if resident {
+                        terrain.splatmap.unpark(&ctx.device);
+                    } else {
+                        terrain.splatmap.park(&ctx.device);
+                    }
+                    for (i, &slot) in terrain.texture_ids.splat_maps.iter().enumerate() {
+                        let Ok(slot) = usize::try_from(slot) else { continue };
+                        let view = if resident {
+                            terrain.splatmap.views[i].clone()
+                        } else {
+                            self.texture_pool.dummy_view.clone()
+                        };
+                        if let Some(owned) = self.texture_pool.views.get_mut(slot) {
+                            *owned = view.clone();
+                        }
+                        self.global_pool.set_slot(slot, view);
+                    }
+                    self.global_pool.update_textures(&ctx.device);
+                }
+            }
             terrain.select_lods(local_cam, &shoreline_regions);
             self.rebuilt_chunks.clear();
             terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut self.rebuilt_chunks);
@@ -4762,11 +4983,11 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
-            self.instances.add_instance(gpu_instance_from_cmd(
-                &self.terrain_lod_by_vertex,
-                cmd,
-                shadow_debug,
-            ));
+            let mut instance = gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug);
+            if instance._padding == 0 && self.no_contact_meshes.contains(&cmd.vertex_offset) {
+                instance._padding = crate::instance::NO_CONTACT_SHADOW;
+            }
+            self.instances.add_instance(instance);
         }
         for cmd in &self.shadow_only_queue {
             self.instances.add_instance(gpu_instance_from_cmd(
@@ -5215,6 +5436,7 @@ impl SomniumRenderer {
                 .iter()
                 .enumerate()
                 .filter(|(_, cmd)| !self.first_person_casters.contains(&(cmd.vertex_offset, cmd.index_offset)))
+                .filter(|(_, cmd)| !self.untraced_meshes.contains(&cmd.vertex_offset))
                 // A posed mesh out of reach keeps whatever pose its bottom level last had: left out, not shown stale.
                 .filter(|(_, cmd)| !posed.contains_key(&cmd.vertex_offset) || live_posed.contains(&cmd.vertex_offset))
                 .filter_map(|(i, cmd)| {
@@ -5222,6 +5444,14 @@ impl SomniumRenderer {
                         let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
                         cmd.transform.transform_vector3(half).length()
                     });
+                    if let Some(&reach) = self.trace_reach.get(&cmd.vertex_offset) {
+                        let centre = geometry.mesh_aabb(cmd.vertex_offset).map_or(cmd.transform.w_axis.truncate(), |(min, max)| {
+                            cmd.transform.transform_point3((glam::Vec3::from(min) + glam::Vec3::from(max)) * 0.5)
+                        });
+                        if centre.distance(self.camera_pos) - radius.min(1.0e6) > reach {
+                            return None;
+                        }
+                    }
                     (radius >= TLAS_MIN_RADIUS).then(|| {
                         (
                             u32::try_from(i).unwrap_or(0),
@@ -6749,6 +6979,9 @@ impl SomniumRenderer {
         self.draw_queue.clear();
         self.reactive_draws.clear();
         self.first_person_casters.clear();
+        self.untraced_meshes.clear();
+        self.trace_reach.clear();
+        self.no_contact_meshes.clear();
         self.first_person = false;
         self.game_highlight_draws.clear();
         self.game_highlight_style = None;
@@ -7432,6 +7665,12 @@ const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 /// Content and interpretation both identify a reusable GPU image.
 /// A compressible texture's alpha and its BC7 chain from the cache, if stored.
 type PreparedChain = (bool, Option<Vec<Vec<u8>>>);
+
+/// The CPU half of an imported scene's upload ([`Renderer::prepare_scene_for`]), made off the render thread.
+pub struct PreparedScene {
+    textures: Vec<(usize, [u8; 32], Option<PreparedChain>)>,
+    meshes: Vec<crate::geometry::PreparedMesh>,
+}
 
 fn imported_texture_key(texture: &somnium_asset::LoadedTexture, colour: bool) -> [u8; 32] {
     use sha2::{Digest, Sha256};

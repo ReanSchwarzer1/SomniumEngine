@@ -1029,6 +1029,10 @@ pub struct Engine<G: GameApp> {
     world_partition: Option<crate::world_partition::WorldPartition>,
     world_partition_cell_size: f64,
     world_partition_pin: Option<crate::world_partition::CellCoord>,
+    /// Read-only cells streamed around the view (`somnium.CellStreaming`).
+    cell_streamer: crate::cell_streaming::CellStreamer,
+    /// Grass and flowers generated round the camera for `ground_cover` foliage kinds.
+    ground_cover: crate::ground_cover::GroundCover,
     /// The inventory and the reference graph travel together, because they
     /// are two readings of the same disk and a panel showing one against the
     /// other's assets is worse than no panel (MORROWIND-M item 3).
@@ -1740,6 +1744,8 @@ impl<G: GameApp + 'static> Engine<G> {
             world_partition: None,
             world_partition_cell_size: 0.0,
             world_partition_pin: None,
+            cell_streamer: crate::cell_streaming::CellStreamer::default(),
+            ground_cover: crate::ground_cover::GroundCover::default(),
             asset_scan: None,
             asset_gate: somnium_asset::database::DebouncedAssetDb::default(),
             locale_catalog: None,
@@ -2629,6 +2635,7 @@ impl<G: GameApp> Engine<G> {
             .chain(self.foliage_lod_meshes.iter_mut().filter_map(Option::take).flatten())
             .collect::<Vec<_>>();
         self.foliage_failed = [false; 256];
+        self.ground_cover.clear();
         for part in foliage {
             if part.index_count > 0 && !retained.contains(&part.vertex_offset) {
                 meshes.insert(part.vertex_offset);
@@ -2654,15 +2661,23 @@ impl<G: GameApp> Engine<G> {
 
     /// Re-upload the GPU state a schema scene does not carry.
     fn reconstruct_scene_gpu(&mut self, path: &str) {
+        let all: Vec<Entity> = self.world.entities().collect();
+        self.restore_entity_gpu(&all);
+        self.restore_terrain_gpu(path);
+    }
+
+    /// Re-upload primitives and imported meshes for `entities`: a scene open passes every entity, a streamed cell
+    /// its own.
+    fn restore_entity_gpu(&mut self, entities: &[Entity]) {
         // ── primitives ──────────────────────────────────────────────────────
         // A `MeshKind` says what the geometry *is*; the `MeshComponent` beside
         // it holds offsets into a buffer that no longer exists. Regenerating
         // and overwriting in place keeps the entity's identity, its parent and
         // its authored material — which is why this is not the game layer's
         // despawn-and-respawn auto-attach.
-        let primitives: Vec<_> = self
-            .world
-            .entities()
+        let primitives: Vec<_> = entities
+            .iter()
+            .copied()
             .filter_map(|entity| Some((entity, *self.world.get::<MeshKind>(entity)?)))
             .collect();
         if !primitives.is_empty()
@@ -2724,7 +2739,7 @@ impl<G: GameApp> Engine<G> {
             renderer.texture_upload_stats = Default::default();
         }
         let mut imported = std::collections::BTreeMap::<String, Vec<(Entity, u32)>>::new();
-        for entity in self.world.entities() {
+        for &entity in entities {
             if let Some(source) = self.world.get::<crate::ImportedMesh>(entity) {
                 imported
                     .entry(source.source.clone())
@@ -2871,6 +2886,10 @@ impl<G: GameApp> Engine<G> {
             );
         }
 
+    }
+
+    /// Terrain sidecars, terrain-linked water and authored materials, after a scene open.
+    fn restore_terrain_gpu(&mut self, path: &str) {
         // ── terrain sidecars ────────────────────────────────────────────────
         // Heightmaps and splatmaps are megabytes of painted data and live
         // beside the scene rather than inside it. Each is named after the
@@ -2934,8 +2953,15 @@ impl<G: GameApp> Engine<G> {
                 // Prefab reconstruction also calls this method without resetting
                 // the scene. Its existing terrain must retain sculpted data.
                 let existed = renderer.terrain(component.terrain_id).is_some();
+                let streamed = self
+                    .world
+                    .get::<crate::cell_streaming::TerrainStreamingComponent>(entity)
+                    .map(|s| s.geometry_distance)
+                    .filter(|d| *d > 0.0);
                 let id = if existed {
                     component.terrain_id
+                } else if let Some(distance) = streamed {
+                    renderer.create_streamed_terrain_with_asset_dir(ctx, desc, &asset_dir, distance)
                 } else {
                     renderer.create_terrain_with_asset_dir(ctx, desc, &asset_dir)
                 };
@@ -5589,6 +5615,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         // through `renderer.set_view`. Stream from that same-frame position,
         // not from a stale ECS settings transform or last frame's renderer.
         self.update_world_partition();
+        self.update_cell_streaming();
 
         // The active camera is the listener. Reconcile authored emitters only
         // after `on_render` publishes that same-frame view.
@@ -8874,6 +8901,11 @@ impl<G: GameApp> Engine<G> {
             .renderer
             .as_ref()
             .map_or(glam::Vec3::ZERO, |r| r.camera_pos);
+        // Where the view looks: ground cover grows round that, not round the camera (WS1-19).
+        let forward_ws = self
+            .renderer
+            .as_ref()
+            .map_or(glam::Vec3::NEG_Z, |r| r.view_matrix.inverse().transform_vector3(glam::Vec3::NEG_Z));
         let terrains: Vec<(
             u32,
             glam::Mat4,
@@ -8882,6 +8914,7 @@ impl<G: GameApp> Engine<G> {
             f32,
             f32,
             somnium_ecs::curve::Curve,
+            Option<glam::Vec4>,
         )> = self
             .world
             .entities_with::<TerrainComponent>()
@@ -8906,6 +8939,10 @@ impl<G: GameApp> Engine<G> {
                     fc.lod_distance,
                     fc.impostor_distance,
                     fc.lod_falloff.clone(),
+                    self.world
+                        .get::<crate::cell_streaming::TerrainStreamingComponent>(e)
+                        .map(|s| s.own_area)
+                        .filter(|a| *a != glam::Vec4::ZERO),
                 ))
             })
             .collect();
@@ -8922,6 +8959,7 @@ impl<G: GameApp> Engine<G> {
             lod_distance,
             impostor_distance,
             lod_falloff,
+            own_area,
         ) in terrains
         {
             // Which palette entries this terrain actually uses, so nothing is
@@ -8935,7 +8973,10 @@ impl<G: GameApp> Engine<G> {
                 grid.refresh(t.edit_revision, &t.painted_foliage);
                 grid.kinds.clone()
             };
-            for kind in &kinds {
+            // Kinds generated round the camera need their meshes as painted ones do.
+            let cover_kinds: Vec<u8> =
+                self.project_foliage.iter().filter(|(_, e)| e.ground_cover.is_some()).map(|(k, _)| *k).collect();
+            for kind in kinds.iter().chain(&cover_kinds) {
                 self.ensure_palette_mesh(*kind);
             }
 
@@ -8964,7 +9005,8 @@ impl<G: GameApp> Engine<G> {
             let mut kind_reach = [cull_distance; 256];
             for (kind, entry) in &self.project_foliage {
                 let k = *kind as usize;
-                if let Some(d) = entry.draw_distance {
+                // Ground cover draws as far as it is generated unless told otherwise.
+                if let Some(d) = entry.draw_distance.or(entry.ground_cover.as_ref().map(|g| g.radius)) {
                     (kind_cull[k], kind_reach[k]) = (d * d, d);
                 }
                 if let Some(s) = entry.shadow_distance {
@@ -8981,12 +9023,21 @@ impl<G: GameApp> Engine<G> {
             if let Some(grid) = self.foliage_grids.get(&terrain_id) {
                 grid.visit([camera_local.x, camera_local.z], reach, |i| self.foliage_visit.push(i));
             }
+            let focus_local = crate::ground_cover::view_focus(
+                camera_local,
+                model.inverse().transform_vector3(forward_ws).normalize_or(glam::Vec3::NEG_Z),
+                t.world_height_at(camera_local.x, camera_local.z),
+                400.0,
+            );
+            self.ground_cover.update(terrain_id, t, &self.project_foliage, focus_local, own_area);
             self.foliage_batch.clear();
-            for &index in &self.foliage_visit {
-                let inst = &t.painted_foliage[index];
+            let painted = self.foliage_visit.iter().map(|&index| (&t.painted_foliage[index], None));
+            let cover = self.ground_cover.instances(terrain_id).iter().map(|c| (&c.instance, Some(c.rotation)));
+            for (inst, cover_rotation) in painted.chain(cover) {
                 let k = inst.kind as usize;
                 counts.candidates = counts.candidates.saturating_add(1);
-                let d = inst.position - camera_local;
+                // Generated cover is measured from where it grows round; painted kinds from the camera, as before.
+                let d = inst.position - if cover_rotation.is_some() { focus_local } else { camera_local };
                 // Horizontal distance: flying up should not make ground cover
                 // vanish out from under you.
                 if d.x * d.x + d.z * d.z > kind_cull[k] {
@@ -9031,7 +9082,9 @@ impl<G: GameApp> Engine<G> {
                 // random direction.
                 let placement = glam::Mat4::from_scale_rotation_translation(
                     glam::Vec3::splat(scale),
-                    glam::Quat::from_rotation_y(inst.yaw) * glam::Quat::from_rotation_x(inst.tilt),
+                    cover_rotation.unwrap_or_else(|| {
+                        glam::Quat::from_rotation_y(inst.yaw) * glam::Quat::from_rotation_x(inst.tilt)
+                    }),
                     inst.position,
                 );
                 // Horizontal, like the draw cull above and for the same
@@ -9102,6 +9155,32 @@ impl<G: GameApp> Engine<G> {
             });
 
             if let Some(r) = self.renderer.as_mut() {
+                // Kinds kept out of the ray-traced scene (ground cover by default): their meshes still rasterise.
+                // Kinds traced only near the camera (their shadow distance, or their own trace distance).
+                for (kind, entry) in &self.project_foliage {
+                    let reach = if entry.traced() { entry.trace_reach() } else { Some(0.0) };
+                    let Some(reach) = reach else { continue };
+                    let near = self.foliage_meshes.get(*kind as usize).and_then(Option::as_ref);
+                    let far = self.foliage_lod_meshes.get(*kind as usize).and_then(Option::as_ref);
+                    for part in near.into_iter().chain(far).flatten() {
+                        if reach <= 0.0 {
+                            r.exclude_from_tracing(part.vertex_offset);
+                        } else {
+                            r.limit_tracing(part.vertex_offset, reach);
+                        }
+                    }
+                }
+                // Generated cover casts no contact shadows: from the iso camera they read as scribbles (WS1-19d).
+                for (kind, entry) in &self.project_foliage {
+                    if entry.ground_cover.is_none() {
+                        continue;
+                    }
+                    let near = self.foliage_meshes.get(*kind as usize).and_then(Option::as_ref);
+                    let far = self.foliage_lod_meshes.get(*kind as usize).and_then(Option::as_ref);
+                    for part in near.into_iter().chain(far).flatten() {
+                        r.exclude_from_contact_shadows(part.vertex_offset);
+                    }
+                }
                 for (part, transform, casts_shadow) in self.foliage_batch.drain(..) {
                     r.submit(somnium_renderer::command::DrawCommand {
                         paint: 0,
@@ -14230,5 +14309,8 @@ mod material_studio_host;
 
 #[path = "app_story.rs"]
 mod story_host;
+
+#[path = "app_cell_streaming.rs"]
+mod cell_streaming_host;
 
 include!("app_project_foliage.rs");

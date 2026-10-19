@@ -135,7 +135,13 @@ fn geometry_usage(base: wgpu::BufferUsages, ray_query_enabled: bool) -> wgpu::Bu
 impl GeometryPool {
     pub fn new(device: &wgpu::Device) -> Self {
         let max_binding = u64::from(device.limits().max_storage_buffer_binding_size);
-        let vertex_bytes = VERTEX_POOL_BYTES.min(max_binding);
+        // An open world can ask for more (Rimeborn: several 4 km terrain windows near the camera at once); the default
+        // stays what every other game has always had.
+        let vertex_request = std::env::var("SOMNIUM_GEOMETRY_POOL_MB")
+            .ok()
+            .and_then(|mb| mb.trim().parse::<u64>().ok())
+            .map_or(VERTEX_POOL_BYTES, |mb| mb.max(64) * 1024 * 1024);
+        let vertex_bytes = vertex_request.min(max_binding);
         let index_bytes = INDEX_POOL_BYTES.min(max_binding);
         tracing::info!(
             "Geometry pool: {:.0} MB vertex / {:.0} MB index (device limit {:.0} MB)",
@@ -377,6 +383,16 @@ impl GeometryPool {
     ///
     /// The caller keeps the returned offset for the lifetime of the geometry and
     /// passes it back to [`GeometryPool::write_vertices`] on every rebuild.
+    /// [`Self::reserve_vertices`] for space that may simply not be there yet (a streamed terrain window waiting for
+    /// another to go): no error is logged when the pool is full.
+    pub fn try_reserve_vertices(&mut self, count: u32) -> Option<u32> {
+        let offset = take_free_span(&mut self.free_vertex_spans, count).or_else(|| {
+            reserve_span(&mut self.next_vertex, count, std::mem::size_of::<Vertex>() as u64, self.vertex_bytes)
+        })?;
+        self.vertex_spans.insert(offset, count);
+        Some(offset)
+    }
+
     pub fn reserve_vertices(&mut self, count: u32) -> Option<u32> {
         let offset = take_free_span(&mut self.free_vertex_spans, count).or_else(|| {
             reserve_span(

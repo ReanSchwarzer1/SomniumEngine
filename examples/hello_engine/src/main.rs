@@ -2385,6 +2385,9 @@ impl GameApp for HelloGame {
                     let l_col = archetype
                         .column_index(ComponentId::of::<LightComponent>())
                         .unwrap();
+                    // A lamp parented under a building or a prop sits where its world transform puts it, not at its
+                    // local offset (which put every child lamp near the world origin, under the ground: WS2-8).
+                    let w_col = archetype.column_index(ComponentId::of::<somnium_core::WorldTransform>());
                     // Hiding a light hides what it lights, not just its gizmo.
                     // One lookup per archetype, since most carry no flags.
                     let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
@@ -2398,7 +2401,14 @@ impl GameApp for HelloGame {
                         {
                             continue;
                         }
-                        let transform = unsafe { archetype.column(t_col).get::<Transform>(row) };
+                        let local = unsafe { archetype.column(t_col).get::<Transform>(row) };
+                        let world = w_col.map(|col| {
+                            let (_, rotation, translation) = unsafe { archetype.column(col).get::<somnium_core::WorldTransform>(row) }
+                                .0
+                                .to_scale_rotation_translation();
+                            Transform { translation, rotation, ..*local }
+                        });
+                        let transform = world.as_ref().unwrap_or(local);
                         let light = unsafe { archetype.column(l_col).get::<LightComponent>(row) };
 
                         // Two different conventions, easy to mix up:
