@@ -17,8 +17,10 @@
 //! plays its `Walk_F_Loop`. Move names resolve through the project's
 //! `animation/clips.json` aliases.
 //!
-//! A swordsman's blade rides the `weapon_r` socket while fighting and the
-//! `sheath` socket otherwise; a rider sits on the mount's `saddle` socket.
+//! A fighter's weapon is WS3's mesh for its kind (`clips.json` `gear`: the
+//! spear, axe and knife on `weapon_r`, the bow on `weapon_l`; a plain blade
+//! for a sword until there is a sword mesh). A sword or knife goes to the
+//! `sheath` socket when not fighting. A rider sits on the mount's `saddle`.
 
 use crate::skinned_crowd::{SkinnedBody, SkinnedSocket};
 use glam::{Mat4, Quat, Vec3};
@@ -26,8 +28,11 @@ use somnium_character::{Controller, MantleKind, Mode};
 use somnium_combat::CombatantId;
 use somnium_combat::clips::ClipTable;
 use somnium_combat::mount::Herding;
+use somnium_combat::weapon::WeaponKind;
 use somnium_combat::world::{Action, CastPhase, CombatWorld, Combatant, Phase};
-use somnium_core::{EditorFlags, MeshKind, Name, Parent, Transform, WorldTransform};
+use somnium_core::{
+    EditorFlags, ImportedMesh, MaterialComponent, MeshKind, Name, Parent, Transform, WorldTransform,
+};
 use somnium_ecs::{Entity, World};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -241,11 +246,31 @@ fn yaw(facing: Vec3) -> Quat {
     Quat::from_rotation_y(f.x.atan2(f.z))
 }
 
+/// A piece of WS3's gear (`clips.json` `gear`): its file under the assets, nodes and joint.
+#[derive(Clone, Debug, PartialEq)]
+struct Piece {
+    file: String,
+    nodes: Vec<u32>,
+    joint: String,
+}
+
+/// The piece a weapon of `kind` is, and whether it goes to the sheath out of a fight.
+fn piece_for(kind: WeaponKind) -> Option<(&'static str, bool)> {
+    match kind {
+        WeaponKind::Sword => Some(("sword", true)),
+        WeaponKind::Knife => Some(("knife", true)),
+        WeaponKind::Spear | WeaponKind::LanceGlaive => Some(("spear", false)),
+        WeaponKind::Axe => Some(("axe", false)),
+        WeaponKind::Bow => Some(("bow", false)),
+        _ => None,
+    }
+}
+
 /// One fighter's body.
 struct Skin {
     body: Entity,
-    /// The blade's socket (weapon_r or sheath).
-    sword: Option<Entity>,
+    /// The weapon's socket, the joint it is held on, and whether it is sheathed out of a fight.
+    weapon: Option<(Entity, String, bool)>,
     /// A mount's saddle socket, where its rider sits.
     saddle: Option<Entity>,
     clip: String,
@@ -254,10 +279,56 @@ struct Skin {
     fought: f64,
 }
 
+/// Each gear piece `clips.json` names (its `gear` table, clip to pieces), once, where its file is there.
+fn gear_pieces(content: &std::path::Path, text: &str) -> BTreeMap<String, Piece> {
+    let doc: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    let mut pieces = BTreeMap::new();
+    for list in doc
+        .get("gear")
+        .and_then(|g| g.as_object())
+        .into_iter()
+        .flat_map(|g| g.values())
+    {
+        for g in list.as_array().into_iter().flatten() {
+            let (Some(name), Some(file), Some(joint)) = (
+                g.get("piece").and_then(|v| v.as_str()),
+                g.get("file").and_then(|v| v.as_str()),
+                g.get("joint").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            if pieces.contains_key(name) || !content.join(file).exists() {
+                continue;
+            }
+            let nodes = g
+                .get("nodes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_u64())
+                        .map(|n| n as u32)
+                        .collect()
+                })
+                .unwrap_or_default();
+            pieces.insert(
+                name.to_string(),
+                Piece {
+                    file: file.to_string(),
+                    nodes,
+                    joint: joint.to_string(),
+                },
+            );
+        }
+    }
+    pieces
+}
+
 /// The fight's skinned bodies.
 #[derive(Default)]
 pub struct Skins {
     table: Option<ClipTable>,
+    /// WS3's gear pieces by name, the ones whose files are there.
+    gear: BTreeMap<String, Piece>,
     seen: BTreeSet<CombatantId>,
     skins: BTreeMap<CombatantId, Skin>,
     /// Bodies taken off fighters and shapes hidden (with the flags they had), given back at Stop.
@@ -269,12 +340,16 @@ impl Skins {
     /// With the project's clip table (`<content>/animation/clips.json`), if it has one.
     #[must_use]
     pub fn new(content: Option<&std::path::Path>) -> Self {
-        let table = content
-            .map(|c| c.join("animation/clips.json"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| ClipTable::from_json(&t).ok());
+        let text =
+            content.and_then(|c| std::fs::read_to_string(c.join("animation/clips.json")).ok());
+        let table = text.as_deref().and_then(|t| ClipTable::from_json(t).ok());
+        let gear = match (content, text.as_deref()) {
+            (Some(content), Some(text)) => gear_pieces(content, text),
+            _ => BTreeMap::new(),
+        };
         Self {
             table,
+            gear,
             ..Default::default()
         }
     }
@@ -358,28 +433,55 @@ impl Skins {
                     },
                 ))
             };
-            let sword = c.sword.is_some().then(|| {
-                let s = socket(world, "sheath");
-                world.spawn((
-                    Name::new(&format!("{name} sword")),
-                    Transform {
-                        translation: Vec3::new(0.0, 0.45, 0.0),
-                        scale: Vec3::new(0.035, 0.9, 0.012),
-                        ..Default::default()
-                    },
-                    WorldTransform::identity(),
-                    Parent { entity: s },
-                    MeshKind::Cube,
-                    crate::combat_demo::material("dark"),
-                ));
-                s
-            });
+            // Its weapon: WS3's mesh for the kind on its joint; a sword without a
+            // mesh is a plain blade.
+            let weapon =
+                piece_for(c.weapon.kind).and_then(|(piece, sheathes)| match self.gear.get(piece) {
+                    Some(g) => {
+                        // Out of a fight to begin with: a sword or knife starts in its sheath.
+                        let s = socket(world, if sheathes { "sheath" } else { &g.joint });
+                        for &node in &g.nodes {
+                            world.spawn((
+                                Name::new(&format!("{name} {piece} {node}")),
+                                Transform::default(),
+                                WorldTransform::identity(),
+                                Parent { entity: s },
+                                ImportedMesh {
+                                    source: format!("assets/{}", g.file),
+                                    node,
+                                },
+                                MaterialComponent {
+                                    asset: somnium_asset::database::AssetId::NONE,
+                                    runtime_id: 0,
+                                },
+                            ));
+                        }
+                        Some((s, g.joint.clone(), sheathes))
+                    }
+                    None if piece == "sword" => {
+                        let s = socket(world, "sheath");
+                        world.spawn((
+                            Name::new(&format!("{name} sword")),
+                            Transform {
+                                translation: Vec3::new(0.0, 0.45, 0.0),
+                                scale: Vec3::new(0.035, 0.9, 0.012),
+                                ..Default::default()
+                            },
+                            WorldTransform::identity(),
+                            Parent { entity: s },
+                            MeshKind::Cube,
+                            crate::combat_demo::material("dark"),
+                        ));
+                        Some((s, "weapon_r".to_string(), true))
+                    }
+                    None => None,
+                });
             let saddle = c.mount_def.is_some().then(|| socket(world, "saddle"));
             self.skins.insert(
                 id,
                 Skin {
                     body,
-                    sword,
+                    weapon,
                     saddle,
                     clip: String::new(),
                     clock: 0.0,
@@ -460,9 +562,13 @@ impl Skins {
                 }
                 b.time = time;
             }
-            if let Some(s) = skin.sword {
-                let joint = if drawn { "weapon_r" } else { "sheath" };
-                if let Some(sock) = world.get_mut::<SkinnedSocket>(s)
+            if let Some((s, held, sheathes)) = &skin.weapon {
+                let joint = if drawn || !sheathes {
+                    held.as_str()
+                } else {
+                    "sheath"
+                };
+                if let Some(sock) = world.get_mut::<SkinnedSocket>(*s)
                     && sock.joint != joint
                 {
                     sock.joint = joint.into();
@@ -555,6 +661,29 @@ mod tests {
                 .0
                 .starts_with("Jump_Loop")
         );
+    }
+
+    /// clips.json's gear table gives each piece once, only where its file is
+    /// there; a weapon kind names its piece and whether it is sheathed.
+    #[test]
+    fn weapons_are_ws3_gear_by_kind() {
+        let dir = std::env::temp_dir().join(format!("combat_gear_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("characters/gear")).unwrap();
+        std::fs::write(dir.join("characters/gear/axe.glb"), b"").unwrap();
+        let text = r#"{"gear": {
+            "Axe_Cut_1": [{"piece": "axe", "file": "characters/gear/axe.glb", "nodes": [0, 1], "joint": "weapon_r"}],
+            "Axe_Cut_2": [{"piece": "axe", "file": "characters/gear/axe.glb", "nodes": [0, 1], "joint": "weapon_r"}],
+            "Bow_Draw_Release": [{"piece": "bow", "file": "characters/gear/bow.glb", "nodes": [0], "joint": "weapon_l"}]},
+            "clips": {}, "aliases": {}}"#;
+        let gear = gear_pieces(&dir, text);
+        assert_eq!(gear.len(), 1, "the bow's file is not there");
+        assert_eq!(gear["axe"].nodes, vec![0, 1]);
+        assert_eq!(gear["axe"].joint, "weapon_r");
+        assert_eq!(piece_for(WeaponKind::Axe), Some(("axe", false)));
+        assert_eq!(piece_for(WeaponKind::Sword), Some(("sword", true)));
+        assert_eq!(piece_for(WeaponKind::LanceGlaive), Some(("spear", false)));
+        assert_eq!(piece_for(WeaponKind::Unarmed), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A move plays its aliased clip warped to its designed timings; a death holds; a dodge back plays Dodge_B.
