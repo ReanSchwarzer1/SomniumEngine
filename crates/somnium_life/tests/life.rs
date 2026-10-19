@@ -611,3 +611,65 @@ fn crowd_cost() {
         );
     }
 }
+
+/// A real realm's table: how long each town takes to house, and a whole day
+/// with the view in its biggest town and every town housed
+/// (`SOMNIUM_LIFE_TABLE=<table.json> cargo test -p somnium_life --release
+/// --test life realm_table -- --ignored --nocapture`).
+#[test]
+#[ignore = "reads a game's life table; timing"]
+fn realm_table() {
+    let Ok(path) = std::env::var("SOMNIUM_LIFE_TABLE") else {
+        return;
+    };
+    let table =
+        somnium_life::LifeTable::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut w = LifeWorld::new(LodConfig::default());
+    let mut slowest = (0.0_f64, String::new());
+    let started = std::time::Instant::now();
+    for p in &table.places {
+        let t = std::time::Instant::now();
+        w.adopt_place(p.key(), p.place.clone(), Some(p.seed));
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        if ms > slowest.0 {
+            slowest = (ms, p.place.name.clone());
+        }
+    }
+    eprintln!(
+        "{} places housed in {:.1} ms; slowest {} {:.2} ms; {} villagers, {} beasts, {} carts",
+        table.places.len(),
+        started.elapsed().as_secs_f64() * 1000.0,
+        slowest.1,
+        slowest.0,
+        w.villagers().len(),
+        w.beasts().len(),
+        w.carts().len()
+    );
+    let biggest = table
+        .places
+        .iter()
+        .max_by_key(|p| p.place.spots.len())
+        .unwrap();
+    let view = Vec3::from(biggest.centre);
+    let dt = 1.0 / 60.0;
+    let mut hour = 0.0_f32;
+    let mut ticks = Vec::new();
+    let mut near = 0;
+    while hour < 24.0 {
+        let t = std::time::Instant::now();
+        w.step(dt, Clock::at(hour), &[view], &Flat);
+        ticks.push(t.elapsed().as_secs_f64() * 1000.0);
+        near = near.max(w.stats().near);
+        hour += dt / 6.0;
+    }
+    let mean = ticks.iter().sum::<f64>() / ticks.len() as f64;
+    ticks.sort_by(f64::total_cmp);
+    let at = |q: f64| ticks[((ticks.len() - 1) as f64 * q) as usize];
+    eprintln!(
+        "a day in {} (view at its middle): mean {mean:.4} ms a tick, p99 {:.3}, p99.9 {:.3}, worst {:.3}; up to {near} near",
+        biggest.place.name,
+        at(0.99),
+        at(0.999),
+        ticks.last().unwrap()
+    );
+}
