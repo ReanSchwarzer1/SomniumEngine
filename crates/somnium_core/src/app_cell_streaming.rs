@@ -59,7 +59,10 @@ impl<G: GameApp> Engine<G> {
             self.unload_cell(index);
         }
 
-        let focus = self.renderer.as_ref().map(|renderer| renderer.camera_pos);
+        // The camera, unless the view is pinned (a protagonist switch's camera is up, crossing land nobody sees).
+        let pinned = self.world.take_cache::<cells::Holds>();
+        let focus = pinned.pinned().or_else(|| self.renderer.as_ref().map(|renderer| renderer.camera_pos));
+        self.world.put_cache(pinned);
         let first_fill = !self.cell_streamer.filled;
         self.schedule_cells(&settings, focus);
         if first_fill && !self.cell_streamer.reading.is_empty() {
@@ -115,15 +118,18 @@ impl<G: GameApp> Engine<G> {
         self.set_cell_status(owner, status);
     }
 
-    /// Unload what the view has left and start readers (up to `READERS`) for what it has reached, nearest first.
+    /// Unload what the view has left and start readers (up to `READERS`) for what it has reached, nearest first. The
+    /// points held with `cell_streaming::hold` count as views too, and are marked ready once their cells are in.
     fn schedule_cells(&mut self, settings: &CellStreamingComponent, focus: Option<glam::Vec3>) {
+        let mut holds: cells::Holds = self.world.take_cache();
         let streamer = &self.cell_streamer;
         let (load, unload) = match focus {
-            Some(focus) if settings.enabled => cells::plan(
+            Some(focus) if settings.enabled => cells::plan_many(
                 &streamer.cells,
                 [focus.x, focus.z],
                 settings.load_radius,
                 settings.unload_margin,
+                &holds.discs(),
                 |index| streamer.loaded.contains_key(&index) || streamer.reading.contains_key(&index),
             ),
             Some(_) => (Vec::new(), streamer.loaded.keys().chain(streamer.reading.keys()).copied().collect()),
@@ -140,6 +146,11 @@ impl<G: GameApp> Engine<G> {
                 self.start_cell_read(index);
             }
         }
+        let streamer = &self.cell_streamer;
+        holds.mark_ready(&streamer.cells, |index| {
+            streamer.loaded.contains_key(&index) || streamer.failed.contains_key(&index)
+        });
+        self.world.put_cache(holds);
     }
 
     /// Start a cell's reader: parse it, then decode and prepare each source it needs that is not uploaded yet.
