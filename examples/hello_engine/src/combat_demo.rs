@@ -2037,6 +2037,36 @@ pub struct CombatDemo {
     hud: Option<Hud>,
     /// Ctrl held: the wheel is the camera's, not the measure's.
     ctrl: bool,
+    /// Draw the sandbox's text panels and the "?" and "!" marks. A game with
+    /// its own HUD (Rimeborn's) turns it off and reads [`CombatDemo::hud_view`]
+    /// and [`CombatDemo::take_hud_events`] instead.
+    pub show_hud: bool,
+    /// The fight's latest events, for a game's HUD (the newest [`HUD_EVENTS`]).
+    hud_events: VecDeque<CombatEvent>,
+}
+
+/// How many of the fight's events wait for a game's HUD before the oldest go.
+pub const HUD_EVENTS: usize = 64;
+
+/// What a game's HUD reads of a running fight (see [`CombatDemo::hud_view`]).
+pub struct HudView<'a> {
+    /// The fight: every fighter, their vitals, actions and statuses.
+    pub world: &'a CombatWorld,
+    /// The protagonist, if the scene has one.
+    pub player: Option<CombatantId>,
+    /// Who has noticed the protagonist, how far, and the seconds their mark
+    /// has left.
+    pub marks: &'a BTreeMap<CombatantId, (somnium_combat::ai::Awareness, f32)>,
+    /// The fight's camera, its world matrix (as [`CombatDemo::view`] gives).
+    pub camera: Option<Mat4>,
+}
+
+/// Keep the newest of a step's `events` for a game's HUD, `cap` at most.
+fn keep_hud_events(queue: &mut VecDeque<CombatEvent>, events: &[CombatEvent], cap: usize) {
+    queue.extend(events.iter().cloned());
+    while queue.len() > cap {
+        queue.pop_front();
+    }
 }
 
 impl Default for CombatDemo {
@@ -2050,6 +2080,8 @@ impl Default for CombatDemo {
             cursor: None,
             hud: None,
             ctrl: false,
+            show_hud: true,
+            hud_events: VecDeque::new(),
         }
     }
 }
@@ -2160,6 +2192,23 @@ impl CombatDemo {
     /// The sandbox camera's world matrix while a fight runs.
     pub fn view(&self, world: &World) -> Option<Mat4> {
         self.run.as_ref()?.camera.map(|c| world_matrix(world, c))
+    }
+
+    /// The running fight as a game's HUD reads it; `None` when no fight runs.
+    pub fn hud_view<'a>(&'a self, world: &World) -> Option<HudView<'a>> {
+        let run = self.run.as_ref()?;
+        Some(HudView {
+            world: &run.world,
+            player: run.player,
+            marks: &run.marks,
+            camera: self.view(world),
+        })
+    }
+
+    /// The fight's events since the last call (the newest [`HUD_EVENTS`]), for
+    /// a game's HUD: damage, healing, parries, broken poise, statuses, deaths.
+    pub fn take_hud_events(&mut self) -> Vec<CombatEvent> {
+        self.hud_events.drain(..).collect()
     }
 
     /// Build the fight from the scene's authored fighters, ground and wind.
@@ -2317,6 +2366,7 @@ impl CombatDemo {
             log_locomotion(run, id, event);
         }
         let events = run.world.drain_events();
+        keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
         for event in &events {
             react(ctx, run, event);
         }
@@ -2336,6 +2386,9 @@ impl CombatDemo {
         let Some(run) = &self.run else {
             return;
         };
+        if !self.show_hud {
+            return;
+        }
         let rect = ctx.ui.viewport_physical_rect(1.0);
         if self.hud.as_ref().is_none_or(|h| h.rect != rect) {
             self.hud = Some(Hud::new(rect));
@@ -2351,6 +2404,7 @@ impl CombatDemo {
     /// Draw the HUD.
     pub fn draw_ui(&mut self, frame: &mut GameUiFrame) {
         if self.run.is_some()
+            && self.show_hud
             && let Some(hud) = &mut self.hud
         {
             frame.draw(&mut hud.canvas);
@@ -4900,6 +4954,26 @@ mod tests {
             CombatantComponent::protagonist(),
         );
         (world, root)
+    }
+
+    /// A game's HUD reads the running fight (none without one) and takes its
+    /// newest events, at most [`HUD_EVENTS`] waiting.
+    #[test]
+    fn hud_view_and_events_for_a_game() {
+        let (world, _) = hero_scene(Vec3::ZERO);
+        let mut demo = CombatDemo::default();
+        assert!(demo.hud_view(&world).is_none() && demo.show_hud);
+        demo.run = build(&world);
+        let view = demo.hud_view(&world).expect("a fight");
+        let hero = view.player.expect("the protagonist");
+        assert!(view.world.combatant(hero).is_some() && view.marks.is_empty());
+        let broken = |n: u32| CombatEvent::GuardBroken { target: CombatantId(n) };
+        let events: Vec<CombatEvent> = (0..100).map(broken).collect();
+        keep_hud_events(&mut demo.hud_events, &events, HUD_EVENTS);
+        let taken = demo.take_hud_events();
+        assert_eq!(taken.len(), HUD_EVENTS);
+        assert!(matches!(taken[0], CombatEvent::GuardBroken { target: CombatantId(36) }), "the oldest go");
+        assert!(demo.take_hud_events().is_empty(), "taken once");
     }
 
     /// A band patrolling a road: along a spline, from `at`, `length` metres
