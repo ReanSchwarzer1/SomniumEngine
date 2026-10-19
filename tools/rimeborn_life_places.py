@@ -76,6 +76,7 @@ WALK_SPEED, RUN_SPEED = 0.86, 5.6
 SNAP = 3.0  # a street's end this close to another street joins it
 CHILD_BELOW, ELDER_FROM = 16, 50  # a body's age (SOURCE.json) that makes it a child's or an elder's (WS3's elders: 52+)
 NOT_VILLAGERS = {"guard"}  # families WS3 casts as set pieces, not people on a routine
+MIN_OWN = 6  # a town's own bodies of a kind, fewer than this, are joined by the table's (no clones)
 
 
 def front(az_deg):
@@ -95,6 +96,62 @@ def door(position, az, depth):
     fx, fz = front(az)
     reach = depth * 0.5 + 0.6
     return [position[0] + fx * reach, position[1], position[2] + fz * reach]
+
+
+def rotate(q, v):
+    """`v` turned by the quaternion `q` (x, y, z, w)."""
+    x, y, z, w = q
+    tx, ty, tz = 2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0])
+    return (v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx))
+
+
+class Bounds(dict):
+    """Each building's bounds by its library name, read when first asked (WS2's `<lib>.building.json`)."""
+
+    def __init__(self, rimeborn: Path):
+        super().__init__()
+        self.paths = {p.name[: -len(".building.json")]: p for p in (rimeborn / "assets/architecture").rglob("*.building.json")
+                      if "_lod" not in p.name}
+
+    def get(self, lib, default=None):
+        if lib not in self and lib in self.paths:
+            try:
+                self[lib] = json.loads(self.paths[lib].read_text(encoding="utf-8")).get("bounds_local")
+            except (OSError, ValueError):
+                self[lib] = None
+        return super().get(lib, default)
+
+
+def door_record(b, bounds, near):
+    """The point 0.6 m out from the middle of one of a building's door leaves, in its placement's frame: of WS2's
+    `doors_gltf_local` (a hinge in the building's glTF frame, a width), the sane one (within the building's bounds,
+    Blender axes: x, depth, up) nearest `near`, front doors first. The leaf runs along the wall its hinge is on, toward
+    that wall's middle, and out is away from the building (rb-story's doors open within 2 m of the point). None without
+    a sane record."""
+    doors, q = b.get("doors_gltf_local") or [], b.get("rotation_quat_xyzw")
+    if not doors or not q or not bounds:
+        return None
+    (x0, y0, _), (x1, y1, _) = bounds
+    half_w, half_d = max(-x0, x1, 0.01), max(-y0, y1, 0.01)
+    if max(half_w, half_d) > 100.0:  # a building file whose geometry strays (some rows): its records too
+        return None
+    at, best = b["position_local"], None
+    for d in doors:
+        hx, hy, hz = d["hinge"]
+        if abs(hx) > half_w + 1.0 or abs(hz) > half_d + 1.0:
+            continue
+        leaf = 0.5 * d.get("width", 1.0)
+        toward = lambda v: -math.copysign(leaf, v) if abs(v) > 1e-3 else leaf  # noqa: E731
+        if abs(hx) / half_w > abs(hz) / half_d:  # a side wall: the leaf along z, out along x
+            local = (hx + math.copysign(0.6, hx), hy, hz + toward(hz))
+        else:
+            local = (hx + toward(hx), hy, hz + math.copysign(0.6, hz))
+        r = rotate(q, local)
+        point = [at[0] + r[0], at[1] + r[1], at[2] + r[2]]
+        rank = ("front" not in d.get("name", ""), math.dist((point[0], point[2]), (near[0], near[2])))
+        if best is None or rank < best[0]:
+            best = (rank, point)
+    return best[1] if best else None
 
 
 def lanes_of(streets, dx, dz, height):
@@ -164,7 +221,7 @@ def area_spot(a, dx, dz):
             "radius": round(radius, 2), "label": a["name"]}
 
 
-def building_spots(buildings, plots_by_id, dx, dy, dz):
+def building_spots(buildings, plots_by_id, dx, dy, dz, bounds=None):
     spots = []
     for b in buildings:
         kind = kind_of(b)
@@ -173,7 +230,10 @@ def building_spots(buildings, plots_by_id, dx, dy, dz):
         plot = plots_by_id.get(b.get("plot"))
         depth = plot["size"][1] if plot else 8.0
         p = b["position_local"]
-        at = door([p[0] + dx, p[1] + dy, p[2] + dz], b["yaw_front_az_deg"], depth)
+        # Its real door where WS2's record has one (a church's west door), else the front's middle.
+        middle = door(p, b["yaw_front_az_deg"], depth)
+        real = door_record(b, (bounds or {}).get(b.get("lib")), middle) or middle
+        at = [real[0] + dx, real[1] + dy, real[2] + dz]
         spots.append({"kind": kind, "position": [round(v, 3) for v in at],
                       "radius": 0.5 if kind in INDOOR else 6.0, "label": b["id"]})
     return spots
@@ -308,6 +368,8 @@ def build(rimeborn: Path):
     tdx, tdy, tdz = shift("tyffir")
     places, report = [], []
     index = people_index(rimeborn)
+    looks = looks_of(rimeborn)
+    bounds = Bounds(rimeborn)
 
     def add(name, centre, radius, spots, lanes, roads):
         if not any(s["kind"] == "Home" for s in spots):
@@ -316,6 +378,12 @@ def build(rimeborn: Path):
         entry = {"centre": [round(v, 3) for v in centre], "radius": radius, "seed": zlib.crc32(name.encode("utf-8")),
                  "place": {"name": name, "spots": spots, "lanes": lanes, "roads": roads}}
         people = people_of(rimeborn, name, index)
+        # WS3's scenes keep only set pieces now (life owns whoever moves): a town with few bodies of a kind of its own
+        # (one story child, a village's herder and two hands) wears the table's too, so its folk are not clones.
+        for role, own in list(people.items()):
+            table = looks["villagers"].get(role)
+            if len(own) < MIN_OWN and table and role in ("default", "Child", "Elder"):
+                people[role] = sorted(set(own) | set(table))
         if people:
             entry["people"] = people
         places.append(entry)
@@ -333,7 +401,7 @@ def build(rimeborn: Path):
             report.append(f"  {d['settlement']}: not in WS1's site plan, left out")
             continue
         plots = {pl["id"]: pl for pl in site["plots"]}
-        spots = building_spots(d["buildings"], plots, tdx, tdy, tdz)
+        spots = building_spots(d["buildings"], plots, tdx, tdy, tdz, bounds)
         spots += [area_spot(a, tdx, tdz) for a in site["areas"] if a["use"] in BY_AREA]
         lanes, roads = lanes_of(site["streets"], tdx, tdz, heights_from(site["plots"], site["ground_y"]))
         add(d["settlement"], (site["x"] + tdx, site["ground_y"], site["z"] + tdz), float(site["radius_m"]),
@@ -345,7 +413,7 @@ def build(rimeborn: Path):
             continue
         d = json.loads(f.read_text(encoding="utf-8"))
         name = d.get("settlement") or f.stem.replace("_", " ").title()
-        spots = building_spots(d.get("buildings", []), {}, 0.0, 0.0, 0.0)
+        spots = building_spots(d.get("buildings", []), {}, 0.0, 0.0, 0.0, bounds)
         site = by_name.get(name.lower())
         lanes, roads = [], []
         if site:
@@ -371,7 +439,7 @@ def build(rimeborn: Path):
             fullest[name] = p
     places = list(fullest.values())
     table = {"version": 1, "frame": f"{WORLD} (compose_tyffir.py's world)",
-             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks_of(rimeborn)}
+             "made_by": "tools/rimeborn_life_places.py (WS5)", "places": places, "looks": looks}
     looks = table["looks"]
     # Every body anyone may wear, by its height: gear is sized to its holder.
     worn = {b for bodies in looks["villagers"].values() for b in bodies}

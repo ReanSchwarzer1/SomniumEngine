@@ -1447,7 +1447,7 @@ impl LifeDemo {
             &ground,
         );
         // The doors near villagers pass. A game opens its own: with
-        // somnium_core::door (rb-interaction), `request_pass(world, at)` for each.
+        // somnium_core::door (claude/rb-interactable), `request_pass(world, at)` for each.
         run.doors += run.life.door_passes().len();
         if let Some(at) = focus.first() {
             run.life.keep_clear(*at, 0.7);
