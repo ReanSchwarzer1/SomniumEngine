@@ -15,6 +15,10 @@ const AMBLE: f32 = 0.55;
 const CART_GAP: f32 = 8.0;
 /// Running from danger, metres a second.
 const RUN: f32 = 3.6;
+
+/// Seconds ahead of stepping in through a door that a near villager asks for
+/// it, so the leaf is open when they reach it.
+pub const DOOR_LEAD: f32 = 1.0;
 /// Neighbours idling at one spot this close stop to talk.
 const TALK_REACH: f32 = 4.0;
 /// How far a dog wanders from its home's door, metres.
@@ -115,6 +119,8 @@ pub struct Villager {
     notice_after: f64,
     /// Hours it runs behind the routine, so a household does not leave as one.
     late: f32,
+    /// It has asked for the door of the indoor spot it walks to.
+    door_asked: bool,
     rng: Rng,
 }
 
@@ -260,6 +266,8 @@ pub struct LifeWorld {
     stats: Stats,
     /// Places adopted by a stable key (see [`LifeWorld::adopt_place`]).
     keyed: HashMap<u64, usize>,
+    /// Doors near villagers passed through in the last step.
+    door_passes: Vec<Vec3>,
 }
 
 impl LifeWorld {
@@ -280,7 +288,16 @@ impl LifeWorld {
             next_id: 1,
             stats: Stats::default(),
             keyed: HashMap::new(),
+            door_passes: Vec::new(),
         }
+    }
+
+    /// The doors near villagers passed through in the last step: stepping out
+    /// of an indoor spot, or about [`DOOR_LEAD`] seconds from stepping in, each
+    /// once. A host opens them (a game's doors, by the door's position).
+    #[must_use]
+    pub fn door_passes(&self) -> &[Vec3] {
+        &self.door_passes
     }
 
     /// Add a place that comes and goes (with a streamed cell), keyed by
@@ -517,6 +534,7 @@ impl LifeWorld {
             flee_until: 0.0,
             notice_after: 0.0,
             late,
+            door_asked: false,
             rng,
         });
         Some(id)
@@ -793,13 +811,15 @@ impl LifeWorld {
         }
         let mut paths = self.paths_per_tick;
         let pace = (self.walk_speed, self.run_speed);
+        let mut doors = std::mem::take(&mut self.door_passes);
+        doors.clear();
         for who in chosen {
             match who {
                 Who::Villager(i) => {
                     let v = &mut self.villagers[i];
                     let owed = std::mem::take(&mut v.owed);
                     if let Some(p) = places.get(v.place) {
-                        v.advance(p, clock, ground, owed, now, &mut paths, pace);
+                        v.advance(p, clock, ground, owed, now, &mut paths, pace, &mut doors);
                     }
                 }
                 Who::Beast(i) => {
@@ -824,6 +844,7 @@ impl LifeWorld {
                 }
             }
         }
+        self.door_passes = doors;
         self.converse();
         self.stats = stats;
     }
@@ -898,6 +919,7 @@ impl Villager {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn advance(
         &mut self,
         placed: &Placed,
@@ -907,7 +929,15 @@ impl Villager {
         now: f64,
         paths: &mut usize,
         (walk, run): (f32, f32),
+        doors: &mut Vec<Vec3>,
     ) {
+        // Nobody sees a door open for anyone but the near.
+        let mut ask = |at: Vec3, near: bool| {
+            if near && !doors.contains(&at) {
+                doors.push(at);
+            }
+        };
+        let near = self.tier == Tier::Near;
         let place = &placed.place;
         let fleeing = now < self.flee_until;
         let wanted = if fleeing {
@@ -925,11 +955,17 @@ impl Villager {
                 && let Some(to) = target
             {
                 *paths -= 1;
+                // Out of the door it was behind.
+                if !self.visible {
+                    ask(self.position, near);
+                }
                 self.go(placed, to);
+                self.door_asked = false;
             }
             self.target = target;
         }
-        let mut walked = dt * if fleeing { run } else { walk };
+        let pace = if fleeing { run } else { walk };
+        let mut walked = dt * pace;
         loop {
             match &mut self.doing {
                 Doing::Walking { path, next, to } => {
@@ -938,6 +974,15 @@ impl Villager {
                     settle(&mut self.position, ground);
                     self.pose = if fleeing { Pose::Run } else { Pose::Walk };
                     self.visible = true;
+                    // In through a door: asked for a little before it is reached
+                    // (or on arriving, after a long step).
+                    if !self.door_asked
+                        && let Some(s) = place.spots.get(to).filter(|s| s.kind.indoor())
+                        && (left.is_some() || flat(self.position, s.position) <= pace * DOOR_LEAD)
+                    {
+                        ask(s.position, near);
+                        self.door_asked = true;
+                    }
                     let Some(left) = left else {
                         break;
                     };

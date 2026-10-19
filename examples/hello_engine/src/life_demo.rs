@@ -553,6 +553,8 @@ struct Run {
     health: HashMap<Entity, f32>,
     /// Alarms rung by fights, all told.
     fights: usize,
+    /// Doors near villagers have passed through, all told.
+    doors: usize,
     /// A Life Table's places, housed as the view comes near.
     table: Option<TableRun>,
     /// A Life Table's looks: what the pooled people and beasts wear.
@@ -1275,6 +1277,7 @@ impl LifeDemo {
             greeted: 0,
             health: HashMap::new(),
             fights: 0,
+            doors: 0,
             table,
             dress_as,
             gear: HashMap::new(),
@@ -1438,6 +1441,9 @@ impl LifeDemo {
             &focus,
             &ground,
         );
+        // The doors near villagers pass. A game opens its own: with
+        // somnium_core::door (rb-interaction), `request_pass(world, at)` for each.
+        run.doors += run.life.door_passes().len();
         if let Some(at) = focus.first() {
             run.life.keep_clear(*at, 0.7);
             run.greeted += run.life.notice(*at, 3.5).len();
@@ -1483,6 +1489,7 @@ impl LifeDemo {
             "places": run.life.place_count(),
             "places_loaded": run.links.places.len(),
             "greeted": run.greeted,
+            "doors": run.doors,
             "table": run.table.as_ref().map(|t| json!({"places": t.table.places.len(), "adopted": t.count})),
             "fights": run.fights,
             "villagers": run.life.villagers().len(),
