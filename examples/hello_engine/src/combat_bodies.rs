@@ -307,6 +307,7 @@ fn piece_for(kind: WeaponKind) -> Option<(&'static str, bool)> {
         WeaponKind::Spear | WeaponKind::LanceGlaive => Some(("spear", false)),
         WeaponKind::Axe => Some(("axe", false)),
         WeaponKind::Bow => Some(("bow", false)),
+        WeaponKind::LatticeRifle => Some(("rifle", false)),
         _ => None,
     }
 }
