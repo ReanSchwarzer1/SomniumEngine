@@ -76,9 +76,19 @@ pub struct Kind {
     pub accel: f32,
     /// How fast it turns (rad/s at the most).
     pub turn: f32,
-    /// Where the protagonist sits, in the boat's frame (feet).
+    /// Where the protagonist's Root sits, from the middle of the hull's top: WS3's
+    /// rowing and sailing loops sit the pelvis 0.10 m above it and the feet 0.32 m
+    /// below, on rb-architecture's floor 0.33 m above the hull's bottom, so 0.65 m
+    /// above the bottom for every kind.
     pub seat: Vec3,
+    /// What he plays there (WS3's): rowing (the stroke while the oars pull, with
+    /// clips.json's oars in his hands) or at the tiller with the sheet.
+    pub clip: &'static str,
 }
+
+/// WS3's rowing loop, and the tiller and sheet's.
+const ROW: &str = "Row_Loop|Sit_Idle_Loop";
+const SAIL: &str = "Sail_Idle_Loop|Sit_Idle_Loop";
 
 pub const KINDS: [Kind; 4] = [
     Kind {
@@ -88,7 +98,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 2.2,
         accel: 1.2,
         turn: 0.9,
-        seat: Vec3::new(0.0, 0.05, -0.3),
+        seat: Vec3::new(0.0, 0.15, -0.3),
+        clip: ROW,
     },
     Kind {
         name: "currach",
@@ -97,7 +108,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 2.6,
         accel: 1.3,
         turn: 0.8,
-        seat: Vec3::new(0.0, 0.05, -0.5),
+        seat: Vec3::new(0.0, 0.15, -0.5),
+        clip: ROW,
     },
     Kind {
         name: "fjord",
@@ -106,7 +118,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 4.0,
         accel: 0.9,
         turn: 0.5,
-        seat: Vec3::new(0.0, 0.1, -2.6),
+        seat: Vec3::new(0.0, -0.15, -2.6),
+        clip: SAIL,
     },
     Kind {
         name: "barge",
@@ -115,7 +128,8 @@ pub const KINDS: [Kind; 4] = [
         speed: 1.4,
         accel: 0.5,
         turn: 0.3,
-        seat: Vec3::new(0.0, 0.1, -4.0),
+        seat: Vec3::new(0.0, -0.25, -4.0),
+        clip: SAIL,
     },
 ];
 
@@ -472,6 +486,9 @@ struct Afloat {
     moored: Option<Vec3>,
     /// The plain hull drawn for a boat with no mesh of its own.
     hull: Vec<Entity>,
+    /// Its oars shipped inside (rb-architecture's `oars_shipped_*` nodes), hidden while its rower holds WS3's.
+    oars: Vec<Entity>,
+    oars_hidden: bool,
 }
 
 /// Boats in Play.
@@ -555,15 +572,26 @@ impl BoatHost {
                 .any(|(_, p)| p.entity == entity)
                 || ctx.world.get::<MeshKind>(entity).is_some();
             // Its own mesh, else rb-architecture's hull for its kind, else a plain one.
-            let hull = if has_mesh {
-                Vec::new()
+            let (hull, oars) = if has_mesh {
+                (Vec::new(), Vec::new())
             } else {
                 let file = format!("props/boats/boat_{}.glb", kind.name);
-                let nodes = crate::combat_bodies::mesh_nodes(&ctx.config.content_root.join(&file));
+                let nodes =
+                    crate::combat_bodies::mesh_node_names(&ctx.config.content_root.join(&file));
                 if nodes.is_empty() {
-                    plain_hull(ctx.world, entity, &kind, authored.scale)
+                    (
+                        plain_hull(ctx.world, entity, &kind, authored.scale),
+                        Vec::new(),
+                    )
                 } else {
-                    hull_mesh(ctx.world, entity, &file, &nodes, authored.scale)
+                    let hull = hull_mesh(ctx.world, entity, &file, &nodes, authored.scale);
+                    let oars = hull
+                        .iter()
+                        .zip(&nodes)
+                        .filter(|(_, (_, name))| name.starts_with("oars_shipped"))
+                        .map(|(e, _)| *e)
+                        .collect();
+                    (hull, oars)
                 }
             };
             self.afloat.push(Afloat {
@@ -573,6 +601,8 @@ impl BoatHost {
                 authored,
                 moored: Some(at.2),
                 hull,
+                oars,
+                oars_hidden: false,
             });
         }
         info!(
@@ -624,7 +654,27 @@ impl BoatHost {
             self.look_in = 1.0;
             self.adopt(ctx);
         }
-        for a in &self.afloat {
+        let rowed = self
+            .aboard
+            .map(|(i, _)| i)
+            .filter(|&i| self.afloat[i].kind.clip == ROW);
+        for (i, a) in self.afloat.iter_mut().enumerate() {
+            // Its shipped oars go while its rower holds WS3's, and come back after.
+            let hide = rowed == Some(i);
+            if a.oars_hidden != hide {
+                a.oars_hidden = hide;
+                for &e in &a.oars {
+                    let flags = somnium_core::EditorFlags {
+                        hidden: hide,
+                        ..ctx
+                            .world
+                            .get::<somnium_core::EditorFlags>(e)
+                            .copied()
+                            .unwrap_or_default()
+                    };
+                    let _ = ctx.world.insert_component(e, flags);
+                }
+            }
             let pose = Mat4::from_rotation_translation(
                 ctx.physics.get_rotation(a.body),
                 ctx.physics.get_position(a.body),
@@ -707,13 +757,29 @@ impl BoatHost {
             }
             float(ctx.physics, a.body, &a.kind, water, oars, a.moored);
         }
+        // The stroke runs while the oars pull (WS3's loop is a 2 s stroke); the tiller always.
+        combat.aboard_clip = self.aboard.map(|(i, _)| {
+            let clip = self.afloat[i].kind.clip;
+            let rate = if clip == ROW {
+                rowing.ahead.abs().max(rowing.turn.abs() * 0.8)
+            } else {
+                1.0
+            };
+            (clip.to_string(), rate)
+        });
         combat.aboard = self.aboard.map(|(i, _)| {
             let a = &self.afloat[i];
             let hull = Mat4::from_rotation_translation(
                 ctx.physics.get_rotation(a.body),
                 ctx.physics.get_position(a.body),
             );
-            hull * Mat4::from_translation(a.kind.seat + Vec3::Y * a.kind.half.y)
+            // A rower faces the stern and pulls (WS3's stroke); a helmsman faces the bow.
+            let facing = if a.kind.clip == ROW {
+                Mat4::from_rotation_y(std::f32::consts::PI)
+            } else {
+                Mat4::IDENTITY
+            };
+            hull * Mat4::from_translation(a.kind.seat + Vec3::Y * a.kind.half.y) * facing
         });
     }
 
@@ -753,12 +819,12 @@ fn hull_mesh(
     world: &mut World,
     boat: Entity,
     file: &str,
-    nodes: &[u32],
+    nodes: &[(u32, String)],
     scale: Vec3,
 ) -> Vec<Entity> {
     nodes
         .iter()
-        .map(|&node| {
+        .map(|&(node, _)| {
             world.spawn((
                 Name::new("Boat hull"),
                 Transform {

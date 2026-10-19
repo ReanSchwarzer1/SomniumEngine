@@ -383,6 +383,11 @@ impl Skin {
 
 /// The nodes of a glTF binary that carry meshes, from its JSON chunk.
 pub(crate) fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
+    mesh_node_names(path).into_iter().map(|(i, _)| i).collect()
+}
+
+/// The nodes of a glTF binary that carry meshes, with their names.
+pub(crate) fn mesh_node_names(path: &std::path::Path) -> Vec<(u32, String)> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
@@ -402,7 +407,15 @@ pub(crate) fn mesh_nodes(path: &std::path::Path) -> Vec<u32> {
         .flatten()
         .enumerate()
         .filter(|(_, n)| n.get("mesh").is_some())
-        .map(|(i, _)| i as u32)
+        .map(|(i, n)| {
+            (
+                i as u32,
+                n.get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
         .collect()
 }
 
@@ -515,8 +528,9 @@ pub struct Skins {
     skins: BTreeMap<CombatantId, Skin>,
     /// Bodies taken off fighters and shapes hidden (with the flags they had), given back at Stop.
     taken: Vec<(Entity, SkinnedBody)>,
-    /// A fighter sitting in a boat (the combat host sets it): it rows, or sits.
-    pub seated: Option<CombatantId>,
+    /// A fighter sitting in a boat (the combat host sets it), the clip it plays there and its rate (rowing, holding
+    /// the clip's oars, or at the tiller).
+    pub seated: Option<(CombatantId, (String, f32))>,
     /// A fighter at work (the game's activity clip, `A|B`, looped while it stands idle), holding the clip's tools.
     pub work: Option<(CombatantId, String)>,
     /// Each clip's pieces (clips.json's `gear`).
@@ -775,9 +789,16 @@ impl Skins {
                 .as_ref()
                 .filter(|(w, _)| w == id && idle)
                 .map(|(_, clip)| clip.clone());
-            // The tools its work clip holds, swapped when the work changes.
-            let tools = work
-                .as_deref()
+            let seat = self
+                .seated
+                .as_ref()
+                .filter(|(s, _)| s == id && idle)
+                .map(|(_, pose)| pose.clone());
+            // The tools its work (or its seat's) clip holds, swapped when that changes.
+            let tools = seat
+                .as_ref()
+                .map(|(clip, _)| clip.as_str())
+                .or(work.as_deref())
                 .and_then(|w| w.split('|').find(|n| self.clip_gear.contains_key(*n)))
                 .map(str::to_string);
             if skin.worn.as_ref().map(|w| &w.0) != tools.as_ref() {
@@ -807,8 +828,8 @@ impl Skins {
                     skin.worn = Some((t, sockets));
                 }
             }
-            let (clip, timing) = if self.seated == Some(*id) && idle {
-                ("Row_Loop|Sit_Idle_Loop".to_string(), Timing::Loop(1.0))
+            let (clip, timing) = if let Some((clip, rate)) = seat {
+                (clip, Timing::Loop(rate))
             } else if let Some(work) = work {
                 (work, Timing::Loop(1.0))
             } else if let Some(swap) = swapping {
@@ -1124,6 +1145,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// In a boat he plays its clip at its rate holding the clip's oars (two
+    /// pieces, both hands); stepping off puts them down.
+    #[test]
+    fn rowing_he_holds_the_oars() {
+        let dir = std::env::temp_dir().join(format!("combat_row_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("characters/gear")).unwrap();
+        std::fs::write(dir.join("characters/gear/oar.glb"), b"").unwrap();
+        let text = r#"{"gear": {"Row_Loop": [
+            {"piece": "oar", "file": "characters/gear/oar.glb", "nodes": [0, 1], "joint": "weapon_r"},
+            {"piece": "oar_l", "file": "characters/gear/oar.glb", "nodes": [0, 1], "joint": "weapon_l"}]},
+            "clips": {}, "aliases": {}}"#;
+        let mut skins = Skins {
+            gear: gear_pieces(&dir, text),
+            clip_gear: clip_gear(text),
+            ..Default::default()
+        };
+        let (combat, id) = fighter();
+        let mut world = World::new();
+        let caelan = world.spawn((
+            Name::new("Caelan"),
+            Transform::default(),
+            WorldTransform::identity(),
+            SkinnedBody::default(),
+        ));
+        let mut spawned = Vec::new();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(id, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        let body = spawned[0];
+        let joints = |world: &World| {
+            let mut j: Vec<String> = world
+                .iter_with::<SkinnedSocket>()
+                .filter(|(e, _)| world.iter_with::<Parent>().any(|(_, p)| p.entity == *e))
+                .map(|(_, s)| s.joint.clone())
+                .collect();
+            j.sort();
+            j
+        };
+        skins.seated = Some((id, ("Row_Loop|Sit_Idle_Loop".into(), 0.0)));
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert_eq!(
+            world.get::<SkinnedBody>(body).unwrap().clip,
+            "Row_Loop|Sit_Idle_Loop"
+        );
+        assert_eq!(
+            joints(&world),
+            ["sheath", "weapon_l", "weapon_r"],
+            "an oar in each hand, the blade sheathed"
+        );
+        skins.seated = None;
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert_eq!(joints(&world), ["sheath"], "the oars shipped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// clips.json's gear table gives each piece once, only where its file is
     /// there; a weapon kind names its piece and whether it is sheathed.
     /// A fighter whose encounter falls asleep leaves the fight: its body,
@@ -1230,6 +1309,11 @@ mod tests {
         let path = std::env::temp_dir().join(format!("scabbard_{}.glb", std::process::id()));
         std::fs::write(&path, &glb).unwrap();
         assert_eq!(mesh_nodes(&path), vec![1, 2]);
+        assert_eq!(
+            mesh_node_names(&path)[1],
+            (2, "iron".to_string()),
+            "and their names (a boat's shipped oars)"
+        );
         let _ = std::fs::remove_file(path);
     }
 

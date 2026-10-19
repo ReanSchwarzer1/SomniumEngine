@@ -2588,6 +2588,8 @@ pub struct CombatDemo {
     /// The protagonist sits in a boat at this seat (feet, its facing the bow), carried: the boats' host
     /// (`boats.rs`) rows it and sets this every fixed step; WASD and E are the boat's meanwhile.
     pub aboard: Option<Mat4>,
+    /// What he plays in the boat and at what rate (its kind's: rowing, or at the tiller), set with `aboard`.
+    pub aboard_clip: Option<(String, f32)>,
     /// E was the boats' this frame (boarding or stepping off), not a mount's.
     pub take_e: bool,
     /// Points brains think near as well as the protagonist and the camera (a second place the game holds streamed).
@@ -2663,6 +2665,7 @@ impl Default for CombatDemo {
             hud_events: VecDeque::new(),
             refused_mounts: Default::default(),
             aboard: None,
+            aboard_clip: None,
             take_e: false,
             focus_points: Vec::new(),
             player_clip: None,
@@ -3138,7 +3141,7 @@ impl CombatDemo {
                 walker.mode = Mode::Air;
             }
         }
-        run.skins.seated = self.aboard.and(run.player);
+        run.skins.seated = run.player.zip(self.aboard.and(self.aboard_clip.clone()));
         run.skins.work = run.player.zip(self.player_clip.clone());
         let events = run.world.drain_events();
         keep_hud_events(&mut self.hud_events, &events, HUD_EVENTS);
