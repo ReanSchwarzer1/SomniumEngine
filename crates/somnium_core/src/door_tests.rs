@@ -8,7 +8,7 @@ fn place(translation: Vec3, rotation: Quat) -> Transform {
 }
 
 fn used(entity: Entity) -> Used {
-    Used { entity, kind: KIND_DOOR, refused: false, trigger: String::new() }
+    Used { entity, kind: KIND_DOOR, refused: false, trigger: String::new(), at: Vec3::ZERO }
 }
 
 /// The church of Aldermere as the composer lays it out: a turned root, `LOD0`, a cutaway group, and the door's two
@@ -52,7 +52,7 @@ fn world_of(world: &World, e: Entity) -> Mat4 {
 /// while its world lives.
 static JOLT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn physics() -> (std::sync::MutexGuard<'static, ()>, PhysicsWorld) {
+pub(crate) fn physics() -> (std::sync::MutexGuard<'static, ()>, PhysicsWorld) {
     let guard = JOLT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     (guard, PhysicsWorld::new(PhysicsConfig::default()))
 }

@@ -6,7 +6,8 @@
 //! the building). At a use's commit event ([`crate::interact::Used`], the session's contact) it eases open by
 //! `open_angle` about the hinge's vertical over `swing_duration`, or closed again; with `close_after` it closes by
 //! itself once nobody is in its way. While closed, a static box fills the leaf (`blocks`), so a locked door stops
-//! the player; it goes as the door starts to open.
+//! the player; it goes as the door starts to open. An operated thing with `swings` (a lever, a gate) swings the same
+//! way and blocks nothing.
 //!
 //! `open` is both the authored start and the live state: the system writes it when a door is used, and a game or
 //! script that sets it swings the door. Villagers and other walkers open doors through [`Doors::pass`].
@@ -125,6 +126,9 @@ pub struct Doors {
     clock: f32,
     /// What happened since the last update returned (a pass between updates included).
     events: Vec<DoorEvent>,
+    /// Every interactable seen at the last change, and those first seen this frame (for `gone_when`).
+    known: HashSet<Entity>,
+    arrived: Vec<Entity>,
 }
 
 impl Doors {
@@ -144,6 +148,12 @@ impl Doors {
     #[must_use]
     pub fn active(&self) -> usize {
         self.active.len()
+    }
+
+    /// The interactables (of every kind) first seen by this frame's update: a cell came in, or play began.
+    #[must_use]
+    pub fn arrived(&self) -> &[Entity] {
+        &self.arrived
     }
 
     /// The play session ended: every door's body goes and everything is forgotten (Stop restores the leaves).
@@ -171,7 +181,8 @@ impl Doors {
         for at in world.take_cache::<Passes>().0 {
             self.pass(world, physics, at);
         }
-        if let Some(used) = used.filter(|u| u.kind == KIND_DOOR && self.bound.contains_key(&u.entity)) {
+        // Doors, and operated things that swing: whatever is bound.
+        if let Some(used) = used.filter(|u| self.bound.contains_key(&u.entity)) {
             if used.refused {
                 self.events.push(DoorEvent::Refused(used.entity));
             } else {
@@ -278,6 +289,7 @@ impl Doors {
     /// Find doors that arrived, forget ones that went, and follow `open` written by others. Costs one walk of the
     /// interactables, compared with the last frame's, when nothing changed.
     fn sync(&mut self, world: &mut World, physics: &mut PhysicsWorld) {
+        self.arrived.clear();
         let tick = world.change_tick(ComponentId::of::<Interactable>());
         let mut count = 0;
         let mut same = true;
@@ -292,6 +304,7 @@ impl Doors {
         self.seen.extend(world.entities_with::<Interactable>());
         self.seen_tick = tick;
         let present: HashSet<Entity> = self.seen.iter().copied().collect();
+        self.arrived.extend(self.seen.iter().copied().filter(|e| !self.known.contains(e)));
         let gone: Vec<Entity> = self.bound.keys().copied().filter(|e| !present.contains(e)).collect();
         for door in gone {
             if let Some(body) = self.bound.remove(&door).and_then(|b| b.body) {
@@ -302,8 +315,12 @@ impl Doors {
             .seen
             .iter()
             .copied()
-            .filter(|e| !self.bound.contains_key(e) && world.get::<Interactable>(*e).is_some_and(|d| d.enabled && d.kind == KIND_DOOR))
+            .filter(|e| {
+                !self.bound.contains_key(e)
+                    && world.get::<Interactable>(*e).is_some_and(|d| d.enabled && (d.kind == KIND_DOOR || d.swings))
+            })
             .collect();
+        self.known = present;
         if !arrived.is_empty() {
             self.bind(world, physics, &arrived);
         }
@@ -404,7 +421,8 @@ impl Doors {
             }
             let (w, h, t) = (component.leaf_width, component.leaf_height, component.leaf_thickness);
             let (scale, rotation, _) = frame.to_scale_rotation_translation();
-            let block = component.blocks.then(|| {
+            // Only a door shuts a way; a lever or a gate's leaves block nothing.
+            let block = (component.kind == KIND_DOOR && component.blocks).then(|| {
                 (frame.transform_point3(Vec3::new(0.5 * w, 0.5 * h, 0.0)), rotation, 0.5 * Vec3::new(w, h, t) * scale.abs())
             });
             let bound = Bound {
@@ -457,4 +475,4 @@ fn pose(world: &mut World, leaves: &[Leaf], angle: f32) {
 
 #[cfg(test)]
 #[path = "door_tests.rs"]
-mod tests;
+pub(crate) mod tests;

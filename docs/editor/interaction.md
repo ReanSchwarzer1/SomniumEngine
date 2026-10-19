@@ -1,4 +1,4 @@
-# Interaction in an isometric game, and doors
+# Interaction in an isometric game: doors, talk, take, sit, read, use
 
 Rimeborn's player walks into buildings, opens their doors and uses what is inside. It does this with the engine's
 **Interaction** component (`somnium.Interactable`), the same one TSF's first-person hands use, driven by an
@@ -43,7 +43,7 @@ fact or expression, such as `has_church_key` or `chapter >= 2 and not curfew`.
 
 | Field | Used here for |
 |---|---|
-| Kind | 0 Door swings itself; the others (1 Collect, 2 Inspect, 3 Operate, 4 Equip Light) go to the game |
+| Kind | What using it does: see **The verbs** below. 5 Talk and 6 Sit are new; 0 to 4 are TSF's |
 | Prompt, Trigger, Enabled, Locked | As above |
 | Reach | From the player's eye to the anchor, in metres (2.0) |
 | Duration | The reach and return. A door's is 0.4 s, so it moves 0.2 s after the key |
@@ -51,6 +51,43 @@ fact or expression, such as `has_church_key` or `chapter >= 2 and not curfew`.
 | Open Angle | How far a door swings, in degrees; positive turns anticlockwise seen from above |
 | *Cone* (new) | How far either side of the player's facing it can be picked, in degrees (75). 180: any direction |
 | *Requires* (new) | The world-state condition above. Empty: only Locked locks |
+| *Refused Prompt* (new) | The prompt while refused ("Barred for the night"). Empty says "Locked" |
+| *Gone When* (new) | A world-state condition. While it holds, the thing is gone: it is removed as it appears |
+| *Swings* (new) | An operated thing (a lever, a gate) swings like a door when used, blocking nothing |
+
+## The verbs
+
+| Kind | Prompt | What happens at the commit |
+|---|---|---|
+| 0 Door | Open, Close | It swings itself (below) |
+| 1 Collect | Take | The game gets the use, then the thing and everything under it are removed at the start of the next frame |
+| 2 Inspect | Read | The game opens the note or sign that **Trigger** names |
+| 3 Operate | Use | The game acts on **Trigger** (a well, a Glyphcraft device). With **Swings**, it also swings like a door (a lever) |
+| 4 Equip Light | Take | The game's |
+| 5 Talk | Talk | The game starts the conversation for **Trigger** |
+| 6 Sit | Sit | The game seats the player at `interact::seat(world, entity)` |
+
+`somnium_core::interact::interactable(kind, trigger)` gives an Interactable with this layer's defaults:
+- an empty prompt, so it says the verb;
+- a short reach, so the commit comes 0.15 s after the key;
+- for Talk, a 3 m reach.
+
+TSF's default prompt is "Operate", so set the prompt empty, or to your own words.
+
+**Talk needs no authoring for the story's people.** A `somnium.CastMember` with a speaker and no Interactable of its
+own is a talk target: its chest, 1.4 m above its origin, within 3 m of the player's eye; its speaker id is the
+trigger. Give a cast member its own Interactable to change that (a shopkeeper's "Barter", a different trigger).
+
+**Take for good.** A take removes the thing at once, but its cell brings it back when it streams in again. To stop
+that, set **Gone When** to the fact your game sets when the thing is taken (for example `taken.purse_01`). A thing
+whose condition holds is removed the moment it appears.
+
+**Sit.** `seat` gives the anchor in the world, where the hips go, and the way the sitter faces: the seat's +Z, along
+the ground. While the player sits, the seat stays the nearest target. Use on it again is the game's cue to stand.
+
+**Use with Swings.** A lever is an Operate whose children, or **Leaves**, turn by **Open Angle** about its origin's
+vertical. It springs back after **Close After**, or stays pulled when that is 0. Its **Open** says whether it is
+pulled. It has no box.
 
 ## Doors
 
@@ -113,7 +150,14 @@ interaction.on_event(event);
 // on_update, after the player has moved (None: nobody is using things):
 let actor = Actor { eye: player_eye, forward: player_facing };
 if let Some(used) = interaction.update(ctx, Some(actor), &|condition| story.check(condition).unwrap_or(false)) {
-    // The commit of a collect, inspect, operate or equip: `used.trigger` says which. `used.refused`: a locked try.
+    match used.kind {
+        _ if used.refused => { /* a locked try: a rattle at used.at */ }
+        interact::KIND_TALK => { /* start the conversation for used.trigger (a speaker id) */ }
+        interact::KIND_COLLECT => { /* add used.trigger to the inventory; set taken.<id>; it goes next frame */ }
+        interact::KIND_INSPECT => { /* open the note used.trigger */ }
+        interact::KIND_SIT => { /* seat the player at interact::seat(world, used.entity) */ }
+        _ => { /* a well, a device: used.trigger */ }
+    }
 }
 for event in &interaction.door_events { /* Opening, Closing, Closed, Refused: play a sound */ }
 // on_render, once the camera is set:
