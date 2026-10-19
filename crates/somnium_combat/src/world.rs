@@ -1291,6 +1291,17 @@ impl CombatWorld {
         self.focus.map(|f| f.who)
     }
 
+    /// End anyone's focus (the slowed world back to time): the protagonists'
+    /// switch at its flip.
+    pub fn end_focus(&mut self) {
+        if let Some(f) = self.focus.take() {
+            self.emit(CombatEvent::Focus {
+                who: f.who,
+                active: false,
+            });
+        }
+    }
+
     /// Time scale of everything but the focuser.
     #[must_use]
     pub fn world_scale(&self) -> f32 {

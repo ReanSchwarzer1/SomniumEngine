@@ -228,16 +228,26 @@ impl CombatantComponent {
         }
         desc.magic = magic;
         if !self.player {
-            let mut brain = BrainDesc::new(self.archetype());
-            let mut profile = brain.archetype.profile();
-            if !ids.is_empty() {
-                profile.spells = ids.iter().map(|s| (*s).to_string()).collect();
-            }
-            brain.profile = Some(profile);
-            brain.home = Some(position);
-            desc.brain = Some(brain);
+            desc.brain = Some(self.brain_desc(position));
         }
         desc
+    }
+
+    /// The brain a fighter of this component thinks with: its archetype's,
+    /// casting its own spells, home at `position` (what [`Self::desc`] gives a
+    /// fighter that is not the protagonist, and what a protagonist left behind
+    /// by the switch thinks with).
+    #[must_use]
+    pub fn brain_desc(&self, position: Vec3) -> BrainDesc {
+        let mut brain = BrainDesc::new(self.archetype());
+        let mut profile = brain.archetype.profile();
+        let ids: Vec<&str> = self.spell_ids().collect();
+        if !ids.is_empty() {
+            profile.spells = ids.iter().map(|s| (*s).to_string()).collect();
+        }
+        brain.profile = Some(profile);
+        brain.home = Some(position);
+        brain
     }
 }
 

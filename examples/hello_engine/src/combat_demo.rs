@@ -2958,19 +2958,22 @@ impl CombatDemo {
             c.brain = None;
             c.command = somnium_combat::Command::default();
         }
+        // A slowed world comes back to time at the flip.
+        run.world.end_focus();
         if let Some(old) = run.player {
-            let archetype = run
-                .bodies
-                .get(&old)
-                .and_then(|e| world.get::<CombatantComponent>(*e))
-                .map_or(Archetype::Companion, CombatantComponent::archetype);
+            let component = run.bodies.get(&old).and_then(|e| world.get::<CombatantComponent>(*e)).cloned();
             if let Some(c) = run.world.combatant_mut(old) {
                 c.command = somnium_combat::Command::default();
                 c.lock = None;
-                // ponytail: his style's default profile (no spells of his own); the component's spell list if his
-                // AI should cast them.
-                let mut brain = ai::BrainDesc::new(archetype);
-                brain.home = Some(c.position);
+                // His own style and spells; his kit (the protagonist's perks) is his from enlisting, whoever is played.
+                let brain = component.map_or_else(
+                    || {
+                        let mut b = ai::BrainDesc::new(Archetype::Companion);
+                        b.home = Some(c.position);
+                        b
+                    },
+                    |k| k.brain_desc(c.position),
+                );
                 c.brain = Some(ai::Brain::new(brain, old));
             }
         }
