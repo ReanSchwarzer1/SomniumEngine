@@ -1,0 +1,376 @@
+//! AI on the ground: cover for the ranged, formations, and what a host's
+//! controller hears from a brain (a jump, "I am climbing").
+mod common;
+use common::*;
+use glam::{Quat, Vec3};
+use somnium_combat::ai::{self, Archetype, BrainDesc};
+use somnium_combat::geometry::Obb;
+use somnium_combat::{
+    Action, CombatEvent, CombatQuery, CombatWorld, CombatantDesc, CombatantId, OpenField, TeamId,
+    Vitals, WorldHit, weapon,
+};
+
+/// A world of boxes for the brain's sight lines and the projectiles.
+struct Boxes(Vec<Obb>);
+
+impl CombatQuery for Boxes {
+    fn sweep(&self, from: Vec3, to: Vec3, radius: f32) -> Option<WorldHit> {
+        let len = (to - from).length();
+        let dir = (to - from).try_normalize()?;
+        self.0
+            .iter()
+            .filter_map(|b| b.ray(from, dir, len, radius))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(t, normal)| WorldHit {
+                fraction: t / len,
+                normal,
+            })
+    }
+}
+
+fn pillar(at: Vec3) -> Obb {
+    Obb {
+        center: at + Vec3::Y * 1.5,
+        half: Vec3::new(0.6, 1.5, 0.6),
+        rotation: Quat::IDENTITY,
+    }
+}
+
+fn brain(
+    w: &mut CombatWorld,
+    name: &str,
+    team: TeamId,
+    at: Vec3,
+    weapon: weapon::WeaponDef,
+    kind: Archetype,
+) -> CombatantId {
+    let mut desc = CombatantDesc::new(name, team, at, weapon);
+    desc.facing = Vec3::Z;
+    desc.brain = Some(BrainDesc::new(kind));
+    w.spawn(desc)
+}
+
+/// Someone who stands and takes it.
+fn post(w: &mut CombatWorld, team: TeamId, at: Vec3) -> CombatantId {
+    let mut desc = CombatantDesc::new("Post", team, at, weapon::sword());
+    desc.facing = -Vec3::Z;
+    desc.vitals = Vitals::new(100_000.0, 100.0, 0.0, 10_000.0);
+    w.spawn(desc)
+}
+
+#[test]
+fn a_rifleman_reloads_behind_a_pillar_and_steps_out_to_fire_again() {
+    let mut w = world();
+    let target = post(&mut w, PARTY, Vec3::ZERO);
+    let rifle = brain(
+        &mut w,
+        "Rifleman",
+        RAIDERS,
+        Vec3::new(0.0, 0.0, -15.0),
+        weapon::lattice_rifle(),
+        Archetype::Rifleman,
+    );
+    // A pillar a little to the rifleman's right, between it and nothing.
+    let world_boxes = Boxes(vec![pillar(Vec3::new(2.5, 0.0, -13.0))]);
+    ai::alert(&mut w, rifle, target, Vec3::ZERO);
+    let (mut shots, mut hidden) = (0, false);
+    for _ in 0..(10.0 / DT) as usize {
+        w.step(DT, &world_boxes, None);
+        shots += w
+            .drain_events()
+            .iter()
+            .filter(|e| matches!(e, CombatEvent::ShotFired { shooter, .. } if *shooter == rifle))
+            .count();
+        let (r, t) = (w.combatant(rifle).unwrap(), w.combatant(target).unwrap());
+        if matches!(r.action, Action::Reload { .. }) && world_boxes.blocked(t.eye(), r.chest()) {
+            hidden = true;
+        }
+    }
+    assert!(hidden, "reloaded out of the target's sight");
+    assert!(shots >= 2, "stepped out and fired again: {shots} shots");
+}
+
+#[test]
+fn spears_hold_a_line_and_the_archers_stand_behind_it() {
+    let mut w = world();
+    let enemy = post(&mut w, PARTY, Vec3::new(0.0, 0.0, 20.0));
+    let spears: Vec<CombatantId> = [
+        Vec3::new(-3.0, 0.0, 0.5),
+        Vec3::new(0.5, 0.0, -1.0),
+        Vec3::new(3.5, 0.0, 0.2),
+    ]
+    .into_iter()
+    .map(|at| {
+        brain(
+            &mut w,
+            "Spear",
+            RAIDERS,
+            at,
+            weapon::spear(),
+            Archetype::Spearman,
+        )
+    })
+    .collect();
+    let archers: Vec<CombatantId> = [Vec3::new(-1.0, 0.0, -2.0), Vec3::new(2.0, 0.0, 1.5)]
+        .into_iter()
+        .map(|at| {
+            brain(
+                &mut w,
+                "Archer",
+                RAIDERS,
+                at,
+                weapon::bow(),
+                Archetype::Archer,
+            )
+        })
+        .collect();
+    let group: Vec<CombatantId> = spears.iter().chain(&archers).copied().collect();
+    ai::form_up(&mut w, &group);
+    for &id in &group {
+        ai::alert(&mut w, id, enemy, Vec3::new(0.0, 0.0, 20.0));
+    }
+    let start = w.combatant(spears[1]).unwrap().position.z;
+    idle(&mut w, 5.0);
+    let at = |id: CombatantId| w.combatant(id).unwrap().position;
+    let line: Vec<Vec3> = spears.iter().map(|id| at(*id)).collect();
+    let front = line.iter().map(|p| p.z).fold(f32::INFINITY, f32::min);
+    let mean = line.iter().map(|p| p.z).sum::<f32>() / 3.0;
+    assert!(
+        line.iter().all(|p| (p.z - mean).abs() < 0.7),
+        "abreast: {line:?}"
+    );
+    let mut xs: Vec<f32> = line.iter().map(|p| p.x).collect();
+    xs.sort_by(f32::total_cmp);
+    assert!(xs.windows(2).all(|p| p[1] - p[0] > 1.2), "spaced: {xs:?}");
+    assert!(
+        mean > start + 1.0,
+        "the line walked toward the enemy: {mean}"
+    );
+    for id in &archers {
+        assert!(
+            at(*id).z < front - 2.5,
+            "behind the line: {:?} {line:?}",
+            at(*id)
+        );
+    }
+    // Near enough, the line breaks and fights.
+    w.combatant_mut(enemy).unwrap().position = Vec3::new(0.0, 0.0, mean + 3.0);
+    let events = idle(&mut w, 3.0);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CombatEvent::AttackStarted { attacker, .. } if spears.contains(attacker)
+        )),
+        "a spear struck"
+    );
+}
+
+#[test]
+fn a_climbing_brain_holds_still_and_a_host_reads_its_jump() {
+    let mut w = world();
+    let enemy = post(&mut w, PARTY, Vec3::new(0.0, 0.0, 1.5));
+    let axe = brain(
+        &mut w,
+        "Axe",
+        RAIDERS,
+        Vec3::ZERO,
+        weapon::axe(),
+        Archetype::Brute,
+    );
+    ai::alert(&mut w, axe, enemy, Vec3::new(0.0, 0.0, 1.5));
+    let hanging = ai::Climb {
+        progress: 0.3,
+        vulnerable: true,
+    };
+    ai::set_climbing(&mut w, axe, Some(hanging));
+    let events = idle(&mut w, 2.0);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == axe)),
+        "no swing mid-climb"
+    );
+    assert!(!ai::wants_jump(&w, axe), "no route, no jump");
+    ai::set_climbing(&mut w, axe, None);
+    let events = idle(&mut w, 2.0);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == axe)),
+        "swings once up"
+    );
+}
+
+/// A brute on a ledge cannot reach someone below it, but strikes at one
+/// whose hands are on the edge.
+#[test]
+fn a_climber_hanging_on_the_edge_is_struck_from_the_top() {
+    let mut w = world();
+    let climber = post(&mut w, PARTY, Vec3::new(0.0, 0.6, 1.2));
+    let axe = brain(
+        &mut w,
+        "Axe",
+        RAIDERS,
+        Vec3::new(0.0, 2.0, 0.0),
+        weapon::axe(),
+        Archetype::Brute,
+    );
+    ai::alert(&mut w, axe, climber, Vec3::new(0.0, 0.6, 1.2));
+    let swings = |events: &[CombatEvent]| {
+        events
+            .iter()
+            .filter(
+                |e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == axe),
+            )
+            .count()
+    };
+    let hold = |w: &mut CombatWorld, _: usize| {
+        // The ledge holds the brute up; the climber hangs where it is.
+        w.combatant_mut(axe).unwrap().position.y = 2.0;
+        w.combatant_mut(climber).unwrap().position = Vec3::new(0.0, 0.6, 1.2);
+    };
+    assert_eq!(
+        swings(&run(&mut w, 1.5, hold)),
+        0,
+        "out of reach below the ledge"
+    );
+    let hanging = ai::Climb {
+        progress: 0.3,
+        vulnerable: true,
+    };
+    ai::set_climbing(&mut w, climber, Some(hanging));
+    assert!(
+        swings(&run(&mut w, 1.5, hold)) > 0,
+        "struck while its hands are on the edge"
+    );
+}
+
+/// A brain the world's LOD lets sit out three steps in four (as
+/// `CombatWorld::set_focus` does mid-range) keeps real time: its morale comes
+/// back as fast as one that thinks every step.
+#[test]
+fn a_brain_that_thinks_every_fourth_step_keeps_real_time() {
+    let mut w = world();
+    let every = brain(
+        &mut w,
+        "Every",
+        RAIDERS,
+        Vec3::ZERO,
+        weapon::spear(),
+        Archetype::Spearman,
+    );
+    let fourth = brain(
+        &mut w,
+        "Fourth",
+        RAIDERS,
+        Vec3::new(30.0, 0.0, 0.0),
+        weapon::spear(),
+        Archetype::Spearman,
+    );
+    let morale = |w: &CombatWorld, id: CombatantId| {
+        w.combatant(id).unwrap().brain.as_ref().unwrap().mind.morale
+    };
+    for id in [every, fourth] {
+        w.combatant_mut(id)
+            .unwrap()
+            .brain
+            .as_mut()
+            .unwrap()
+            .mind
+            .morale = 0.2;
+    }
+    for step in 0..120 {
+        let parked = (step % 4 != 0).then(|| w.combatant_mut(fourth).unwrap().brain.take());
+        w.step(DT, &OpenField, None);
+        if let Some(brain) = parked {
+            w.combatant_mut(fourth).unwrap().brain = brain;
+        }
+    }
+    let (a, b) = (morale(&w, every), morale(&w, fourth));
+    assert!(a > 0.235, "two seconds of recovery: {a}");
+    assert!((a - b).abs() < 0.002, "every step {a}, every fourth {b}");
+}
+
+/// What a step of brains costs as the crowd near the player grows: bands of
+/// ten raiders, half facing a party of ten, all within one fight. Run with
+/// `cargo test --release -p somnium_combat --test ai_nav brain_crowd -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn brain_crowd() {
+    for bands in [2, 5, 10, 20] {
+        let mut w = world();
+        for b in 0..bands {
+            let at = Vec3::new((b % 5) as f32 * 12.0, 0.0, (b / 5) as f32 * 12.0);
+            for i in 0..10 {
+                let kind = [Archetype::Spearman, Archetype::Archer, Archetype::Brute][i % 3];
+                let team = if i < 5 { RAIDERS } else { PARTY };
+                let wpn = if kind == Archetype::Archer {
+                    weapon::bow()
+                } else {
+                    weapon::spear()
+                };
+                let p = at + Vec3::new(i as f32 * 1.1, 0.0, if i < 5 { 0.0 } else { 6.0 });
+                brain(&mut w, "Crowd", team, p, wpn, kind);
+            }
+        }
+        for _ in 0..60 {
+            w.step(DT, &OpenField, None);
+        }
+        // The quickest of five runs: the machine is shared.
+        let steps = 60;
+        let per = (0..5)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for _ in 0..steps {
+                    w.step(DT, &OpenField, None);
+                }
+                start.elapsed().as_secs_f64() * 1e3 / f64::from(steps)
+            })
+            .fold(f64::INFINITY, f64::min);
+        println!(
+            "{:>4} bodies: {per:.3} ms a step, {:.1} us a body",
+            bands * 10,
+            per * 1e3 / (bands * 10) as f64
+        );
+    }
+}
+
+/// A hundred brains in ten bands across 160 m, fighting for ten seconds,
+/// hashed (every event, and where everyone ends and how hurt). A change meant
+/// only to make brains cheaper must print the same fingerprint before and
+/// after (`27e0c22a137897ac` on 18 Oct: 3750 events).
+#[test]
+#[ignore = "a fingerprint"]
+fn crowd_fingerprint() {
+    use std::hash::{Hash, Hasher};
+    let mut w = world();
+    for b in 0..10 {
+        let at = Vec3::new((b % 5) as f32 * 30.0, 0.0, (b / 5) as f32 * 40.0);
+        for i in 0..10 {
+            let kind = [Archetype::Spearman, Archetype::Archer, Archetype::Brute][i % 3];
+            let team = if i < 5 { RAIDERS } else { PARTY };
+            let wpn = if kind == Archetype::Archer {
+                weapon::bow()
+            } else {
+                weapon::spear()
+            };
+            let p = at + Vec3::new(i as f32 * 1.1, 0.0, if i < 5 { 0.0 } else { 14.0 });
+            brain(&mut w, "Crowd", team, p, wpn, kind);
+        }
+    }
+    let events = idle(&mut w, 10.0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{events:?}").hash(&mut h);
+    for c in w.combatants() {
+        format!(
+            "{:?} {:?} {}",
+            c.position, c.action, c.vitals.health.current
+        )
+        .hash(&mut h);
+    }
+    println!(
+        "fingerprint {:016x} over {} events",
+        h.finish(),
+        events.len()
+    );
+}

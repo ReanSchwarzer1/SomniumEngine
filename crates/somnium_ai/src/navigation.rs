@@ -9,7 +9,7 @@ use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use somnium_jobs::{JobDesc, JobError, JobHandle, JobSystem};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 
 pub type CellId = [i64; 3];
 pub type Triangle = [[f32; 3]; 3];
@@ -432,6 +432,116 @@ fn bake_checked(
     Ok(tile)
 }
 
+/// A tile from ground heights alone, for open land, where a triangle [`bake`]
+/// samples every terrain triangle for every column. One flat cell of
+/// `settings.voxel_size` per column (the columns that fit inside `bounds`),
+/// at the height `height(x, z)` gives at its centre: `None` for no ground (a
+/// hole, water, off the map); a height outside `bounds` drops the cell (a
+/// roof, when heights come from a ray cast down). Neighbours join where their
+/// heights differ by no more than a walkable slope (`max_slope_degrees`)
+/// rises across a cell, or `max_step` if that is more: hills are walked,
+/// cliffs and walls are not. The tile keeps that rise as its `max_step`, so
+/// tiles built alike on one grid join each other once installed. Nothing is
+/// eroded by the agent's radius (a cell is coarse already): paths touch the
+/// corners of what they go round.
+pub fn heightfield(
+    cell: CellId,
+    bounds: Bounds,
+    settings: BakeSettings,
+    height: impl Fn(f32, f32) -> Option<f32>,
+) -> Result<NavTile, String> {
+    if !bounds.valid() || !settings.valid() {
+        return Err("invalid heightfield input".into());
+    }
+    let size = settings.voxel_size;
+    let count =
+        |axis: usize| ((bounds.max[axis] - bounds.min[axis]) / size + 1e-3).floor() as usize;
+    let (nx, nz) = (count(0), count(2));
+    if nx == 0 || nz == 0 || nx.checked_mul(nz).is_none_or(|n| n > MAX_COLUMNS) {
+        return Err("navigation tile exceeds voxel budget".into());
+    }
+    let rise = (settings.max_slope_degrees.to_radians().tan() * size).max(settings.max_step);
+    let settings = BakeSettings {
+        max_step: rise,
+        ..settings
+    };
+    let corner = |axis: usize, i: usize| bounds.min[axis] + i as f32 * size;
+    let ys: Vec<Option<f32>> = (0..nx * nz)
+        .map(|i| {
+            let (x, z) = (i % nx, i / nx);
+            let centre = |axis: usize, i: usize| corner(axis, i) + 0.5 * size;
+            height(centre(0, x), centre(2, z))
+                .filter(|y| y.is_finite() && (bounds.min[1]..bounds.max[1]).contains(y))
+        })
+        .collect();
+    let joined = |a: usize, b: usize| match (ys[a], ys[b]) {
+        (Some(p), Some(q)) => (p - q).abs() <= rise + EPS,
+        _ => false,
+    };
+    // Across each edge in the polygon's own order: -z, +x, +z, -x.
+    let across = |i: usize| {
+        let (x, z) = (i % nx, i / nx);
+        [
+            (z > 0).then(|| i - nx),
+            (x + 1 < nx).then(|| i + 1),
+            (z + 1 < nz).then(|| i + nx),
+            (x > 0).then(|| i - 1),
+        ]
+    };
+    let mut region = vec![0u32; nx * nz];
+    let mut regions = 0;
+    for start in 0..nx * nz {
+        if ys[start].is_none() || region[start] != 0 {
+            continue;
+        }
+        regions += 1;
+        region[start] = regions;
+        let mut queue = VecDeque::from([start]);
+        while let Some(i) = queue.pop_front() {
+            for j in across(i).into_iter().flatten() {
+                if region[j] == 0 && joined(i, j) {
+                    region[j] = regions;
+                    queue.push_back(j);
+                }
+            }
+        }
+    }
+    let mut polygons = Vec::new();
+    let mut contours = Vec::new();
+    for i in 0..nx * nz {
+        let Some(y) = ys[i] else {
+            continue;
+        };
+        let (x, z) = (i % nx, i / nx);
+        let (x0, x1, z0, z1) = (
+            corner(0, x),
+            corner(0, x + 1),
+            corner(2, z),
+            corner(2, z + 1),
+        );
+        let p = NavPolygon {
+            vertices: [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
+            region: region[i],
+        };
+        for (edge, j) in across(i).into_iter().enumerate() {
+            if !j.is_some_and(|j| joined(i, j)) {
+                contours.push([p.vertices[edge], p.vertices[(edge + 1) % 4]]);
+            }
+        }
+        polygons.push(p);
+    }
+    let tile = NavTile {
+        version: 1,
+        cell,
+        bounds,
+        settings,
+        polygons,
+        contours,
+    };
+    tile.validate()?;
+    Ok(tile)
+}
+
 /// Cancellation is polled once per voxel row and region pass.
 pub fn submit_bake(
     jobs: &mut JobSystem,
@@ -457,6 +567,63 @@ pub struct OffMeshLink {
     /// Nonnegative additional traversal cost, in metres.
     pub cost: f32,
 }
+/// How a body crosses an off-mesh link, for the gameplay that moves it. Set
+/// per link with [`NavWorld::set_link_kind`]; unset is [`LinkKind::Auto`].
+/// Path costs do not depend on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkKind {
+    /// Decided by the rise from where the link is entered to where it is
+    /// left ([`LinkKind::resolve`]): up past [`LinkKind::LEVEL`] climbs, down
+    /// past it drops, level jumps.
+    #[default]
+    Auto,
+    /// Up a ledge or over a wall: run into it holding climb (a vault or a
+    /// climb).
+    Climb,
+    /// Across a gap (or a low wall), level or rising: leap from its edge.
+    Jump,
+    /// Down: walk off the edge.
+    Drop,
+    /// Into or out of water: in by dropping or wading in, out by climbing
+    /// the bank.
+    Swim,
+}
+
+impl LinkKind {
+    /// Rise or fall within which an [`LinkKind::Auto`] link counts as level.
+    pub const LEVEL: f32 = 0.5;
+
+    /// This kind for a link crossed from `from` to `to`, with
+    /// [`LinkKind::Auto`] decided by the rise; never `Auto`.
+    pub fn resolve(self, from: Vec3, to: Vec3) -> Self {
+        match self {
+            Self::Auto => {
+                let rise = to.y - from.y;
+                if rise > Self::LEVEL {
+                    Self::Climb
+                } else if rise < -Self::LEVEL {
+                    Self::Drop
+                } else {
+                    Self::Jump
+                }
+            }
+            kind => kind,
+        }
+    }
+}
+
+/// One stretch of a [`NavPath`], from a corner to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathLeg {
+    /// Where it starts.
+    pub from: Vec3,
+    /// Where it ends.
+    pub to: Vec3,
+    /// The off-mesh link it crosses and how (never [`LinkKind::Auto`]), or
+    /// `None` on the mesh.
+    pub link: Option<(u64, LinkKind)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavPath {
     pub points: Vec<Vec3>,
@@ -464,13 +631,44 @@ pub struct NavPath {
     /// Changes after install/unload; agents replan if their path is stale.
     pub revision: u64,
 }
+
+impl NavPath {
+    /// The path as legs, each marked when it crosses one of the path's
+    /// links: a leg whose ends sit within the link's radius of the link's
+    /// ends (either way for a bidirectional link). Gameplay walking the
+    /// corners reads how to cross each link from here.
+    pub fn legs(&self, nav: &NavWorld) -> Vec<PathLeg> {
+        let links: Vec<&OffMeshLink> = self.links.iter().filter_map(|id| nav.link(*id)).collect();
+        let near = |a: Vec3, b: Vec3, r: f32| a.distance(b) <= r + 1e-3;
+        self.points
+            .windows(2)
+            .map(|w| {
+                let (from, to) = (w[0], w[1]);
+                let link = links
+                    .iter()
+                    .find(|l| {
+                        (near(from, l.start, l.radius) && near(to, l.end, l.radius))
+                            || (l.bidirectional
+                                && near(from, l.end, l.radius)
+                                && near(to, l.start, l.radius))
+                    })
+                    .map(|l| (l.id, nav.link_kind(l.id).resolve(from, to)));
+                PathLeg { from, to, link }
+            })
+            .collect()
+    }
+}
+/// 40 bytes: a link's id and ends live in [`NavWorld::crossings`], since most
+/// edges cross none.
 #[derive(Clone, Copy, Debug)]
 struct Edge {
-    to: usize,
+    to: u32,
     portal: [Vec3; 2],
     cost: f32,
-    link: Option<(u64, Vec3, Vec3)>,
+    /// Its place in `crossings`, when the edge is a link.
+    link: Option<u32>,
 }
+const _: () = assert!(std::mem::size_of::<Edge>() == 40);
 #[derive(Default)]
 pub struct NavWorld {
     tiles: BTreeMap<CellId, NavTile>,
@@ -478,6 +676,87 @@ pub struct NavWorld {
     polygons: Vec<NavPolygon>,
     adjacency: Vec<Vec<Edge>>,
     revision: u64,
+    /// By link id; kept when a link is removed and set again (an editor
+    /// re-syncing a moved link keeps its kind).
+    kinds: BTreeMap<u64, LinkKind>,
+    /// Polygons by the ground cells ([`INDEX_CELL`] metres) their extent
+    /// touches, so `nearest` looks only near the point.
+    index: HashMap<(i32, i32), Vec<u32>>,
+    /// Kept between path searches (see [`Search`]).
+    search: std::sync::Mutex<Search>,
+    /// Each polygon's step (its tile's `max_step`), each tile's run of
+    /// polygons, and the polygons holding link edges: what streaming a tile
+    /// in or out needs to touch only that tile.
+    steps: Vec<f32>,
+    spans: BTreeMap<CellId, (usize, usize)>,
+    linked: Vec<usize>,
+    /// Each link edge's link id and the ends it is crossed between.
+    crossings: Vec<(u64, Vec3, Vec3)>,
+}
+type EdgeKey = (i64, i64, i64, i64);
+/// The ground-plane key of a polygon's edge, the same either way round.
+fn edge_key(a: Vec3, b: Vec3) -> EdgeKey {
+    let quant = |v: f32| (f64::from(v) * 10_000.0).round() as i64;
+    let aa = (quant(a.x), quant(a.z));
+    let bb = (quant(b.x), quant(b.z));
+    let (u, v) = if aa < bb { (aa, bb) } else { (bb, aa) };
+    (u.0, u.1, v.0, v.1)
+}
+/// A path search's bookkeeping, kept between searches so one costs what it
+/// visits rather than the size of the mesh: an entry counts only while it
+/// carries this search's generation.
+#[derive(Default)]
+struct Search {
+    generation: u32,
+    stamp: Vec<u32>,
+    best: Vec<f32>,
+    /// Where each polygon was reached from: the polygon, and the edge's
+    /// place in its list.
+    previous: Vec<Option<(u32, u32)>>,
+}
+impl Search {
+    fn begin(&mut self, polygons: usize) {
+        if self.stamp.len() != polygons {
+            *self = Self {
+                generation: 0,
+                stamp: vec![0; polygons],
+                best: vec![0.0; polygons],
+                previous: vec![None; polygons],
+            };
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamp.fill(0);
+            self.generation = 1;
+        }
+    }
+    fn best(&self, i: usize) -> f32 {
+        if self.stamp[i] == self.generation {
+            self.best[i]
+        } else {
+            f32::INFINITY
+        }
+    }
+    fn previous(&self, i: usize) -> Option<(u32, u32)> {
+        if self.stamp[i] == self.generation {
+            self.previous[i]
+        } else {
+            None
+        }
+    }
+    fn set(&mut self, i: usize, best: f32, previous: Option<(u32, u32)>) {
+        self.stamp[i] = self.generation;
+        self.best[i] = best;
+        self.previous[i] = previous;
+    }
+}
+/// The side of a [`NavWorld`] index cell, metres.
+const INDEX_CELL: f32 = 2.0;
+fn index_cell(x: f32, z: f32) -> (i32, i32) {
+    (
+        (x / INDEX_CELL).floor() as i32,
+        (z / INDEX_CELL).floor() as i32,
+    )
 }
 impl NavWorld {
     pub fn revision(&self) -> u64 {
@@ -539,19 +818,51 @@ impl NavWorld {
     pub fn link(&self, id: u64) -> Option<&OffMeshLink> {
         self.links.get(&id)
     }
+    /// How the link `id` is crossed (before or after it is set);
+    /// [`LinkKind::Auto`] forgets it. Paths do not change.
+    pub fn set_link_kind(&mut self, id: u64, kind: LinkKind) {
+        if kind == LinkKind::Auto {
+            self.kinds.remove(&id);
+        } else {
+            self.kinds.insert(id, kind);
+        }
+    }
+    /// How the link `id` is crossed; [`LinkKind::Auto`] unless set.
+    pub fn link_kind(&self, id: u64) -> LinkKind {
+        self.kinds.get(&id).copied().unwrap_or_default()
+    }
     fn nearest_index(&self, point: Vec3, max_distance: f32) -> Option<(usize, Vec3)> {
         if !point.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {
             return None;
         }
-        self.polygons
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i, p.closest(point)))
-            .filter(|(_, p)| p.distance(point) <= max_distance)
-            .min_by(|a, b| {
-                a.1.distance_squared(point)
-                    .total_cmp(&b.1.distance_squared(point))
-            })
+        // In index order, as a scan of every polygon would, so ties go the
+        // same way; a polygon within reach has its extent within reach on
+        // the ground (a millimetre spare for rounding).
+        let best = |ids: &mut dyn Iterator<Item = usize>| {
+            ids.map(|i| (i, self.polygons[i].closest(point)))
+                .filter(|(_, p)| p.distance(point) <= max_distance)
+                .min_by(|a, b| {
+                    a.1.distance_squared(point)
+                        .total_cmp(&b.1.distance_squared(point))
+                })
+        };
+        let reach = max_distance + 1e-3;
+        let lo = index_cell(point.x - reach, point.z - reach);
+        let hi = index_cell(point.x + reach, point.z + reach);
+        let span =
+            (i64::from(hi.0) - i64::from(lo.0) + 1) * (i64::from(hi.1) - i64::from(lo.1) + 1);
+        if span > 64 {
+            return best(&mut (0..self.polygons.len()));
+        }
+        let mut ids: Vec<usize> = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|cell| self.index.get(&cell))
+            .flatten()
+            .map(|&i| i as usize)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        best(&mut ids.into_iter())
     }
     pub fn nearest(&self, point: Vec3, max_distance: f32) -> Option<Vec3> {
         self.nearest_index(point, max_distance).map(|(_, p)| p)
@@ -559,52 +870,95 @@ impl NavWorld {
     fn rebuild(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         self.polygons.clear();
-        let mut steps = Vec::new();
+        self.steps.clear();
+        self.spans.clear();
+        self.linked.clear();
+        self.crossings.clear();
         for tile in self.tiles.values() {
-            steps.extend(std::iter::repeat_n(
+            let start = self.polygons.len();
+            self.steps.extend(std::iter::repeat_n(
                 tile.settings.max_step,
                 tile.polygons.len(),
             ));
             self.polygons.extend(tile.polygons.iter().cloned());
+            self.spans.insert(tile.cell, (start, self.polygons.len()));
         }
         self.adjacency = vec![Vec::new(); self.polygons.len()];
+        self.index.clear();
+        for i in 0..self.polygons.len() {
+            self.index_polygon(i);
+        }
         // Bucket coplanar XZ edges independently of height to stitch stacked
-        // floors only when their step-height policy allows it.
-        type EdgeKey = (i64, i64, i64, i64);
-        type PolygonEdges = Vec<(usize, [Vec3; 2])>;
-        let mut edges: BTreeMap<EdgeKey, PolygonEdges> = BTreeMap::new();
-        let quant = |v: f32| (f64::from(v) * 10_000.0).round() as i64;
-        for (i, p) in self.polygons.iter().enumerate() {
-            for e in 0..4 {
-                let a = Vec3::from(p.vertices[e]);
-                let b = Vec3::from(p.vertices[(e + 1) % 4]);
-                let aa = (quant(a.x), quant(a.z));
-                let bb = (quant(b.x), quant(b.z));
-                let (u, v) = if aa < bb { (aa, bb) } else { (bb, aa) };
-                let key = (u.0, u.1, v.0, v.1);
-                for &(j, _) in edges.get(&key).into_iter().flatten() {
-                    if (p.center().y - self.polygons[j].center().y).abs()
-                        > steps[i].min(steps[j]) + EPS
-                    {
-                        continue;
-                    }
-                    let cost = p.center().distance(self.polygons[j].center());
-                    self.adjacency[i].push(Edge {
-                        to: j,
-                        portal: [a, b],
-                        cost,
-                        link: None,
-                    });
-                    self.adjacency[j].push(Edge {
-                        to: i,
-                        portal: [b, a],
-                        cost,
-                        link: None,
-                    });
-                }
-                edges.entry(key).or_default().push((i, [a, b]));
+        // floors only when their step-height policy allows it. Only ever
+        // looked up, never walked: a hash map gives the same adjacency, sooner.
+        let mut edges: HashMap<EdgeKey, Vec<usize>> =
+            HashMap::with_capacity(self.polygons.len() * 2);
+        for i in 0..self.polygons.len() {
+            self.stitch(i, &mut edges, &|_| false);
+        }
+        self.link_edges();
+    }
+    /// Put polygon `i` in the nearest-point index.
+    fn index_polygon(&mut self, i: usize) {
+        let p = &self.polygons[i];
+        let (a, c) = (p.vertices[0], p.vertices[2]);
+        let (lo, hi) = (
+            index_cell(a[0] - 1e-3, a[2] - 1e-3),
+            index_cell(c[0] + 1e-3, c[2] + 1e-3),
+        );
+        for x in lo.0..=hi.0 {
+            for z in lo.1..=hi.1 {
+                self.index.entry((x, z)).or_default().push(i as u32);
             }
         }
+    }
+    /// Join polygon `i` to every polygon already in `edges` across a shared
+    /// edge (both ways), then put its own edges there. The portal is the edge
+    /// as the polygon later in install order (cell order) has it, which is
+    /// `i` unless `after(j)` says `j` comes after it.
+    fn stitch(
+        &mut self,
+        i: usize,
+        edges: &mut HashMap<EdgeKey, Vec<usize>>,
+        after: &dyn Fn(usize) -> bool,
+    ) {
+        let p = self.polygons[i].clone();
+        for e in 0..4 {
+            let a = Vec3::from(p.vertices[e]);
+            let b = Vec3::from(p.vertices[(e + 1) % 4]);
+            let key = edge_key(a, b);
+            for &j in edges.get(&key).into_iter().flatten() {
+                let q = &self.polygons[j];
+                if (p.center().y - q.center().y).abs() > self.steps[i].min(self.steps[j]) + EPS {
+                    continue;
+                }
+                let cost = p.center().distance(q.center());
+                // Seen from `j`'s side, when `j` is the later one.
+                let side = |f: usize| {
+                    let (c, d) = (q.vertices[f], q.vertices[(f + 1) % 4]);
+                    (Vec3::from(c), Vec3::from(d))
+                };
+                let theirs = (0..4).find(|&f| after(j) && edge_key(side(f).0, side(f).1) == key);
+                let (a, b) = theirs.map_or((a, b), |f| (side(f).1, side(f).0));
+                self.adjacency[i].push(Edge {
+                    to: j as u32,
+                    portal: [a, b],
+                    cost,
+                    link: None,
+                });
+                self.adjacency[j].push(Edge {
+                    to: i as u32,
+                    portal: [b, a],
+                    cost,
+                    link: None,
+                });
+            }
+            edges.entry(key).or_default().push(i);
+        }
+    }
+    /// Each link as an edge from the polygon nearest its start to the one
+    /// nearest its end (and back, both ways), after every polygon's own.
+    fn link_edges(&mut self) {
         for l in self.links.values() {
             if let (Some((a, start)), Some((b, end))) = (
                 self.nearest_index(l.start, l.radius),
@@ -614,30 +968,137 @@ impl NavWorld {
                     + start.distance(end)
                     + end.distance(self.polygons[b].center())
                     + l.cost;
+                self.crossings.push((l.id, start, end));
                 self.adjacency[a].push(Edge {
-                    to: b,
+                    to: b as u32,
                     portal: [start, start],
                     cost,
-                    link: Some((l.id, start, end)),
+                    link: Some(self.crossings.len() as u32 - 1),
                 });
+                self.linked.push(a);
                 if l.bidirectional {
+                    self.crossings.push((l.id, end, start));
                     self.adjacency[b].push(Edge {
-                        to: a,
+                        to: a as u32,
                         portal: [end, end],
                         cost,
-                        link: Some((l.id, end, start)),
+                        link: Some(self.crossings.len() as u32 - 1),
                     });
+                    self.linked.push(b);
                 }
             }
         }
     }
+    /// Take every link edge away (they go back, last, after a stream).
+    fn strip_links(&mut self) {
+        self.crossings.clear();
+        for i in std::mem::take(&mut self.linked) {
+            if let Some(list) = self.adjacency.get_mut(i) {
+                list.retain(|e| e.link.is_none());
+            }
+        }
+    }
+    /// Install `tile` for streaming: the graph [`NavWorld::install`] gives,
+    /// for work in proportion to the tile and what already lies under it,
+    /// not to the whole world. Its polygons go after everyone else's rather
+    /// than in cell order, so where two routes cost exactly the same a search
+    /// may pick the other one. A tile of the same cell is replaced.
+    pub fn stream_in(&mut self, tile: NavTile) {
+        self.stream_out(tile.cell);
+        self.strip_links();
+        // What is already here, where the tile lies, bucketed by edge.
+        let b = tile.bounds;
+        let (lo, hi) = (
+            index_cell(b.min[0] - 1e-3, b.min[2] - 1e-3),
+            index_cell(b.max[0] + 1e-3, b.max[2] + 1e-3),
+        );
+        let mut under: Vec<usize> = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|cell| self.index.get(&cell))
+            .flatten()
+            .map(|&i| i as usize)
+            .collect();
+        under.sort_unstable();
+        under.dedup();
+        let mut edges: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
+        for j in under {
+            let p = &self.polygons[j];
+            for e in 0..4 {
+                let key = edge_key(
+                    Vec3::from(p.vertices[e]),
+                    Vec3::from(p.vertices[(e + 1) % 4]),
+                );
+                edges.entry(key).or_default().push(j);
+            }
+        }
+        // Tiles of later cells come after this one when installed.
+        let later: Vec<(usize, usize)> = self
+            .spans
+            .range(tile.cell..)
+            .map(|(_, span)| *span)
+            .collect();
+        let after = |j: usize| later.iter().any(|&(s, e)| (s..e).contains(&j));
+        let start = self.polygons.len();
+        self.polygons.extend(tile.polygons.iter().cloned());
+        self.steps.extend(std::iter::repeat_n(
+            tile.settings.max_step,
+            tile.polygons.len(),
+        ));
+        self.adjacency.resize_with(self.polygons.len(), Vec::new);
+        for i in start..self.polygons.len() {
+            self.index_polygon(i);
+            self.stitch(i, &mut edges, &after);
+        }
+        self.spans.insert(tile.cell, (start, self.polygons.len()));
+        self.tiles.insert(tile.cell, tile);
+        self.link_edges();
+        self.revision = self.revision.wrapping_add(1);
+    }
+    /// Remove a tile streamed in (or installed): [`NavWorld::unload`]'s
+    /// graph, without rebuilding (only renumbering what came after it).
+    pub fn stream_out(&mut self, cell: CellId) -> bool {
+        let Some((s, e)) = self.spans.remove(&cell) else {
+            return false;
+        };
+        self.tiles.remove(&cell);
+        self.strip_links();
+        let gone = s..e;
+        let shift = |i: usize| if i >= e { i - (e - s) } else { i };
+        self.polygons.drain(gone.clone());
+        self.steps.drain(gone.clone());
+        self.adjacency.drain(gone.clone());
+        for list in &mut self.adjacency {
+            list.retain(|x| !gone.contains(&(x.to as usize)));
+            for x in list.iter_mut() {
+                x.to = shift(x.to as usize) as u32;
+            }
+        }
+        for span in self.spans.values_mut() {
+            if span.0 >= e {
+                *span = (shift(span.0), shift(span.1));
+            }
+        }
+        self.index.retain(|_, list| {
+            list.retain(|&i| !gone.contains(&(i as usize)));
+            for i in list.iter_mut() {
+                *i = shift(*i as usize) as u32;
+            }
+            !list.is_empty()
+        });
+        self.link_edges();
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
     pub fn path(&self, start: Vec3, goal: Vec3, snap_distance: f32) -> Option<NavPath> {
         let (source, start) = self.nearest_index(start, snap_distance)?;
         let (target, goal) = self.nearest_index(goal, snap_distance)?;
-        let mut best = vec![f32::INFINITY; self.polygons.len()];
-        let mut previous = vec![None; self.polygons.len()];
+        // The kept bookkeeping, or a fresh one when another search holds it.
+        let mut kept = self.search.try_lock().ok();
+        let mut fresh = Search::default();
+        let search = kept.as_deref_mut().unwrap_or(&mut fresh);
+        search.begin(self.polygons.len());
         let mut open = BinaryHeap::new();
-        best[source] = 0.0;
+        search.set(source, 0.0, None);
         open.push(Open {
             node: source,
             score: 0.0,
@@ -647,26 +1108,27 @@ impl NavWorld {
             if node == target {
                 break;
             }
-            for &edge in &self.adjacency[node] {
-                let cost = best[node] + edge.cost;
-                if cost < best[edge.to] {
-                    best[edge.to] = cost;
-                    previous[edge.to] = Some((node, edge));
+            for (k, &edge) in self.adjacency[node].iter().enumerate() {
+                let cost = search.best(node) + edge.cost;
+                let to = edge.to as usize;
+                if cost < search.best(to) {
+                    search.set(to, cost, Some((node as u32, k as u32)));
                     open.push(Open {
-                        node: edge.to,
-                        score: cost + self.polygons[edge.to].center().distance(target_center),
+                        node: to,
+                        score: cost + self.polygons[to].center().distance(target_center),
                     });
                 }
             }
         }
-        if !best[target].is_finite() {
+        if !search.best(target).is_finite() {
             return None;
         }
         let mut corridor = Vec::new();
         let mut cursor = target;
         while cursor != source {
-            let (from, edge) = previous[cursor]?;
-            corridor.push((from, edge));
+            let (from, k) = search.previous(cursor)?;
+            let from = from as usize;
+            corridor.push((from, self.adjacency[from][k as usize]));
             cursor = from;
         }
         corridor.reverse();
@@ -675,14 +1137,15 @@ impl NavWorld {
         let mut links = Vec::new();
         let mut section = start;
         for (from, edge) in corridor {
-            if let Some((id, a, b)) = edge.link {
+            if let Some((id, a, b)) = edge.link.map(|k| self.crossings[k as usize]) {
                 points.extend(funnel(section, a, &portals).into_iter().skip(1));
                 points.push(b);
                 links.push(id);
                 portals.clear();
                 section = b;
             } else {
-                let direction = self.polygons[edge.to].center() - self.polygons[from].center();
+                let direction =
+                    self.polygons[edge.to as usize].center() - self.polygons[from].center();
                 let mid = (edge.portal[0] + edge.portal[1]) * 0.5;
                 let a = edge.portal[0] - mid;
                 let left = direction.x * a.z - direction.z * a.x > 0.0;
@@ -756,12 +1219,13 @@ impl NavWorld {
                 return None;
             }
             for edge in &self.adjacency[i] {
-                if edge.link.is_some() || visited.contains(&edge.to) {
+                let to = edge.to as usize;
+                if edge.link.is_some() || visited.contains(&to) {
                     continue;
                 }
-                if intervals[edge.to].is_some_and(|(a, b)| a <= high + EPS && b >= low - EPS) {
-                    visited.insert(edge.to);
-                    queue.push_back(edge.to);
+                if intervals[to].is_some_and(|(a, b)| a <= high + EPS && b >= low - EPS) {
+                    visited.insert(to);
+                    queue.push_back(to);
                 }
             }
         }
@@ -1032,5 +1496,120 @@ impl NavAgent {
             velocity,
             ..stopped
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    /// Every edge as what it joins (by the polygons' corners), where and at
+    /// what cost: the graph whatever order the polygons are in.
+    fn graph(nav: &NavWorld) -> Vec<String> {
+        let key = |i: usize| {
+            format!(
+                "{:?}",
+                nav.polygons[i].vertices.map(|v| v.map(f32::to_bits))
+            )
+        };
+        let mut all: Vec<String> = nav
+            .adjacency
+            .iter()
+            .enumerate()
+            .flat_map(|(i, list)| {
+                list.iter().map(move |e| {
+                    format!(
+                        "{} {} {:?} {} {:?}",
+                        key(i),
+                        key(e.to as usize),
+                        e.portal.map(|v| v.to_array().map(f32::to_bits)),
+                        e.cost.to_bits(),
+                        e.link.map(|k| nav.crossings[k as usize].0)
+                    )
+                })
+            })
+            .collect();
+        all.sort();
+        all
+    }
+
+    fn tile(cell: i64, x: f32, z: f32, floor: f32) -> NavTile {
+        heightfield(
+            [cell, 0, 0],
+            Bounds {
+                min: [x, -20.0, z],
+                max: [x + 16.0, 20.0, z + 16.0],
+            },
+            BakeSettings {
+                voxel_size: 2.0,
+                ..BakeSettings::default()
+            },
+            |px, pz| Some(floor + 0.15 * px - 0.1 * pz),
+        )
+        .unwrap()
+    }
+
+    /// Streamed in and out in any order, the graph is the one a full install
+    /// of the same tiles builds: neighbours, a deck stacked over one, a link,
+    /// and a tile replaced in place.
+    #[test]
+    fn streaming_builds_the_graph_installing_does() {
+        let tiles = [
+            tile(0, 0.0, 0.0, 0.0),
+            tile(1, 16.0, 0.0, 0.0),
+            tile(2, 0.0, 16.0, 0.0),
+            tile(3, 16.0, 16.0, 0.0),
+            tile(4, 0.0, 0.0, 6.0),
+        ];
+        let link = OffMeshLink {
+            id: 9,
+            start: Vec3::new(5.0, 0.0, 5.0),
+            end: Vec3::new(5.0, 6.0, 5.0),
+            bidirectional: true,
+            radius: 1.5,
+            cost: 2.0,
+        };
+        let mut streamed = NavWorld::default();
+        streamed.set_link(link).unwrap();
+        let mut present: Vec<usize> = Vec::new();
+        let steps: [(bool, usize); 10] = [
+            (true, 3),
+            (true, 0),
+            (true, 4),
+            (true, 1),
+            (true, 2),
+            (false, 1),
+            (true, 0),
+            (false, 4),
+            (true, 1),
+            (false, 3),
+        ];
+        for (n, (into, which)) in steps.into_iter().enumerate() {
+            if into {
+                streamed.stream_in(tiles[which].clone());
+                if !present.contains(&which) {
+                    present.push(which);
+                }
+            } else {
+                assert!(streamed.stream_out(tiles[which].cell));
+                present.retain(|&t| t != which);
+            }
+            let mut installed = NavWorld::default();
+            installed.set_link(link).unwrap();
+            for &t in &present {
+                installed.install(tiles[t].clone());
+            }
+            assert_eq!(graph(&streamed), graph(&installed), "after step {n}");
+            assert_eq!(streamed.polygons.len(), installed.polygons.len());
+            for x in 0..40 {
+                let p = Vec3::new(x as f32 * 0.83, 1.0, 31.0 - x as f32 * 0.71);
+                assert_eq!(
+                    streamed.nearest(p, 3.0),
+                    installed.nearest(p, 3.0),
+                    "nearest {p} after step {n}"
+                );
+            }
+        }
+        assert!(!streamed.stream_out([7, 0, 0]), "nothing there");
     }
 }

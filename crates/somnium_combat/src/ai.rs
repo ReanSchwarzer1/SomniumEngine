@@ -52,10 +52,21 @@
 //! | `combat.hold` | at the held point | companions under orders |
 //! | `combat.idle` | always | returns home |
 //! | `combat.pack_bite` | never (runs while there is prey) | wolves: circle, dart in on a token, bite or leap, break away |
+//! | `combat.hold_formation` | outside a formation, in the line with an enemy close, or in the row near its place | runs while keeping place ([`form_up`]) |
+//! | `combat.take_cover` | behind cover from the target | only while reloading; fails when nothing near hides it |
+//! | `combat.find_shot` | at a spot with the target in sight | fails when the shot is already clear |
 //!
 //! Nerve: every friend that falls within 25 m shakes a brain, and one whose
 //! profile [`Profile::breaks_with_leader`] (a wolf, a bandit) breaks and runs
 //! when its leader falls.
+//!
+//! A host whose controller moves the bodies hears two things from a brain
+//! besides the movement intent: [`wants_jump`] on the first stride of a level
+//! off-mesh link (a gap; a low wall is vaulted from the jump), and it reports
+//! each body's vault or climb with [`set_climbing`] ([`Climb`]: progress, and
+//! whether the hands are on the edge): a climbing brain neither swings,
+//! guards nor dodges until it is up, and a melee brain can strike a climber
+//! hanging on the edge, out of reach otherwise.
 use crate::geometry::{flat, planar_dir};
 use crate::spell::{Address, Bearing, SpellRequest};
 use crate::weapon::WeaponKind;
@@ -65,9 +76,13 @@ use glam::{Quat, Vec3};
 use somnium_ai::behavior::{
     BehaviorInstance, BehaviorTree, Blackboard, Node, Status, Task, TaskHost,
 };
-use somnium_ai::navigation::NavWorld;
+use somnium_ai::navigation::{LinkKind, NavPath, NavWorld};
 use somnium_ai::perception::{Observer, Sense, Stimulus, StimulusMemory};
 use std::collections::BTreeMap;
+
+mod cover;
+mod formation;
+pub use formation::{Formation, form_up};
 
 /// Seconds between perception updates.
 pub const THINK_INTERVAL: f32 = 0.1;
@@ -276,31 +291,40 @@ impl Archetype {
             ])
         };
         let search = || Seq(vec![Do("combat.has_lead"), Do("combat.investigate")]);
+        // `hold_formation` succeeds at once outside a formation, `take_cover`
+        // and `find_shot` fail at once unless reloading or out of sight, so
+        // a fighter on its own behaves as it did without them.
         let fight = match self {
             Self::Duelist | Self::Spearman | Self::Brute => Seq(vec![
                 Do("combat.has_target"),
                 Do("combat.alert_allies"),
+                Do("combat.hold_formation"),
                 Do("combat.engage"),
                 Do("combat.attack"),
             ]),
             Self::Skirmisher => Seq(vec![
                 Do("combat.has_target"),
                 Do("combat.alert_allies"),
+                Do("combat.hold_formation"),
                 Do("combat.flank"),
                 Do("combat.attack"),
             ]),
             Self::Archer | Self::Rifleman => Seq(vec![
                 Do("combat.has_target"),
                 Do("combat.alert_allies"),
+                Do("combat.hold_formation"),
                 Sel(vec![
                     Seq(vec![Do("combat.too_close"), Do("combat.keep_distance")]),
+                    Do("combat.take_cover"),
                     Do("combat.shoot"),
+                    Do("combat.find_shot"),
                     Do("combat.engage"),
                 ]),
             ]),
             Self::Caster => Seq(vec![
                 Do("combat.has_target"),
                 Do("combat.alert_allies"),
+                Do("combat.hold_formation"),
                 Sel(vec![
                     Seq(vec![Do("combat.too_close"), Do("combat.keep_distance")]),
                     Do("combat.heal_ally"),
@@ -477,11 +501,21 @@ pub struct Mind {
     memory: StimulusMemory,
     /// Awareness of each enemy, 0 to 1.
     aware: BTreeMap<CombatantId, f32>,
-    /// Corners, each with whether it is reached over an off-mesh link.
-    route: Vec<(Vec3, bool)>,
+    /// Corners, each with the kind of link the leg to it crosses.
+    route: Vec<(Vec3, Option<LinkKind>)>,
     route_goal: Option<Vec3>,
     route_age: f32,
+    /// The corner the current leg began at.
+    leg_start: Option<Vec3>,
+    /// This step's wish for the host's controller to jump ([`wants_jump`]).
+    jump: bool,
+    /// The host says its body is vaulting or climbing ([`set_climbing`]).
+    climbing: bool,
+    /// A cover or firing spot: where, whether hidden, when it was judged.
+    spot: Option<(Vec3, bool, f64)>,
     think: f32,
+    /// World time it last thought.
+    thought: Option<f64>,
     situation: u8,
     shouted_for: Option<CombatantId>,
     swings_left: u8,
@@ -531,7 +565,12 @@ impl Brain {
                 route: Vec::new(),
                 route_goal: None,
                 route_age: 0.0,
+                leg_start: None,
+                jump: false,
+                climbing: false,
+                spot: None,
                 think: 0.0,
+                thought: None,
                 situation: u8::MAX,
                 shouted_for: None,
                 swings_left: 0,
@@ -562,6 +601,8 @@ impl Brain {
 pub struct Tactics {
     tokens: BTreeMap<CombatantId, Vec<(CombatantId, f64)>>,
     slots: BTreeMap<CombatantId, Vec<(CombatantId, u8)>>,
+    formations: Vec<Formation>,
+    climbing: BTreeMap<CombatantId, Climb>,
 }
 
 /// Slots around a target.
@@ -648,6 +689,7 @@ impl Tactics {
     pub fn forget(&mut self, id: CombatantId) {
         self.tokens.remove(&id);
         self.slots.remove(&id);
+        self.climbing.remove(&id);
         for h in self.tokens.values_mut() {
             h.retain(|(a, _)| *a != id);
         }
@@ -663,6 +705,7 @@ impl Tactics {
         }
         self.tokens.retain(|t, h| alive(*t) && !h.is_empty());
         self.slots.retain(|t, _| alive(*t));
+        self.climbing.retain(|t, _| alive(*t));
     }
 }
 
@@ -685,6 +728,8 @@ struct Seen {
     windup: Option<(f32, Vec3, f32, u32)>,
     busy: bool,
     mounted: bool,
+    /// Mid-vault or mid-climb ([`set_climbing`]).
+    climb: Option<Climb>,
 }
 
 fn reach_of(def: &crate::weapon::MoveDef) -> f32 {
@@ -724,6 +769,7 @@ fn snapshot(w: &CombatWorld) -> Vec<Seen> {
             },
             busy: !matches!(c.action, Action::Idle | Action::Guard { .. }),
             mounted: c.mount.is_some(),
+            climb: w.tactics.climbing.get(&c.id).copied(),
         })
         .collect()
 }
@@ -834,25 +880,60 @@ pub fn order(w: &mut CombatWorld, id: CombatantId, order: Order) {
     }
 }
 
-/// A path's corners, each marked when the leg to it is one of the path's
-/// off-mesh links (its ends sit within the link's radius of the leg's).
-fn corners(nav: &NavWorld, path: &somnium_ai::navigation::NavPath) -> Vec<(Vec3, bool)> {
-    let links: Vec<_> = path.links.iter().filter_map(|id| nav.link(*id)).collect();
-    let near = |a: Vec3, b: Vec3, r: f32| a.distance(b) <= r + 1e-3;
+/// A body's vault or climb, as the host's controller reports it
+/// (`somnium_character::Controller::mantle`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Climb {
+    /// 0 at the start to 1 standing on top.
+    pub progress: f32,
+    /// Hands on the edge, the feet not yet over: it can neither strike nor
+    /// guard.
+    pub vulnerable: bool,
+}
+
+/// The host reports each body's vault or climb after its controller's step,
+/// `None` once it is up (or on its feet). A climbing brain holds still, with
+/// no swing, guard, dodge or verse, and picks up where it was once on top.
+/// Every brain sees who is climbing: a melee fighter can reach a climber
+/// whose hands are on the edge, above or below it, where a ledge's height
+/// otherwise puts a body out of reach.
+pub fn set_climbing(w: &mut CombatWorld, id: CombatantId, climb: Option<Climb>) {
+    match climb {
+        Some(c) => w.tactics.climbing.insert(id, c),
+        None => w.tactics.climbing.remove(&id),
+    };
+    if let Some(brain) = w.combatant_mut(id).and_then(|c| c.brain.as_mut()) {
+        brain.mind.climbing = climb.is_some();
+    }
+}
+
+/// Whether this step's brain wants the host's controller to jump: the first
+/// strides of a level off-mesh link (a gap to leap, or a low wall it then
+/// vaults). Read after [`CombatWorld::step`].
+#[must_use]
+pub fn wants_jump(w: &CombatWorld, id: CombatantId) -> bool {
+    w.combatant(id)
+        .and_then(|c| c.brain.as_ref())
+        .is_some_and(|b| b.mind.jump)
+}
+
+/// How near a jump link's start the jump is asked for.
+const TAKE_OFF: f32 = 0.6;
+/// A jump link longer than this is leapt at a run.
+const RUNNING_LEAP: f32 = 3.5;
+
+/// A path's corners, each with the kind of off-mesh link the leg to it
+/// crosses (`None` on the mesh), from [`NavPath::legs`].
+fn corners(nav: &NavWorld, path: &NavPath) -> Vec<(Vec3, Option<LinkKind>)> {
     path.points
-        .iter()
-        .enumerate()
-        .map(|(i, &p)| {
-            let link = i > 0
-                && links.iter().any(|l| {
-                    let from = path.points[i - 1];
-                    (near(from, l.start, l.radius) && near(p, l.end, l.radius))
-                        || (l.bidirectional
-                            && near(from, l.end, l.radius)
-                            && near(p, l.start, l.radius))
-                });
-            (p, link)
-        })
+        .first()
+        .map(|&start| (start, None))
+        .into_iter()
+        .chain(
+            path.legs(nav)
+                .into_iter()
+                .map(|leg| (leg.to, leg.link.map(|(_, kind)| kind))),
+        )
         .collect()
 }
 
@@ -880,7 +961,7 @@ struct Host<'a, Q: CombatQuery> {
 
 impl<Q: CombatQuery> Host<'_, Q> {
     fn find(&self, id: CombatantId) -> Option<&Seen> {
-        self.view.iter().find(|s| s.id == id)
+        find(self.view, id)
     }
 
     fn target(&self) -> Option<Seen> {
@@ -892,7 +973,9 @@ impl<Q: CombatQuery> Host<'_, Q> {
     fn distance(&self, other: &Seen) -> f32 {
         let gap = flat(other.position - self.me.position).length() - other.radius - self.me.radius;
         let rise = ((other.position.y - self.me.position.y).abs() - 1.0).max(0.0);
-        if self.mind.ranged {
+        // A climber hanging on the edge is in reach from the top and the foot.
+        let hanging = other.climb.is_some_and(|c| c.vulnerable);
+        if self.mind.ranged || hanging {
             gap
         } else {
             gap + rise * 10.0
@@ -910,13 +993,15 @@ impl<Q: CombatQuery> Host<'_, Q> {
         }
         let to = flat(dest - me);
         let mut dir = to.normalize_or_zero();
+        let mut sprint = sprint;
+        let mut leg = None;
         if let Some(nav) = self.nav {
             // Walk the corridor's corners. `NavAgent` advances a corner only on
             // exact arrival, which assumes it moved the body; here collide and
             // slide moves it, so corners are passed within an arrival radius.
             // A leg over an off-mesh link (a vault, a climb) keeps its plan
             // until its end: one made mid-climb sends the body back to the foot.
-            let on_link = self.mind.route.first().is_some_and(|c| c.1);
+            let on_link = self.mind.route.first().is_some_and(|c| c.1.is_some());
             let stale = if on_link {
                 self.mind.route_age > 3.0
             } else {
@@ -943,7 +1028,7 @@ impl<Q: CombatQuery> Host<'_, Q> {
             }
             self.mind.route_age += self.dt;
             while self.mind.route.len() > 1 && at(self.mind.route[0].0, 0.35) {
-                self.mind.route.remove(0);
+                self.mind.leg_start = Some(self.mind.route.remove(0).0);
             }
             if let [(end, _)] = self.mind.route[..]
                 && at(end, 0.35)
@@ -952,20 +1037,31 @@ impl<Q: CombatQuery> Host<'_, Q> {
                 self.cmd.move_dir = Vec3::ZERO;
                 return true;
             }
-            if let Some(&(next, link)) = self.mind.route.first() {
+            if let Some(&(next, kind)) = self.mind.route.first() {
                 dir = flat(next - me).try_normalize().unwrap_or(dir);
-                // Run into the wall; the host's controller vaults or climbs it.
-                self.cmd.climb = link;
+                leg = kind;
+                let start = self.mind.leg_start.unwrap_or(me);
+                // Run into the wall; the host's controller vaults or climbs
+                // it. Water is dropped into, and only climbed out of.
+                self.cmd.climb = match kind {
+                    Some(LinkKind::Climb | LinkKind::Jump) => true,
+                    Some(LinkKind::Swim) => next.y > start.y,
+                    _ => false,
+                };
+                if kind == Some(LinkKind::Jump) {
+                    self.mind.jump = flat(me - start).length() < TAKE_OFF;
+                    sprint = flat(next - start).length() > RUNNING_LEAP;
+                }
             }
         }
-        // Keep clear of friends.
+        // Keep clear of friends, unless crossing a link (a leap goes straight).
         for s in self.view {
-            if s.id == self.me.id || !(self.allied)(s.id) {
+            if leg.is_some() || s.id == self.me.id {
                 continue;
             }
             let away = flat(self.me.position - s.position);
             let d = away.length();
-            if d < 1.6 && d > 1e-3 {
+            if d < 1.6 && d > 1e-3 && (self.allied)(s.id) {
                 dir += away / d * (1.6 - d) * 0.8;
             }
         }
@@ -997,7 +1093,9 @@ impl<Q: CombatQuery> Host<'_, Q> {
         let d = self.distance(&t);
         let band = self.band();
         self.face(t.chest);
-        if d <= band[1] && (!self.mind.ranged || d >= band[0] * 0.8) {
+        // The row behind a formation keeps its place; the line brings it on.
+        let in_row = self.formation_row().is_some_and(|p| !p.front);
+        if in_row || d <= band[1] && (!self.mind.ranged || d >= band[0] * 0.8) {
             self.cmd.move_dir = Vec3::ZERO;
             return Status::Success;
         }
@@ -1182,10 +1280,12 @@ impl<Q: CombatQuery> Host<'_, Q> {
                 let hurt = self
                     .view
                     .iter()
-                    .filter(|s| (self.allied)(s.id) && s.health < 0.5)
                     .filter(|s| {
-                        flat(s.position - self.me.position).length() <= asset.default_measure.range
+                        s.health < 0.5
+                            && flat(s.position - self.me.position).length()
+                                <= asset.default_measure.range
                     })
+                    .filter(|s| (self.allied)(s.id))
                     .min_by(|a, b| a.health.total_cmp(&b.health));
                 match hurt {
                     Some(s) => Bearing::Target(s.id),
@@ -1241,7 +1341,7 @@ impl<Q: CombatQuery> Host<'_, Q> {
         let threats: Vec<Vec3> = self
             .view
             .iter()
-            .filter(|s| (self.hostile)(s.id) && s.position.distance(self.me.position) < 30.0)
+            .filter(|s| s.position.distance(self.me.position) < 30.0 && (self.hostile)(s.id))
             .map(|s| s.position)
             .collect();
         if threats.is_empty() {
@@ -1480,6 +1580,9 @@ impl<Q: CombatQuery> TaskHost for Host<'_, Q> {
                 _ => Status::Failure,
             },
             "combat.idle" => self.idle(),
+            "combat.hold_formation" => self.hold_formation(),
+            "combat.take_cover" => self.take_cover(),
+            "combat.find_shot" => self.find_shot(),
             other => {
                 board.insert(
                     "task_error".into(),
@@ -1527,8 +1630,18 @@ fn perceive(
         .filter(|wall| wall.blocks_movement())
         .map(|wall| wall.obb)
         .collect();
+    // Past sight, hearing and touch, someone it knows nothing of stays
+    // unknown: skip it before the costlier question of whose side it is on.
+    let beyond = p.sight.max(p.hearing) + 2.0;
     for other in view {
-        if other.id == me.id || !w.hostile(me.id, other.id) {
+        if other.id == me.id
+            || (flat(other.position - me.position).length() > beyond
+                && mind.target != Some(other.id)
+                && mind.aware.get(&other.id).is_none_or(|a| *a <= 0.0))
+            || !w
+                .relations
+                .hostile((me.id, me.team), (other.id, other.team))
+        {
             continue;
         }
         let observer = Observer {
@@ -1733,11 +1846,16 @@ fn reflex(
         let Some((left, dir, reach, serial)) = other.windup else {
             continue;
         };
-        if !w.hostile(me.id, other.id) || !knows(other.id) {
-            continue;
-        }
+        // The reach first: asking whose side someone is on costs more.
         let to_me = flat(me.position - other.position);
         if to_me.length() > reach + me.radius || dir.dot(to_me.normalize_or_zero()) < 0.5 {
+            continue;
+        }
+        if !w
+            .relations
+            .hostile((me.id, me.team), (other.id, other.team))
+            || !knows(other.id)
+        {
             continue;
         }
         if mind.reacted.contains(&(other.id, serial)) {
@@ -1806,6 +1924,13 @@ fn reflex(
     false
 }
 
+/// Someone in a snapshot (it is in id order).
+fn find(view: &[Seen], id: CombatantId) -> Option<&Seen> {
+    view.binary_search_by_key(&id, |s| s.id)
+        .ok()
+        .map(|i| &view[i])
+}
+
 /// Every brain's step: perceive (at ten hertz), react, decide.
 pub(crate) fn think(
     w: &mut CombatWorld,
@@ -1814,6 +1939,7 @@ pub(crate) fn think(
     nav: Option<&NavWorld>,
 ) {
     let view = snapshot(w);
+    formation::update(w, &view, dt);
     let ids: Vec<CombatantId> = w
         .combatants()
         .filter(|c| c.brain.is_some() && c.alive())
@@ -1827,7 +1953,7 @@ pub(crate) fn think(
     let mut rng = std::mem::replace(&mut w.rng, Rng::new(1));
     let mut tactics = std::mem::take(&mut w.tactics);
     for id in ids {
-        let Some(me) = view.iter().find(|s| s.id == id).copied() else {
+        let Some(me) = find(&view, id).copied() else {
             continue;
         };
         let Some(mut brain) = w.combatant_mut(id).and_then(|c| c.brain.take()) else {
@@ -1847,6 +1973,24 @@ pub(crate) fn think(
         cmd.guard = Press::default();
         cmd.channel = false;
         cmd.climb = false;
+        brain.mind.jump = false;
+        // A brain the world's LOD let sit out a few steps lives the time it
+        // missed (up to a second), so its timers and awareness keep real time.
+        let dt = match brain.mind.thought.replace(now) {
+            Some(last) if now - last > f64::from(dt) * 1.5 => ((now - last) as f32).min(1.0),
+            _ => dt,
+        };
+        if brain.mind.climbing {
+            // Hands on the ledge: nothing pressed until the host says it is up.
+            if let Some(c) = w.combatant_mut(id) {
+                c.command = Command {
+                    aim: cmd.aim,
+                    ..Command::default()
+                };
+                c.brain = Some(brain);
+            }
+            continue;
+        }
         if let Some(c) = w.combatant(id) {
             brain.mind.ranged = matches!(c.weapon.kind, WeaponKind::Bow | WeaponKind::LatticeRifle);
             brain.mind.reach = c
@@ -1856,17 +2000,17 @@ pub(crate) fn think(
                 .map_or(c.weapon.reach, reach_of)
                 .max(c.weapon.reach);
             brain.mind.charges = c.weapon.charge.is_some();
-            // Morale follows health and company.
-            let friends = view
-                .iter()
-                .filter(|s| {
-                    s.id != id && w.allied(id, s.id) && s.position.distance(me.position) < 15.0
-                })
-                .count();
-            let foes = view
-                .iter()
-                .filter(|s| w.hostile(id, s.id) && s.position.distance(me.position) < 15.0)
-                .count();
+            // Morale follows health and company (the near first, and their
+            // sides from the snapshot: asking the world costs more).
+            let (mut friends, mut foes) = (0usize, 0usize);
+            let mine = (id, me.team);
+            for s in &view {
+                if s.position.distance(me.position) < 15.0 {
+                    let theirs = (s.id, s.team);
+                    friends += usize::from(s.id != id && w.relations.allied(mine, theirs));
+                    foes += usize::from(w.relations.hostile(mine, theirs));
+                }
+            }
             let pressure = (foes as f32 - friends as f32 - 1.0).max(0.0) * 0.1;
             let ceiling = (c.vitals.health.fraction() + 0.35 - pressure).clamp(0.0, 1.0);
             brain.mind.morale = (brain.mind.morale + 0.02 * dt)
@@ -2025,6 +2169,9 @@ mod tests {
             "combat.hold",
             "combat.idle",
             "combat.pack_bite",
+            "combat.hold_formation",
+            "combat.take_cover",
+            "combat.find_shot",
         ];
         for a in Archetype::ALL {
             let tree = a.tree();
