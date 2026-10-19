@@ -904,6 +904,13 @@ impl HelloGame {
         self.combat.refused_mounts = mounts;
     }
 
+    /// Make the fighter at `entity` the played one (the dual protagonists' switch; out of any boat): see
+    /// `CombatDemo::set_player`.
+    pub fn set_player(&mut self, world: &somnium_ecs::World, entity: Entity) -> bool {
+        self.boats.cast_off();
+        self.combat.set_player(world, entity)
+    }
+
     /// Put the protagonist back from a save (out of any boat): see `CombatDemo::restore_player`.
     pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
         self.boats.cast_off();

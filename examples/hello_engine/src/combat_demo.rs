@@ -2615,6 +2615,47 @@ impl CombatDemo {
         true
     }
 
+    /// Make the fighter at `entity` the played one (the dual protagonists'
+    /// switch, DP-1, at `hand_over`): input, lock-on and the HUD follow him, his
+    /// own brain gone. The one left keeps his body as an ordinary fighter of his
+    /// style (his authored archetype's brain, home where he stands), his command
+    /// and lock-on dropped. False when no fight runs or `entity` is not one of
+    /// its fighters.
+    pub fn set_player(&mut self, world: &World, entity: Entity) -> bool {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let Some(new) = run.bodies.iter().find_map(|(id, e)| (*e == entity).then_some(*id)) else {
+            return false;
+        };
+        if run.player == Some(new) {
+            return true;
+        }
+        if let Some(c) = run.world.combatant_mut(new) {
+            c.brain = None;
+            c.command = somnium_combat::Command::default();
+        }
+        if let Some(old) = run.player {
+            let archetype = run
+                .bodies
+                .get(&old)
+                .and_then(|e| world.get::<CombatantComponent>(*e))
+                .map_or(Archetype::Companion, CombatantComponent::archetype);
+            if let Some(c) = run.world.combatant_mut(old) {
+                c.command = somnium_combat::Command::default();
+                c.lock = None;
+                // ponytail: his style's default profile (no spells of his own); the component's spell list if his
+                // AI should cast them.
+                let mut brain = ai::BrainDesc::new(archetype);
+                brain.home = Some(c.position);
+                c.brain = Some(ai::Brain::new(brain, old));
+            }
+        }
+        run.player = Some(new);
+        true
+    }
+
     /// Off a boat: the protagonist stands (or falls, or swims) from `feet`.
     pub fn disembark(&mut self, feet: Vec3) {
         self.aboard = None;
@@ -4908,6 +4949,40 @@ mod tests {
         let c = demo.run.as_ref().unwrap().world.combatant(player).unwrap();
         assert!(c.mount.is_none(), "on foot");
         assert!(c.vitals.health.current <= c.vitals.health.max, "health within its pool");
+    }
+
+    /// The switch makes another fighter the played one: he has no brain now,
+    /// and the one left has one (his style's), his command and lock-on dropped.
+    #[test]
+    fn the_switch_hands_the_fight_to_the_other_protagonist() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut demo = CombatDemo::default();
+        demo.run = Some(build(&world).expect("a fight"));
+        let (caelan, other, other_entity) = {
+            let run = demo.run.as_ref().unwrap();
+            let caelan = run.player.unwrap();
+            let (other, e) = run
+                .bodies
+                .iter()
+                .find(|(id, _)| {
+                    **id != caelan && run.world.combatant(**id).is_some_and(|c| c.brain.is_some() && c.mount_def.is_none())
+                })
+                .map(|(id, e)| (*id, *e))
+                .expect("another fighter");
+            (caelan, other, e)
+        };
+        demo.run.as_mut().unwrap().world.combatant_mut(caelan).unwrap().lock = Some(other);
+        let nobody = world.spawn((Name::new("nobody"),));
+        assert!(!demo.set_player(&world, nobody), "not a fighter");
+        assert!(demo.set_player(&world, other_entity));
+        let run = demo.run.as_ref().unwrap();
+        assert_eq!(run.player, Some(other));
+        assert!(run.world.combatant(other).unwrap().brain.is_none(), "his own brain gone: he is played");
+        let left = run.world.combatant(caelan).unwrap();
+        assert!(left.brain.is_some() && left.lock.is_none(), "the one left fights as anyone would");
+        assert!(demo.set_player(&world, other_entity), "already him");
     }
 
     #[test]
