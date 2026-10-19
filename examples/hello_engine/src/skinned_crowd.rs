@@ -423,9 +423,9 @@ struct Stats {
 pub struct SkinnedBodies {
     /// Posed vertices all skinned bodies may hold together.
     pub vertex_budget: u32,
-    /// Skinned meshes registered a frame at most, nearest bodies first: the
-    /// renderer re-checks every registered skin for each new one, so a crowd
-    /// coming into view (or changing level) all at once would stall a frame.
+    /// Skinned meshes registered a frame at most, nearest bodies first: each
+    /// uploads a body's posed vertices and bindings, so a crowd coming into
+    /// view all at once is spread over a few frames.
     pub registers_per_frame: usize,
     /// How far still bodies are drawn.
     pub still_cull: f32,
@@ -666,7 +666,7 @@ const BUDGET_KEEP: f32 = 4.0;
 const LOADS_IN_FLIGHT: usize = 4;
 
 /// Skinned meshes registered a frame, by default.
-const REGISTERS_PER_FRAME: usize = 4;
+const REGISTERS_PER_FRAME: usize = 16;
 
 /// Where a body holds one pose, by default: the old cull, so nothing that
 /// animated before stops.
