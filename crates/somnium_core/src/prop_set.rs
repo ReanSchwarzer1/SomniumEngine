@@ -556,15 +556,17 @@ mod tests {
                 ComponentId::of::<MaterialComponent>(),
             ]);
             let mut drawn = 0;
+            // Every mesh here has all three components, so the mesh query visits these archetypes, in this order.
+            let mut entities = world.entities_with::<MeshComponent>();
             for archetype in world.query_archetypes(&required, &ComponentSet::empty()) {
                 let wt_col = archetype.column_index(ComponentId::of::<WorldTransform>()).unwrap();
                 let m_col = archetype.column_index(ComponentId::of::<MeshComponent>()).unwrap();
                 for row in 0..archetype.len() {
-                    let entity = archetype.entities()[row];
+                    let entity = entities.next().expect("one entity a row");
                     if lods.is_hidden(entity) {
                         continue;
                     }
-                    let Some(casts_shadow) = draws.draw_row(world, archetype, row, camera) else { continue };
+                    let Some(casts_shadow) = draws.draw_row(world, archetype, row, entity, camera) else { continue };
                     // The draw hello_engine submits: what the renderer is then given to sort, instance and cull.
                     let (wt, mesh) = unsafe {
                         (archetype.column(wt_col).get::<WorldTransform>(row), archetype.column(m_col).get::<MeshComponent>(row))
@@ -582,6 +584,7 @@ mod tests {
                     drawn += 1;
                 }
             }
+            assert!(entities.next().is_none(), "the mesh query and the loop visit the same rows");
             drawn
         }
         let camera = Vec3::new(500.0, 70.0, 300.0);

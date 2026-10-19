@@ -33,6 +33,10 @@ const BASELINE: &[(&str, usize)] = &[
     ("crates/somnium_core/src/clipboard.rs", 8),
     ("crates/somnium_core/src/editor_commands.rs", 12),
     ("crates/somnium_core/src/map.rs", 1),
+    // 19 Oct 2026: not a world scan. The prop-set planner reads the entity of the row it plans, inside a query over
+    // the archetypes holding PropSet, beside that row's WorldTransform and EditorFlags columns. Per frame by design:
+    // a lookup per set is what it was rewritten to avoid (150 ns a set).
+    ("crates/somnium_core/src/prop_set.rs", 1),
     ("crates/somnium_core/src/prefab.rs", 7),
     ("crates/somnium_core/src/save_game/editor.rs", 1),
     ("crates/somnium_core/src/scatter_scene.rs", 1),
