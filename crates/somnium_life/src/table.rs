@@ -4,9 +4,13 @@
 //! [`crate::LifeWorld::adopt_place`] with [`TablePlace::key`]), so the people
 //! of a town far off cost nothing until the player is on the way there.
 
+use crate::Pose;
 use crate::place::Place;
+use crate::routine::Role;
+use crate::sim::BeastKind;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Every place of a realm.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -16,6 +20,81 @@ pub struct LifeTable {
     pub version: u32,
     /// The places.
     pub places: Vec<TablePlace>,
+    /// How its people and beasts look, if the game has bodies for them.
+    #[serde(default)]
+    pub looks: Option<TableLooks>,
+}
+
+/// How a table's people and beasts look: skinned bodies and their clips (a
+/// game's assets; paths relative to its assets folder, with `<name>_lod1.glb`
+/// and `<name>_lod2.glb` beside a body as its lighter levels).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TableLooks {
+    /// Bodies by role name ([`Role::NAMES`]); `default` for any role not
+    /// named. Each person keeps one of their role's, by who they are.
+    #[serde(default)]
+    pub villagers: BTreeMap<String, Vec<String>>,
+    /// A body by beast kind ([`BeastKind::NAMES`]).
+    #[serde(default)]
+    pub beasts: BTreeMap<String, String>,
+    /// Clips by pose name ([`Pose::name`]).
+    #[serde(default)]
+    pub poses: BTreeMap<String, String>,
+    /// Children's own clips, over `poses`.
+    #[serde(default)]
+    pub child_poses: BTreeMap<String, String>,
+    /// Elders' own clips, over `poses`.
+    #[serde(default)]
+    pub elder_poses: BTreeMap<String, String>,
+    /// Beasts' clips by pose name (`Graze`, `Walk`, `Run`, `Idle`).
+    #[serde(default)]
+    pub beast_poses: BTreeMap<String, String>,
+    /// How fast the walk clip moves, m/s: villagers walk at it.
+    #[serde(default)]
+    pub walk_speed: Option<f32>,
+    /// How fast the run clip moves, m/s: villagers run from danger at it.
+    #[serde(default)]
+    pub run_speed: Option<f32>,
+}
+
+impl TableLooks {
+    /// The body person `who` wears, of their role's.
+    #[must_use]
+    pub fn body(&self, role: Role, who: u32) -> Option<&str> {
+        let list = self
+            .villagers
+            .get(Role::NAMES[role as usize])
+            .or_else(|| self.villagers.get("default"))?;
+        // A stable pick, so the same person wears the same body each time.
+        let pick = (who.wrapping_mul(2_654_435_761) >> 7) as usize % list.len().max(1);
+        list.get(pick).map(String::as_str)
+    }
+
+    /// The clip a person of `role` plays in `pose`.
+    #[must_use]
+    pub fn clip(&self, role: Role, pose: Pose) -> Option<&str> {
+        let own = match role {
+            Role::Child => self.child_poses.get(pose.name()),
+            Role::Elder => self.elder_poses.get(pose.name()),
+            _ => None,
+        };
+        own.or_else(|| self.poses.get(pose.name()))
+            .map(String::as_str)
+    }
+
+    /// The body a beast of `kind` wears.
+    #[must_use]
+    pub fn beast_body(&self, kind: BeastKind) -> Option<&str> {
+        self.beasts
+            .get(BeastKind::NAMES[kind as usize])
+            .map(String::as_str)
+    }
+
+    /// The clip a beast plays in `pose`.
+    #[must_use]
+    pub fn beast_clip(&self, pose: Pose) -> Option<&str> {
+        self.beast_poses.get(pose.name()).map(String::as_str)
+    }
 }
 
 /// One place of the table.
@@ -82,6 +161,7 @@ mod tests {
         LifeTable {
             version: 1,
             places: vec![town("Nearby", 0.0), town("Far Off", 5_000.0)],
+            looks: None,
         }
     }
 
@@ -108,5 +188,46 @@ mod tests {
         assert_eq!(w.place_count(), 1, "adopted once");
         assert!(w.villagers().len() >= 6, "a household a home");
         assert!(LifeTable::from_json("{").is_err());
+    }
+
+    /// Looks: a person keeps one body of their role's, children and elders
+    /// play their own clips where they have them, beasts theirs.
+    #[test]
+    fn looks_dress_people_and_beasts_by_role_and_pose() {
+        let looks: TableLooks = serde_json::from_str(
+            r#"{
+              "villagers": {"Farmer": ["a.glb", "b.glb"], "default": ["c.glb"]},
+              "beasts": {"Sheep": "sheep.glb"},
+              "poses": {"Walk": "Loco_Walk_F_Loop", "Idle": "Idle_Neutral_Loop"},
+              "child_poses": {"Walk": "Child_Walk_F_Loop"},
+              "beast_poses": {"Graze": "Graze_Loop"},
+              "walk_speed": 0.86
+            }"#,
+        )
+        .unwrap();
+        let farmer = looks.body(Role::Farmer, 7).unwrap();
+        assert!(farmer == "a.glb" || farmer == "b.glb");
+        assert_eq!(
+            looks.body(Role::Farmer, 7),
+            Some(farmer),
+            "the same each time"
+        );
+        assert_eq!(looks.body(Role::Smith, 7), Some("c.glb"), "the default");
+        assert_eq!(
+            looks.clip(Role::Child, Pose::Walk),
+            Some("Child_Walk_F_Loop")
+        );
+        assert_eq!(
+            looks.clip(Role::Child, Pose::Idle),
+            Some("Idle_Neutral_Loop")
+        );
+        assert_eq!(
+            looks.clip(Role::Farmer, Pose::Walk),
+            Some("Loco_Walk_F_Loop")
+        );
+        assert_eq!(looks.clip(Role::Farmer, Pose::Pray), None);
+        assert_eq!(looks.beast_body(BeastKind::Sheep), Some("sheep.glb"));
+        assert_eq!(looks.beast_clip(Pose::Graze), Some("Graze_Loop"));
+        assert_eq!(looks.walk_speed, Some(0.86));
     }
 }

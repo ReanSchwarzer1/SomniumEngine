@@ -33,7 +33,7 @@ pub use crowd::Bodies;
 pub use lod::{LodConfig, Tier};
 pub use place::{LaneGraph, Place, Spot, SpotKind};
 pub use routine::{Activity, Role, Routine};
-pub use table::{LifeTable, TablePlace};
+pub use table::{LifeTable, TableLooks, TablePlace};
 pub use sim::{
     AgentId, Beast, BeastKind, Cart, Flat, Ground, LifeWorld, Stats, Villager, VillagerDesc,
 };
@@ -96,6 +96,29 @@ pub enum Pose {
     Run,
     /// Talking with a neighbour (facing them).
     Talk,
+}
+
+impl Pose {
+    /// Its name, as a game's tables give poses (`Walk`, `Talk`, ...).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Walk => "Walk",
+            Self::Work => "Work",
+            Self::Farm => "Farm",
+            Self::Tend => "Tend",
+            Self::Trade => "Trade",
+            Self::Pray => "Pray",
+            Self::Sit => "Sit",
+            Self::Play => "Play",
+            Self::Graze => "Graze",
+            Self::Drive => "Drive",
+            Self::Inside => "Inside",
+            Self::Run => "Run",
+            Self::Talk => "Talk",
+        }
+    }
 }
 
 /// The world's random numbers: xorshift64*, seeded per agent.

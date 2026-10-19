@@ -30,6 +30,9 @@
 //! A **Life Table** names a realm's places in one file (a game's tool writes it
 //! from its settlements): each town is housed when the view comes within its
 //! reach, and lives on cheaply after. Villagers stand on the scene's terrain.
+//! When the table has looks (the game's skinned bodies and clips), the pooled
+//! people and beasts wear them (`hello.SkinnedBody`), each keeping one body of
+//! their role's and playing the clip their pose calls for.
 //!
 //! **B** rings the alarm bell where the camera is: everyone within 80 m runs
 //! home and stays in for 45 seconds, beasts bolt, carts stop
@@ -55,7 +58,7 @@ use somnium_life::components::{
 };
 use somnium_life::{
     BeastKind, Bodies, Clock, Ground, LifeTable, LifeWorld, LodConfig, Place, Role, Spot, SpotKind,
-    Tier, VillagerDesc,
+    TableLooks, Tier, VillagerDesc,
 };
 use somnium_physics::body::{BodyId, MotionType, RigidBodyDescriptor};
 use somnium_physics::shape::ColliderShape;
@@ -535,6 +538,8 @@ struct Run {
     fights: usize,
     /// A Life Table's places, housed as the view comes near.
     table: Option<TableRun>,
+    /// A Life Table's looks: what the pooled people and beasts wear.
+    dress_as: Option<TableLooks>,
     spawned: Vec<Entity>,
     colliders: Vec<BodyId>,
     hour: f32,
@@ -551,6 +556,8 @@ struct Pool {
     slots: Vec<(Entity, Option<Entity>)>,
     /// Agents of this kind shown by their own hand-placed entity.
     own: HashSet<usize>,
+    /// Its slots wear skinned bodies (a Life Table's looks), not shapes.
+    skinned: bool,
 }
 
 impl Pool {
@@ -558,7 +565,7 @@ impl Pool {
         world: &mut World,
         spawned: &mut Vec<Entity>,
         parent: Entity,
-        (n, name, mesh, head): (usize, &str, MeshKind, bool),
+        (n, name, mesh, head): (usize, &str, Option<MeshKind>, bool),
         own: HashSet<usize>,
     ) -> Self {
         let slots = (0..n)
@@ -571,10 +578,13 @@ impl Pool {
                     },
                     WorldTransform::identity(),
                     Parent { entity: parent },
-                    mesh,
-                    material("ash"),
                 ));
                 spawned.push(body);
+                let Some(mesh) = mesh else {
+                    return (body, None);
+                };
+                let _ = world.insert_component(body, mesh);
+                let _ = world.insert_component(body, material("ash"));
                 let head = head.then(|| {
                     let h = world.spawn((
                         Name::new(&format!("{name} head")),
@@ -594,6 +604,7 @@ impl Pool {
             bodies: Bodies::new(n),
             slots,
             own,
+            skinned: mesh.is_none(),
         }
     }
 
@@ -613,6 +624,50 @@ fn villager_size(role: Role) -> Vec3 {
         Vec3::new(0.38, 1.05, 0.38)
     } else {
         Vec3::new(0.5, 1.45, 0.5)
+    }
+}
+
+/// Dress a pooled slot in a skinned body from a Life Table's looks (its
+/// `<name>_lod1.glb` and `_lod2.glb` beside it as the lighter levels).
+fn wear(
+    world: &mut World,
+    entity: Entity,
+    name: &str,
+    body: Option<&str>,
+    clip: Option<&str>,
+    who: u32,
+) {
+    if let Some(n) = world.get_mut::<Name>(entity) {
+        *n = Name::new(name);
+    }
+    let Some(body) = body else {
+        return;
+    };
+    let lod = |k: &str| {
+        body.strip_suffix(".glb").map_or(AssetId::NONE, |stem| {
+            AssetId::from_relative_path(format!("{stem}_{k}.glb"))
+        })
+    };
+    let _ = world.insert_component(
+        entity,
+        crate::skinned_crowd::SkinnedBody {
+            source: AssetId::from_relative_path(body),
+            clip: clip.unwrap_or_default().to_string(),
+            time: (who % 97) as f32 * 0.37 % 4.0,
+            lod1: lod("lod1"),
+            lod2: lod("lod2"),
+            ..Default::default()
+        },
+    );
+}
+
+/// Play the clip a pooled skinned slot's holder's pose calls for (when it changed).
+fn play(world: &mut World, entity: Entity, clip: Option<&str>) {
+    let clip = clip.unwrap_or_default();
+    if let Some(b) = world.get_mut::<crate::skinned_crowd::SkinnedBody>(entity)
+        && b.clip != clip
+    {
+        b.clip = clip.to_string();
     }
 }
 
@@ -1043,25 +1098,39 @@ impl LifeDemo {
             WorldTransform::identity(),
         ));
         spawned.push(effects);
+        let table = load_table(world, root);
+        let dress_as = table.as_ref().and_then(|t| t.table.looks.clone());
+        let skinned_people = dress_as.as_ref().is_some_and(|l| !l.villagers.is_empty());
+        let skinned_beasts = dress_as.as_ref().is_some_and(|l| !l.beasts.is_empty());
         let villagers = Pool::new(
             world,
             &mut spawned,
             effects,
-            (VILLAGER_BODIES, "Villager", MeshKind::Cylinder, true),
+            (
+                VILLAGER_BODIES,
+                "Villager",
+                (!skinned_people).then_some(MeshKind::Cylinder),
+                true,
+            ),
             HashSet::new(),
         );
         let beasts = Pool::new(
             world,
             &mut spawned,
             effects,
-            (BEAST_BODIES, "Beast", MeshKind::Cube, false),
+            (
+                BEAST_BODIES,
+                "Beast",
+                (!skinned_beasts).then_some(MeshKind::Cube),
+                false,
+            ),
             HashSet::new(),
         );
         let mut carts = Pool::new(
             world,
             &mut spawned,
             effects,
-            (CART_BODIES, "Cart", MeshKind::Cube, false),
+            (CART_BODIES, "Cart", Some(MeshKind::Cube), false),
             HashSet::new(),
         );
         for (body, _) in &carts.slots {
@@ -1086,7 +1155,8 @@ impl LifeDemo {
             greeted: 0,
             health: HashMap::new(),
             fights: 0,
-            table: None,
+            table,
+            dress_as,
             spawned,
             colliders: Vec::new(),
             // `SOMNIUM_LIFE_HOUR` starts the day at another hour (captures).
@@ -1102,7 +1172,15 @@ impl LifeDemo {
             reported: 0.0,
         };
         sync(world, &mut run);
-        run.table = load_table(world, root);
+        // People walk and run at the pace their clips move.
+        if let Some(looks) = &run.dress_as {
+            if let Some(walk) = looks.walk_speed {
+                run.life.walk_speed = walk;
+            }
+            if let Some(run_speed) = looks.run_speed {
+                run.life.run_speed = run_speed;
+            }
+        }
         // Look round for the table's towns on the first frame.
         run.synced = 1.0;
         let life = &run.life;
@@ -1317,6 +1395,11 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         run.looks.remove(&body);
         if let Some(i) = holder {
             let v = &life.villagers()[i];
+            if let (true, Some(looks)) = (run.villagers.skinned, &run.dress_as) {
+                let (look, clip) = (looks.body(v.role, v.id.0), looks.clip(v.role, v.pose));
+                wear(world, body, &v.name, look, clip, v.id.0);
+                continue;
+            }
             let size = villager_size(v.role);
             dress(world, body, &v.name, size, role_material(v.role));
             if let Some(t) = head.and_then(|h| world.get_mut::<Transform>(h)) {
@@ -1336,7 +1419,14 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         let body = run.beasts.slots[slot].0;
         run.looks.remove(&body);
         if let Some(i) = holder {
-            let kind = life.beasts()[i].kind;
+            let b = &life.beasts()[i];
+            let kind = b.kind;
+            if let (true, Some(looks)) = (run.beasts.skinned, &run.dress_as) {
+                let name = BeastKind::NAMES[kind as usize];
+                let (look, clip) = (looks.beast_body(kind), looks.beast_clip(b.pose));
+                wear(world, body, name, look, clip, b.id.0);
+                continue;
+            }
             let (size, look) = beast_look(kind);
             dress(world, body, BeastKind::NAMES[kind as usize], size, look);
         }
@@ -1352,6 +1442,26 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
     for (slot, _) in changed {
         run.looks.remove(&run.carts.slots[slot].0);
     }
+    // Skinned slots play the clip their holder's pose calls for.
+    if let Some(looks) = &run.dress_as {
+        for (slot, (e, _)) in run.villagers.slots.iter().enumerate() {
+            if run.villagers.skinned
+                && let Some(i) = run.villagers.bodies.holder(slot)
+            {
+                let v = &life.villagers()[i];
+                play(world, *e, looks.clip(v.role, v.pose));
+            }
+        }
+        for (slot, (e, _)) in run.beasts.slots.iter().enumerate() {
+            if run.beasts.skinned
+                && let Some(i) = run.beasts.bodies.holder(slot)
+            {
+                play(world, *e, looks.beast_clip(life.beasts()[i].pose));
+            }
+        }
+    }
+    // A shape stands on its middle; a skinned body on its feet.
+    let feet = Vec3::new(1.0, 0.0, 1.0);
     let pooled = |pool: &Pool, kind: fn(usize) -> Visual, size: &dyn Fn(usize) -> Vec3| {
         pool.slots
             .iter()
@@ -1368,10 +1478,18 @@ fn write_visuals(world: &mut World, run: &mut Run, focus: Vec3) {
         .map(|(e, v, size)| (*e, Some(*v), *size))
         .collect();
     all.extend(pooled(&run.villagers, Visual::Villager, &|i| {
-        villager_size(life.villagers()[i].role)
+        if run.villagers.skinned {
+            feet
+        } else {
+            villager_size(life.villagers()[i].role)
+        }
     }));
     all.extend(pooled(&run.beasts, Visual::Beast, &|i| {
-        beast_look(life.beasts()[i].kind).0
+        if run.beasts.skinned {
+            feet
+        } else {
+            beast_look(life.beasts()[i].kind).0
+        }
     }));
     all.extend(pooled(&run.carts, Visual::Cart, &|_| {
         Vec3::new(1.4, 1.1, 2.6)
@@ -1754,6 +1872,7 @@ mod tests {
         let table = LifeTable {
             version: 1,
             places: vec![town("Here", 0.0), town("Yonder", 3_000.0)],
+            looks: None,
         };
         let root = std::env::temp_dir().join(format!("life_table_{}", std::process::id()));
         std::fs::create_dir_all(root.join("data")).unwrap();
@@ -1781,6 +1900,103 @@ mod tests {
             1,
             "Yonder, on the way there"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A table with looks: the pooled people wear their role's bodies, play
+    /// their pose's clip, and stand on their feet; no shapes are spawned.
+    #[test]
+    fn a_tables_looks_dress_the_pooled_people() {
+        let mut spots: Vec<Spot> = (0..12)
+            .map(|i| Spot::new(SpotKind::Home, Vec3::new(i as f32 * 8.0, 2.0, 0.0)))
+            .collect();
+        spots.push(Spot {
+            radius: 8.0,
+            ..Spot::new(SpotKind::Green, Vec3::new(40.0, 2.0, 20.0))
+        });
+        let table = LifeTable {
+            version: 1,
+            places: vec![somnium_life::TablePlace {
+                centre: [40.0, 2.0, 0.0],
+                radius: 60.0,
+                seed: 9,
+                place: Place {
+                    name: "Dressed".into(),
+                    spots,
+                    lanes: vec![vec![Vec3::new(-10.0, 2.0, 4.0), Vec3::new(100.0, 2.0, 4.0)]],
+                    roads: Vec::new(),
+                },
+            }],
+            looks: Some(
+                serde_json::from_value(json!({
+                    "villagers": {"default": ["characters/crowd_00/crowd_00.glb"]},
+                    "poses": {"Walk": "Loco_Walk_F_Loop", "Idle": "Idle_Neutral_Loop", "Play": "Child_Tag"},
+                    "child_poses": {"Walk": "Child_Walk_F_Loop", "Idle": "Child_Idle_Loop"},
+                    "walk_speed": 0.86
+                }))
+                .unwrap(),
+            ),
+        };
+        let root = std::env::temp_dir().join(format!("life_looks_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("realm.json"),
+            serde_json::to_string(&table).unwrap(),
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Realm"),
+            LifeTableComponent {
+                file: "realm.json".into(),
+                ..Default::default()
+            },
+        ));
+        let mut run = LifeDemo::start(&mut world, Some(&root)).unwrap();
+        assert!(run.villagers.skinned && !run.beasts.skinned);
+        assert!((run.life.walk_speed - 0.86).abs() < 1e-6, "the clip's pace");
+        assert!(
+            world.iter_with::<MeshKind>().all(|(e, _)| !run
+                .villagers
+                .slots
+                .iter()
+                .any(|s| s.0 == e))
+        );
+        adopt_near(&mut run, Vec3::new(40.0, 0.0, 0.0));
+        for _ in 0..600 {
+            run.life
+                .step(0.5, Clock::at(11.0), &[Vec3::new(40.0, 0.0, 0.0)], &Flat);
+        }
+        write_visuals(&mut world, &mut run, Vec3::new(40.0, 0.0, 0.0));
+        let mut dressed = 0;
+        for (slot, (e, _)) in run.villagers.slots.iter().enumerate() {
+            let Some(i) = run.villagers.bodies.holder(slot) else {
+                continue;
+            };
+            let v = &run.life.villagers()[i];
+            let b = world
+                .get::<crate::skinned_crowd::SkinnedBody>(*e)
+                .expect("dressed");
+            assert_eq!(
+                b.source,
+                AssetId::from_relative_path("characters/crowd_00/crowd_00.glb")
+            );
+            assert_eq!(
+                b.lod1,
+                AssetId::from_relative_path("characters/crowd_00/crowd_00_lod1.glb")
+            );
+            let want = run
+                .dress_as
+                .as_ref()
+                .unwrap()
+                .clip(v.role, v.pose)
+                .unwrap_or_default();
+            assert_eq!(b.clip, want, "{:?} {:?}", v.role, v.pose);
+            let at = world.get::<Transform>(*e).unwrap().translation;
+            assert!((at - v.position).length() < 1e-3, "on its feet");
+            dressed += 1;
+        }
+        assert!(dressed > 0, "somebody out of doors at eleven");
         let _ = std::fs::remove_dir_all(root);
     }
 
