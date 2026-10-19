@@ -925,6 +925,9 @@ pub fn claims_play(world: &World) -> bool {
         || world
             .iter_with::<CombatEncounterComponent>()
             .any(|(_, c)| c.enabled)
+        || world
+            .iter_with::<CombatPatrolComponent>()
+            .any(|(_, c)| c.enabled)
 }
 
 /// A fight authored into a scene: on Play the host builds the encounter at
@@ -953,7 +956,46 @@ impl Default for CombatEncounterComponent {
     }
 }
 
+/// A band or pack that walks a route: the entity's `somnium.Spline`, as it is
+/// drawn (just where it stands, without one). Asleep it is a record that
+/// keeps walking the route; it wakes where it has got to when the
+/// protagonist comes near, and walks on from there until it finds a fight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CombatPatrolComponent {
+    /// Walks while Play runs.
+    pub enabled: bool,
+    /// Who walks: `bandits` (a band) or `wolves` (a pack).
+    pub kind: String,
+    /// Bring its own flat ground; off stands everyone on the ground where it
+    /// wakes.
+    pub floor: bool,
+    /// Walking pace, metres a second.
+    pub speed: f32,
+}
+
+impl somnium_ecs::Component for CombatPatrolComponent {}
+
+impl Default for CombatPatrolComponent {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kind: "bandits".into(),
+            floor: false,
+            speed: 1.3,
+        }
+    }
+}
+
 fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
+    registry.register(somnium_ecs::component_schema! {
+        CombatPatrolComponent as "somnium.CombatPatrol", display "Combat Patrol", version 1,
+        fields {
+            enabled { doc: "Walks its route (this entity's Spline) while Play runs, asleep until the protagonist comes near." },
+            kind { doc: "bandits: a band that walks the road; wolves: a pack that roams." },
+            floor { doc: "Bring its own flat ground; off stands everyone on the ground where it wakes." },
+            speed { min: 0.0, max: 6.0, unit: "m/s", doc: "Walking pace along the route." },
+        }
+    });
     registry.register(somnium_ecs::component_schema! {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
@@ -973,6 +1015,24 @@ fn expand_encounters(world: &mut World) -> Vec<Entity> {
         .filter(|(_, c)| c.enabled)
         .map(|(e, c)| (world_matrix(world, e), c.clone()))
         .collect();
+    let mut wanted = wanted;
+    // Without a protagonist to wake them, patrols stand at their route's start.
+    let patrols: Vec<(Mat4, CombatEncounterComponent)> = world
+        .iter_with::<CombatPatrolComponent>()
+        .filter(|(_, c)| c.enabled)
+        .map(|(e, c)| {
+            let (route, closed) = patrol_route(world, e);
+            let (at, way) = route_at(&route, closed, 0.0);
+            let m = Mat4::from_rotation_translation(yaw(way), at);
+            let encounter = CombatEncounterComponent {
+                enabled: true,
+                kind: c.kind.clone(),
+                floor: c.floor,
+            };
+            (m, encounter)
+        })
+        .collect();
+    wanted.extend(patrols);
     let mut made = Vec::new();
     for (m, encounter) in wanted {
         let (at, facing) = (m.transform_point3(Vec3::ZERO), m.transform_vector3(Vec3::Z));
@@ -1086,6 +1146,15 @@ struct Encounter {
     left: Option<Vec<(String, f32)>>,
     /// Where its navigation patch is centred, while it has one.
     patch_at: Option<Vec3>,
+    /// A patrol's route in the world (empty for a camp or pack that stays),
+    /// whether it closes, its pace, and how far along it the group has got
+    /// (metres; it walks on while asleep).
+    route: Vec<Vec3>,
+    closed: bool,
+    speed: f32,
+    along: f32,
+    /// A pack shadowing the protagonist (at dusk): its homes are off its own.
+    shadowing: bool,
     /// Awake: its entities, fighters (and where each stood when it woke)
     /// and colliders.
     entities: Vec<Entity>,
@@ -1135,6 +1204,207 @@ fn enlist_encounters(world: &World, set: &mut Dormancy<Encounter>) {
             },
         );
     }
+    for (e, c) in world.iter_with::<CombatPatrolComponent>() {
+        if !c.enabled {
+            continue;
+        }
+        let (route, closed) = patrol_route(world, e);
+        let (at, way) = route_at(&route, closed, 0.0);
+        let home = (
+            format!("patrol {}", c.kind.trim().to_ascii_lowercase()),
+            at.to_array().map(|v| (v * 2.0).round() as i64),
+        );
+        if !known.insert(home.clone()) {
+            continue;
+        }
+        set.add(
+            at,
+            encounter_extent(&c.kind),
+            Encounter {
+                kind: c.kind.clone(),
+                floor: c.floor,
+                facing: way,
+                home,
+                route,
+                closed,
+                speed: c.speed.max(0.0),
+                ..Encounter::default()
+            },
+        );
+    }
+}
+
+/// A patrol's route in the world: its entity's spline, sampled along its
+/// curve, or just where the entity stands.
+fn patrol_route(world: &World, e: Entity) -> (Vec<Vec3>, bool) {
+    let m = world_matrix(world, e);
+    match world.get::<somnium_core::SplineComponent>(e) {
+        Some(spline) if spline.points.len() >= 2 => (
+            spline
+                .polyline()
+                .into_iter()
+                .map(|p| m.transform_point3(p))
+                .collect(),
+            spline.closed,
+        ),
+        _ => (vec![m.transform_point3(Vec3::ZERO)], false),
+    }
+}
+
+/// Where a route has got to `along` metres in, and which way it is going: a
+/// closed route goes round, an open one there and back.
+fn route_at(route: &[Vec3], closed: bool, along: f32) -> (Vec3, Vec3) {
+    let Some(&first) = route.first() else {
+        return (Vec3::ZERO, Vec3::Z);
+    };
+    let mut legs: Vec<(Vec3, Vec3)> = route.windows(2).map(|w| (w[0], w[1])).collect();
+    if closed && route.len() > 2 {
+        legs.push((route[route.len() - 1], first));
+    }
+    let length: f32 = legs.iter().map(|(a, b)| a.distance(*b)).sum();
+    if length <= 1e-3 || !along.is_finite() {
+        return (first, Vec3::Z);
+    }
+    let (mut t, back) = if closed {
+        (along.rem_euclid(length), false)
+    } else {
+        let t = along.rem_euclid(2.0 * length);
+        if t > length {
+            (2.0 * length - t, true)
+        } else {
+            (t, false)
+        }
+    };
+    for (a, b) in &legs {
+        let d = a.distance(*b);
+        if t <= d && d > 1e-6 {
+            let way = (*b - *a).normalize_or(Vec3::Z) * if back { -1.0 } else { 1.0 };
+            return (a.lerp(*b, t / d), way);
+        }
+        t -= d;
+    }
+    let (a, b) = legs[legs.len() - 1];
+    (
+        b,
+        (b - a).normalize_or(Vec3::Z) * if back { -1.0 } else { 1.0 },
+    )
+}
+
+/// Patrols walk their routes while they sleep, so one is met where it would
+/// have got to; a cleared one stays where it fell.
+fn walk_asleep(set: &mut Dormancy<Encounter>, seconds: f32) {
+    if seconds <= 0.0 || !seconds.is_finite() {
+        return;
+    }
+    for i in 0..set.len() {
+        let id = GroupId(i as u32);
+        if set.is_awake(id) {
+            continue;
+        }
+        let Some(record) = set.data_mut(id) else {
+            continue;
+        };
+        if record.route.len() < 2 || record.left.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        record.along += record.speed * seconds;
+        let (at, way) = route_at(&record.route, record.closed, record.along);
+        record.facing = way;
+        set.move_to(id, at);
+    }
+}
+
+/// Darkness from which wolves take up a trail (dusk under the Lid; night by
+/// the clock).
+const DUSK: f32 = 0.35;
+/// How far off a shadowing pack keeps, and from how far it takes up a trail.
+const SHADOW: f32 = 30.0;
+const SHADOW_REACH: f32 = 150.0;
+/// How close a patrol comes to its next point before it steps on, and how far.
+const PATROL_NEAR: f32 = 5.0;
+const PATROL_STEP: f32 = 6.0;
+
+/// Awake groups not in a fight are led. A patrol walks on along its route
+/// (formed up again where it is at each step, so a fight on the road is
+/// fought there). At dusk a wolf pack shadows the protagonist from thirty
+/// metres on its own side, its brains noticing, stalking and striking as they
+/// would; by day, or once the protagonist is far, it goes back to where it
+/// woke. A group with anyone in a fight is left to its brains.
+fn lead(world: &World, run: &mut Run) {
+    let Some(set) = run.encounters.as_mut() else {
+        return;
+    };
+    let dusk = darkness(world) >= DUSK;
+    let hero = run
+        .player
+        .and_then(|p| run.world.combatant(p))
+        .map(|c| c.position);
+    let awake: Vec<GroupId> = set.awake().collect();
+    for id in awake {
+        let Some(record) = set.data_mut(id) else {
+            continue;
+        };
+        let alive: Vec<(CombatantId, Vec3, Vec3)> = record
+            .members
+            .iter()
+            .zip(&record.starts)
+            .filter_map(|(m, start)| {
+                let c = run.world.combatant(*m).filter(|c| c.alive())?;
+                Some((c.id, c.position, *start))
+            })
+            .collect();
+        if alive.is_empty() {
+            continue;
+        }
+        let fighting = alive.iter().any(|(m, ..)| {
+            run.world
+                .combatant(*m)
+                .and_then(|c| c.brain.as_ref())
+                .is_some_and(|b| b.mind.target.is_some())
+        });
+        if fighting {
+            continue;
+        }
+        let centre = alive.iter().map(|a| a.1).sum::<Vec3>() / alive.len() as f32;
+        let ground = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z);
+        let trail = hero.filter(|h| {
+            dusk && record.kind.trim().eq_ignore_ascii_case("wolves")
+                && ground(centre, *h).length() <= SHADOW_REACH
+        });
+        let mut stepped = false;
+        let goal = if let Some(h) = trail {
+            record.shadowing = true;
+            Some(h + ground(centre, h).normalize_or(Vec3::X) * SHADOW)
+        } else if record.route.len() >= 2 {
+            record.shadowing = false;
+            let (next, _) = route_at(&record.route, record.closed, record.along);
+            if ground(centre, next).length() < PATROL_NEAR {
+                record.along += PATROL_STEP;
+                stepped = true;
+            }
+            Some(route_at(&record.route, record.closed, record.along).0)
+        } else if record.shadowing {
+            record.shadowing = false;
+            None
+        } else {
+            continue;
+        };
+        for (i, (m, _, start)) in alive.iter().enumerate() {
+            // Round the goal, the first (the chief, the alpha) in the middle;
+            // back to where each woke when there is none.
+            let home = goal.map_or(*start, |g| {
+                let a = i as f32 * 2.4;
+                g + Vec3::new(a.cos(), 0.0, a.sin()) * if i == 0 { 0.0 } else { 1.6 }
+            });
+            if let Some(brain) = run.world.combatant_mut(*m).and_then(|c| c.brain.as_mut()) {
+                brain.mind.home = Some(home);
+            }
+        }
+        if stepped {
+            let ids: Vec<CombatantId> = alive.iter().map(|a| a.0).collect();
+            form_bands(&mut run.world, &ids);
+        }
+    }
 }
 
 /// Wake the encounters the protagonist has come near and put back to sleep
@@ -1155,9 +1425,11 @@ fn tend_encounters(
     if run.tended < TEND_EVERY {
         return;
     }
+    let elapsed = if dt.is_finite() { run.tended } else { 0.0 };
     run.tended = 0.0;
     if let Some(set) = run.encounters.as_mut() {
         enlist_encounters(world, set);
+        walk_asleep(set, elapsed);
     }
     let watchers: Vec<Vec3> = run
         .player
@@ -1182,6 +1454,7 @@ fn tend_encounters(
             break;
         }
     }
+    lead(world, run);
     if run.patched
         && let Some(physics) = physics
     {
@@ -1351,9 +1624,23 @@ fn sleep(
         if was_built && let Some(record) = set.data_mut(id) {
             record.left = Some(alive.iter().map(|a| (a.0.clone(), a.1)).collect());
         }
-        if let (false, Some(at)) = (alive.is_empty(), set.position(id)) {
+        let route = set
+            .data(id)
+            .filter(|r| r.route.len() >= 2)
+            .map(|r| route_at(&r.route, r.closed, r.along));
+        if let Some((at, way)) = route {
+            // A patrol sleeps where it had got to on its route.
+            if let Some(record) = set.data_mut(id) {
+                record.facing = way;
+                record.shadowing = false;
+            }
+            set.move_to(id, at);
+        } else if let (false, Some(at)) = (alive.is_empty(), set.position(id)) {
             let went = alive.iter().map(|a| a.2).sum::<Vec3>() / alive.len() as f32;
             set.move_to(id, at + Vec3::new(went.x, 0.0, went.z));
+            if let Some(record) = set.data_mut(id) {
+                record.shadowing = false;
+            }
         }
     }
     for m in &members {
@@ -2302,7 +2589,20 @@ fn organise(combat: &mut CombatWorld, ids: &[CombatantId], leaders: &[CombatantI
             brain.mind.profile.breaks_with_leader = true;
         }
     }
-    for &t in teams.iter().filter(|t| **t != TeamId(0)) {
+    form_bands(combat, ids);
+}
+
+/// Each side's band among `ids` formed up where it stands, its melee in a
+/// line and its bows, rifles and mages behind (knives flank on their own).
+fn form_bands(combat: &mut CombatWorld, ids: &[CombatantId]) {
+    let mut teams: Vec<TeamId> = ids
+        .iter()
+        .filter_map(|id| combat.combatant(*id).map(|c| c.team))
+        .filter(|t| *t != TeamId(0))
+        .collect();
+    teams.sort_unstable();
+    teams.dedup();
+    for t in teams {
         let band: Vec<CombatantId> = ids
             .iter()
             .filter_map(|id| combat.combatant(*id))
@@ -4457,6 +4757,244 @@ mod tests {
         tend_encounters(&mut world, None, &mut run, f32::INFINITY);
         assert_eq!(wolves(&run), 5, "not twice");
         assert_eq!(run.encounters.as_ref().map(|s| s.len()), Some(1));
+    }
+
+    /// Flat ground a kilometre across, for bodies to walk on headless.
+    fn plain() -> somnium_character::boxes::Boxes {
+        somnium_character::boxes::Boxes {
+            solids: vec![somnium_character::boxes::Solid {
+                center: Vec3::new(0.0, -0.5, 0.0),
+                half: Vec3::new(500.0, 0.5, 500.0),
+                rotation: Quat::IDENTITY,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A scene with the protagonist at `hero` and nothing else.
+    fn hero_scene(hero: Vec3) -> (World, Entity) {
+        let mut world = World::new();
+        let root = world.spawn((
+            Name::new("Scene"),
+            Transform::default(),
+            WorldTransform::identity(),
+        ));
+        fighter(
+            &mut world,
+            root,
+            "Protagonist",
+            hero,
+            Vec3::X,
+            CombatantComponent::protagonist(),
+        );
+        (world, root)
+    }
+
+    /// A band patrolling a road: along a spline, from `at`, `length` metres
+    /// along +X.
+    fn patrol(world: &mut World, at: Vec3, length: f32) -> Entity {
+        world.spawn((
+            Name::new("Patrol"),
+            Transform::from_translation(at),
+            WorldTransform::identity(),
+            somnium_core::SplineComponent {
+                points: vec![Vec3::ZERO, Vec3::X * length],
+                closed: false,
+                tangents: Vec::new(),
+            },
+            CombatPatrolComponent::default(),
+        ))
+    }
+
+    /// Play's fixed steps without the engine: the fight, the walkers, and a
+    /// look at the encounters every half second.
+    fn play(world: &mut World, run: &mut Run, seconds: f32) {
+        let ground = plain();
+        let open = somnium_combat::OpenField;
+        for frame in 0..(seconds * 60.0) as usize {
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &ground);
+            if frame % 30 == 29 {
+                tend_encounters(world, None, run, 0.5);
+            }
+        }
+    }
+
+    fn centre_of(run: &Run, prefix: &str) -> Vec3 {
+        let at: Vec<Vec3> = run
+            .world
+            .combatants()
+            .filter(|c| c.name.starts_with(prefix) && c.alive())
+            .map(|c| c.position)
+            .collect();
+        at.iter().sum::<Vec3>() / at.len().max(1) as f32
+    }
+
+    /// A patrol keeps walking its road while it sleeps, wakes where it has
+    /// got to when the protagonist comes near, and walks on from there.
+    #[test]
+    fn a_patrol_walks_its_road_asleep_and_awake() {
+        let (mut world, _) = hero_scene(Vec3::new(-200.0, 0.0, 0.0));
+        patrol(&mut world, Vec3::ZERO, 120.0);
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        assert_eq!(run.world.combatants().count(), 1, "asleep, 200 m off");
+        // Ten seconds asleep at 1.3 m/s: thirteen metres down the road.
+        for _ in 0..20 {
+            tend_encounters(&mut world, None, &mut run, 0.5);
+        }
+        let at = run
+            .encounters
+            .as_ref()
+            .unwrap()
+            .position(GroupId(0))
+            .unwrap();
+        assert!((at.x - 13.0).abs() < 0.1, "asleep, it walked to {at}");
+        // The protagonist comes within reach: it wakes there.
+        let hero = run.player.unwrap();
+        let near = Vec3::new(-95.0, 0.0, 0.0);
+        run.world.combatant_mut(hero).unwrap().position = near;
+        run.walkers.get_mut(&hero).unwrap().feet = near + Vec3::Y * 0.02;
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let woke = centre_of(&run, "Bandit");
+        assert!((woke.x - 13.0).abs() < 3.0, "woken at {woke}");
+        // Awake, it walks on down the road.
+        play(&mut world, &mut run, 30.0);
+        let now = centre_of(&run, "Bandit");
+        assert!(now.x > woke.x + 12.0, "from {woke} to {now}");
+        assert!(now.z.abs() < 6.0, "on the road: {now}");
+        assert_eq!(run.world.combatants().count(), 5, "nobody fought");
+    }
+
+    /// At dusk a woken wolf pack shadows the protagonist from thirty metres on
+    /// its own side; by day it goes back to where it woke.
+    #[test]
+    fn wolves_shadow_the_protagonist_at_dusk() {
+        use somnium_core::time_of_day::TimeOfDayComponent;
+        let (mut world, _) = hero_scene(Vec3::ZERO);
+        let sky = world.spawn((
+            Name::new("Sky"),
+            TimeOfDayComponent {
+                enabled: true,
+                fixed_sun: true,
+                eclipse: 0.6,
+                ..TimeOfDayComponent::default()
+            },
+        ));
+        world.spawn((
+            Name::new("Den"),
+            Transform::from_translation(Vec3::new(80.0, 0.0, 0.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "wolves".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let homes = |run: &Run| -> Vec<(Vec3, Vec3)> {
+            run.world
+                .combatants()
+                .filter(|c| c.name.starts_with("Rime wolf"))
+                .map(|c| (c.brain.as_ref().unwrap().mind.home.unwrap(), c.position))
+                .collect()
+        };
+        let trail = homes(&run);
+        assert_eq!(trail.len(), 5, "the pack woke");
+        let shadow = Vec3::new(SHADOW, 0.0, 0.0);
+        assert!(
+            trail.iter().all(|(home, _)| home.distance(shadow) < 2.0),
+            "on the trail thirty metres off, its side: {trail:?}"
+        );
+        // Day under the fixed sun: back to where each woke.
+        world.get_mut::<TimeOfDayComponent>(sky).unwrap().eclipse = 0.0;
+        tend_encounters(&mut world, None, &mut run, 0.5);
+        assert!(
+            homes(&run)
+                .iter()
+                .all(|(home, at)| home.distance(*at) < 0.5),
+            "home again: {:?}",
+            homes(&run)
+        );
+    }
+
+    /// What patrols cost: bands walking their roads awake (the fight, the
+    /// walkers and the looks every half second), and the records of a
+    /// Tyffir's worth of camps, packs and patrols asleep. Run with
+    /// `cargo test --release -p hello_engine --bin hello_engine patrol_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn patrol_cost() {
+        for bands in [1usize, 4, 16] {
+            let (mut world, _) = hero_scene(Vec3::new(0.0, 0.0, -20.0));
+            for b in 0..bands {
+                let z = (b % 8) as f32 * 12.0 + 10.0;
+                let x = if b < 8 { -60.0 } else { 20.0 };
+                patrol(&mut world, Vec3::new(x, 0.0, z), 200.0);
+            }
+            somnium_core::propagate_transforms(&mut world);
+            let mut run = build(&world).expect("a fight");
+            run.encounters = Some(encounters_asleep(&world));
+            tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+            let awake = run.encounters.as_ref().unwrap().awake().count();
+            play(&mut world, &mut run, 2.0);
+            let started = std::time::Instant::now();
+            play(&mut world, &mut run, 5.0);
+            let per = started.elapsed().as_secs_f64() * 1e3 / 300.0;
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                tend_encounters(&mut world, None, &mut run, 0.5);
+            }
+            let look = started.elapsed().as_secs_f64() * 1e3 / 100.0;
+            println!(
+                "{awake} bands awake ({} bodies): {per:.3} ms a step, {:.3} a band; a look {look:.3} ms",
+                run.world.combatants().count(),
+                per / awake.max(1) as f64
+            );
+        }
+        // Asleep: 131 camps and packs and 25 patrols over 10 km, the
+        // protagonist far from all.
+        let (mut world, _) = hero_scene(Vec3::new(-5000.0, 0.0, -5000.0));
+        for i in 0..131 {
+            let a = i as f32 * 0.37;
+            world.spawn((
+                Name::new("Encounter"),
+                Transform::from_translation(Vec3::new(
+                    a.sin() * 4000.0,
+                    0.0,
+                    a.cos() * 4000.0 + i as f32,
+                )),
+                WorldTransform::identity(),
+                CombatEncounterComponent {
+                    kind: if i % 5 == 0 { "bandits" } else { "wolves" }.into(),
+                    ..CombatEncounterComponent::default()
+                },
+            ));
+        }
+        for i in 0..25 {
+            patrol(
+                &mut world,
+                Vec3::new(i as f32 * 300.0 - 3750.0, 0.0, 3000.0),
+                400.0,
+            );
+        }
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let started = std::time::Instant::now();
+        for _ in 0..200 {
+            tend_encounters(&mut world, None, &mut run, 0.5);
+        }
+        let look = started.elapsed().as_secs_f64() * 1e3 / 200.0;
+        println!(
+            "156 asleep ({} records), a look {look:.3} ms",
+            run.encounters.as_ref().unwrap().len()
+        );
     }
 
     /// A pack and a camp placed apart (as across Tyffir): each builds only
