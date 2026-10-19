@@ -232,6 +232,8 @@ struct Stats {
     /// Posed vertices the drawn bodies hold.
     posed: u32,
     sample_ms: f64,
+    /// Of it, loading sources and fitting levels to the budget.
+    plan_ms: f64,
     frames: u32,
     reported: f32,
 }
@@ -473,6 +475,7 @@ impl SkinnedBodies {
             "drawn": s.drawn,
             "sampled": s.sampled,
             "sample_ms": s.sample_ms,
+            "plan_ms": s.plan_ms,
             "sources": self.shared.len(),
             "posed_vertices": [s.posed, self.vertex_budget],
             "errors": self.failed.values().collect::<Vec<_>>(),
@@ -581,6 +584,7 @@ impl SkinnedBodies {
             .zip(fit(self.vertex_budget, &wants, &sizes))
             .map(|(p, level)| (p.1, level))
             .collect();
+        let planned = started.elapsed().as_secs_f64() * 1000.0;
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
             let ids = levels(&settings);
@@ -722,6 +726,7 @@ impl SkinnedBodies {
         s.frames += 1;
         let k = 1.0 / f64::from(s.frames.min(120));
         s.sample_ms += (started.elapsed().as_secs_f64() * 1000.0 - s.sample_ms) * k;
+        s.plan_ms += (planned - s.plan_ms) * k;
         s.reported += dt;
         if s.bodies > 0 && s.reported >= 10.0 {
             s.reported = 0.0;
@@ -730,6 +735,7 @@ impl SkinnedBodies {
                 drawn = s.drawn,
                 sampled = s.sampled,
                 cpu_ms = s.sample_ms,
+                plan_ms = s.plan_ms,
                 "skinned crowd"
             );
         }
