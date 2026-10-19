@@ -534,6 +534,32 @@ impl Skins {
         dt: f32,
     ) {
         let now = combat.time();
+        // A fighter gone from the fight (its encounter fell asleep) takes its
+        // body, sockets and gear with it; waking again is a new fighter.
+        let gone: Vec<CombatantId> = self
+            .skins
+            .keys()
+            .filter(|id| combat.combatant(**id).is_none())
+            .copied()
+            .collect();
+        for id in gone {
+            let skin = self.skins.remove(&id).expect("listed");
+            let mut parts = vec![skin.body];
+            parts.extend(skin.saddle);
+            if let Some((socket, _, _)) = skin.weapon {
+                parts.extend(
+                    world
+                        .iter_with::<Parent>()
+                        .filter(|(_, p)| p.entity == socket)
+                        .map(|(e, _)| e)
+                        .collect::<Vec<_>>(),
+                );
+                parts.push(socket);
+            }
+            for e in parts {
+                world.despawn(e);
+            }
+        }
         // Saddles where they were last drawn (a frame behind the mount's pose).
         let saddles: BTreeMap<CombatantId, Mat4> = self
             .skins
@@ -698,6 +724,46 @@ mod tests {
 
     /// clips.json's gear table gives each piece once, only where its file is
     /// there; a weapon kind names its piece and whether it is sheathed.
+    /// A fighter whose encounter falls asleep leaves the fight: its body,
+    /// sockets and blade go with it, and nothing is written for it again.
+    #[test]
+    fn a_sleeping_fighter_takes_its_body_away() {
+        let (mut combat, id) = fighter();
+        let mut world = World::new();
+        let caelan = world.spawn((
+            Name::new("Caelan"),
+            Transform::default(),
+            WorldTransform::identity(),
+            SkinnedBody::default(),
+        ));
+        let mut skins = Skins::new(None);
+        let mut spawned = Vec::new();
+        skins.dress(
+            &mut world,
+            &BTreeMap::from([(id, caelan)]),
+            &combat,
+            &mut spawned,
+        );
+        assert_eq!(skins.count(), 1);
+        let parts: Vec<Entity> = world
+            .iter_with::<Name>()
+            .filter(|(_, n)| n.as_str() != "Caelan")
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(parts.len(), 3, "the body, its sheath and the blade");
+        combat.despawn(id);
+        skins.write(&mut world, &combat, &BTreeMap::new(), 1.0 / 60.0);
+        assert_eq!(skins.count(), 0);
+        assert!(
+            parts.iter().all(|e| world.get::<Name>(*e).is_none()),
+            "all despawned"
+        );
+        assert!(
+            world.get::<Name>(caelan).is_some(),
+            "the fighter's own entity is its encounter's"
+        );
+    }
+
     /// The watch: a spearman stands sentry, and on guard (drawn or guarding)
     /// holds the spear's guard; a sword still blocks.
     #[test]
