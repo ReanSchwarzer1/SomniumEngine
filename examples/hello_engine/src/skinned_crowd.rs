@@ -444,6 +444,13 @@ pub struct SkinnedBodies {
     >,
     /// Posed vertices a body of each file costs, from its glTF's JSON alone.
     sizes: HashMap<AssetId, u32>,
+    /// Files whose JSON is being read for their cost (a WS3 body's is 2.5 MB),
+    /// and where the readers send what they find.
+    sizing: std::collections::HashSet<AssetId>,
+    sized: (
+        std::sync::mpsc::Sender<(AssetId, Option<u32>)>,
+        std::sync::mpsc::Receiver<(AssetId, Option<u32>)>,
+    ),
     lod: AnimationLod,
     stats: Stats,
     /// Each socket's descendants, parents first, and the entity count they
@@ -464,6 +471,8 @@ impl Default for SkinnedBodies {
             failed: HashMap::new(),
             pending: HashMap::new(),
             sizes: HashMap::new(),
+            sizing: std::collections::HashSet::new(),
+            sized: std::sync::mpsc::channel(),
             lod: AnimationLod::default(),
             stats: Stats::default(),
             subtrees: HashMap::new(),
@@ -943,25 +952,38 @@ impl SkinnedBodies {
         let (mut drawn, mut sampled, mut posed) = (0, 0, 0);
         let (mut registered, mut waiting, mut register_ms) = (0, 0, 0.0);
         let (mut still, mut baked) = (0, 0);
-        // What a body of each file costs, from its header, so the budget plans
-        // before anything is read.
-        for id in &wanted_ids {
-            if self.sizes.contains_key(id) || self.failed.contains_key(id) {
-                continue;
-            }
-            let Some(record) = ctx.ui.asset_record(*id) else {
-                continue;
-            };
-            match skinned_vertices(&record.absolute_path) {
+        // What a body of each file costs, from its JSON, so the budget plans
+        // before anything is read: the new files of this frame on a worker thread.
+        for (id, size) in self.sized.1.try_iter() {
+            self.sizing.remove(&id);
+            match size {
                 Some(n) => {
-                    self.sizes.insert(*id, n);
+                    self.sizes.insert(id, n);
                 }
                 None => {
-                    warn!(path = %record.absolute_path.display(), "skinned body source has no skinned meshes");
+                    warn!(%id, "skinned body source has no skinned meshes");
                     self.failed
-                        .insert(*id, "no skinned meshes in its glTF".into());
+                        .insert(id, "no skinned meshes in its glTF".into());
                 }
             }
+        }
+        let to_size: Vec<(AssetId, std::path::PathBuf)> = wanted_ids
+            .iter()
+            .filter(|id| {
+                !self.sizes.contains_key(id)
+                    && !self.failed.contains_key(id)
+                    && !self.sizing.contains(id)
+            })
+            .filter_map(|id| Some((*id, ctx.ui.asset_record(*id)?.absolute_path.clone())))
+            .collect();
+        if !to_size.is_empty() {
+            self.sizing.extend(to_size.iter().map(|(id, _)| *id));
+            let tx = self.sized.0.clone();
+            std::thread::spawn(move || {
+                for (id, path) in to_size {
+                    let _ = tx.send((id, skinned_vertices(&path)));
+                }
+            });
         }
         // A file read off the frame goes to the GPU, one a frame.
         let finished = self
