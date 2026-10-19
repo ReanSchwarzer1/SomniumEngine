@@ -2567,6 +2567,54 @@ impl CombatDemo {
         Some((c.position, c.mount.is_some()))
     }
 
+    /// Put the protagonist back from a save: at `feet`, facing `yaw` (about +Y,
+    /// +Z ahead), with `health`, on a mount if `riding` (the nearest free one,
+    /// brought beside them) or on foot. Whatever they were doing is dropped, so
+    /// a load mid-swing does not land the swing. False with no fight running.
+    pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
+        self.aboard = None;
+        let Some(run) = self.run.as_mut() else {
+            return false;
+        };
+        let Some(player) = run.player else {
+            return false;
+        };
+        if run.world.combatant(player).is_some_and(|c| c.mount.is_some()) {
+            somnium_combat::mount::dismount(&mut run.world, player);
+        }
+        let facing = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+        let Some(c) = run.world.combatant_mut(player) else {
+            return false;
+        };
+        c.position = feet;
+        c.velocity = Vec3::ZERO;
+        c.facing = facing;
+        c.action = Action::Idle;
+        c.lock = None;
+        c.command = somnium_combat::Command::default();
+        c.riposte_until = 0.0;
+        c.vitals.health.current = health.clamp(0.0, c.vitals.health.max);
+        let mut place = |id: CombatantId, at: Vec3| {
+            if let Some(walker) = run.walkers.get_mut(&id) {
+                walker.feet = at;
+                walker.velocity = Vec3::ZERO;
+                walker.mode = Mode::Air;
+            }
+        };
+        place(player, feet);
+        if riding && let Some(steed) = somnium_combat::mount::nearest_free(&run.world, player) {
+            let beside = feet + Vec3::new(facing.z, 0.0, -facing.x) * 1.2;
+            if let Some(m) = run.world.combatant_mut(steed) {
+                m.position = beside;
+                m.velocity = Vec3::ZERO;
+                m.facing = facing;
+            }
+            place(steed, beside);
+            let _ = somnium_combat::mount::mount(&mut run.world, player, steed);
+        }
+        true
+    }
+
     /// Off a boat: the protagonist stands (or falls, or swims) from `feet`.
     pub fn disembark(&mut self, feet: Vec3) {
         self.aboard = None;
@@ -4832,6 +4880,34 @@ mod tests {
                 target: elk_entity
             }]
         );
+    }
+
+    /// A load puts the protagonist back where the save had him, at its health,
+    /// mid-swing no longer; riding, on the nearest mount brought beside him;
+    /// on foot, off it.
+    #[test]
+    fn a_load_puts_the_protagonist_back() {
+        let mut world = World::new();
+        spawn_sandbox(&mut world, &json!({})).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let mut demo = CombatDemo::default();
+        assert!(!demo.restore_player(Vec3::ZERO, 0.0, 1.0, false), "no fight, nothing to restore");
+        demo.run = Some(build(&world).expect("a fight"));
+        let player = demo.run.as_ref().unwrap().player.unwrap();
+        let feet = Vec3::new(30.0, 0.0, -12.0);
+        assert!(demo.restore_player(feet, std::f32::consts::FRAC_PI_2, 55.0, true));
+        let run = demo.run.as_ref().unwrap();
+        let c = run.world.combatant(player).unwrap();
+        let elk = c.mount.expect("riding");
+        assert!(matches!(c.action, Action::Idle));
+        assert!((c.vitals.health.current - 55.0).abs() < 1e-4);
+        assert!((c.facing - Vec3::X).length() < 1e-4, "a quarter turn faces +X");
+        let steed = run.world.combatant(elk).unwrap().position;
+        assert!(Vec3::new(steed.x - feet.x, 0.0, steed.z - feet.z).length() < 1.5, "the mount was brought: {steed}");
+        assert!(demo.restore_player(feet, 0.0, 999.0, false));
+        let c = demo.run.as_ref().unwrap().world.combatant(player).unwrap();
+        assert!(c.mount.is_none(), "on foot");
+        assert!(c.vitals.health.current <= c.vitals.health.max, "health within its pool");
     }
 
     #[test]

@@ -691,9 +691,13 @@ impl BoatHost {
             ahead: k(0) - k(1),
             turn: k(2) - k(3),
         };
-        for (i, a) in self.afloat.iter().enumerate() {
+        for (i, a) in self.afloat.iter_mut().enumerate() {
             let mine = self.aboard.is_some_and(|(b, _)| b == i);
             let oars = if mine { rowing } else { Oars::default() };
+            // An empty boat holds to wherever it was left (stepped off, or a load took its rower away).
+            if !mine && a.moored.is_none() {
+                a.moored = Some(ctx.physics.get_position(a.body));
+            }
             float(ctx.physics, a.body, &a.kind, water, oars, a.moored);
         }
         combat.aboard = self.aboard.map(|(i, _)| {
@@ -704,6 +708,11 @@ impl BoatHost {
             );
             hull * Mat4::from_translation(a.kind.seat + Vec3::Y * a.kind.half.y)
         });
+    }
+
+    /// Nobody in any boat (a load put the protagonist elsewhere).
+    pub fn cast_off(&mut self) {
+        self.aboard = None;
     }
 
     /// For MCP and automation.

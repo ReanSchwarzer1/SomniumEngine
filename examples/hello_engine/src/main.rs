@@ -904,6 +904,12 @@ impl HelloGame {
         self.combat.refused_mounts = mounts;
     }
 
+    /// Put the protagonist back from a save (out of any boat): see `CombatDemo::restore_player`.
+    pub fn restore_player(&mut self, feet: Vec3, yaw: f32, health: f32, riding: bool) -> bool {
+        self.boats.cast_off();
+        self.combat.restore_player(feet, yaw, health, riding)
+    }
+
     /// The life sim's people (positions, roles, who is out of doors), while Play runs it.
     pub fn life(&self) -> Option<&somnium_life::LifeWorld> {
         self.life.world()
