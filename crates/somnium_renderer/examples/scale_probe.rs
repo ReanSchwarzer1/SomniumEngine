@@ -9,7 +9,8 @@
 //! cargo run --release -p somnium_renderer --example scale_probe -- 5000 20000 50000 100000 180000
 //! ```
 //!
-//! `SCALE_PROBE_RT=1` gives the meshes bottom levels, so the frame traces them. `SCALE_PROBE_BATCH=1` sets the same instances once, as instance batches (one per 96 m cell and mesh), instead of
+//! `SCALE_PROBE_GLTF=<file>` draws copies of a real glTF's nodes as a prop set does (see the code for its scale and
+//! spacing variables). `SCALE_PROBE_RT=1` gives the meshes bottom levels, so the frame traces them. `SCALE_PROBE_BATCH=1` sets the same instances once, as instance batches (one per 96 m cell and mesh), instead of
 //! submitting them every frame. `SOMNIUM_CAPTURE_PNG=<file>` with `SOMNIUM_CAPTURE_FRAME=<n>` writes frame n, to
 //! compare the two ways by eye.
 //!
@@ -219,6 +220,58 @@ set {n} instances as {batches} batches in {:.1} ms",
                     started.elapsed().as_secs_f64() * 1000.0
                 );
             }
+            // `SCALE_PROBE_GLTF=<file>` (with `SCALE_PROBE_GLTF_SCALE`, `SCALE_PROBE_GLTF_SPACING`): N copies of every node of
+            // a real glTF, as a prop set draws them: each copy places the file's root and each node sits where it does
+            // in the file; every other copy draws through tinted copies of the materials.
+            let gltf = std::env::var("SCALE_PROBE_GLTF").ok();
+            if let Some(path) = &gltf {
+                let number = |name: &str, default: f32| {
+                    std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(default)
+                };
+                let (scale, spacing) = (number("SCALE_PROBE_GLTF_SCALE", 1.0), number("SCALE_PROBE_GLTF_SPACING", 30.0));
+                let scene = somnium_asset::load_gltf_for(path, None).expect("the glTF loads");
+                let nodes = renderer.upload_scene_for(&ctx, &scene, None);
+                let per_row = (n as f32).sqrt().ceil() as usize;
+                let half = (per_row as f32 - 1.0) * spacing * 0.5;
+                let mut groups = [Vec::new(), Vec::new()];
+                for k in 0..n {
+                    let at = glam::Vec3::new((k % per_row) as f32 * spacing - half, 0.0, (k / per_row) as f32 * spacing - half);
+                    groups[k % 2].push(glam::Mat4::from_scale_rotation_translation(
+                        glam::Vec3::splat(scale),
+                        glam::Quat::from_rotation_y(k as f32 * 0.7),
+                        at,
+                    ));
+                }
+                let mut tinted = std::collections::HashMap::new();
+                for (g, placements) in groups.into_iter().enumerate() {
+                    let parts = nodes
+                        .iter()
+                        .map(|node| BatchPart {
+                            vertex_offset: node.vertex_offset,
+                            index_offset: node.index_offset,
+                            index_count: node.index_count,
+                            material_id: if g == 0 {
+                                node.material_id
+                            } else {
+                                *tinted.entry(node.material_id).or_insert_with(|| {
+                                    let mut copy = renderer.materials_pool.get(node.material_id).expect("uploaded");
+                                    copy.base_color[1] *= 0.35;
+                                    copy.base_color[2] *= 0.3;
+                                    renderer.materials_pool.add_material(&ctx.queue, copy)
+                                })
+                            },
+                            local: node.transform,
+                            near: 0.0,
+                            far: 0.0,
+                            casts_shadow: true,
+                            shadow_far: 0.0,
+                        })
+                        .collect();
+                    renderer.set_instance_batch(1_000_000 + g as u64, &InstanceBatch { parts, placements });
+                }
+                println!("
+glTF {path}: {} nodes, {n} copies, {} tinted materials", nodes.len(), tinted.len());
+            }
             // A high three-quarter view of the middle of the region, about 120 m across.
             // `SCALE_PROBE_MOVE=1` pans 2 m a frame, as a player walking does, which moves the shadow cascades.
             let pan = std::env::var("SCALE_PROBE_MOVE").as_deref() == Ok("1");
@@ -233,7 +286,7 @@ set {n} instances as {batches} batches in {:.1} ms",
                 let eye = target + glam::Vec3::new(55.0, 70.0, 55.0);
                 let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
                 renderer.set_view(view, proj, eye);
-                if !batch {
+                if !batch && gltf.is_none() {
                     for draw in &draws {
                         renderer.submit(draw.clone());
                     }

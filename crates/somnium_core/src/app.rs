@@ -1209,6 +1209,8 @@ pub struct Engine<G: GameApp> {
     foliage_visit: Vec<usize>,
     /// `SOMNIUM_FOLIAGE_BATCHES=1`: the instance batches painted foliage is drawn with (`foliage_batches.rs`).
     foliage_batches: crate::foliage_batches::FoliageBatches,
+    /// `somnium.PropSet` entities' batches and colliders (`prop_set.rs`, `app_prop_sets.rs`).
+    prop_sets: crate::prop_set::PropSets,
     /// Advances per dab so a held brush keeps generating fresh candidates
     /// rather than retrying the same rejected points.
     foliage_stroke_seed: u32,
@@ -1810,6 +1812,7 @@ impl<G: GameApp + 'static> Engine<G> {
             foliage_grids: std::collections::HashMap::new(),
             foliage_visit: Vec::new(),
             foliage_batches: Default::default(),
+            prop_sets: Default::default(),
             foliage_stroke_seed: 0,
             foliage_painting: false,
             foliage_refusal_reported: false,
@@ -4017,6 +4020,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.foliage_failed = [false; 256];
                 // A new renderer holds no batches.
                 self.foliage_batches = Default::default();
+                self.prop_sets.reset_gpu();
                 self.renderer = Some(renderer);
                 self.ui_manager = Some(ui_manager);
 
@@ -5722,6 +5726,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
         self.submit_terrains();
         self.submit_foliage();
+        self.update_prop_sets();
         self.submit_decals();
         self.sync_terrain_colliders();
         if let Some(r) = &mut self.renderer {
@@ -14382,5 +14387,7 @@ mod story_host;
 
 #[path = "app_cell_streaming.rs"]
 mod cell_streaming_host;
+#[path = "app_prop_sets.rs"]
+mod prop_sets_host;
 
 include!("app_project_foliage.rs");
