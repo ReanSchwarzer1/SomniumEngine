@@ -434,8 +434,14 @@ pub struct SkinnedBodies {
     shared: HashMap<AssetId, Shared>,
     bodies: HashMap<Entity, Body>,
     failed: HashMap<AssetId, String>,
-    /// Files being read on a worker thread.
-    pending: HashMap<AssetId, std::sync::mpsc::Receiver<Result<AnimatedAsset, String>>>,
+    /// Files being read on a worker thread, and whether each is a lighter level.
+    pending: HashMap<
+        AssetId,
+        (
+            std::sync::mpsc::Receiver<Result<AnimatedAsset, String>>,
+            bool,
+        ),
+    >,
     /// Posed vertices a body of each file costs, from its glTF's JSON alone.
     sizes: HashMap<AssetId, u32>,
     lod: AnimationLod,
@@ -475,12 +481,20 @@ fn world_matrix(world: &World, e: Entity) -> Mat4 {
 }
 
 /// A read file's materials and merged meshes, uploaded (the read itself happens
-/// on a worker thread).
+/// on a worker thread). A lighter level (LOD 1, LOD 2) keeps only its colour
+/// maps: its normal and ORM detail is not seen past 20 m, and a crowd of WS3
+/// bodies (35 maps each) would fill the renderer's 2,048 texture slots.
 fn upload(
     gpu: &somnium_renderer::RenderContext,
     r: &mut SomniumRenderer,
-    asset: AnimatedAsset,
+    mut asset: AnimatedAsset,
+    lighter: bool,
 ) -> Result<Shared, String> {
+    if lighter {
+        for m in &mut asset.scene.materials {
+            (m.normal_map, m.occlusion_map, m.metallic_roughness_map) = (None, None, None);
+        }
+    }
     if asset.clips.is_empty() {
         return Err("no skeletal clips".into());
     }
@@ -953,16 +967,16 @@ impl SkinnedBodies {
         let finished = self
             .pending
             .iter()
-            .find_map(|(id, rx)| match rx.try_recv() {
-                Ok(read) => Some((*id, read)),
+            .find_map(|(id, (rx, lighter))| match rx.try_recv() {
+                Ok(read) => Some((*id, read, *lighter)),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some((*id, Err("its reader stopped".into())))
+                    Some((*id, Err("its reader stopped".into()), *lighter))
                 }
             });
-        if let Some((id, read)) = finished {
+        if let Some((id, read, lighter)) = finished {
             self.pending.remove(&id);
-            match read.and_then(|asset| upload(gpu, r, asset)) {
+            match read.and_then(|asset| upload(gpu, r, asset, lighter)) {
                 Ok(shared) => {
                     info!(clips = ?shared.asset.clips.keys().collect::<Vec<_>>(), "skinned body source loaded");
                     self.sizes.insert(id, shared.vertices);
@@ -1050,7 +1064,7 @@ impl SkinnedBodies {
             std::thread::spawn(move || {
                 let _ = tx.send(AnimatedAsset::load(&path).map_err(|e| e.to_string()));
             });
-            self.pending.insert(id, rx);
+            self.pending.insert(id, (rx, level > 0));
         }
         for (e, settings, matrix) in wanted {
             let distance = matrix.w_axis.truncate().distance(camera);
