@@ -1495,8 +1495,8 @@ impl SomniumRenderer {
     /// Add a texture to the global bindless pool.
     pub fn add_texture(&mut self, ctx: &RenderContext, view: wgpu::TextureView) -> u32 {
         let index = self.texture_pool.add_texture(view.clone());
-        if index == crate::texture_pool::FALLBACK_SLOT {
-            if self.global_pool.bound_len() != crate::bindless::MAX_BINDLESS_TEXTURES as usize {
+        if index == crate::texture_pool::fallback_slot() {
+            if self.global_pool.bound_len() != crate::bindless::bindless_capacity() as usize {
                 self.global_pool.bind_every_slot();
                 self.global_pool.update_textures(&ctx.device);
             }

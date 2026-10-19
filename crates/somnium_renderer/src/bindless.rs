@@ -31,6 +31,26 @@ use wgpu;
 /// a session.
 pub const MAX_BINDLESS_TEXTURES: u32 = 2048;
 
+static CAPACITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(MAX_BINDLESS_TEXTURES);
+
+/// How many textures the bindless pool holds: [`MAX_BINDLESS_TEXTURES`], unless `SOMNIUM_BINDLESS_TEXTURES` asked
+/// for more and the device granted it (set at context creation, before any pool exists). An open world's terrains,
+/// buildings and skinned crowds outgrow 2,048 (Rimeborn's Tyffir left ~400 textures blank).
+#[must_use]
+pub fn bindless_capacity() -> u32 {
+    CAPACITY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The binding-array size to request of a device whose adapter allows `adapter_max`: exactly
+/// [`MAX_BINDLESS_TEXTURES`] when `SOMNIUM_BINDLESS_TEXTURES` is unset (as before), else that ask (never below the
+/// default) within the adapter's limit. Remembered for [`bindless_capacity`].
+pub(crate) fn request_bindless_capacity(adapter_max: u32) -> u32 {
+    let asked = std::env::var("SOMNIUM_BINDLESS_TEXTURES").ok().and_then(|v| v.trim().parse::<u32>().ok());
+    let capacity = asked.map_or(MAX_BINDLESS_TEXTURES, |n| n.max(MAX_BINDLESS_TEXTURES).min(adapter_max.max(MAX_BINDLESS_TEXTURES)));
+    CAPACITY.store(capacity, std::sync::atomic::Ordering::Relaxed);
+    capacity
+}
+
 /// A global pool of resources mapped to a single bind group.
 ///
 /// In a complete implementation, this handles dynamic allocation
@@ -140,7 +160,7 @@ impl GlobalResourcePool {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
-                    count: std::num::NonZeroU32::new(MAX_BINDLESS_TEXTURES),
+                    count: std::num::NonZeroU32::new(bindless_capacity()),
                 },
                 // Materials reach the vertex stage for foliage wind (`wind.wgsl`):
                 // the visibility and shadow rasters displace by the material's
@@ -247,8 +267,8 @@ impl GlobalResourcePool {
         });
         let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut views = Vec::with_capacity(MAX_BINDLESS_TEXTURES as usize);
-        for _ in 0..MAX_BINDLESS_TEXTURES {
+        let mut views = Vec::with_capacity(bindless_capacity() as usize);
+        for _ in 0..bindless_capacity() {
             views.push(&dummy_view);
         }
 
@@ -320,10 +340,10 @@ impl GlobalResourcePool {
             terrain_material_buffer: terrain_material_buffer.clone(),
             cluster_grid,
             dummy_view: dummy_view.clone(),
-            texture_views: (0..MAX_BINDLESS_TEXTURES)
+            texture_views: (0..bindless_capacity())
                 .map(|_| dummy_view.clone())
                 .collect(),
-            live: vec![false; MAX_BINDLESS_TEXTURES as usize],
+            live: vec![false; bindless_capacity() as usize],
             bind_all: false,
         };
         let dummy = pool.dummy_view.clone();

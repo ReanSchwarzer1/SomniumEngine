@@ -517,7 +517,8 @@ impl RenderContext {
         };
 
         let mut limits = wgpu::Limits::default();
-        limits.max_binding_array_elements_per_shader_stage = crate::bindless::MAX_BINDLESS_TEXTURES;
+        limits.max_binding_array_elements_per_shader_stage =
+            crate::bindless::request_bindless_capacity(adapter.limits().max_binding_array_elements_per_shader_stage);
         // The shading pass binds 16 storage buffers before vertex paint adds a
         // seventeenth. Desktop DX12/Vulkan report far more than 32.
         // ponytail: no shader variant for an adapter capped at 16; add one if

@@ -1,6 +1,6 @@
 //! Bindless texture management.
 
-use crate::bindless::MAX_BINDLESS_TEXTURES;
+use crate::bindless::{MAX_BINDLESS_TEXTURES, bindless_capacity};
 
 /// Manages a pool of textures for bindless rendering.
 pub struct TexturePool {
@@ -31,8 +31,8 @@ impl TexturePool {
         });
         let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let _views: Vec<&wgpu::TextureView> = Vec::with_capacity(MAX_BINDLESS_TEXTURES as usize);
-        for _ in 0..MAX_BINDLESS_TEXTURES {
+        let _views: Vec<&wgpu::TextureView> = Vec::with_capacity(bindless_capacity() as usize);
+        for _ in 0..bindless_capacity() {
             // We can't easily store the same view multiple times in a Vec of owned views
             // but we'll manage the indices.
             // Actually, in wgpu we need to provide a slice of references to views.
@@ -41,8 +41,8 @@ impl TexturePool {
         Self {
             dummy_view,
             views: Vec::new(), // This will hold owned views
-            free_indices: (0..FALLBACK_SLOT).rev().collect(),
-            live: vec![false; MAX_BINDLESS_TEXTURES as usize],
+            free_indices: (0..fallback_slot()).rev().collect(),
+            live: vec![false; bindless_capacity() as usize],
         }
     }
 
@@ -63,9 +63,10 @@ impl TexturePool {
             index
         } else {
             tracing::error!(
-                "bindless texture pool exhausted ({MAX_BINDLESS_TEXTURES} slots); texture left blank"
+                "bindless texture pool exhausted ({} slots); texture left blank",
+                bindless_capacity()
             );
-            FALLBACK_SLOT
+            fallback_slot()
         }
     }
 
@@ -85,10 +86,16 @@ impl TexturePool {
     }
 
     pub fn live_count(&self) -> usize {
-        FALLBACK_SLOT as usize - self.free_indices.len()
+        fallback_slot() as usize - self.free_indices.len()
     }
 }
 
 /// Never handed out while space remains; returned when the pool is full so a
 /// texture renders blank instead of the process aborting.
 pub const FALLBACK_SLOT: u32 = MAX_BINDLESS_TEXTURES - 1;
+
+/// The fallback slot of the pool as sized ([`bindless_capacity`]): the top one, [`FALLBACK_SLOT`] by default.
+#[must_use]
+pub fn fallback_slot() -> u32 {
+    bindless_capacity() - 1
+}
