@@ -258,7 +258,7 @@ pub fn pose_of(
             format!("Loco_Run_{way}_Loop")
         };
         (
-            format!("{clip}|Loco_Jog_F_Loop|Trot_F_Loop"),
+            format!("{clip}|Loco_Jog_F_Loop|Trot_F_Loop|Gallop_F_Loop"),
             (speed / 5.6).clamp(0.75, 1.4),
         )
     } else {
