@@ -330,7 +330,11 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
         spawn_camp(world, root, camp, content, &mut out);
     }
     if let Some((team, faces, members)) = only.and_then(band_of) {
+        let from = out.len();
         spawn_line(world, root, Vec3::ZERO, content, team, faces, members, &mut out);
+        if only == Some("lance") {
+            saddle_up(world, root, content, team, from, &mut out);
+        }
     }
     if only == Some("harrowcat") {
         spawn_harrowcat(world, root, Vec3::ZERO, content, &mut out);
@@ -711,6 +715,72 @@ fn spawn_line(
         if count > 0 {
             let (family, b) = (faces.family, face(i));
             wear(world, out[n], content, &format!("characters/{family}_{b:02}/{family}_{b:02}"));
+        }
+    }
+}
+
+/// The Lance rides: a horse beside each fighter made into `out` from `from`,
+/// named for its rider (`<rider>'s horse`) for [`seat_band`] to put them in
+/// the saddle once they join the fight; with a `content` root they wear the
+/// slice's march pony.
+fn saddle_up(
+    world: &mut World,
+    root: Entity,
+    content: Option<&std::path::Path>,
+    team: u32,
+    from: usize,
+    out: &mut Vec<Entity>,
+) {
+    let riders: Vec<(String, Vec3)> = out[from..]
+        .iter()
+        .filter(|e| world.get::<CombatantComponent>(**e).is_some())
+        .filter_map(|e| Some((world.get::<Name>(*e)?.as_str().to_string(), world.get::<Transform>(*e)?.translation)))
+        .collect();
+    for (name, at) in riders {
+        // On the rider's outer side, along the road.
+        let side = if at.x < 0.0 { -1.2 } else { 1.2 };
+        let horse = world.spawn((
+            Name::new(&format!("{name}'s horse")),
+            Transform {
+                translation: Vec3::new(at.x + side, 0.8, at.z),
+                rotation: yaw(Vec3::Z),
+                scale: Vec3::new(0.85, 1.6, 2.4),
+            },
+            WorldTransform::identity(),
+            Parent { entity: root },
+            MeshKind::Cube,
+            material("hide"),
+            CombatantComponent {
+                team,
+                mount: 1,
+                max_health: 200.0,
+                poise: 80.0,
+                ..CombatantComponent::default()
+            },
+        ));
+        wear(world, horse, content, "creatures/march_pony/march_pony");
+        out.push(horse);
+    }
+}
+
+/// Each `<rider>'s horse` among `ids` with its rider in the saddle: the
+/// nearest fighter of that name on foot ([`saddle_up`]'s Lance).
+fn seat_band(combat: &mut CombatWorld, ids: &[CombatantId]) {
+    let horses: Vec<(CombatantId, String, Vec3)> = ids
+        .iter()
+        .filter_map(|id| combat.combatant(*id))
+        .filter(|c| c.mount_def.is_some() && c.rider.is_none())
+        .filter_map(|c| Some((c.id, c.name.strip_suffix("'s horse")?.to_string(), c.position)))
+        .collect();
+    for (horse, name, at) in horses {
+        let rider = ids
+            .iter()
+            .filter_map(|id| combat.combatant(*id))
+            .filter(|c| c.name == name && c.mount.is_none() && c.mount_def.is_none())
+            .min_by(|a, b| flat_distance(a.position, at).total_cmp(&flat_distance(b.position, at)))
+            .map(|c| c.id);
+        if let Some(rider) = rider {
+            let _ = somnium_combat::mount::mount(combat, rider, horse);
         }
     }
 }
@@ -3452,8 +3522,9 @@ fn enlist(
 /// teams hostile to the party, each side within 15 m of a leader following
 /// it (a pack's alpha, a band's chief) and breaking when it falls, and each
 /// raider band formed up, its melee in a line, its bows, rifles and mages
-/// behind (knives flank on their own).
+/// behind (knives flank on their own). The Lance's riders are in their saddles.
 fn organise(combat: &mut CombatWorld, ids: &[CombatantId], leaders: &[CombatantId]) {
+    seat_band(combat, ids);
     let mut teams: Vec<TeamId> = ids
         .iter()
         .filter_map(|id| combat.combatant(*id).map(|c| c.team))
@@ -5402,6 +5473,23 @@ mod tests {
 
     /// The protagonist alone in a scene, with these encounters near him: Play's
     /// run woken round him, in a host.
+    /// A Lance patrol rides: each of the three wakes in the saddle of a horse
+    /// of its own.
+    #[test]
+    fn the_lance_wakes_in_the_saddle() {
+        let (_world, demo) = host_with(&[("lance", Vec3::new(20.0, 0.0, 0.0))]);
+        let w = &demo.run.as_ref().unwrap().world;
+        let riders: Vec<(String, Option<String>)> = w
+            .combatants()
+            .filter(|c| c.name.starts_with("Lance") && c.mount_def.is_none())
+            .map(|c| (c.name.clone(), c.mount.and_then(|m| w.combatant(m)).map(|m| m.name.clone())))
+            .collect();
+        assert_eq!(riders.len(), 3, "{riders:?}");
+        for (name, horse) in riders {
+            assert_eq!(horse, Some(format!("{name}'s horse")));
+        }
+    }
+
     fn host_with(encounters: &[(&str, Vec3)]) -> (World, CombatDemo) {
         let mut world = World::new();
         let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));
