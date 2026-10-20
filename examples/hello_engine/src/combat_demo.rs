@@ -50,7 +50,7 @@ use somnium_combat::{
 };
 use somnium_core::ai::NavigationLink;
 use somnium_core::{
-    CameraSettingsComponent, EngineContext, EngineEvent, GameUiFrame, InputState,
+    CameraSettingsComponent, EngineContext, EngineEvent, GameUiFrame, ImportedMesh, InputState,
     MaterialComponent, MeshKind, Name, Parent, ParticleEmitter, Transform, UiCanvas,
     WorldTransform,
 };
@@ -506,9 +506,10 @@ struct Beast {
 /// The bestiary's kinds beyond wolves and the harrowcat:
 /// - `harrowdogs`: feral dogs gone strange near Spire leaks, packs on the
 ///   edge of the Stilled March (5.9), five, in WS3's sheepdog;
-/// - `crocodile`: a Delta crocodile (5.7), one, long and heavily armoured;
+/// - `crocodile`: a Delta crocodile (5.7), one, long and heavily armoured, in
+///   WS3's delta_crocodile;
 /// - `icecrawlers`: many-legged, blind and pale, from the glacier crevasses,
-///   the Rimewall's commonest enemy (5.3), three.
+///   the Rimewall's commonest enemy (5.3), three, in WS3's ice_crawler.
 fn beast_of(kind: &str) -> Option<Beast> {
     Some(match kind.trim().to_ascii_lowercase().as_str() {
         "harrowdogs" => Beast {
@@ -532,19 +533,19 @@ fn beast_of(kind: &str) -> Option<Beast> {
             poise: 140.0,
             armor: 6.0,
             speed: 3.6,
-            body: None,
+            body: Some("creatures/delta_crocodile/delta_crocodile"),
             blind: false,
         },
         "icecrawlers" => Beast {
             name: "Ice-crawler",
             count: 3,
-            size: Vec3::new(1.1, 0.6, 1.7),
+            size: Vec3::new(1.1, 0.6, 1.8),
             mat: "ice",
             health: 90.0,
             poise: 35.0,
             armor: 3.0,
             speed: 4.6,
-            body: None,
+            body: Some("creatures/ice_crawler/ice_crawler"),
             blind: true,
         },
         _ => return None,
@@ -703,6 +704,7 @@ fn spawn_engine(
     for (i, name) in ENGINE_BOARDS.iter().enumerate() {
         let size = Vec3::new(1.6, 2.4, 0.3);
         let feet = at + Vec3::new((i as f32 - 1.0) * 3.0, 0.0, -4.0);
+        let n = out.len();
         out.push(world.spawn((
             Name::new(name),
             Transform {
@@ -724,7 +726,40 @@ fn spawn_engine(
                 ..CombatantComponent::default()
             },
         )));
+        // WS3's board where the project has it: its mesh on the ground under
+        // the box (whose scale it undoes), the box no longer drawn.
+        let file = board_file(i, false);
+        if content.is_some_and(|c| c.join(&file).exists()) {
+            let board = out[n];
+            let _ = world.remove_component::<MeshKind>(board);
+            out.push(world.spawn((
+                Name::new(&format!("{name} mesh")),
+                Transform {
+                    translation: Vec3::new(0.0, -0.5, 0.0),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ONE / size,
+                },
+                WorldTransform::identity(),
+                Parent { entity: board },
+                ImportedMesh {
+                    source: format!("assets/{file}"),
+                    node: 0,
+                },
+                MaterialComponent {
+                    asset: AssetId::NONE,
+                    runtime_id: 0,
+                },
+            )));
+        }
     }
+}
+
+/// WS3's glyph-board for [`ENGINE_BOARDS`]`[i]`, whole or broken
+/// (`creatures/ledger_board_<count|hold|sense>[_broken].glb`, one mesh node).
+fn board_file(i: usize, broken: bool) -> String {
+    let board = ["count", "hold", "sense"][i.min(2)];
+    let tail = if broken { "_broken" } else { "" };
+    format!("creatures/ledger_board_{board}/ledger_board_{board}{tail}.glb")
 }
 
 /// The Engine's fight, once its keeper has woken ([`ENGINE_KEEPER`]).
@@ -743,6 +778,8 @@ struct EngineState {
     pace: f32,
     /// Every board broken: the Engine has stopped.
     stopped: bool,
+    /// Boards shown broken (WS3's broken mesh swapped in).
+    broken: [bool; 3],
 }
 
 /// The Engine's turn each fixed step: Count, Hold and Sense (see
@@ -775,6 +812,35 @@ fn engine_tick(world: &mut World, run: &mut Run, dt: f32) {
         let keeper = named(ENGINE_KEEPER);
         let boards = ENGINE_BOARDS.map(|b| named(b).is_some());
         let state = record.engine.get_or_insert_with(EngineState::default);
+        // A board just broken shows WS3's broken board.
+        for (i, name) in ENGINE_BOARDS.iter().enumerate() {
+            if boards[i] || state.broken[i] {
+                continue;
+            }
+            state.broken[i] = true;
+            let file = board_file(i, true);
+            if !run.content.as_ref().is_some_and(|c| c.join(&file).exists()) {
+                continue;
+            }
+            let Some(board) = record
+                .members
+                .iter()
+                .find(|m| run.world.combatant(**m).is_some_and(|c| c.name == *name))
+                .and_then(|m| run.bodies.get(m).copied())
+            else {
+                continue;
+            };
+            let meshes: Vec<Entity> = world
+                .iter_with::<ImportedMesh>()
+                .filter(|(e, _)| world.get::<Parent>(*e).is_some_and(|p| p.entity == board))
+                .map(|(e, _)| e)
+                .collect();
+            for e in meshes {
+                if let Some(mesh) = world.get_mut::<ImportedMesh>(e) {
+                    mesh.source = format!("assets/{file}");
+                }
+            }
+        }
         let Some(keeper) = keeper else {
             if let Some((_, _, ring)) = state.tell.take() {
                 world.despawn(ring);
@@ -4855,6 +4921,10 @@ fn ragdoll(ctx: &mut EngineContext, run: &mut Run, id: CombatantId, impulse: Vec
         // A fallen mount lies where it fell; its rider was thrown.
         return;
     }
+    if c.name.starts_with("Glyph-board") {
+        // A broken board stands where it broke.
+        return;
+    }
     let feet = c.position;
     let rotation = yaw(c.facing);
     let torso = feet + Vec3::Y * BODY_HEIGHT * 0.5;
@@ -6192,14 +6262,22 @@ mod tests {
     fn the_bestiary_hunts_with_the_beasts() {
         use crate::skinned_crowd::SkinnedBody;
         let content = std::env::temp_dir().join("somnium_combat_bestiary");
-        let file = content.join("creatures/sheepdog/sheepdog.glb");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, b"").unwrap();
+        for stem in ["sheepdog/sheepdog", "delta_crocodile/delta_crocodile", "ice_crawler/ice_crawler"] {
+            let file = content.join(format!("creatures/{stem}.glb"));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"").unwrap();
+        }
         let mut world = World::new();
         let dogs = build_encounter(&mut world, "harrowdogs", Vec3::ZERO, Vec3::X, false, Some(&content)).expect("dogs");
         let bodies = dogs.iter().filter(|e| world.get::<CombatantComponent>(**e).is_some()).count();
         let worn = dogs.iter().filter(|e| world.get::<SkinnedBody>(**e).is_some()).count();
         assert_eq!((bodies, worn), (5, 5));
+        for (kind, stem, count) in [("crocodile", "delta_crocodile", 1), ("icecrawlers", "ice_crawler", 3)] {
+            let made = build_encounter(&mut world, kind, Vec3::ZERO, Vec3::X, false, Some(&content)).expect(kind);
+            let sources: Vec<AssetId> = made.iter().filter_map(|e| world.get::<SkinnedBody>(*e)).map(|b| b.source).collect();
+            let want = AssetId::from_relative_path(format!("creatures/{stem}/{stem}.glb"));
+            assert_eq!(sources, vec![want; count], "{kind}");
+        }
         let (_world, demo) = host_with(&[
             ("crocodile", Vec3::new(30.0, 0.0, 0.0)),
             ("icecrawlers", Vec3::new(-30.0, 0.0, 0.0)),
@@ -6281,6 +6359,52 @@ mod tests {
         assert!((health(&demo) - 300.0).abs() < 1e-3, "nothing counts him back");
         let run = demo.run.as_ref().unwrap();
         assert!(run.world.combatant(keeper).unwrap().status.active(StatusKind::Stagger), "the Engine stopped");
+    }
+
+    /// The Engine's boards wear WS3's boards (their boxes not drawn); a board
+    /// broken shows WS3's broken board and stands where it broke.
+    #[test]
+    fn the_engines_boards_wear_ws3_and_break() {
+        let content = std::env::temp_dir().join("somnium_combat_boards");
+        for i in 0..3 {
+            for broken in [false, true] {
+                let file = content.join(board_file(i, broken));
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"").unwrap();
+            }
+        }
+        let mut world = World::new();
+        let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));
+        fighter(&mut world, root, "Protagonist", Vec3::ZERO, Vec3::X, CombatantComponent::protagonist());
+        world.spawn((
+            Name::new("Vault"),
+            Transform::from_translation(Vec3::new(0.0, 0.0, 12.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "ledger_engine".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.content = Some(content.clone());
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let mesh_of = |world: &World, name: &str| -> String {
+            let board = world.iter_with::<Name>().find(|(_, n)| n.as_str() == name).map(|(e, _)| e).unwrap();
+            assert!(world.get::<MeshKind>(board).is_none(), "{name}'s box not drawn");
+            world
+                .iter_with::<ImportedMesh>()
+                .find(|(e, _)| world.get::<Parent>(*e).is_some_and(|p| p.entity == board))
+                .map(|(_, m)| m.source.clone())
+                .expect("its mesh")
+        };
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[1]), format!("assets/{}", board_file(1, false)));
+        let hold = run.world.combatants().find(|c| c.name == ENGINE_BOARDS[1]).map(|c| c.id).unwrap();
+        run.world.combatant_mut(hold).unwrap().action = Action::Dead;
+        engine_tick(&mut world, &mut run, 1.0 / 60.0);
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[1]), format!("assets/{}", board_file(1, true)));
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[0]), format!("assets/{}", board_file(0, false)), "the others whole");
     }
 
     #[test]
