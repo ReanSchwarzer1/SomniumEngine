@@ -512,6 +512,8 @@ pub const FACTIONS: [&str; 8] = [
 ];
 /// The first faction's team; the others follow in [`FACTIONS`]' order.
 const FACTION_TEAM: u16 = 16;
+/// The beasts' team: rime wolves, harrowcats and the rest of the bestiary.
+pub const BEAST_TEAM: u16 = 2;
 
 /// A faction's team, by its name in [`FACTIONS`].
 fn faction_team(name: &str) -> Option<TeamId> {
@@ -1897,6 +1899,10 @@ fn tend_encounters(
         }
     }
     lead(world, run);
+    if run.beasts_calm {
+        // Those just woken were made hostile as every band is.
+        run.world.relations.set(TeamId(0), TeamId(BEAST_TEAM), Attitude::Neutral);
+    }
     if run.patched
         && let Some(physics) = physics
     {
@@ -2424,6 +2430,8 @@ struct Run {
     hunting: BTreeSet<String>,
     hunts: u32,
     hunt_due: BTreeMap<String, f64>,
+    /// The beasts are calm (the game's say): woken ones are made neutral too.
+    beasts_calm: bool,
 }
 
 struct Hud {
@@ -2601,11 +2609,17 @@ pub struct CombatDemo {
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
     hostile_factions: BTreeSet<String>,
     hunting_factions: BTreeSet<String>,
+    /// Whether the beasts (wolves, harrowcats, all of team [`BEAST_TEAM`])
+    /// fight the protagonist ([`CombatDemo::set_beasts_hostile`]).
+    beasts_hostile: bool,
 }
 
 /// The game's law on the fight: each faction hostile to the party when it is
 /// turned or hunting, neutral otherwise; the hunters to send.
-fn apply_law(run: &mut Run, hostile: &BTreeSet<String>, hunting: &BTreeSet<String>) {
+fn apply_law(run: &mut Run, hostile: &BTreeSet<String>, hunting: &BTreeSet<String>, beasts: bool) {
+    run.beasts_calm = !beasts;
+    let attitude = if beasts { Attitude::Hostile } else { Attitude::Neutral };
+    run.world.relations.set(TeamId(0), TeamId(BEAST_TEAM), attitude);
     for faction in FACTIONS {
         let Some(team) = faction_team(faction) else {
             continue;
@@ -2672,6 +2686,7 @@ impl Default for CombatDemo {
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
+            beasts_hostile: true,
         }
     }
 }
@@ -2813,17 +2828,28 @@ impl CombatDemo {
     pub fn set_hostile_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
         self.hostile_factions = factions_of(factions);
         if let Some(run) = &mut self.run {
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
         }
     }
 
     /// The factions hunting the protagonist (hostile as well): each sends a
     /// band from out of sight that walks to him and fights (the knights or
     /// the Lance at Hue 4 and 5), another a while after one is cleared.
+    /// Whether the beasts (wolves, harrowcats, every creature of team
+    /// [`BEAST_TEAM`]) fight the protagonist: on by default; off, they let
+    /// him be unless he strikes one (STORY_GATES: in Act I animals never
+    /// fight him). Kept across Plays.
+    pub fn set_beasts_hostile(&mut self, hostile: bool) {
+        self.beasts_hostile = hostile;
+        if let Some(run) = &mut self.run {
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
+        }
+    }
+
     pub fn set_hunting_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
         self.hunting_factions = factions_of(factions);
         if let Some(run) = &mut self.run {
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
         }
     }
 
@@ -2870,7 +2896,7 @@ impl CombatDemo {
             run.skins = crate::combat_bodies::Skins::new(Some(&ctx.config.content_root));
             run.content = Some(ctx.config.content_root.clone());
             run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
             // Those already near wake now, the rest as the protagonist comes.
             tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
             run.log.push_back(
@@ -3395,6 +3421,7 @@ fn build(world: &World) -> Option<Run> {
         hunting: BTreeSet::new(),
         hunts: 0,
         hunt_due: BTreeMap::new(),
+        beasts_calm: false,
     })
 }
 
@@ -5645,6 +5672,39 @@ mod tests {
             "by the door: {:?}",
             out.points
         );
+    }
+
+    /// Calm beasts (Act I) let him be, those that wake later too; turned
+    /// back, they hunt him again.
+    #[test]
+    fn calm_beasts_let_him_be() {
+        let (mut world, mut demo) = host_with(&[("wolves", Vec3::new(30.0, 0.0, 0.0))]);
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        let wolf = |demo: &CombatDemo| {
+            let run = demo.run.as_ref().unwrap();
+            run.world.combatants().filter(|c| c.name.starts_with("Rime wolf")).map(|c| c.id).collect::<Vec<_>>()
+        };
+        let hostile = |demo: &CombatDemo, id| demo.run.as_ref().unwrap().world.hostile(hero, id);
+        let first = wolf(&demo)[0];
+        assert!(hostile(&demo, first), "wolves hunt by default");
+        demo.set_beasts_hostile(false);
+        assert!(!hostile(&demo, first));
+        // A cat woken after: calm as well.
+        world.spawn((
+            Name::new("Cat"),
+            Transform::from_translation(Vec3::new(-30.0, 0.0, 0.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "harrowcat".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), f32::INFINITY);
+        let cat = demo.run.as_ref().unwrap().world.combatants().find(|c| c.name == "Harrowcat").map(|c| c.id).unwrap();
+        assert!(!hostile(&demo, cat) && !hostile(&demo, first));
+        demo.set_beasts_hostile(true);
+        assert!(hostile(&demo, cat) && hostile(&demo, first));
     }
 
     #[test]
