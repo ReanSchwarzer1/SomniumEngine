@@ -713,6 +713,28 @@ const FAR_PART_MIN: u32 = 240;
 /// Still bodies nearer than this cast shadows.
 const STILL_SHADOWS: f32 = 60.0;
 
+/// A clip's pose at `time` (looping), in place: each root joint (parentless, or named `Root`) keeps its rest
+/// position over the ground and only its height from the clip. WS3's loops carry their travel in the Root
+/// (`Loco_Walk_F_Loop` goes 1.15 m forward a loop); the sim and physics already move the body, so played as authored
+/// a walker slid ahead and snapped back every loop (the developer, 20 Oct: characters "move and then again come
+/// back to the previous spot").
+fn sample_in_place(
+    clip: &somnium_anim::AnimationClip,
+    skeleton: &somnium_anim::Skeleton,
+    time: f32,
+) -> Option<somnium_anim::Pose> {
+    let mut pose = clip.sample(skeleton, time, Playback::LOOPING).ok()?;
+    let roots = skeleton.parents().iter().zip(skeleton.names()).enumerate();
+    for (i, (parent, name)) in roots {
+        if *parent == somnium_anim::NO_PARENT || name.eq_ignore_ascii_case("root") {
+            let rest = skeleton.rest()[i].translation;
+            let t = &mut pose.local[i].translation;
+            (t.x, t.z) = (rest.x, rest.z);
+        }
+    }
+    Some(pose)
+}
+
 /// Held poses baked a frame, by default (each is one CPU skinning of a body).
 const STILLS_PER_FRAME: usize = 4;
 
@@ -726,7 +748,7 @@ fn hold_pose(
 ) -> Option<(Vec<Vec<somnium_asset::Vertex>>, Vec<Mat4>)> {
     let skeleton = &shared.asset.skeleton;
     let clip = pick_clip(&shared.asset, clip).or_else(|| shared.asset.clips.values().next())?;
-    let pose = clip.sample(skeleton, time, Playback::LOOPING).ok()?;
+    let pose = sample_in_place(clip, skeleton, time)?;
     let mut model = vec![Mat4::IDENTITY; skeleton.len()];
     if !pose.to_model_space(skeleton, &mut model) {
         return None;
@@ -1350,8 +1372,7 @@ impl SkinnedBodies {
                         .or_else(|| if body.posed { None } else { first() })
                 };
                 if let Some(clip) = clip
-                    && let Ok(pose) =
-                        clip.sample(&shared.asset.skeleton, body.clock, Playback::LOOPING)
+                    && let Some(pose) = sample_in_place(clip, &shared.asset.skeleton, body.clock)
                     && pose.to_model_space(&shared.asset.skeleton, &mut body.model)
                 {
                     let skeleton = &shared.asset.skeleton;
@@ -1468,6 +1489,23 @@ mod tests {
         starts.dedup();
         assert!(starts.len() > 10, "not in step");
         assert!(spawn(&mut world, &json!({"position": [f32::NAN, 0, 0]})).is_err());
+    }
+
+    /// A walk loop plays in place: WS3's Root carries the clip's travel
+    /// (`Loco_Walk_F_Loop` goes 1.15 m a loop), which the sim already gives
+    /// the body.
+    #[test]
+    fn a_walk_plays_in_place() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../games/Rimeborn/assets/animation/rimeborn_loco.glb");
+        let Ok(asset) = AnimatedAsset::load(&path) else { return }; // WS3's clips, in the game's folder
+        let Some(walk) = asset.clips.get("Loco_Walk_F_Loop") else { return };
+        let root = asset.joint("Root").expect("a Root joint") as usize;
+        let raw = |t| walk.sample(&asset.skeleton, t, Playback::LOOPING).unwrap().local[root].translation;
+        let kept = |t| sample_in_place(walk, &asset.skeleton, t).unwrap().local[root].translation;
+        let half = walk.duration() * 0.5;
+        assert!((raw(half) - raw(0.0)).length() > 0.3, "the clip itself travels");
+        assert!((kept(half) - kept(0.0)).with_y(0.0).length() < 1e-4, "played in place");
     }
 
     /// A socket and what hangs from it land on the joint as posed, the same
