@@ -4891,7 +4891,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             }
         }
 
-        {
+        let scene_request = {
             // Computed before the context borrows the world, because the
             // orbit pivot reads the selection's transforms.
             let camera_focus = self.camera_focus_request.take();
@@ -4922,6 +4922,43 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             ctx.orbit_selection = orbit_selection;
             ctx.orbit_pivot = orbit_pivot;
             self.game.on_update(&mut ctx);
+            ctx.scene_request.take()
+        };
+        // A scene the game asked for (`EngineContext::request_scene`): Stop, load, Play, as a standalone start runs.
+        // Between Stop and the load the game gets one update in the stopped state, with no frame drawn, so its
+        // systems tear down and start afresh as at a real Stop (a frame drawn stopped would be the editor's view,
+        // path tracer and all: it lost the device at 2560x1440, 20 Oct).
+        if let Some(path) = scene_request {
+            // Relative to the project, as `--scene` is (the content root is its `assets` folder).
+            let path = match &self.config.project_root {
+                Some(root) if path.is_relative() && !path.exists() => root.join(path),
+                _ => path,
+            };
+            let playing = self.simulation_clock.state != SimulationState::Editing;
+            if playing {
+                self.handle_editor_event(EditorEvent::StopSimulation);
+                let mut ctx = EngineContext::new(
+                    &self.time,
+                    &self.config,
+                    &mut self.world,
+                    self.physics.as_mut().unwrap(),
+                    self.audio.as_mut().unwrap(),
+                    &mut self.jobs,
+                    &mut self.navigation_editor,
+                    self.render_ctx.as_ref(),
+                    self.renderer.as_mut(),
+                    &mut self.selection.primary,
+                    self.ui_manager.as_mut().unwrap(),
+                    crate::camera_speed_from_normalized(self.camera_speed_norm),
+                    self.simulation_clock,
+                    &mut self.scripts,
+                );
+                self.game.on_update(&mut ctx);
+            }
+            self.load_scene_file(&path.to_string_lossy());
+            if playing {
+                self.handle_editor_event(EditorEvent::PlaySimulation);
+            }
         }
         // A game's menu asked for the pointer, or gave it back: capture follows (`UiManager::set_game_cursor_free`).
         if self.ui_manager.as_mut().is_some_and(|ui| ui.take_game_cursor_changed()) {

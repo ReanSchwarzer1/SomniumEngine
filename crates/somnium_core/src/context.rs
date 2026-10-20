@@ -172,9 +172,19 @@ pub struct EngineContext<'a> {
     /// The engine will call [`GameApp::on_shutdown`](crate::app::GameApp::on_shutdown)
     /// before exiting.
     pub should_exit: bool,
+
+    /// A scene the game asked to open with [`EngineContext::request_scene`], taken once the update returns.
+    pub scene_request: Option<std::path::PathBuf>,
 }
 
 impl<'a> EngineContext<'a> {
+    /// Open the scene at `path` (relative to the project, as `--scene` takes it) once this update returns: Play
+    /// stops, the scene loads, and Play starts again if it was running, as a standalone start opens its scene.
+    /// Rimeborn's title (20 Oct) starts in a small scene and asks for the world only when the player chooses to play.
+    pub fn request_scene(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.scene_request = Some(path.into());
+    }
+
     /// Consume any pending exact pose. Returns `(position, yaw, pitch)` once.
     pub fn take_camera_pose(&mut self) -> Option<(glam::Vec3, f32, f32)> {
         self.camera_pose.take()
@@ -233,6 +243,7 @@ impl<'a> EngineContext<'a> {
             ui,
             scripts,
             should_exit: false,
+            scene_request: None,
         }
     }
 
