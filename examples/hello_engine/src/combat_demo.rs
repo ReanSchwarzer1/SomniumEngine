@@ -2568,6 +2568,9 @@ pub enum HostEvent {
     Hit { attacker: Entity, target: Entity },
 }
 
+/// The fight's steps a frame at most ([`CombatDemo::take_step`]).
+const STEPS_PER_FRAME: u32 = 2;
+
 /// The sandbox's runtime.
 pub struct CombatDemo {
     run: Option<Run>,
@@ -2596,6 +2599,10 @@ pub struct CombatDemo {
     pub focus_points: Vec<Vec3>,
     /// The protagonist's work clip (`A|B`, looped while he stands idle: chopping, fishing), from the game.
     pub player_clip: Option<String>,
+    /// The frame the fight last stepped in, how many steps it took there, and the steps it let go (the measure).
+    frame: u64,
+    steps: u32,
+    skipped: u64,
     events: Vec<HostEvent>,
     /// Factions the game has turned against the protagonist, and those hunting
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
@@ -2669,6 +2676,9 @@ impl Default for CombatDemo {
             take_e: false,
             focus_points: Vec::new(),
             player_clip: None,
+            frame: u64::MAX,
+            steps: 0,
+            skipped: 0,
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
@@ -3086,6 +3096,25 @@ impl CombatDemo {
         }
     }
 
+    /// Whether the fight takes this fixed step of `frame`. A slow frame runs
+    /// several to catch up (up to six at 60 Hz: the engine caps a frame at
+    /// 0.1 s); the fight takes [`STEPS_PER_FRAME`] of them, so one slow frame
+    /// cannot make the next slower. ponytail: past that the fight runs slow for
+    /// the frame (real time up to 33 ms frames); owe the time to the next
+    /// frame's step if a slowed hitch ever reads badly.
+    fn take_step(&mut self, frame: u64) -> bool {
+        if frame != self.frame {
+            self.frame = frame;
+            self.steps = 0;
+        }
+        self.steps += 1;
+        if self.steps > STEPS_PER_FRAME {
+            self.skipped += 1;
+            return false;
+        }
+        true
+    }
+
     /// What the fight told the game since it last asked.
     pub fn take_events(&mut self) -> Vec<HostEvent> {
         std::mem::take(&mut self.events)
@@ -3093,6 +3122,9 @@ impl CombatDemo {
 
     /// One fixed step of the fight, then everything it changed onto the scene.
     pub fn fixed(&mut self, ctx: &mut EngineContext) {
+        if self.run.is_none() || !self.take_step(ctx.time.frame_count()) {
+            return;
+        }
         let Some(run) = &mut self.run else {
             return;
         };
@@ -3225,6 +3257,7 @@ impl CombatDemo {
             });
         json!({
             "running": true,
+            "steps_skipped": self.skipped,
             "bodies": run.skins.count(),
             "time": run.world.time(),
             "locomotion": locomotion,
@@ -5645,6 +5678,17 @@ mod tests {
             "by the door: {:?}",
             out.points
         );
+    }
+
+    /// A slow frame's catch-up steps beyond two are let go, counted; the
+    /// next frame steps afresh.
+    #[test]
+    fn a_slow_frame_takes_two_fight_steps() {
+        let mut demo = CombatDemo::default();
+        let taken: Vec<bool> = (0..6).map(|_| demo.take_step(7)).collect();
+        assert_eq!(taken, [true, true, false, false, false, false]);
+        assert_eq!(demo.skipped, 4);
+        assert!(demo.take_step(8) && demo.take_step(8) && !demo.take_step(8));
     }
 
     #[test]
