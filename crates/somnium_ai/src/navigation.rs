@@ -214,6 +214,22 @@ fn overlaps_square(tri: Triangle, centre: Vec2, half: f32) -> bool {
     })
 }
 
+/// The point of a triangle's footprint on the ground (its XZ projection) nearest `p`; a vertical face's is a segment.
+fn footprint_closest(tri: Triangle, p: Vec2) -> Vec2 {
+    let v = tri.map(|v| Vec2::new(v[0], v[2]));
+    let area = (v[1] - v[0]).perp_dot(v[2] - v[0]);
+    if area.abs() > EPS && (0..3).all(|i| (v[(i + 1) % 3] - v[i]).perp_dot(p - v[i]) * area.signum() >= 0.0) {
+        return p;
+    }
+    (0..3)
+        .map(|i| {
+            let (a, ab) = (v[i], v[(i + 1) % 3] - v[i]);
+            a + ab * ((p - a).dot(ab) / ab.length_squared().max(EPS * EPS)).clamp(0.0, 1.0)
+        })
+        .min_by(|a, b| a.distance_squared(p).total_cmp(&b.distance_squared(p)))
+        .unwrap()
+}
+
 /// Bake synchronously for command-line cook tools and deterministic tests.
 pub fn bake(input: &BakeInput) -> Result<NavTile, String> {
     bake_checked(input, || Ok(()))
@@ -327,12 +343,25 @@ fn bake_checked(
                         && y + s.agent_height > b.min[1]
                         && y < b.max[1]
                 };
+                // A steep face standing a step above the floor in front of it (on this column's side), where that
+                // floor is itself a step above this one, is the riser after next up a flight: it is climbed, not a wall.
+                // ponytail: two risers within reach; treads under half of radius + half a voxel need a deeper look.
+                let stepped = |t: Triangle, top: f32| {
+                    let centre = Vec2::new(px, pz);
+                    let foot = footprint_closest(t, centre);
+                    let q = foot + (centre - foot).clamp_length_max(size * 0.5);
+                    walkable
+                        .iter()
+                        .filter_map(|&w| sample_height(w, q))
+                        .any(|h| h >= top - s.max_step - EPS && h <= y + s.max_step + EPS)
+                };
                 // Steep faces no taller than a step (kerbs, stair risers) are climbed.
                 !input.obstacles.iter().any(near)
                     && !walls.iter().any(|(b, t)| {
                         near(b)
                             && b.max[1] > y + s.max_step + EPS
                             && overlaps_square(*t, Vec2::new(px, pz), size * 0.5 + s.agent_radius)
+                            && !stepped(*t, b.max[1])
                     })
             });
             spans.insert((x, z), heights);
