@@ -462,6 +462,8 @@ pub struct SkinnedBodies {
     /// standalone game's first minute or so, when nobody would otherwise draw.
     walked: Option<HashMap<AssetId, std::path::PathBuf>>,
     walking: Option<std::sync::mpsc::Receiver<HashMap<AssetId, std::path::PathBuf>>>,
+    /// A body outlined this frame (the combat host's hostile under the cursor).
+    pub highlight: Option<Entity>,
 }
 
 /// Every glTF binary under `root`, by the id of its path relative to it.
@@ -488,6 +490,14 @@ fn walk_glbs(root: &std::path::Path) -> HashMap<AssetId, std::path::PathBuf> {
     found
 }
 
+/// A hovered hostile's outline: a dull red.
+const HIGHLIGHT: somnium_renderer::pass::game_highlight::HighlightStyle =
+    somnium_renderer::pass::game_highlight::HighlightStyle {
+        color: [0.86, 0.22, 0.14, 0.9],
+        width_pixels: 2.5,
+        show_mask: false,
+    };
+
 impl Default for SkinnedBodies {
     fn default() -> Self {
         Self {
@@ -508,6 +518,7 @@ impl Default for SkinnedBodies {
             subtrees_for: 0,
             walked: None,
             walking: None,
+            highlight: None,
         }
     }
 }
@@ -953,6 +964,8 @@ impl SkinnedBodies {
         let Some(r) = ctx.renderer.as_deref_mut() else {
             return;
         };
+        let lit = self.highlight.filter(|e| self.bodies.contains_key(e));
+        r.set_game_highlight(lit.map(|_| HIGHLIGHT));
         let camera = r.camera_pos;
         let dt = ctx.time.dt().min(0.1);
         let running = ctx.simulation.state != somnium_core::SimulationState::Paused;
@@ -1297,7 +1310,7 @@ impl SkinnedBodies {
                         if far && count < FAR_PART_MIN {
                             continue;
                         }
-                        r.submit(somnium_renderer::command::DrawCommand {
+                        let cmd = somnium_renderer::command::DrawCommand {
                             paint: 0,
                             sort_key: somnium_renderer::command::SortKey::new(
                                 0,
@@ -1310,7 +1323,11 @@ impl SkinnedBodies {
                             material_id: material,
                             transform: matrix,
                             casts_shadow: distance < STILL_SHADOWS,
-                        });
+                        };
+                        if lit == Some(e) {
+                            r.mark_game_highlight(&cmd);
+                        }
+                        r.submit(cmd);
                     }
                 }
                 drawn += 1;
@@ -1389,7 +1406,7 @@ impl SkinnedBodies {
             body.matrix = matrix;
             for (m, (_, posed)) in shared.meshes.iter().zip(&body.skins) {
                 for &(first, count, material) in &m.parts {
-                    r.submit(somnium_renderer::command::DrawCommand {
+                    let cmd = somnium_renderer::command::DrawCommand {
                         paint: 0,
                         sort_key: somnium_renderer::command::SortKey::new(
                             0,
@@ -1402,7 +1419,11 @@ impl SkinnedBodies {
                         material_id: material,
                         transform: matrix,
                         casts_shadow: true,
-                    });
+                    };
+                    if lit == Some(e) {
+                        r.mark_game_highlight(&cmd);
+                    }
+                    r.submit(cmd);
                 }
             }
             drawn += 1;

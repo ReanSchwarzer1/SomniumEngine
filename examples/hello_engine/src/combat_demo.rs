@@ -76,6 +76,9 @@ const FIRES: usize = 24;
 const BURSTS: usize = 12;
 const DECALS: usize = 14;
 const LOG_LINES: usize = 6;
+/// How far from the camera a click finds the ground, metres.
+const CLICK_REACH: f32 = 400.0;
+
 /// The vertical field of view hello_engine draws a fight's camera with
 /// (`main.rs`, `on_render`): the aim and the marks project through it too.
 const VIEW_FOV: f32 = 45.0;
@@ -2678,6 +2681,8 @@ pub struct CombatDemo {
     /// him ([`CombatDemo::set_hostile_factions`], [`CombatDemo::set_hunting_factions`]).
     hostile_factions: BTreeSet<String>,
     hunting_factions: BTreeSet<String>,
+    /// The left button's click-move and attack-move (Diablo IV's mouse).
+    click: crate::click_move::ClickMove,
 }
 
 /// The game's law on the fight: each faction hostile to the party when it is
@@ -2752,6 +2757,7 @@ impl Default for CombatDemo {
             events: Vec::new(),
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
+            click: Default::default(),
         }
     }
 }
@@ -2843,6 +2849,9 @@ impl CombatDemo {
                     _ => return,
                 };
                 devices.set_mouse_button(name, *state == InputState::Pressed);
+                if *button == somnium_core::MouseButton::Left {
+                    self.click.button(*state == InputState::Pressed);
+                }
             }
             // Ctrl+wheel is the camera's zoom (Rimeborn's rig), not the measure.
             EngineEvent::MouseWheel { delta_y } if !self.ctrl => {
@@ -2997,20 +3006,26 @@ impl CombatDemo {
             .world
             .combatant(player)
             .map_or(run.floor, |c| c.position.y);
-        let aim = camera.zip(self.cursor).and_then(|(camera, cursor)| {
+        let ray = camera.zip(self.cursor).and_then(|(camera, cursor)| {
             let (view, _) = somnium_core::camera_view_from_world(camera);
             let (x, y, w, h) = ctx.ui.viewport_physical_rect(1.0);
             let size = Vec2::new(w as f32, h as f32);
             let projection =
                 Mat4::perspective_rh(VIEW_FOV.to_radians(), size.x / size.y.max(1.0), 0.1, 1000.0);
-            let (o, d) = cursor_ray(
+            cursor_ray(
                 cursor - Vec2::new(x as f32, y as f32),
                 size,
                 view,
                 projection,
-            )?;
-            ray_plane(o, d, feet)
+            )
         });
+        let aim = ray.and_then(|(o, d)| ray_plane(o, d, feet));
+        // Where a click sends him: the ground the cursor is on (up a hill, down a gully), else its height's plane.
+        let ground = ray.and_then(|(o, d)| {
+            let reach = o + d.normalize_or_zero() * CLICK_REACH;
+            JoltQuery(ctx.physics).sweep(o, reach, 0.05).map(|h| o.lerp(reach, h.fraction))
+        }).or(aim);
+        let under = ray.and_then(|(o, d)| crate::click_move::pick(&run.world, player, o, d));
         let forward = camera.map_or(Vec3::Z, |m| -m.z_axis.truncate());
         let mut cmd = self.reader.command(
             &self.input,
@@ -3020,6 +3035,10 @@ impl CombatDemo {
                 camera_forward: forward,
             },
         );
+        // Diablo IV's left button: click-move and attack-move (WASD drops them).
+        let cells = &ctx.navigation.cells.world;
+        let nav = cells.cells().next().is_some().then_some(cells).or(run.nav.as_ref());
+        self.click.steer(&run.world, nav, player, under, ground, ctx.dt(), &mut cmd);
         if run
             .walkers
             .get(&player)
@@ -3045,6 +3064,13 @@ impl CombatDemo {
             cmd.climb = false;
         }
         run.world.command(player, cmd);
+    }
+
+    /// The body to outline: the hostile under the cursor (its skinned body, else its entity).
+    pub fn hovered_body(&self) -> Option<Entity> {
+        let run = self.run.as_ref()?;
+        let id = self.click.hovered()?;
+        run.skins.body_of(id).or_else(|| run.bodies.get(&id).copied())
     }
 
     /// The protagonist's feet and whether they ride, while a fight runs.
@@ -3333,6 +3359,13 @@ impl CombatDemo {
             "locomotion": locomotion,
             "fighters": fighters,
             "log": run.log,
+            // Where the left button sent him: a ground point, or the hostile he is to strike.
+            "click": match self.click.goal() {
+                Some(crate::click_move::Goal::Ground(at)) => json!({ "ground": [at.x, at.y, at.z] }),
+                Some(crate::click_move::Goal::Foe(id)) => json!({ "foe": id.0 }),
+                None => Value::Null,
+            },
+            "hovered": self.click.hovered().map(|id| id.0),
         })
     }
 }
@@ -5471,8 +5504,6 @@ mod tests {
         );
     }
 
-    /// The protagonist alone in a scene, with these encounters near him: Play's
-    /// run woken round him, in a host.
     /// A Lance patrol rides: each of the three wakes in the saddle of a horse
     /// of its own.
     #[test]
@@ -5490,6 +5521,97 @@ mod tests {
         }
     }
 
+    /// The Wilds preset with only `part` (a crew, a post), the protagonist 8 m
+    /// short of it: the world, the fight and him.
+    fn clicking(part: &str) -> (World, Run, CombatantId) {
+        let mut world = World::new();
+        spawn_wilds(&mut world, &json!({ "only": part })).expect("preset builds");
+        somnium_core::propagate_transforms(&mut world);
+        let run = build(&world).expect("a fight");
+        let hero = run.player.expect("the protagonist");
+        (world, run, hero)
+    }
+
+    /// `seconds` of the fight with no keys down, the left button's command
+    /// from `click` each step: what happened.
+    fn click_for(
+        world: &World,
+        run: &mut Run,
+        click: &mut crate::click_move::ClickMove,
+        under: Option<CombatantId>,
+        ground: Option<Vec3>,
+        seconds: f32,
+    ) -> Vec<CombatEvent> {
+        let (terrain, hero, open) = (boxes(world, run), run.player.unwrap(), somnium_combat::OpenField);
+        let mut events = Vec::new();
+        for _ in 0..(seconds * 60.0) as usize {
+            let mut cmd = somnium_combat::Command::default();
+            click.steer(&run.world, run.nav.as_ref(), hero, under, ground, 1.0 / 60.0, &mut cmd);
+            run.world.command(hero, cmd);
+            run.world.step(1.0 / 60.0, &open, run.nav.as_ref());
+            walk(&mut run.world, &mut run.walkers, 1.0 / 60.0, &terrain);
+            events.extend(run.world.drain_events());
+        }
+        events
+    }
+
+    /// A left click on the ground walks him there and he stops (Diablo IV's
+    /// mouse); held, he follows the cursor.
+    #[test]
+    fn a_click_on_the_ground_walks_him_there() {
+        let (world, mut run, hero) = clicking("watch");
+        let mut click = crate::click_move::ClickMove::default();
+        let there = Vec3::new(5.0, 0.0, -2.0);
+        click.button(true);
+        click.button(false);
+        click_for(&world, &mut run, &mut click, None, Some(there), 5.0);
+        let c = run.world.combatant(hero).unwrap();
+        let off = Vec2::new(c.position.x - there.x, c.position.z - there.z).length();
+        assert!(off < 0.5, "arrived: {} for {there}", c.position);
+        assert!(Vec2::new(c.velocity.x, c.velocity.z).length() < 0.2, "and stopped");
+        assert_eq!(click.goal(), None);
+        // Held, the cursor leads him on.
+        click.button(true);
+        let on = Vec3::new(-4.0, 0.0, 2.0);
+        click_for(&world, &mut run, &mut click, None, Some(on), 4.0);
+        let c = run.world.combatant(hero).unwrap();
+        assert!(Vec2::new(c.position.x - on.x, c.position.z - on.z).length() < 0.5, "{}", c.position);
+    }
+
+    /// A left click on a hostile walks him into reach and strikes it once;
+    /// held, he keeps striking.
+    #[test]
+    fn a_click_on_a_hostile_walks_into_reach_and_strikes() {
+        let (world, mut run, hero) = clicking("lampmen");
+        let boss = run.world.combatants().find(|c| c.name == "Lamp-man boss").map(|c| c.id).unwrap();
+        // The crew fights back; he outlasts it here, so what is tested is the button.
+        let health = &mut run.world.combatant_mut(hero).unwrap().vitals.health;
+        (health.max, health.current) = (5000.0, 5000.0);
+        // The cursor's ray from the camera's side onto the boss's chest finds him.
+        let chest = run.world.combatant(boss).unwrap().chest();
+        let eye = chest + Vec3::new(0.0, 12.0, -9.0);
+        assert_eq!(crate::click_move::pick(&run.world, hero, eye, chest - eye), Some(boss));
+        let swings = |events: &[CombatEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, CombatEvent::AttackStarted { attacker, .. } if *attacker == hero))
+                .count()
+        };
+        let mut click = crate::click_move::ClickMove::default();
+        click.button(true);
+        click.button(false);
+        let events = click_for(&world, &mut run, &mut click, Some(boss), None, 4.0);
+        let (me, him) = (run.world.combatant(hero).unwrap(), run.world.combatant(boss).unwrap());
+        let gap = Vec2::new(me.position.x - him.position.x, me.position.z - him.position.z).length();
+        assert!(gap < me.weapon.reach + me.body.radius + him.body.radius, "in reach: {gap}");
+        assert_eq!(swings(&events), 1, "one click, one blow");
+        click.button(true);
+        let events = click_for(&world, &mut run, &mut click, Some(boss), None, 3.0);
+        assert!(swings(&events) >= 2, "held, he keeps at it: {}", swings(&events));
+    }
+
+    /// The protagonist alone in a scene, with these encounters near him: Play's
+    /// run woken round him, in a host.
     fn host_with(encounters: &[(&str, Vec3)]) -> (World, CombatDemo) {
         let mut world = World::new();
         let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));

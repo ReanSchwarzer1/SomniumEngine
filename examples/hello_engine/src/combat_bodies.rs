@@ -567,6 +567,11 @@ impl Skins {
         }
     }
 
+    /// The skinned body drawn for fighter `id`, if it wears one.
+    pub(crate) fn body_of(&self, id: CombatantId) -> Option<Entity> {
+        self.skins.get(&id).map(|s| s.body)
+    }
+
     /// Fighters drawn as bodies.
     #[must_use]
     pub fn count(&self) -> usize {
