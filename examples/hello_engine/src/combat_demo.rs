@@ -335,6 +335,9 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     if only == Some("harrowcat") {
         spawn_harrowcat(world, root, Vec3::ZERO, content, &mut out);
     }
+    if let Some(beast) = only.and_then(beast_of) {
+        spawn_beasts(world, root, Vec3::ZERO, content, &beast, &mut out);
+    }
     Ok(out)
 }
 
@@ -477,6 +480,153 @@ fn spawn_harrowcat(
         },
     ));
     wear(world, out[n], content, "creatures/harrowcat/harrowcat");
+}
+
+/// A creature of ECOLOGY_AND_BESTIARY that hunts as the wolves do (a wolf's
+/// brain and jaws), with the beasts: what one is called, how many hunt
+/// together (the first leads), its size (width, height, length), shape
+/// material, health, poise, armour and speed, WS3's body if there is one,
+/// and whether it is blind (it hunts by ear).
+struct Beast {
+    name: &'static str,
+    count: usize,
+    size: Vec3,
+    mat: &'static str,
+    health: f32,
+    poise: f32,
+    armor: f32,
+    speed: f32,
+    body: Option<&'static str>,
+    blind: bool,
+}
+
+/// The bestiary's kinds beyond wolves and the harrowcat:
+/// - `harrowdogs`: feral dogs gone strange near Spire leaks, packs on the
+///   edge of the Stilled March (5.9), five, in WS3's sheepdog;
+/// - `crocodile`: a Delta crocodile (5.7), one, long and heavily armoured;
+/// - `icecrawlers`: many-legged, blind and pale, from the glacier crevasses,
+///   the Rimewall's commonest enemy (5.3), three.
+fn beast_of(kind: &str) -> Option<Beast> {
+    Some(match kind.trim().to_ascii_lowercase().as_str() {
+        "harrowdogs" => Beast {
+            name: "Harrow-dog",
+            count: 5,
+            size: Vec3::new(0.45, 0.7, 1.15),
+            mat: "ash",
+            health: 60.0,
+            poise: 20.0,
+            armor: 0.0,
+            speed: 5.5,
+            body: Some("creatures/sheepdog/sheepdog"),
+            blind: false,
+        },
+        "crocodile" => Beast {
+            name: "Delta crocodile",
+            count: 1,
+            size: Vec3::new(1.3, 0.9, 6.0),
+            mat: "stone",
+            health: 420.0,
+            poise: 140.0,
+            armor: 6.0,
+            speed: 3.6,
+            body: None,
+            blind: false,
+        },
+        "icecrawlers" => Beast {
+            name: "Ice-crawler",
+            count: 3,
+            size: Vec3::new(1.1, 0.6, 1.7),
+            mat: "ice",
+            health: 90.0,
+            poise: 35.0,
+            armor: 3.0,
+            speed: 4.6,
+            body: None,
+            blind: true,
+        },
+        _ => return None,
+    })
+}
+
+/// A group of `beast` round its leader, facing away (as a pack is).
+fn spawn_beasts(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    beast: &Beast,
+    out: &mut Vec<Entity>,
+) {
+    for i in 0..beast.count {
+        let leader = i == 0;
+        let a = i as f32 / (beast.count - 1).max(1) as f32 * std::f32::consts::TAU;
+        let (spot, facing) = if leader {
+            (at, Vec3::Z)
+        } else {
+            (at + Vec3::new(a.cos(), 0.0, a.sin()) * 2.5, Vec3::new(a.sin(), 0.0, a.cos()))
+        };
+        let name = match (beast.count, leader) {
+            (1, _) => beast.name.to_string(),
+            (_, true) => format!("{} (leader)", beast.name),
+            _ => format!("{} {i}", beast.name),
+        };
+        let size = if leader { beast.size * 1.1 } else { beast.size };
+        let n = out.len();
+        out.extend(beast_body(world, root, &name, spot, facing, size, beast, leader));
+        if let Some(body) = beast.body {
+            wear(world, out[n], content, body);
+        }
+    }
+}
+
+/// One of `beast`'s body (a long box and a head, as `beast` builds).
+#[allow(clippy::too_many_arguments)]
+fn beast_body(
+    world: &mut World,
+    root: Entity,
+    name: &str,
+    feet: Vec3,
+    facing: Vec3,
+    size: Vec3,
+    kind: &Beast,
+    leader: bool,
+) -> Vec<Entity> {
+    let scale = if leader { 1.2 } else { 1.0 };
+    beast(
+        world,
+        root,
+        name,
+        feet,
+        facing,
+        size,
+        kind.mat,
+        CombatantComponent {
+            team: u32::from(BEAST_TEAM),
+            archetype: Archetype::Wolf as u32,
+            weapon: WeaponKind::Fangs as u32,
+            max_health: kind.health * scale,
+            max_stamina: 160.0,
+            poise: kind.poise * scale,
+            armor: kind.armor,
+            speed: kind.speed,
+            leader,
+            ..CombatantComponent::default()
+        },
+    )
+}
+
+/// What a kind's brains are beyond their archetype: a blind creature (the
+/// ice-crawlers) sees only what touches it and hears far.
+fn tune(world: &mut CombatWorld, kind: &str, members: &[CombatantId]) {
+    if !beast_of(kind).is_some_and(|b| b.blind) {
+        return;
+    }
+    for m in members {
+        if let Some(brain) = world.combatant_mut(*m).and_then(|c| c.brain.as_mut()) {
+            brain.mind.profile.sight = 3.0;
+            brain.mind.profile.hearing *= 1.6;
+        }
+    }
 }
 
 /// WS3's bandits (`characters/bandit_00` to `bandit_09`).
@@ -1368,7 +1518,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; harrowdogs, crocodile, icecrawlers: the bestiary's; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -1434,10 +1584,11 @@ fn build_encounter(
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
         part @ ("wolves" | "bandits" | "harrowcat") => args["only"] = json!(part),
+        beast if beast_of(beast).is_some() => args["only"] = json!(beast),
         band if band_of(band).is_some() => args["only"] = json!(band),
         other => {
             return Err(format!(
-                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, lampmen [red|white|amber|green|blue], watch, lance or knights)"
+                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, harrowdogs, crocodile, icecrawlers, lampmen [red|white|amber|green|blue], watch, lance or knights)"
             ));
         }
     }
@@ -2096,6 +2247,7 @@ fn wake(
         world.despawn(e);
     }
     organise(&mut run.world, &members, &leaders);
+    tune(&mut run.world, &record.kind, &members);
     let mut solids = Vec::new();
     let mut patched = None;
     if let Some(physics) = physics {
@@ -5705,6 +5857,34 @@ mod tests {
         assert!(!hostile(&demo, cat) && !hostile(&demo, first));
         demo.set_beasts_hostile(true);
         assert!(hostile(&demo, cat) && hostile(&demo, first));
+    }
+
+    /// The bestiary's new kinds wake as the beasts: harrow-dogs a pack of five
+    /// in WS3's sheepdog, a crocodile alone, ice-crawlers three and blind.
+    #[test]
+    fn the_bestiary_hunts_with_the_beasts() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_bestiary");
+        let file = content.join("creatures/sheepdog/sheepdog.glb");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        let mut world = World::new();
+        let dogs = build_encounter(&mut world, "harrowdogs", Vec3::ZERO, Vec3::X, false, Some(&content)).expect("dogs");
+        let bodies = dogs.iter().filter(|e| world.get::<CombatantComponent>(**e).is_some()).count();
+        let worn = dogs.iter().filter(|e| world.get::<SkinnedBody>(**e).is_some()).count();
+        assert_eq!((bodies, worn), (5, 5));
+        let (_world, demo) = host_with(&[
+            ("crocodile", Vec3::new(30.0, 0.0, 0.0)),
+            ("icecrawlers", Vec3::new(-30.0, 0.0, 0.0)),
+        ]);
+        let run = demo.run.as_ref().unwrap();
+        let hero = run.player.unwrap();
+        let croc: Vec<_> = run.world.combatants().filter(|c| c.name == "Delta crocodile").collect();
+        let crawlers: Vec<_> = run.world.combatants().filter(|c| c.name.starts_with("Ice-crawler")).collect();
+        assert_eq!((croc.len(), crawlers.len()), (1, 3));
+        assert!(run.world.hostile(hero, croc[0].id) && crawlers.iter().all(|c| run.world.hostile(hero, c.id)));
+        assert!(crawlers.iter().all(|c| c.brain.as_ref().is_some_and(|b| b.mind.profile.sight <= 3.0)), "blind");
+        assert!(croc[0].brain.as_ref().is_some_and(|b| b.mind.profile.sight > 3.0));
     }
 
     #[test]
