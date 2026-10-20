@@ -67,6 +67,11 @@
 //! whether the hands are on the edge): a climbing brain neither swings,
 //! guards nor dodges until it is up, and a melee brain can strike a climber
 //! hanging on the edge, out of reach otherwise.
+//!
+//! A brain in the saddle rides ([`fights_mounted`]): it walks its horse on the
+//! road; against a foe a lance or a spear charges at the gallop, strikes in
+//! passing and wheels about for another pass, and anything shorter rides up
+//! and gets down [`DISMOUNT_RANGE`] out to fight on foot.
 use crate::geometry::{flat, planar_dir};
 use crate::spell::{Address, Bearing, SpellRequest};
 use crate::weapon::WeaponKind;
@@ -82,7 +87,9 @@ use std::collections::BTreeMap;
 
 mod cover;
 mod formation;
+mod riding;
 pub use formation::{Formation, form_up};
+pub use riding::{DISMOUNT_RANGE, STRIKE_RANGE, fights_mounted};
 
 /// Seconds between perception updates.
 pub const THINK_INTERVAL: f32 = 0.1;
@@ -531,6 +538,8 @@ pub struct Mind {
     orbit: f32,
     retreat_until: f64,
     leaping: bool,
+    /// In the saddle: where it is in its passes.
+    pass: riding::Pass,
 }
 
 /// A combatant's AI.
@@ -585,6 +594,7 @@ impl Brain {
                 orbit: if id.0 % 2 == 0 { 1.0 } else { -1.0 },
                 retreat_until: f64::NEG_INFINITY,
                 leaping: false,
+                pass: riding::Pass::Run,
             },
         }
     }
@@ -1948,6 +1958,7 @@ pub(crate) fn think(
     let mut shouts = Vec::new();
     let mut casts: Vec<(CombatantId, SpellRequest)> = Vec::new();
     let mut events = Vec::new();
+    let mut dismounts = Vec::new();
     let now = w.time();
     let max_attackers = w.rules.max_melee_attackers;
     let mut rng = std::mem::replace(&mut w.rng, Rng::new(1));
@@ -2081,11 +2092,22 @@ pub(crate) fn think(
                 }
             }
         }
+        if me.mounted {
+            let lancer = w
+                .combatant(id)
+                .is_some_and(|c| riding::fights_mounted(c.weapon.kind));
+            if riding::steer(&me, &mut brain.mind, &view, &mut cmd, lancer, now) {
+                dismounts.push(id);
+            }
+        }
         casts.extend(my_casts.into_iter().map(|r| (id, r)));
         if let Some(c) = w.combatant_mut(id) {
             c.command = cmd;
             c.brain = Some(brain);
         }
+    }
+    for id in dismounts {
+        crate::mount::dismount(w, id);
     }
     w.tactics = tactics;
     w.rng = rng;
