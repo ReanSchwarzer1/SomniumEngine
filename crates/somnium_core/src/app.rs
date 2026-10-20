@@ -5971,6 +5971,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 render_ctx.set_vsync(vsync);
             }
         }
+        // The window's mode and size asked for by the game's options: a shipped player's only (the editor keeps its
+        // own window, and its immersive view stays borderless).
+        if let Some(display) = somnium_ui::take_window_display_request()
+            && self.config.player_mode
+            && let Some(ui) = &mut self.ui_manager
+        {
+            ui.set_player_display(display);
+        }
         self.movie_frame();
         self.time.wait_for_frame_budget();
 

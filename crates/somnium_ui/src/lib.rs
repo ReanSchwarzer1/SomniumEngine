@@ -954,6 +954,50 @@ enum LogView {
     History,
 }
 
+/// How a shipped player's window is shown while immersive: a game's display options.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowMode {
+    /// Fills the screen at its own resolution, as a window without borders (quick to switch away from).
+    #[default]
+    Borderless,
+    /// Takes the screen over in one of its video modes.
+    Fullscreen,
+    /// A window with a title bar, moved and sized as any other.
+    Windowed,
+}
+
+/// A window mode and a size in physical pixels: the video mode in `Fullscreen`, the window's inner size in
+/// `Windowed`, unused in `Borderless`. `None` is the screen's own size (`Windowed`: the window as it is).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowDisplay {
+    pub mode: WindowMode,
+    pub size: Option<[u32; 2]>,
+}
+
+/// A process-wide slot, as `somnium_core::time::request_frame_pacing` is, since the request comes from game callbacks
+/// that never see the [`UiManager`]. The app hands the latest one over between frames.
+static DISPLAY_REQUEST: std::sync::Mutex<Option<WindowDisplay>> = std::sync::Mutex::new(None);
+/// The window's screen as last seen: its own size, and the sizes of its video modes (smallest first).
+static DISPLAY_SIZES: std::sync::Mutex<(Option<[u32; 2]>, Vec<[u32; 2]>)> = std::sync::Mutex::new((None, Vec::new()));
+
+/// Ask for the player's window to be shown this way; applied before the next frame, and whenever the window goes
+/// immersive after that.
+pub fn request_window_display(display: WindowDisplay) {
+    if let Ok(mut slot) = DISPLAY_REQUEST.lock() {
+        *slot = Some(display);
+    }
+}
+
+/// The pending request, once.
+pub fn take_window_display_request() -> Option<WindowDisplay> {
+    DISPLAY_REQUEST.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// The window's screen: its own size, and every size its video modes offer, smallest first (empty with no window).
+pub fn display_sizes() -> (Option<[u32; 2]>, Vec<[u32; 2]>) {
+    DISPLAY_SIZES.lock().map(|sizes| sizes.clone()).unwrap_or_default()
+}
+
 pub struct UiManager {
     authoring_panel: Option<crate::authoring_panel::AuthoringPanel>,
     /// The welcome screen, built the first time it is shown.
@@ -1477,6 +1521,8 @@ pub struct UiManager {
     immersive: bool,
     immersive_restore_fullscreen: Option<Fullscreen>,
     immersive_restore_maximized: bool,
+    /// How the window is shown while immersive ([`request_window_display`]).
+    player_display: WindowDisplay,
 }
 
 /// Load the bundled Nocturne faces and publish the [`FontRole`] table.
@@ -2187,6 +2233,7 @@ impl UiManager {
             immersive: false,
             immersive_restore_fullscreen: None,
             immersive_restore_maximized: false,
+            player_display: WindowDisplay::default(),
         };
         // CONTROL-A evidence harness. A relative drawer path lets a timing run
         // queue the real `assets/terrain/` workload before frame one, without
@@ -7539,13 +7586,55 @@ impl UiManager {
             self.set_play_overlays_hidden(true);
             self.immersive_restore_maximized = self.window.is_maximized();
             self.immersive_restore_fullscreen = self.window.fullscreen();
-            self.window
-                .set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.apply_player_display();
         } else {
+            // The editor's window draws its own title bar; a windowed player had the system's.
+            self.window.set_decorations(false);
             self.window
                 .set_fullscreen(self.immersive_restore_fullscreen.take());
             if self.immersive_restore_maximized {
                 self.window.set_maximized(true);
+            }
+        }
+    }
+
+    /// Show the window as a game's display options ask ([`request_window_display`]): now while immersive, and each
+    /// time it goes immersive after.
+    pub fn set_player_display(&mut self, display: WindowDisplay) {
+        self.player_display = display;
+        if self.immersive {
+            self.apply_player_display();
+        }
+    }
+
+    fn apply_player_display(&self) {
+        let monitor = self.window.current_monitor();
+        let native = monitor.as_ref().map(|m| [m.size().width, m.size().height]);
+        let mut sizes: Vec<[u32; 2]> = monitor.iter().flat_map(|m| m.video_modes()).map(|v| [v.size().width, v.size().height])
+            .chain(native).collect();
+        sizes.sort_by_key(|s| (s[0], s[1]));
+        sizes.dedup();
+        if let Ok(mut published) = DISPLAY_SIZES.lock() {
+            *published = (native, sizes);
+        }
+        match self.player_display.mode {
+            WindowMode::Borderless => self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor))),
+            WindowMode::Fullscreen => {
+                // The screen's mode at that size with the fastest refresh; borderless if it has none.
+                let wanted = self.player_display.size.or(native);
+                let mode = monitor.as_ref().and_then(|m| {
+                    m.video_modes().filter(|v| Some([v.size().width, v.size().height]) == wanted)
+                        .max_by_key(|v| (v.refresh_rate_millihertz(), v.bit_depth()))
+                });
+                self.window.set_fullscreen(Some(mode.map_or(Fullscreen::Borderless(monitor), Fullscreen::Exclusive)));
+            }
+            WindowMode::Windowed => {
+                self.window.set_fullscreen(None);
+                self.window.set_maximized(false);
+                self.window.set_decorations(true);
+                if let Some([w, h]) = self.player_display.size {
+                    let _ = self.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                }
             }
         }
     }
