@@ -2199,6 +2199,9 @@ impl GameApp for HelloGame {
         }
         self.was_playing = playing;
         if playing {
+            // A second place the game holds streamed (the protagonists' switch, a joint mission) thinks too.
+            let held = somnium_core::cell_streaming::held_points(ctx.world);
+            self.set_focus_points(&held);
             self.boats.update(ctx, &mut self.combat);
             self.combat.update(ctx);
             self.life.update(ctx);
