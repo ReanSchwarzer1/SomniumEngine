@@ -7620,11 +7620,16 @@ impl UiManager {
         match self.player_display.mode {
             WindowMode::Borderless => self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor))),
             WindowMode::Fullscreen => {
-                // The screen's mode at that size with the fastest refresh; borderless if it has none.
+                // At the screen's own size, borderless: it looks the same and asks the display for no mode change.
+                // A mode change can fail (a locked screen, a laptop's switched graphics), and winit then panics on it:
+                // a start at 4 a.m. on 23 Oct 2026 died on its `assert_eq!(res, DISP_CHANGE_SUCCESSFUL)`. Another size
+                // takes the screen's mode at that size, at the screen's own refresh rate where it has one (the
+                // smallest change to ask for); borderless if it has none.
                 let wanted = self.player_display.size.or(native);
-                let mode = monitor.as_ref().and_then(|m| {
+                let hz = monitor.as_ref().and_then(|m| m.refresh_rate_millihertz());
+                let mode = monitor.as_ref().filter(|_| wanted != native).and_then(|m| {
                     m.video_modes().filter(|v| Some([v.size().width, v.size().height]) == wanted)
-                        .max_by_key(|v| (v.refresh_rate_millihertz(), v.bit_depth()))
+                        .max_by_key(|v| (Some(v.refresh_rate_millihertz()) == hz, v.refresh_rate_millihertz(), v.bit_depth()))
                 });
                 self.window.set_fullscreen(Some(mode.map_or(Fullscreen::Borderless(monitor), Fullscreen::Exclusive)));
             }
