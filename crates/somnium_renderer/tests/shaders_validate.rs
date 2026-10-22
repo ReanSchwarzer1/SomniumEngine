@@ -784,8 +784,7 @@ fn decal_axes_come_from_the_rows_of_the_inverse() {
     let shading = include_str!("../src/shaders/shading.wgsl");
     let start = shading.find("fn apply_decals").expect("apply_decals");
     let body = &shading[start..start + shading[start..].find("
-}
-").expect("end")];
+}").expect("end")];
     assert!(body.contains("vec3<f32>(inv[0].y, inv[1].y, inv[2].y)"), "facing axis from row 1");
     assert!(!body.contains("inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)"), "direction through the inverse");
 }

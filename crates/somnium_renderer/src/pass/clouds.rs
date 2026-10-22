@@ -14,9 +14,14 @@
 //! consequences, both deliberate:
 //!
 //! - The clouds land in the HDR buffer that TAA already resolves, so they
-//!   inherit the existing jittered-matrix reprojection rather than growing a
-//!   private history. Phase 24F's §18 records what a second, naive history
-//!   cost the first time; there is no reason to pay it again.
+//!   inherit the existing jittered-matrix reprojection. That was the reason for
+//!   having no history of their own, and it does not hold where an upscaler
+//!   stands in for TAA (FSR has no motion for a sky pixel): the march's few
+//!   steps at a quarter of the scene showed as banding that stood still on the
+//!   screen. So the clouds keep a history of their own after all
+//!   (`cloud_resolve`, 22 Oct 2026), at the march's size, reprojected through
+//!   last frame's matrix and clipped to this frame's neighbourhood, with the
+//!   ray start moving every frame. `SOMNIUM_CLOUD_HISTORY=0` is the A/B.
 //! - Aerial perspective is applied **inside the march**, to the cloud layer, at
 //!   the cloud's own transmittance-weighted depth — not once over the composite
 //!   afterwards. §6.3 is explicit that the latter is wrong, and the reason is
@@ -224,6 +229,26 @@ struct CompositeParams {
     _pad3: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ResolveParams {
+    inv_view_proj: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 3],
+    keep: f32,
+    layer_bottom: f32,
+    layer_top: f32,
+    max_distance: f32,
+    _pad0: f32,
+}
+
+/// Share of last frame's clouds kept each frame: about ten frames to settle,
+/// which at the march's size is the noise of ten ray starts averaged.
+const HISTORY_KEEP: f32 = 0.9;
+/// A camera that moved further than this in one frame was cut, not walked:
+/// last frame's sky is somewhere else.
+const CUT_METRES: f32 = 30.0;
+
 /// How much of the sky eye survives an opaque cloud deck: it is meant to burn
 /// through the storm, not sit politely behind it.
 const EYE_THROUGH_CLOUD: f32 = 0.92;
@@ -278,8 +303,40 @@ pub struct CloudPass {
     shadow_pipeline: wgpu::ComputePipeline,
 
     composite_layout: wgpu::BindGroupLayout,
-    composite_bind_group: Option<wgpu::BindGroup>,
+    /// One per history, so the composite reads the one this frame wrote.
+    composite_bind_groups: [Option<wgpu::BindGroup>; 2],
     composite_pipeline: wgpu::RenderPipeline,
+
+    // ── History (22 Oct 2026; module header) ─────────────────────────────────
+    /// Resolved clouds at the march's size, two of them: one written this
+    /// frame, from the march and from the other, last frame's.
+    history_views: [wgpu::TextureView; 2],
+    resolve_layout: wgpu::BindGroupLayout,
+    resolve_bind_groups: [Option<wgpu::BindGroup>; 2],
+    resolve_pipeline: wgpu::ComputePipeline,
+    resolve_params: wgpu::Buffer,
+    /// The history this frame writes and the composite reads.
+    history_index: usize,
+    /// Last frame's view-projection and eye. None when there is nothing to
+    /// trust: the first frame, a resize.
+    previous: Option<(glam::Mat4, glam::Vec3)>,
+    /// Keep the history. `SOMNIUM_CLOUD_HISTORY=0` sends each frame's march
+    /// straight to the screen, as before.
+    pub history: bool,
+    /// The view being recorded is the primary one (set by the renderer per
+    /// view). Secondary views run history-free, as TAA and FSR do: a history
+    /// belongs to one camera.
+    pub primary_view: bool,
+    /// The composite straight from this frame's march, for secondary views.
+    composite_direct_bind_group: Option<wgpu::BindGroup>,
+    /// This frame's composite reads the march directly (a secondary view).
+    direct: bool,
+    /// Clamped at the edges: the march buffer is the screen, which does not
+    /// wrap (the noise sampler's Repeat bled the far edge in).
+    composite_sampler: wgpu::Sampler,
+    /// The scene size the bind groups were built for: the depth view they bind
+    /// follows it even when the march's size does not change.
+    scene_size: (u32, u32),
 
     // ── State ────────────────────────────────────────────────────────────────
     /// Noise volumes are generated once, on the first frame the pass runs.
@@ -402,6 +459,16 @@ impl CloudPass {
             ..Default::default()
         });
 
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Cloud Composite Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let uniform = |label, size| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -497,7 +564,7 @@ impl CloudPass {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
-                module: if entry == "march" || entry == "cloud_shadow" {
+                module: if entry == "march" || entry == "cloud_shadow" || entry == "cloud_resolve" {
                     &march_shader
                 } else {
                     &noise_shader
@@ -598,6 +665,50 @@ impl CloudPass {
         });
         let march_pipeline = compute("Cloud March", &march_pl, "march");
         let shadow_pipeline = compute("Cloud Shadow", &march_pl, "cloud_shadow");
+
+        // ── History ──────────────────────────────────────────────────────────
+        // Its own bindings in the march's module (12 on), so neither layout has
+        // to carry the other's.
+        let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Cloud Resolve BGL"),
+            entries: &[
+                tex_2d(12),
+                tex_2d(13),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let resolve_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Cloud Resolve PL"),
+            bind_group_layouts: &[Some(&resolve_layout)],
+            immediate_size: 0,
+        });
+        let resolve_pipeline = compute("Cloud Resolve", &resolve_pl, "cloud_resolve");
+        let resolve_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cloud Resolve Params"),
+            size: std::mem::size_of::<ResolveParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let history_views = [Self::make_scatter(device, march_size), Self::make_scatter(device, march_size)];
 
         // ── Composite ────────────────────────────────────────────────────────
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -721,8 +832,21 @@ impl CloudPass {
             march_pipeline,
             shadow_pipeline,
             composite_layout,
-            composite_bind_group: None,
+            composite_bind_groups: [None, None],
             composite_pipeline,
+            history_views,
+            resolve_layout,
+            resolve_bind_groups: [None, None],
+            resolve_pipeline,
+            resolve_params,
+            history_index: 0,
+            previous: None,
+            history: std::env::var("SOMNIUM_CLOUD_HISTORY").as_deref() != Ok("0"),
+            primary_view: true,
+            composite_direct_bind_group: None,
+            direct: false,
+            composite_sampler,
+            scene_size: (width, height),
             noise_ready: false,
             weather_key: None,
             weather_cpu: None,
@@ -770,13 +894,29 @@ impl CloudPass {
     /// free when nothing moved.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let size = Self::march_extent(width, height, self.settings.resolution_divisor);
+        if (width, height) != self.scene_size {
+            // The depth view the groups bind was made again with the scene.
+            self.scene_size = (width, height);
+            self.march_bind_group = None;
+            self.composite_bind_groups = [None, None];
+            self.composite_direct_bind_group = None;
+        }
         if size == self.march_size {
             return;
         }
         self.march_size = size;
         self.scatter_view = Self::make_scatter(device, size);
+        self.history_views = [Self::make_scatter(device, size), Self::make_scatter(device, size)];
         self.march_bind_group = None;
-        self.composite_bind_group = None;
+        self.composite_bind_groups = [None, None];
+        self.composite_direct_bind_group = None;
+        self.resolve_bind_groups = [None, None];
+        self.previous = None;
+    }
+
+    /// Forget the history: a new scene's sky owes nothing to the last one's.
+    pub fn reset_history(&mut self) {
+        self.previous = None;
     }
 
     /// Bind the atmosphere LUTs, the depth buffer and the froxel volume.
@@ -847,9 +987,9 @@ impl CloudPass {
                 ],
             }));
         }
-        if self.composite_bind_group.is_none() {
-            self.composite_bind_group =
-                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        for index in 0..2 {
+            if self.composite_bind_groups[index].is_none() {
+                self.composite_bind_groups[index] = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Cloud Composite BG"),
                     layout: &self.composite_layout,
                     entries: &[
@@ -859,11 +999,11 @@ impl CloudPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.scatter_view),
+                            resource: wgpu::BindingResource::TextureView(&self.history_views[index]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
@@ -871,6 +1011,55 @@ impl CloudPass {
                         },
                     ],
                 }));
+            }
+            if self.resolve_bind_groups[index].is_none() {
+                self.resolve_bind_groups[index] = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Cloud Resolve BG"),
+                    layout: &self.resolve_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: wgpu::BindingResource::TextureView(&self.scatter_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: wgpu::BindingResource::TextureView(&self.history_views[1 - index]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 14,
+                            resource: wgpu::BindingResource::TextureView(&self.history_views[index]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 15,
+                            resource: self.resolve_params.as_entire_binding(),
+                        },
+                    ],
+                }));
+            }
+        }
+        if self.composite_direct_bind_group.is_none() {
+            self.composite_direct_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Cloud Composite BG (direct)"),
+                layout: &self.composite_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.composite_params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.scatter_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                ],
+            }));
         }
     }
 
@@ -1087,6 +1276,7 @@ impl CloudPass {
             bytemuck::bytes_of(&self.shadow_uniform(camera_pos)),
         );
         if !self.enabled || self.march_bind_group.is_none() {
+            self.previous = None;
             return;
         }
         // Before the bind group is borrowed: `ensure_fields` needs `&mut self`
@@ -1114,12 +1304,12 @@ impl CloudPass {
                 phase_blend: s.phase_blend.clamp(0.0, 1.0),
                 ambient: s.ambient.max(0.0),
                 precipitation: s.precipitation.clamp(0.0, 1.0),
-                jitter_enabled: f32::from(u8::from(self.jitter)),
-                // Zero unless temporal jitter is on, which makes the offset
-                // spatially varying but frame-stable — no shimmer, and the
-                // banding the jitter exists to break is still broken.
+                // The history settles a ray start that moves every frame, so
+                // with it the start always moves. Without it the start moves
+                // only when asked, frame-stable otherwise: no shimmer.
+                jitter_enabled: f32::from(u8::from(self.jitter || (self.history && self.primary_view))),
                 #[allow(clippy::cast_precision_loss)]
-                frame: if s.temporal_jitter {
+                frame: if s.temporal_jitter || (self.history && self.primary_view) {
                     (self.frame % 4096) as f32
                 } else {
                     0.0
@@ -1165,6 +1355,35 @@ impl CloudPass {
             }),
         );
 
+        // A secondary view leaves the primary view's history alone and
+        // composites its own march as it comes.
+        self.direct = !self.primary_view;
+        // This frame writes the other history and reads the one last frame
+        // wrote, through last frame's matrix.
+        let view_proj = inv_view_proj.inverse();
+        let keep = match self.previous {
+            Some((_, eye)) if self.history && eye.distance(camera_pos) < CUT_METRES => HISTORY_KEEP,
+            _ => 0.0,
+        };
+        if !self.direct {
+            self.history_index ^= 1;
+            queue.write_buffer(
+                &self.resolve_params,
+                0,
+                bytemuck::bytes_of(&ResolveParams {
+                    inv_view_proj: inv_view_proj.to_cols_array_2d(),
+                    prev_view_proj: self.previous.map_or(view_proj, |(m, _)| m).to_cols_array_2d(),
+                    camera_pos: camera_pos.to_array(),
+                    keep,
+                    layer_bottom: s.altitude.max(1.0),
+                    layer_top: s.altitude.max(1.0) + s.thickness.max(1.0),
+                    max_distance: s.max_distance.max(1.0),
+                    _pad0: 0.0,
+                }),
+            );
+            self.previous = Some((view_proj, camera_pos));
+        }
+
         let bind_group = self.march_bind_group.as_ref().expect("checked above");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Cloud March"),
@@ -1177,6 +1396,16 @@ impl CloudPass {
             self.march_size.1.div_ceil(8),
             1,
         );
+        if let Some(resolve) = self.resolve_bind_groups[self.history_index].as_ref().filter(|_| !self.direct) {
+            pass.set_bind_group(0, resolve, &[]);
+            pass.set_pipeline(&self.resolve_pipeline);
+            pass.dispatch_workgroups(
+                self.march_size.0.div_ceil(8),
+                self.march_size.1.div_ceil(8),
+                1,
+            );
+            pass.set_bind_group(0, bind_group, &[]);
+        }
         pass.set_pipeline(&self.shadow_pipeline);
         let g = SHADOW_SIZE.div_ceil(8);
         pass.dispatch_workgroups(g, g, 1);
@@ -1194,7 +1423,12 @@ impl CloudPass {
         if !self.enabled {
             return;
         }
-        let Some(bind_group) = self.composite_bind_group.as_ref() else {
+        let chosen = if self.direct {
+            self.composite_direct_bind_group.as_ref()
+        } else {
+            self.composite_bind_groups[self.history_index].as_ref()
+        };
+        let Some(bind_group) = chosen else {
             return;
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1245,6 +1479,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<CloudParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<NoiseParams>() % 16, 0);
         assert_eq!(std::mem::size_of::<CompositeParams>() % 16, 0);
+        assert_eq!(std::mem::size_of::<ResolveParams>() % 16, 0);
     }
 
     /// The weather map costs a 512² dispatch, so it must regenerate when its

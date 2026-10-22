@@ -3902,6 +3902,7 @@ impl SomniumRenderer {
         self.water_bodies.clear();
         self.underwater_body = None;
         self.underwater_pass.invalidate();
+        self.cloud_pass.reset_history();
         self.clear_gizmo();
     }
 
@@ -4754,6 +4755,8 @@ impl SomniumRenderer {
     ) {
         self.view_slot = slot;
         self.set_view(view.view, view.proj, view.camera_pos);
+        // The clouds' history belongs to the primary camera too (pass/clouds.rs).
+        self.cloud_pass.primary_view = primary;
         if !primary {
             self.taa_pass.set_enabled(false);
             self.fsr_pass.enabled = false;
@@ -4770,6 +4773,7 @@ impl SomniumRenderer {
     /// every frame after it — the classic shape of a bug that only appears once
     /// you have used a feature and then stopped.
     fn restore_primary_view(&mut self, views: &[crate::view::SceneView]) {
+        self.cloud_pass.primary_view = true;
         if views.len() > 1 {
             self.taa_pass.set_enabled(self.frame_view_state.taa);
             self.fsr_pass.enabled = self.frame_view_state.fsr;
