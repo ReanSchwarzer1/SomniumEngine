@@ -300,6 +300,10 @@ impl RenderContext {
             info!(?backends, "Backend selection overridden by the environment");
             descriptor.backends = backends;
         }
+        if let Some(salt) = crate::shaders::salt() {
+            info!(salt, "SOMNIUM_SHADER_SALT: debug SPIR-V and salted shaders, so every composed pipeline compiles cold");
+            descriptor.flags |= wgpu::InstanceFlags::DEBUG;
+        }
         let instance = wgpu::Instance::new(descriptor);
 
         // Create the surface from the window.

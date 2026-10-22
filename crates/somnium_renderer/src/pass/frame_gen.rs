@@ -259,6 +259,7 @@ impl FrameGenPass {
         }
         let stale = self.gpu.as_ref().is_none_or(|g| g.format != format || g.size != size);
         if stale {
+            let started = std::time::Instant::now();
             let interpolator = match self.gpu.take() {
                 Some(mut g) => {
                     g.interpolator.resize(device, size);
@@ -278,7 +279,8 @@ impl FrameGenPass {
             self.last_generated_ns = None;
             self.real_stamped = false;
             self.control_windows = 0;
-            tracing::info!(?size, ?format, "frame generation on (FSR 3 frame interpolation)");
+            tracing::info!(?size, ?format, ms = started.elapsed().as_millis() as u64,
+                "frame generation on (FSR 3 frame interpolation)");
         }
         true
     }

@@ -3977,7 +3977,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
                 info!("Initializing rendering subsystems...");
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
+                let started = std::time::Instant::now();
                 let renderer = SomniumRenderer::new(&render_ctx);
+                info!(ms = started.elapsed().as_millis() as u64, "renderer built (every startup pipeline)");
 
                 // Phase ALYX-D: the Theme and Density preferences, chosen before any widget takes its colours.
                 // `SOMNIUM_UI_THEME` / `SOMNIUM_UI_DENSITY` win (UiManager::new reads them next).
@@ -5916,6 +5918,12 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         }
 
         frame_timings[5] = frame_body_started.elapsed().as_secs_f64() * 1000.0;
+        // A frame over a quarter second is a stall someone will feel (a load, a shader compile): say where it went.
+        if frame_timings[5] > 250.0 {
+            let t = frame_timings;
+            info!(ms = t[5] as u32, simulation = t[0] as u32, panels = (t[1] - t[0]) as u32, game = (t[2] - t[1]) as u32,
+                render = (t[3] - t[2]) as u32, authoring = (t[4] - t[3]) as u32, "long frame");
+        }
         self.authoring_frame_timings = frame_timings;
         // PORTAL-0-B: before the limiter, so this is engine work and not sleep.
         if let Some(r) = &mut self.renderer {

@@ -710,6 +710,271 @@ fn write_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, rgba: &[u8], width: 
     );
 }
 
+/// One terrain as the shading pipelines see it (`SomniumRenderer::shading_plan`).
+#[derive(Clone, Copy)]
+struct TerrainShade {
+    clipmapped: bool,
+    painted_layers: u32,
+    hex: bool,
+    pom: bool,
+    hero_bank_only: bool,
+}
+
+/// The shading pipelines one frame draws with: the fullscreen spec, the near and aerial pair while the split is on,
+/// and one spec per bin while binning is on.
+struct ShadingPlan {
+    main: crate::pass::shading::ShadingSpec,
+    split: Option<(crate::pass::shading::ShadingSpec, crate::pass::shading::ShadingSpec)>,
+    bins: Option<[crate::pass::shading::ShadingSpec; crate::pass::classify::BIN_COUNT]>,
+}
+
+impl ShadingPlan {
+    fn keys(&self) -> Vec<crate::pass::shading::ShadingKey> {
+        let mut keys = vec![(self.main, "vs_main", None)];
+        if let Some((near, aerial)) = self.split {
+            keys.push((near, "vs_main", Some(wgpu::CompareFunction::Greater)));
+            keys.push((aerial, "vs_main", Some(wgpu::CompareFunction::LessEqual)));
+        }
+        keys.extend(self.bins.iter().flatten().map(|&spec| (spec, "vs_tile", None)));
+        keys
+    }
+}
+
+impl SomniumRenderer {
+    /// What the shading pass draws with, for these shadow bits (`shading_mode`'s 2 and 4), traced sun or not, and
+    /// these terrains. The one place that decides it, for the frame and for `warm_pipelines` alike, so what is
+    /// warmed is what the frames ask for.
+    fn shading_plan(
+        &self,
+        shading_mode: u32,
+        restir_sun: bool,
+        any_terrain: bool,
+        terrains: impl Iterator<Item = TerrainShade>,
+    ) -> ShadingPlan {
+        let mut spec = crate::pass::shading::ShadingSpec {
+            hex: false,
+            pom: false,
+            pcss: (shading_mode & 2) != 0 && !restir_sun,
+            contact: (shading_mode & 4) != 0 && !restir_sun && self.contact_shadows,
+            clipmap: false,
+            debug: self.shading_debug != 0.0,
+            terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+            terrain_active_layers: 0,
+            live_terrain: false,
+            // Phase DOOM-B. Read once at startup and held constant for the
+            // process: an ablation that could change mid-run would recreate
+            // the PSO and put a shader compile inside the window being
+            // timed.
+            ablate: self.shade_ablate,
+        };
+        // Phase DF audit: a clipmapped terrain shades from the cache, which
+        // already holds strongest-four + hex + height-blend and never
+        // marches POM. Folding its `hex_tiling` / `parallax_scale` into the
+        // spec kept both of those compiled into the shading shader for a
+        // path that cannot execute, and occupancy is the union of what is
+        // in the module — the same trap the runtime checkboxes fell into.
+        //
+        // The clipmap test must match `TerrainClipmap::fill_gpu` exactly.
+        // If it says "clipmapped" where `fill_gpu` writes
+        // `clipmap_enabled = 0`, the live path is deleted from under a
+        // terrain that still needs it and the ground renders unshaded.
+        for t in terrains {
+            if t.clipmapped {
+                spec.clipmap = true;
+                continue;
+            }
+            spec.live_terrain = true;
+            spec.terrain_active_layers |= t.painted_layers;
+            spec.hex |= t.hex;
+            spec.pom |= t.pom;
+            if !t.hero_bank_only {
+                spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
+            }
+        }
+        // No terrain queued at all: keep the live path so the next frame's
+        // first terrain does not have to wait on a pipeline rebuild.
+        if !any_terrain {
+            spec.live_terrain = true;
+            spec.terrain_active_layers = u32::MAX;
+        }
+        // Same binary A/B, default off: the sparse mask regressed Gardens
+        // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
+        // full palette until a specialization is measured faster.
+        static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*PAINTED_LAYERS.get_or_init(|| std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")) {
+            spec.terrain_active_layers = u32::MAX;
+        }
+        // Measurement rail only: how much of terrain shading is the splat scan.
+        if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
+            spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
+        }
+
+        // ── Phase DOOM-E: the aerial split ───────────────────────────────
+        //
+        // Two fullscreen draws instead of one, separated by a depth test
+        // against the scene depth the visibility pass already filled. The
+        // near draw keeps everything closer than `aerial_split`; the aerial
+        // draw takes the rest, including the sky at the cleared far value.
+        //
+        // What the aerial pipeline drops is what only resolves close up:
+        // hex tiling, which exists to break the repetition of a tiled layer
+        // and cannot be seen at distance, and the parallax march, which
+        // `gpu_material_for_camera` already fades out with height. Both are
+        // *deleted from the pipeline*, not skipped at runtime — a per-pixel
+        // sample-count branch is exactly what XV-Zeta §11.1 forbids, and a
+        // second pipeline is how the same effect is had without one.
+        //
+        // Enabled only when the near spec actually has something to drop.
+        // Compiling a second pipeline identical to the first would cost a
+        // shader compile and a second full-screen pass to save nothing.
+        let split = (self.aerial_split_enabled
+            && (spec.hex || spec.pom)
+            && self.shade_ablate == crate::pass::shading::ablate::OFF)
+            .then(|| {
+                let aerial = crate::pass::shading::ShadingSpec {
+                    hex: false,
+                    pom: false,
+                    terrain_scan: if self.aerial_hero_bank {
+                        crate::terrain::textures::TERRAIN_HERO_LAYERS
+                    } else {
+                        spec.terrain_scan
+                    },
+                    ..spec
+                };
+                (spec, aerial)
+            });
+
+        // Phase DOOM-C/E: the same spec, narrowed per bin.
+        //
+        // This is the whole point of the phase. `spec` above is the union
+        // of everything any pixel on screen might need, which is what the
+        // one fullscreen draw has to be compiled for. A tile that contains
+        // only sky needs almost none of it, and a tile of terrain 400 m away
+        // needs less than one at the player's feet.
+        let bins = self.classify_pass.enabled.then(|| {
+            use crate::pass::classify as bins;
+            std::array::from_fn(|bin| {
+                let mut s = spec;
+                match bin {
+                    // Sky, mesh and foliage never reach the terrain
+                    // material, so the 32-wide splat scan, hex tiling, POM
+                    // and the clipmap sampler all leave the module. Sky
+                    // additionally never samples a shadow map.
+                    bins::BIN_SKY => {
+                        s.live_terrain = false;
+                        s.clipmap = false;
+                        s.hex = false;
+                        s.pom = false;
+                        s.pcss = false;
+                        s.contact = false;
+                        s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                    }
+                    bins::BIN_MESH | bins::BIN_FOLIAGE => {
+                        s.live_terrain = false;
+                        s.clipmap = false;
+                        s.hex = false;
+                        s.pom = false;
+                        s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                    }
+                    // DOOM-E. Terrain past the aerial split drops the two
+                    // things that only resolve close up: hex tiling, which
+                    // exists to break tiling repetition the eye can only
+                    // see near the camera, and the parallax march, which
+                    // `gpu_material_for_camera` already fades out with
+                    // distance. Both are *deleted* from this pipeline
+                    // rather than skipped at runtime — a per-pixel
+                    // sample-count branch is what XV-Zeta §11.1 forbids,
+                    // and a separate pipeline is precisely the way to get
+                    // the same effect without one.
+                    bins::BIN_TERRAIN_AERIAL => {
+                        s.hex = false;
+                        s.pom = false;
+                    }
+                    // Near terrain and mixed tiles keep the full spec.
+                    _ => {}
+                }
+                s
+            })
+        });
+        ShadingPlan { main: spec, split, bins }
+    }
+
+    /// Every shading pipeline the frames could ask for under the switches as they are now, the likeliest first: with
+    /// traced sun shadows and without, every soft and contact shadow choice the options can make, and no terrain, a
+    /// live terrain (full or hero layer scan) or a clipmapped one.
+    fn shading_warm_keys(&self) -> Vec<crate::pass::shading::ShadingKey> {
+        let restir_now = self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
+        let restir = if self.raytrace_pass.supported() { vec![restir_now, !restir_now] } else { vec![false] };
+        let mode_now = self.shading_mode & 6;
+        let modes = [mode_now, 2 | 4, 2, 4, 0];
+        // A terrain as `Terrain::new` makes one (hex and POM from their switches), and the ones already here.
+        let fresh = TerrainShade {
+            clipmapped: false,
+            painted_layers: u32::MAX,
+            hex: std::env::var("SOMNIUM_HEXTILE").as_deref() == Ok("1"),
+            pom: std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("1"),
+            hero_bank_only: false,
+        };
+        let mut sets: Vec<Vec<TerrainShade>> = vec![Vec::new(), vec![fresh], vec![TerrainShade { hero_bank_only: true, ..fresh }]];
+        if !crate::terrain::clipmap::TerrainClipmap::env_forced_off() {
+            sets.push(vec![TerrainShade { clipmapped: true, ..fresh }]);
+        }
+        for t in &self.terrains {
+            sets.push(vec![TerrainShade {
+                painted_layers: t.splatmap.painted_layers(),
+                hex: t.hex_tiling,
+                pom: t.parallax_scale > 0.0,
+                hero_bank_only: t.hero_bank_only,
+                ..fresh
+            }]);
+        }
+        let mut keys = Vec::new();
+        for &sun in &restir {
+            for &mode in &modes {
+                for set in &sets {
+                    let mode = (self.shading_mode & !6) | mode;
+                    for key in self.shading_plan(mode, sun, !set.is_empty(), set.iter().copied()).keys() {
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// Start compiling, on worker threads, every shading pipeline the frames could ask for, so no scene's first
+    /// frames stop to compile one. Returns at once; call again after changing graphics switches to add what they
+    /// need. The renderer starts this itself when it is built.
+    pub fn warm_pipelines(&mut self, ctx: &RenderContext) {
+        let keys = self.shading_warm_keys();
+        self.shading_pass.warm(&ctx.device, keys);
+    }
+
+    /// `(done, total)` of the pipelines `warm_pipelines` asked for.
+    pub fn pipeline_warm_progress(&mut self) -> (usize, usize) {
+        self.shading_pass.warm_progress()
+    }
+
+    /// This GPU, its driver and every shader the renderer composes, in one line. A game can keep it beside a record
+    /// of having warmed the pipelines: the driver's own cache keeps them across runs until the driver or a shader
+    /// changes, which changes this line.
+    pub fn pipeline_fingerprint(&self, ctx: &RenderContext) -> String {
+        let info = ctx.adapter.get_info();
+        format!(
+            "{} {:04x}:{:04x} {:?} {} {} shaders {}",
+            info.name,
+            info.vendor,
+            info.device,
+            info.backend,
+            info.driver,
+            info.driver_info,
+            self.shaders.fingerprint()
+        )
+    }
+}
+
 impl SomniumRenderer {
     /// Push [`Self::debug_toggles`] into the fields the passes actually read.
     ///
@@ -1192,7 +1457,7 @@ impl SomniumRenderer {
         );
 
         let skin_pass = crate::pass::skin::SkinPass::new(&ctx.device, &shaders);
-        Self {
+        let mut renderer = Self {
             skin_pass,
             animated_geometry: Default::default(),
             last_motion: Vec::new(),
@@ -1472,7 +1737,11 @@ impl SomniumRenderer {
             // Shader ownership and its DREAMS sampling resource stay together.
             shaders,
             grain_masks,
-        }
+        };
+        // Every shading variant the frames could want, compiling on worker threads while startup and the first
+        // scene load go on (the first frame waits only for one still compiling).
+        renderer.warm_pipelines(ctx);
+        renderer
     }
 
     /// Add a texture to the global bindless pool.
@@ -1704,23 +1973,38 @@ impl SomniumRenderer {
         scene: &somnium_asset::LoadedScene,
         textured: Option<&std::collections::HashSet<usize>>,
     ) -> (usize, usize) {
+        use rayon::prelude::*;
         let (used, colour, _) = Self::texture_usage(scene, textured);
-        let (mut encoded, mut cached) = (0, 0);
-        for (index, tex) in scene.textures.iter().enumerate() {
-            if !used[index] || !crate::imported_bc::compressible(tex.width, tex.height) {
+        // Keys on every core, then each texture's chain on every core: one texture at a time left most of a machine
+        // idle on the small maps and the short mips (22 Oct 2026: the whole of TSF took 585 s that way).
+        let wanted: Vec<_> = (0..scene.textures.len())
+            .into_par_iter()
+            .filter(|&index| used[index])
+            .filter(|&index| crate::imported_bc::compressible(scene.textures[index].width, scene.textures[index].height))
+            .map(|index| {
+                let tex = &scene.textures[index];
+                (index, imported_texture_key(tex, colour[index]), crate::imported_bc::has_alpha(&tex.data))
+            })
+            .collect();
+        // One job per key: two threads storing the same key would share its temporary file.
+        let mut seen = std::collections::HashSet::new();
+        let (mut jobs, mut cached) = (Vec::new(), 0);
+        for (index, key, alpha) in wanted {
+            if !seen.insert((key, alpha)) {
                 continue;
             }
-            let key = imported_texture_key(tex, colour[index]);
-            let alpha = crate::imported_bc::has_alpha(&tex.data);
             if crate::imported_bc::is_cached(&key, alpha) {
                 cached += 1;
-                continue;
+            } else {
+                jobs.push((index, key, alpha));
             }
+        }
+        jobs.par_iter().for_each(|&(index, key, alpha)| {
+            let tex = &scene.textures[index];
             let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
             crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
-            encoded += 1;
-        }
-        (encoded, cached)
+        });
+        (jobs.len(), cached)
     }
 
     /// As [`Self::upload_scene_materials`], but textures are uploaded only for
@@ -5939,161 +6223,27 @@ impl SomniumRenderer {
         // per-frame cost; Island stays on COMPACT and never pays it.
         {
             let restir_sun = self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
-            let mut spec = crate::pass::shading::ShadingSpec {
-                hex: false,
-                pom: false,
-                pcss: (self.shading_mode & 2) != 0 && !restir_sun,
-                contact: (self.shading_mode & 4) != 0 && !restir_sun && self.contact_shadows,
-                clipmap: false,
-                debug: self.shading_debug != 0.0,
-                terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
-                terrain_active_layers: 0,
-                live_terrain: false,
-                // Phase DOOM-B. Read once at startup and held constant for the
-                // process: an ablation that could change mid-run would recreate
-                // the PSO and put a shader compile inside the window being
-                // timed.
-                ablate: self.shade_ablate,
-            };
-            // Phase DF audit: a clipmapped terrain shades from the cache, which
-            // already holds strongest-four + hex + height-blend and never
-            // marches POM. Folding its `hex_tiling` / `parallax_scale` into the
-            // spec kept both of those compiled into the shading shader for a
-            // path that cannot execute, and occupancy is the union of what is
-            // in the module — the same trap the runtime checkboxes fell into.
-            //
-            // The clipmap test must match `TerrainClipmap::fill_gpu` exactly.
-            // If it says "clipmapped" where `fill_gpu` writes
-            // `clipmap_enabled = 0`, the live path is deleted from under a
-            // terrain that still needs it and the ground renders unshaded.
+            // The clipmap test must match `TerrainClipmap::fill_gpu` exactly; see `shading_plan`.
             let clipmap_forced_off = crate::terrain::clipmap::TerrainClipmap::env_forced_off();
-            for &(id, _) in &self.terrain_queue {
-                let Some(t) = self.terrains.get(id as usize) else {
-                    continue;
-                };
-                let clipmapped = self
-                    .clipmaps
-                    .get(id as usize)
-                    .is_some_and(|c| c.enabled && !clipmap_forced_off);
-                if clipmapped {
-                    spec.clipmap = true;
-                    continue;
-                }
-                spec.live_terrain = true;
-                spec.terrain_active_layers |= t.splatmap.painted_layers();
-                spec.hex |= t.hex_tiling;
-                spec.pom |= t.parallax_scale > 0.0;
-                if !t.hero_bank_only {
-                    spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
-                }
+            let terrains = self.terrain_queue.iter().filter_map(|&(id, _)| {
+                let t = self.terrains.get(id as usize)?;
+                Some(TerrainShade {
+                    clipmapped: self.clipmaps.get(id as usize).is_some_and(|c| c.enabled && !clipmap_forced_off),
+                    painted_layers: t.splatmap.painted_layers(),
+                    hex: t.hex_tiling,
+                    pom: t.parallax_scale > 0.0,
+                    hero_bank_only: t.hero_bank_only,
+                })
+            });
+            let plan = self.shading_plan(self.shading_mode, restir_sun, !self.terrain_queue.is_empty(), terrains);
+            self.shading_pass.ensure_pipeline(&ctx.device, plan.main);
+            self.aerial_split_active = plan.split.is_some();
+            if let Some((near, aerial)) = plan.split {
+                self.shading_pass.ensure_split_pipelines(&ctx.device, near, aerial);
             }
-            // No terrain queued at all: keep the live path so the next frame's
-            // first terrain does not have to wait on a pipeline rebuild.
-            if self.terrain_queue.is_empty() {
-                spec.live_terrain = true;
-                spec.terrain_active_layers = u32::MAX;
-            }
-            // Same binary A/B, default off: the sparse mask regressed Gardens
-            // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
-            // full palette until a specialization is measured faster.
-            static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if !*PAINTED_LAYERS.get_or_init(|| {
-                std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")
-            }) {
-                spec.terrain_active_layers = u32::MAX;
-            }
-            // Measurement rail only: how much of terrain shading is the splat scan.
-            if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
-                spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
-            }
-            self.shading_pass.ensure_pipeline(&ctx.device, spec);
-
-            // ── Phase DOOM-E: the aerial split ───────────────────────────────
-            //
-            // Two fullscreen draws instead of one, separated by a depth test
-            // against the scene depth the visibility pass already filled. The
-            // near draw keeps everything closer than `aerial_split`; the aerial
-            // draw takes the rest, including the sky at the cleared far value.
-            //
-            // What the aerial pipeline drops is what only resolves close up:
-            // hex tiling, which exists to break the repetition of a tiled layer
-            // and cannot be seen at distance, and the parallax march, which
-            // `gpu_material_for_camera` already fades out with height. Both are
-            // *deleted from the pipeline*, not skipped at runtime — a per-pixel
-            // sample-count branch is exactly what XV-Zeta §11.1 forbids, and a
-            // second pipeline is how the same effect is had without one.
-            //
-            // Enabled only when the near spec actually has something to drop.
-            // Compiling a second pipeline identical to the first would cost a
-            // shader compile and a second full-screen pass to save nothing.
-            self.aerial_split_active = self.aerial_split_enabled
-                && (spec.hex || spec.pom)
-                && self.shade_ablate == crate::pass::shading::ablate::OFF;
-            if self.aerial_split_active {
-                let aerial = crate::pass::shading::ShadingSpec {
-                    hex: false,
-                    pom: false,
-                    terrain_scan: if self.aerial_hero_bank {
-                        crate::terrain::textures::TERRAIN_HERO_LAYERS
-                    } else {
-                        spec.terrain_scan
-                    },
-                    ..spec
-                };
-                self.shading_pass
-                    .ensure_split_pipelines(&ctx.device, spec, aerial);
-            }
-
-            // Phase DOOM-C/E: the same spec, narrowed per bin.
-            //
-            // This is the whole point of the phase. `spec` above is the union
-            // of everything any pixel on screen might need, which is what the
-            // one fullscreen draw has to be compiled for. A tile that contains
-            // only sky needs almost none of it, and a tile of terrain 400 m away
-            // needs less than one at the player's feet.
-            if self.classify_pass.enabled {
-                use crate::pass::classify as bins;
-                for bin in 0..bins::BIN_COUNT {
-                    let mut s = spec;
-                    match bin {
-                        // Sky, mesh and foliage never reach the terrain
-                        // material, so the 32-wide splat scan, hex tiling, POM
-                        // and the clipmap sampler all leave the module. Sky
-                        // additionally never samples a shadow map.
-                        bins::BIN_SKY => {
-                            s.live_terrain = false;
-                            s.clipmap = false;
-                            s.hex = false;
-                            s.pom = false;
-                            s.pcss = false;
-                            s.contact = false;
-                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-                        }
-                        bins::BIN_MESH | bins::BIN_FOLIAGE => {
-                            s.live_terrain = false;
-                            s.clipmap = false;
-                            s.hex = false;
-                            s.pom = false;
-                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-                        }
-                        // DOOM-E. Terrain past the aerial split drops the two
-                        // things that only resolve close up: hex tiling, which
-                        // exists to break tiling repetition the eye can only
-                        // see near the camera, and the parallax march, which
-                        // `gpu_material_for_camera` already fades out with
-                        // distance. Both are *deleted* from this pipeline
-                        // rather than skipped at runtime — a per-pixel
-                        // sample-count branch is what XV-Zeta §11.1 forbids,
-                        // and a separate pipeline is precisely the way to get
-                        // the same effect without one.
-                        bins::BIN_TERRAIN_AERIAL => {
-                            s.hex = false;
-                            s.pom = false;
-                        }
-                        // Near terrain and mixed tiles keep the full spec.
-                        _ => {}
-                    }
-                    self.shading_pass.ensure_bin_pipeline(&ctx.device, bin, s);
+            if let Some(bins) = plan.bins {
+                for (bin, spec) in bins.into_iter().enumerate() {
+                    self.shading_pass.ensure_bin_pipeline(&ctx.device, bin, spec);
                 }
             }
         }
@@ -6221,7 +6371,7 @@ impl SomniumRenderer {
                             rpass.draw(0..3, 0..1);
                         }
                         _ => {
-                            rpass.set_pipeline(&self.shading_pass.pipeline);
+                            rpass.set_pipeline(self.shading_pass.pipeline.as_ref().expect("ensure_pipeline ran this frame"));
                             rpass.draw(0..3, 0..1);
                         }
                     }
