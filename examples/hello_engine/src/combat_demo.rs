@@ -50,7 +50,7 @@ use somnium_combat::{
 };
 use somnium_core::ai::NavigationLink;
 use somnium_core::{
-    CameraSettingsComponent, EngineContext, EngineEvent, GameUiFrame, InputState,
+    CameraSettingsComponent, EngineContext, EngineEvent, GameUiFrame, ImportedMesh, InputState,
     MaterialComponent, MeshKind, Name, Parent, ParticleEmitter, Transform, UiCanvas,
     WorldTransform,
 };
@@ -342,6 +342,12 @@ fn spawn_wilds(world: &mut World, args: &Value) -> Result<Vec<Entity>, String> {
     if only == Some("harrowcat") {
         spawn_harrowcat(world, root, Vec3::ZERO, content, &mut out);
     }
+    if let Some(beast) = only.and_then(beast_of) {
+        spawn_beasts(world, root, Vec3::ZERO, content, &beast, &mut out);
+    }
+    if only == Some("ledger_engine") {
+        spawn_engine(world, root, Vec3::ZERO, content, &mut out);
+    }
     Ok(out)
 }
 
@@ -486,6 +492,496 @@ fn spawn_harrowcat(
     wear(world, out[n], content, "creatures/harrowcat/harrowcat");
 }
 
+/// A creature of ECOLOGY_AND_BESTIARY that hunts as the wolves do (a wolf's
+/// brain and jaws), with the beasts: what one is called, how many hunt
+/// together (the first leads), its size (width, height, length), shape
+/// material, health, poise, armour and speed, WS3's body if there is one,
+/// and whether it is blind (it hunts by ear).
+struct Beast {
+    name: &'static str,
+    count: usize,
+    size: Vec3,
+    mat: &'static str,
+    health: f32,
+    poise: f32,
+    armor: f32,
+    speed: f32,
+    body: Option<&'static str>,
+    blind: bool,
+}
+
+/// The bestiary's kinds beyond wolves and the harrowcat:
+/// - `harrowdogs`: feral dogs gone strange near Spire leaks, packs on the
+///   edge of the Stilled March (5.9), five, in WS3's sheepdog;
+/// - `crocodile`: a Delta crocodile (5.7), one, long and heavily armoured, in
+///   WS3's delta_crocodile;
+/// - `icecrawlers`: many-legged, blind and pale, from the glacier crevasses,
+///   the Rimewall's commonest enemy (5.3), three, in WS3's ice_crawler.
+fn beast_of(kind: &str) -> Option<Beast> {
+    Some(match kind.trim().to_ascii_lowercase().as_str() {
+        "harrowdogs" => Beast {
+            name: "Harrow-dog",
+            count: 5,
+            size: Vec3::new(0.45, 0.7, 1.15),
+            mat: "ash",
+            health: 60.0,
+            poise: 20.0,
+            armor: 0.0,
+            speed: 5.5,
+            body: Some("creatures/sheepdog/sheepdog"),
+            blind: false,
+        },
+        "crocodile" => Beast {
+            name: "Delta crocodile",
+            count: 1,
+            size: Vec3::new(1.3, 0.9, 6.0),
+            mat: "stone",
+            health: 420.0,
+            poise: 140.0,
+            armor: 6.0,
+            speed: 3.6,
+            body: Some("creatures/delta_crocodile/delta_crocodile"),
+            blind: false,
+        },
+        "icecrawlers" => Beast {
+            name: "Ice-crawler",
+            count: 3,
+            size: Vec3::new(1.1, 0.6, 1.8),
+            mat: "ice",
+            health: 90.0,
+            poise: 35.0,
+            armor: 3.0,
+            speed: 4.6,
+            body: Some("creatures/ice_crawler/ice_crawler"),
+            blind: true,
+        },
+        _ => return None,
+    })
+}
+
+/// A group of `beast` round its leader, facing away (as a pack is).
+fn spawn_beasts(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    beast: &Beast,
+    out: &mut Vec<Entity>,
+) {
+    for i in 0..beast.count {
+        let leader = i == 0;
+        let a = i as f32 / (beast.count - 1).max(1) as f32 * std::f32::consts::TAU;
+        let (spot, facing) = if leader {
+            (at, Vec3::Z)
+        } else {
+            (at + Vec3::new(a.cos(), 0.0, a.sin()) * 2.5, Vec3::new(a.sin(), 0.0, a.cos()))
+        };
+        let name = match (beast.count, leader) {
+            (1, _) => beast.name.to_string(),
+            (_, true) => format!("{} (leader)", beast.name),
+            _ => format!("{} {i}", beast.name),
+        };
+        let size = if leader { beast.size * 1.1 } else { beast.size };
+        let n = out.len();
+        out.extend(beast_body(world, root, &name, spot, facing, size, beast, leader));
+        if let Some(body) = beast.body {
+            wear(world, out[n], content, body);
+        }
+    }
+}
+
+/// One of `beast`'s body (a long box and a head, as `beast` builds).
+#[allow(clippy::too_many_arguments)]
+fn beast_body(
+    world: &mut World,
+    root: Entity,
+    name: &str,
+    feet: Vec3,
+    facing: Vec3,
+    size: Vec3,
+    kind: &Beast,
+    leader: bool,
+) -> Vec<Entity> {
+    let scale = if leader { 1.2 } else { 1.0 };
+    beast(
+        world,
+        root,
+        name,
+        feet,
+        facing,
+        size,
+        kind.mat,
+        CombatantComponent {
+            team: u32::from(BEAST_TEAM),
+            archetype: Archetype::Wolf as u32,
+            weapon: WeaponKind::Fangs as u32,
+            max_health: kind.health * scale,
+            max_stamina: 160.0,
+            poise: kind.poise * scale,
+            armor: kind.armor,
+            speed: kind.speed,
+            leader,
+            ..CombatantComponent::default()
+        },
+    )
+}
+
+/// What a kind's brains are beyond their archetype: a blind creature (the
+/// ice-crawlers) sees only what touches it and hears far; the Engine's
+/// glyph-boards have no brain at all (they stand and are broken).
+fn tune(world: &mut CombatWorld, kind: &str, members: &[CombatantId]) {
+    if kind.trim().eq_ignore_ascii_case("ledger_engine") {
+        for m in members {
+            if let Some(c) = world.combatant_mut(*m)
+                && c.name.starts_with("Glyph-board")
+            {
+                c.brain = None;
+                c.body.speed = 0.0;
+            }
+        }
+        return;
+    }
+    if !beast_of(kind).is_some_and(|b| b.blind) {
+        return;
+    }
+    for m in members {
+        if let Some(brain) = world.combatant_mut(*m).and_then(|c| c.brain.as_mut()) {
+            brain.mind.profile.sight = 3.0;
+            brain.mind.profile.hearing *= 1.6;
+        }
+    }
+}
+
+/// The Ledger Engine's keeper (Act VI's climax: ACT6_MAIN_QUEST V6, "burn it
+/// down") and its three glyph-boards, Caelan's own designs turned on him.
+pub const ENGINE_KEEPER: &str = "Castellane vault-keeper";
+pub const ENGINE_BOARDS: [&str; 3] = ["Glyph-board (Count)", "Glyph-board (Hold)", "Glyph-board (Sense)"];
+/// How the Engine fights ([`engine_tick`]):
+/// - **Count** (while its board stands): the keeper's wounds are counted
+///   back, 1.5% of his health a second once he is 4 s unhurt;
+/// - **Hold**: every 9 s (7 at two thirds, 5 at one third) a ring of rime
+///   opens under Caelan, the tell, for 1.6 s; whoever is still in it then is
+///   held (frozen 2.5 s). Below a third it opens where he is going;
+/// - **Sense-a-named-person**: at two thirds and at one third of the keeper's
+///   health the Engine calls two Castellane guards in by the door;
+/// - the keeper quickens by phase (x1.15, x1.3). Every board broken stops the
+///   Engine: the keeper reels. Cleared when the keeper and every board fall.
+const HOLD_FIRST: f32 = 4.0;
+const HOLD_EVERY: [f32; 3] = [9.0, 7.0, 5.0];
+const HOLD_TELL: f32 = 1.6;
+const HOLD_RADIUS: f32 = 2.5;
+const HOLD_FREEZE: f32 = 2.5;
+const HOLD_LEAD: f32 = 1.0;
+const COUNT_QUIET: f32 = 4.0;
+const COUNT_RATE: f32 = 0.015;
+const PHASE_PACE: [f32; 3] = [1.0, 1.15, 1.3];
+/// Where the Engine's called guards come in: ahead of the keeper (+Z), by the door.
+const SENSE_FROM: f32 = 8.0;
+
+/// The keeper before the Engine's boards, which stand in a row behind him
+/// (-Z), 3 m apart. With a `content` root he wears WS3's Castellane boss.
+fn spawn_engine(
+    world: &mut World,
+    root: Entity,
+    at: Vec3,
+    content: Option<&std::path::Path>,
+    out: &mut Vec<Entity>,
+) {
+    let n = out.len();
+    out.extend(fighter(
+        world,
+        root,
+        ENGINE_KEEPER,
+        at,
+        Vec3::Z,
+        CombatantComponent {
+            team: 1,
+            archetype: Archetype::Duelist as u32,
+            weapon: WeaponKind::Sword as u32,
+            max_health: 650.0,
+            max_stamina: 220.0,
+            poise: 140.0,
+            armor: 4.0,
+            speed: 4.2,
+            leader: true,
+            ..CombatantComponent::default()
+        },
+    ));
+    wear(world, out[n], content, "characters/lampman_10/lampman_10");
+    for (i, name) in ENGINE_BOARDS.iter().enumerate() {
+        let size = Vec3::new(1.6, 2.4, 0.3);
+        let feet = at + Vec3::new((i as f32 - 1.0) * 3.0, 0.0, -4.0);
+        let n = out.len();
+        out.push(world.spawn((
+            Name::new(name),
+            Transform {
+                translation: feet + Vec3::Y * size.y * 0.5,
+                rotation: Quat::IDENTITY,
+                scale: size,
+            },
+            WorldTransform::identity(),
+            Parent { entity: root },
+            MeshKind::Cube,
+            material("force"),
+            CombatantComponent {
+                team: 1,
+                archetype: Archetype::Brute as u32,
+                weapon: WeaponKind::Unarmed as u32,
+                max_health: 160.0,
+                poise: 9999.0,
+                speed: 0.0,
+                ..CombatantComponent::default()
+            },
+        )));
+        // WS3's board where the project has it: its mesh on the ground under
+        // the box (whose scale it undoes), the box no longer drawn.
+        let file = board_file(i, false);
+        if content.is_some_and(|c| c.join(&file).exists()) {
+            let board = out[n];
+            let _ = world.remove_component::<MeshKind>(board);
+            out.push(world.spawn((
+                Name::new(&format!("{name} mesh")),
+                Transform {
+                    translation: Vec3::new(0.0, -0.5, 0.0),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ONE / size,
+                },
+                WorldTransform::identity(),
+                Parent { entity: board },
+                ImportedMesh {
+                    source: format!("assets/{file}"),
+                    node: 0,
+                },
+                MaterialComponent {
+                    asset: AssetId::NONE,
+                    runtime_id: 0,
+                },
+            )));
+        }
+    }
+}
+
+/// WS3's glyph-board for [`ENGINE_BOARDS`]`[i]`, whole or broken
+/// (`creatures/ledger_board_<count|hold|sense>[_broken].glb`, one mesh node).
+fn board_file(i: usize, broken: bool) -> String {
+    let board = ["count", "hold", "sense"][i.min(2)];
+    let tail = if broken { "_broken" } else { "" };
+    format!("creatures/ledger_board_{board}/ledger_board_{board}{tail}.glb")
+}
+
+/// The Engine's fight, once its keeper has woken ([`ENGINE_KEEPER`]).
+#[derive(Clone, Debug, Default)]
+struct EngineState {
+    /// Seconds to the next Hold.
+    hold_in: f32,
+    /// The Hold showing: where, how long it has left, its ring.
+    tell: Option<(Vec3, f32, Entity)>,
+    /// Calls made (at two thirds and at one third).
+    sensed: u8,
+    /// Seconds since the keeper was last hurt, and his health then.
+    quiet: f32,
+    last: f32,
+    /// His pace before the phases.
+    pace: f32,
+    /// Every board broken: the Engine has stopped.
+    stopped: bool,
+    /// Boards shown broken (WS3's broken mesh swapped in).
+    broken: [bool; 3],
+}
+
+/// The Engine's turn each fixed step: Count, Hold and Sense (see
+/// [`HOLD_EVERY`]) for every woken `ledger_engine`, and its tell's ring.
+fn engine_tick(world: &mut World, run: &mut Run, dt: f32) {
+    let Some(set) = run.encounters.as_mut() else {
+        return;
+    };
+    let hero = run
+        .player
+        .and_then(|p| run.world.combatant(p))
+        .map(|c| (c.id, c.position, c.velocity));
+    let mut calls = Vec::new();
+    let awake: Vec<GroupId> = set.awake().collect();
+    for id in awake {
+        let at = set.position(id);
+        let Some(record) = set.data_mut(id) else {
+            continue;
+        };
+        if !record.kind.trim().eq_ignore_ascii_case("ledger_engine") {
+            continue;
+        }
+        let named = |name: &str| {
+            record
+                .members
+                .iter()
+                .copied()
+                .find(|m| run.world.combatant(*m).is_some_and(|c| c.name == name && c.alive()))
+        };
+        let keeper = named(ENGINE_KEEPER);
+        let boards = ENGINE_BOARDS.map(|b| named(b).is_some());
+        let state = record.engine.get_or_insert_with(EngineState::default);
+        // A board just broken shows WS3's broken board.
+        for (i, name) in ENGINE_BOARDS.iter().enumerate() {
+            if boards[i] || state.broken[i] {
+                continue;
+            }
+            state.broken[i] = true;
+            let file = board_file(i, true);
+            if !run.content.as_ref().is_some_and(|c| c.join(&file).exists()) {
+                continue;
+            }
+            let Some(board) = record
+                .members
+                .iter()
+                .find(|m| run.world.combatant(**m).is_some_and(|c| c.name == *name))
+                .and_then(|m| run.bodies.get(m).copied())
+            else {
+                continue;
+            };
+            let meshes: Vec<Entity> = world
+                .iter_with::<ImportedMesh>()
+                .filter(|(e, _)| world.get::<Parent>(*e).is_some_and(|p| p.entity == board))
+                .map(|(e, _)| e)
+                .collect();
+            for e in meshes {
+                if let Some(mesh) = world.get_mut::<ImportedMesh>(e) {
+                    mesh.source = format!("assets/{file}");
+                }
+            }
+        }
+        let Some(keeper) = keeper else {
+            if let Some((_, _, ring)) = state.tell.take() {
+                world.despawn(ring);
+                record.entities.retain(|e| *e != ring);
+            }
+            continue;
+        };
+        let Some(c) = run.world.combatant(keeper) else {
+            continue;
+        };
+        let (health, max) = (c.vitals.health.current, c.vitals.health.max.max(1.0));
+        if state.pace == 0.0 {
+            state.pace = c.body.speed;
+            state.last = health;
+            state.hold_in = HOLD_FIRST;
+        }
+        let fraction = health / max;
+        let phase = if fraction > 2.0 / 3.0 {
+            0
+        } else if fraction > 1.0 / 3.0 {
+            1
+        } else {
+            2
+        };
+        state.quiet = if health < state.last - 1e-3 { 0.0 } else { state.quiet + dt };
+        state.last = health;
+        let (stopped, pace) = (boards.iter().all(|b| !b), state.pace);
+        if let Some(c) = run.world.combatant_mut(keeper) {
+            c.body.speed = pace * if stopped { 1.0 } else { PHASE_PACE[phase] };
+            // Count: his wounds counted back while he is let be.
+            if boards[0] && state.quiet >= COUNT_QUIET && fraction < 1.0 {
+                c.vitals.heal(max * COUNT_RATE * dt);
+                state.last = c.vitals.health.current;
+            }
+        }
+        if stopped && !state.stopped {
+            state.stopped = true;
+            run.world.apply_status(keeper, StatusKind::Stagger, 1.5);
+        }
+        // Hold: the tell, then the hold on whoever stays in it.
+        match state.tell.take() {
+            Some((centre, left, ring)) if boards[1] => {
+                let left = left - dt;
+                if left > 0.0 {
+                    if let Some(t) = world.get_mut::<Transform>(ring) {
+                        let grow = 0.6 + 0.4 * (1.0 - left / HOLD_TELL);
+                        t.scale = Vec3::new(2.0 * HOLD_RADIUS * grow, 0.04, 2.0 * HOLD_RADIUS * grow);
+                    }
+                    state.tell = Some((centre, left, ring));
+                } else {
+                    world.despawn(ring);
+                    record.entities.retain(|e| *e != ring);
+                    if let Some((who, p, _)) = hero {
+                        let off = Vec3::new(p.x - centre.x, 0.0, p.z - centre.z);
+                        if off.length() <= HOLD_RADIUS {
+                            run.world.apply_status(who, StatusKind::Freeze, HOLD_FREEZE);
+                        }
+                    }
+                    state.hold_in = HOLD_EVERY[phase];
+                }
+            }
+            Some((_, _, ring)) => {
+                // Its board broken under it: the Hold is gone.
+                world.despawn(ring);
+                record.entities.retain(|e| *e != ring);
+            }
+            None if boards[1] => {
+                state.hold_in -= dt;
+                if state.hold_in <= 0.0
+                    && let Some((_, p, v)) = hero
+                {
+                    let lead = if phase == 2 { Vec3::new(v.x, 0.0, v.z) * HOLD_LEAD } else { Vec3::ZERO };
+                    let centre = p + lead;
+                    let ring = world.spawn((
+                        Name::new("Hold (the Ledger Engine)"),
+                        Transform {
+                            translation: centre + Vec3::Y * 0.03,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::new(1.2 * HOLD_RADIUS, 0.04, 1.2 * HOLD_RADIUS),
+                        },
+                        WorldTransform::identity(),
+                        MeshKind::Cylinder,
+                        material("frostmark"),
+                    ));
+                    record.entities.push(ring);
+                    state.tell = Some((centre, HOLD_TELL, ring));
+                }
+            }
+            None => {}
+        }
+        // Sense: the Engine calls its guards at two thirds and one third.
+        let due = match state.sensed {
+            0 => fraction <= 2.0 / 3.0,
+            1 => fraction <= 1.0 / 3.0,
+            _ => false,
+        };
+        if boards[2]
+            && due
+            && let Some(at) = at
+        {
+            state.sensed += 1;
+            calls.push((at + record.facing.normalize_or(Vec3::Z) * SENSE_FROM, -record.facing, state.sensed));
+        }
+    }
+    for (at, facing, n) in calls {
+        set.add(
+            at,
+            encounter_extent("vault_guards"),
+            Encounter {
+                kind: "vault_guards".into(),
+                facing,
+                home: ("engine call".into(), [i64::from(n), 0, 0]),
+                ..Encounter::default()
+            },
+        );
+    }
+}
+
+/// A boss fight as a game's HUD shows it ([`CombatDemo::boss_view`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BossView {
+    /// The boss's name.
+    pub name: String,
+    /// Its health, 0 to 1.
+    pub health: f32,
+    /// 1 to 3, by its health (two thirds, one third).
+    pub phase: u8,
+    /// Its parts the player breaks, each with whether it still stands.
+    pub parts: Vec<(String, bool)>,
+    /// The Hold coming: where (its centre on the ground), its radius, and the
+    /// seconds before it closes.
+    pub hold: Option<(Vec3, f32, f32)>,
+}
+
 /// WS3's bandits (`characters/bandit_00` to `bandit_09`).
 const BANDITS: usize = 10;
 
@@ -519,6 +1015,8 @@ pub const FACTIONS: [&str; 8] = [
 ];
 /// The first faction's team; the others follow in [`FACTIONS`]' order.
 const FACTION_TEAM: u16 = 16;
+/// The beasts' team: rime wolves, harrowcats and the rest of the bestiary.
+pub const BEAST_TEAM: u16 = 2;
 
 /// A faction's team, by its name in [`FACTIONS`].
 fn faction_team(name: &str) -> Option<TeamId> {
@@ -604,6 +1102,10 @@ fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
         ("Lance rider (glaive)", Spearman, LanceGlaive, 140.0, 3.0),
         ("Lance rider (spear)", Spearman, Spear, 140.0, 3.0),
     ];
+    const VAULT: &[Member] = &[
+        ("Castellane guard (cane)", Duelist, Sword, 100.0, 1.0),
+        ("Castellane guard (pistol)", Rifleman, LatticeRifle, 90.0, 1.0),
+    ];
     const KNIGHTS: &[Member] = &[
         ("Knight-captain", Duelist, Sword, 200.0, 6.0),
         ("Knight (sword)", Duelist, Sword, 170.0, 6.0),
@@ -649,6 +1151,8 @@ fn band_of(kind: &str) -> Option<(u32, Faces, &'static [Member])> {
     let kind = kind.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     let (faction, faces, members) = match kind.as_str() {
         "lampmen" => return Some((1, VARGA, RED)),
+        // The Engine's call (always hostile: they come for him).
+        "vault_guards" => return Some((1, CASTELLANE, VAULT)),
         "lampmen red" => ("lamp_red", VARGA, RED),
         "lampmen white" => ("lamp_white", CASTELLANE, WHITE),
         "lampmen amber" => ("lamp_amber", AMBER_MEN, AMBER),
@@ -1439,7 +1943,7 @@ fn register_encounter(registry: &mut somnium_ecs::reflect::TypeRegistry) {
         CombatEncounterComponent as "somnium.CombatEncounter", display "Combat Encounter", version 1,
         fields {
             enabled { doc: "Built on Play at this entity's position, taken away on Stop." },
-            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's." },
+            kind { doc: "wilds: a horse, a rime wolf pack and a bandit camp, none of them aware yet; wolves: the pack alone; bandits: the camp alone; harrowcat: one, hunting alone; harrowdogs, crocodile, icecrawlers: the bestiary's; lampmen [red, white, amber, green, blue]: a Lamp crew on a street; watch, lance, knights: the law's; ledger_engine: Act VI's climax, the vault-keeper and the Engine's three glyph-boards." },
             floor { doc: "Bring its own flat ground; off stands everyone on the ground here." },
         }
     });
@@ -1505,10 +2009,12 @@ fn build_encounter(
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => {}
         part @ ("wolves" | "bandits" | "harrowcat") => args["only"] = json!(part),
+        beast if beast_of(beast).is_some() => args["only"] = json!(beast),
+        "ledger_engine" => args["only"] = json!("ledger_engine"),
         band if band_of(band).is_some() => args["only"] = json!(band),
         other => {
             return Err(format!(
-                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, lampmen [red|white|amber|green|blue], watch, lance or knights)"
+                "no kind {other:?} (try wilds, wolves, bandits, harrowcat, harrowdogs, crocodile, icecrawlers, lampmen [red|white|amber|green|blue], watch, lance, knights or ledger_engine)"
             ));
         }
     }
@@ -1519,6 +2025,7 @@ fn build_encounter(
 fn encounter_extent(kind: &str) -> f32 {
     match kind.trim().to_ascii_lowercase().as_str() {
         "wilds" => 25.0,
+        "ledger_engine" => 8.0,
         band if band_of(band).is_some() => 8.0,
         _ => 6.0,
     }
@@ -1625,6 +2132,8 @@ struct Encounter {
     /// A band its faction sent to hunt the protagonist ([`hunt`]): it walks to
     /// him asleep and makes for him awake.
     hunter: Option<String>,
+    /// The Ledger Engine's fight, once woken ([`engine_tick`]).
+    engine: Option<EngineState>,
     /// Awake: its entities, fighters (and where each stood when it woke)
     /// and colliders.
     entities: Vec<Entity>,
@@ -1970,6 +2479,10 @@ fn tend_encounters(
         }
     }
     lead(world, run);
+    if run.beasts_calm {
+        // Those just woken were made hostile as every band is.
+        run.world.relations.set(TeamId(0), TeamId(BEAST_TEAM), Attitude::Neutral);
+    }
     if run.patched
         && let Some(physics) = physics
     {
@@ -2163,6 +2676,7 @@ fn wake(
         world.despawn(e);
     }
     organise(&mut run.world, &members, &leaders);
+    tune(&mut run.world, &record.kind, &members);
     let mut solids = Vec::new();
     let mut patched = None;
     if let Some(physics) = physics {
@@ -2497,6 +3011,8 @@ struct Run {
     hunting: BTreeSet<String>,
     hunts: u32,
     hunt_due: BTreeMap<String, f64>,
+    /// The beasts are calm (the game's say): woken ones are made neutral too.
+    beasts_calm: bool,
 }
 
 struct Hud {
@@ -2683,11 +3199,17 @@ pub struct CombatDemo {
     hunting_factions: BTreeSet<String>,
     /// The left button's click-move and attack-move (Diablo IV's mouse).
     click: crate::click_move::ClickMove,
+    /// Whether the beasts (wolves, harrowcats, all of team [`BEAST_TEAM`])
+    /// fight the protagonist ([`CombatDemo::set_beasts_hostile`]).
+    beasts_hostile: bool,
 }
 
 /// The game's law on the fight: each faction hostile to the party when it is
 /// turned or hunting, neutral otherwise; the hunters to send.
-fn apply_law(run: &mut Run, hostile: &BTreeSet<String>, hunting: &BTreeSet<String>) {
+fn apply_law(run: &mut Run, hostile: &BTreeSet<String>, hunting: &BTreeSet<String>, beasts: bool) {
+    run.beasts_calm = !beasts;
+    let attitude = if beasts { Attitude::Hostile } else { Attitude::Neutral };
+    run.world.relations.set(TeamId(0), TeamId(BEAST_TEAM), attitude);
     for faction in FACTIONS {
         let Some(team) = faction_team(faction) else {
             continue;
@@ -2758,6 +3280,7 @@ impl Default for CombatDemo {
             hostile_factions: BTreeSet::new(),
             hunting_factions: BTreeSet::new(),
             click: Default::default(),
+            beasts_hostile: true,
         }
     }
 }
@@ -2902,18 +3425,65 @@ impl CombatDemo {
     pub fn set_hostile_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
         self.hostile_factions = factions_of(factions);
         if let Some(run) = &mut self.run {
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
         }
     }
 
     /// The factions hunting the protagonist (hostile as well): each sends a
     /// band from out of sight that walks to him and fights (the knights or
     /// the Lance at Hue 4 and 5), another a while after one is cleared.
+    /// Whether the beasts (wolves, harrowcats, every creature of team
+    /// [`BEAST_TEAM`]) fight the protagonist: on by default; off, they let
+    /// him be unless he strikes one (STORY_GATES: in Act I animals never
+    /// fight him). Kept across Plays.
+    pub fn set_beasts_hostile(&mut self, hostile: bool) {
+        self.beasts_hostile = hostile;
+        if let Some(run) = &mut self.run {
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
+        }
+    }
+
     pub fn set_hunting_factions<S: AsRef<str>>(&mut self, factions: &[S]) {
         self.hunting_factions = factions_of(factions);
         if let Some(run) = &mut self.run {
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
         }
+    }
+
+    /// The boss fight under way (Act VI's Ledger Engine), for a game's HUD:
+    /// its name, health and phase, the parts the player breaks, and the Hold
+    /// coming (its ring, the readable tell). `None` with no boss awake.
+    #[must_use]
+    pub fn boss_view(&self) -> Option<BossView> {
+        let run = self.run.as_ref()?;
+        let set = run.encounters.as_ref()?;
+        set.awake().find_map(|id| {
+            let record = set.data(id)?;
+            let state = record.engine.as_ref()?;
+            let alive = |name: &str| {
+                record
+                    .members
+                    .iter()
+                    .filter_map(|m| run.world.combatant(*m))
+                    .find(|c| c.name == name)
+                    .filter(|c| c.alive())
+            };
+            let keeper = alive(ENGINE_KEEPER)?;
+            let health = keeper.vitals.health.current / keeper.vitals.health.max.max(1.0);
+            Some(BossView {
+                name: ENGINE_KEEPER.into(),
+                health,
+                phase: if health > 2.0 / 3.0 {
+                    1
+                } else if health > 1.0 / 3.0 {
+                    2
+                } else {
+                    3
+                },
+                parts: ENGINE_BOARDS.iter().map(|b| ((*b).to_string(), alive(b).is_some())).collect(),
+                hold: state.tell.map(|(centre, left, _)| (centre, HOLD_RADIUS, left)),
+            })
+        })
     }
 
     pub fn take_cleared(&mut self) -> Vec<(Entity, String)> {
@@ -2959,7 +3529,7 @@ impl CombatDemo {
             run.skins = crate::combat_bodies::Skins::new(Some(&ctx.config.content_root));
             run.content = Some(ctx.config.content_root.clone());
             run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
-            apply_law(run, &self.hostile_factions, &self.hunting_factions);
+            apply_law(run, &self.hostile_factions, &self.hunting_factions, self.beasts_hostile);
             // Those already near wake now, the rest as the protagonist comes.
             tend_encounters(ctx.world, Some(&mut *ctx.physics), run, f32::INFINITY);
             run.log.push_back(
@@ -3282,6 +3852,7 @@ impl CombatDemo {
             *left > 0.0
         });
         tend_encounters(ctx.world, Some(&mut *ctx.physics), run, dt);
+        engine_tick(ctx.world, run, dt);
         write_scene(ctx, run);
         // Bodies for fighters that woke this frame, and every body's pose.
         run.skins.dress(ctx.world, &run.bodies, &run.world, &mut run.spawned);
@@ -3531,6 +4102,7 @@ fn build(world: &World) -> Option<Run> {
         hunting: BTreeSet::new(),
         hunts: 0,
         hunt_due: BTreeMap::new(),
+        beasts_calm: false,
     })
 }
 
@@ -4484,6 +5056,10 @@ fn ragdoll(ctx: &mut EngineContext, run: &mut Run, id: CombatantId, impulse: Vec
     };
     if c.mount_def.is_some() {
         // A fallen mount lies where it fell; its rider was thrown.
+        return;
+    }
+    if c.name.starts_with("Glyph-board") {
+        // A broken board stands where it broke.
         return;
     }
     let feet = c.position;
@@ -5899,6 +6475,190 @@ mod tests {
         assert_eq!(taken, [true, true, false, false, false, false]);
         assert_eq!(demo.skipped, 4);
         assert!(demo.take_step(8) && demo.take_step(8) && !demo.take_step(8));
+    }
+
+    /// Calm beasts (Act I) let him be, those that wake later too; turned
+    /// back, they hunt him again.
+    #[test]
+    fn calm_beasts_let_him_be() {
+        let (mut world, mut demo) = host_with(&[("wolves", Vec3::new(30.0, 0.0, 0.0))]);
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        let wolf = |demo: &CombatDemo| {
+            let run = demo.run.as_ref().unwrap();
+            run.world.combatants().filter(|c| c.name.starts_with("Rime wolf")).map(|c| c.id).collect::<Vec<_>>()
+        };
+        let hostile = |demo: &CombatDemo, id| demo.run.as_ref().unwrap().world.hostile(hero, id);
+        let first = wolf(&demo)[0];
+        assert!(hostile(&demo, first), "wolves hunt by default");
+        demo.set_beasts_hostile(false);
+        assert!(!hostile(&demo, first));
+        // A cat woken after: calm as well.
+        world.spawn((
+            Name::new("Cat"),
+            Transform::from_translation(Vec3::new(-30.0, 0.0, 0.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "harrowcat".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), f32::INFINITY);
+        let cat = demo.run.as_ref().unwrap().world.combatants().find(|c| c.name == "Harrowcat").map(|c| c.id).unwrap();
+        assert!(!hostile(&demo, cat) && !hostile(&demo, first));
+        demo.set_beasts_hostile(true);
+        assert!(hostile(&demo, cat) && hostile(&demo, first));
+    }
+
+    /// The bestiary's new kinds wake as the beasts: harrow-dogs a pack of five
+    /// in WS3's sheepdog, a crocodile alone, ice-crawlers three and blind.
+    #[test]
+    fn the_bestiary_hunts_with_the_beasts() {
+        use crate::skinned_crowd::SkinnedBody;
+        let content = std::env::temp_dir().join("somnium_combat_bestiary");
+        for stem in ["sheepdog/sheepdog", "delta_crocodile/delta_crocodile", "ice_crawler/ice_crawler"] {
+            let file = content.join(format!("creatures/{stem}.glb"));
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"").unwrap();
+        }
+        let mut world = World::new();
+        let dogs = build_encounter(&mut world, "harrowdogs", Vec3::ZERO, Vec3::X, false, Some(&content)).expect("dogs");
+        let bodies = dogs.iter().filter(|e| world.get::<CombatantComponent>(**e).is_some()).count();
+        let worn = dogs.iter().filter(|e| world.get::<SkinnedBody>(**e).is_some()).count();
+        assert_eq!((bodies, worn), (5, 5));
+        for (kind, stem, count) in [("crocodile", "delta_crocodile", 1), ("icecrawlers", "ice_crawler", 3)] {
+            let made = build_encounter(&mut world, kind, Vec3::ZERO, Vec3::X, false, Some(&content)).expect(kind);
+            let sources: Vec<AssetId> = made.iter().filter_map(|e| world.get::<SkinnedBody>(*e)).map(|b| b.source).collect();
+            let want = AssetId::from_relative_path(format!("creatures/{stem}/{stem}.glb"));
+            assert_eq!(sources, vec![want; count], "{kind}");
+        }
+        let (_world, demo) = host_with(&[
+            ("crocodile", Vec3::new(30.0, 0.0, 0.0)),
+            ("icecrawlers", Vec3::new(-30.0, 0.0, 0.0)),
+        ]);
+        let run = demo.run.as_ref().unwrap();
+        let hero = run.player.unwrap();
+        let croc: Vec<_> = run.world.combatants().filter(|c| c.name == "Delta crocodile").collect();
+        let crawlers: Vec<_> = run.world.combatants().filter(|c| c.name.starts_with("Ice-crawler")).collect();
+        assert_eq!((croc.len(), crawlers.len()), (1, 3));
+        assert!(run.world.hostile(hero, croc[0].id) && crawlers.iter().all(|c| run.world.hostile(hero, c.id)));
+        assert!(crawlers.iter().all(|c| c.brain.as_ref().is_some_and(|b| b.mind.profile.sight <= 3.0)), "blind");
+        assert!(croc[0].brain.as_ref().is_some_and(|b| b.mind.profile.sight > 3.0));
+    }
+
+    /// The Ledger Engine: a keeper and three brainless boards; the Hold's ring
+    /// shows, then holds him if he stays and not if he steps out; Count heals
+    /// the keeper let be; Sense calls guards at two thirds; broken boards stop
+    /// each; all broken, the keeper reels; the HUD sees it all.
+    #[test]
+    fn the_ledger_engine_fights_in_phases_with_a_readable_tell() {
+        let (mut world, mut demo) = host_with(&[("ledger_engine", Vec3::new(0.0, 0.0, 12.0))]);
+        let dt = 1.0 / 60.0;
+        let id = |demo: &CombatDemo, name: &str| {
+            demo.run.as_ref().unwrap().world.combatants().find(|c| c.name == name).map(|c| c.id).expect(name)
+        };
+        let keeper = id(&demo, ENGINE_KEEPER);
+        let boards = ENGINE_BOARDS.map(|b| id(&demo, b));
+        let hero = demo.run.as_ref().unwrap().player.unwrap();
+        {
+            let run = demo.run.as_ref().unwrap();
+            assert!(boards.iter().all(|b| run.world.combatant(*b).unwrap().brain.is_none()), "boards think not");
+            assert!(run.world.hostile(hero, keeper));
+        }
+        // The first Hold: its ring shows for the tell, then holds him where he stands.
+        let tick = |world: &mut World, demo: &mut CombatDemo, seconds: f32| {
+            for _ in 0..(seconds / dt).round() as usize {
+                engine_tick(world, demo.run.as_mut().unwrap(), dt);
+            }
+        };
+        tick(&mut world, &mut demo, HOLD_FIRST + 0.05);
+        let view = demo.boss_view().expect("a boss");
+        assert_eq!((view.phase, view.parts.len()), (1, 3));
+        let (centre, radius, left) = view.hold.expect("the tell");
+        assert!(centre.distance(Vec3::ZERO) < 0.1 && radius == HOLD_RADIUS && left > 1.0);
+        assert!(world.iter_with::<Name>().any(|(_, n)| n.as_str() == "Hold (the Ledger Engine)"), "its ring");
+        tick(&mut world, &mut demo, HOLD_TELL);
+        let frozen = |demo: &CombatDemo| {
+            demo.run.as_ref().unwrap().world.combatant(hero).unwrap().status.active(StatusKind::Freeze)
+        };
+        assert!(frozen(&demo), "held");
+        assert!(demo.boss_view().unwrap().hold.is_none());
+        // The next: he steps out of the ring in time.
+        demo.run.as_mut().unwrap().world.combatant_mut(hero).unwrap().status = Default::default();
+        tick(&mut world, &mut demo, HOLD_EVERY[0] + 0.05);
+        assert!(demo.boss_view().unwrap().hold.is_some());
+        demo.run.as_mut().unwrap().world.combatant_mut(hero).unwrap().position = Vec3::new(5.0, 0.0, 0.0);
+        tick(&mut world, &mut demo, HOLD_TELL);
+        assert!(!frozen(&demo), "stepped out");
+        // Count: the keeper's wounds counted back while he is let be.
+        let health = |demo: &CombatDemo| demo.run.as_ref().unwrap().world.combatant(keeper).unwrap().vitals.health.current;
+        demo.run.as_mut().unwrap().world.combatant_mut(keeper).unwrap().vitals.health.current = 500.0;
+        tick(&mut world, &mut demo, COUNT_QUIET + 1.0);
+        assert!(health(&demo) > 500.0, "counted back: {}", health(&demo));
+        // Sense: at two thirds the Engine calls its guards, who wake by the door.
+        demo.run.as_mut().unwrap().world.combatant_mut(keeper).unwrap().vitals.health.current = 400.0;
+        tick(&mut world, &mut demo, dt);
+        tend_encounters(&mut world, None, demo.run.as_mut().unwrap(), f32::INFINITY);
+        let guards = demo.run.as_ref().unwrap().world.combatants().filter(|c| c.name.starts_with("Castellane guard")).count();
+        assert_eq!(guards, 2);
+        assert_eq!(demo.boss_view().unwrap().phase, 2);
+        // Broken boards: no more Count, no more Hold; all broken, the keeper reels.
+        for b in boards {
+            demo.run.as_mut().unwrap().world.combatant_mut(b).unwrap().action = Action::Dead;
+        }
+        demo.run.as_mut().unwrap().world.combatant_mut(keeper).unwrap().vitals.health.current = 300.0;
+        tick(&mut world, &mut demo, HOLD_EVERY[1] + COUNT_QUIET + 1.0);
+        let view = demo.boss_view().unwrap();
+        assert!(view.hold.is_none() && view.parts.iter().all(|p| !p.1));
+        assert!((health(&demo) - 300.0).abs() < 1e-3, "nothing counts him back");
+        let run = demo.run.as_ref().unwrap();
+        assert!(run.world.combatant(keeper).unwrap().status.active(StatusKind::Stagger), "the Engine stopped");
+    }
+
+    /// The Engine's boards wear WS3's boards (their boxes not drawn); a board
+    /// broken shows WS3's broken board and stands where it broke.
+    #[test]
+    fn the_engines_boards_wear_ws3_and_break() {
+        let content = std::env::temp_dir().join("somnium_combat_boards");
+        for i in 0..3 {
+            for broken in [false, true] {
+                let file = content.join(board_file(i, broken));
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"").unwrap();
+            }
+        }
+        let mut world = World::new();
+        let root = world.spawn((Name::new("Scene"), Transform::default(), WorldTransform::identity()));
+        fighter(&mut world, root, "Protagonist", Vec3::ZERO, Vec3::X, CombatantComponent::protagonist());
+        world.spawn((
+            Name::new("Vault"),
+            Transform::from_translation(Vec3::new(0.0, 0.0, 12.0)),
+            WorldTransform::identity(),
+            CombatEncounterComponent {
+                kind: "ledger_engine".into(),
+                ..CombatEncounterComponent::default()
+            },
+        ));
+        somnium_core::propagate_transforms(&mut world);
+        let mut run = build(&world).expect("a fight");
+        run.content = Some(content.clone());
+        run.encounters = Some(encounters_asleep(&world));
+        tend_encounters(&mut world, None, &mut run, f32::INFINITY);
+        let mesh_of = |world: &World, name: &str| -> String {
+            let board = world.iter_with::<Name>().find(|(_, n)| n.as_str() == name).map(|(e, _)| e).unwrap();
+            assert!(world.get::<MeshKind>(board).is_none(), "{name}'s box not drawn");
+            world
+                .iter_with::<ImportedMesh>()
+                .find(|(e, _)| world.get::<Parent>(*e).is_some_and(|p| p.entity == board))
+                .map(|(_, m)| m.source.clone())
+                .expect("its mesh")
+        };
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[1]), format!("assets/{}", board_file(1, false)));
+        let hold = run.world.combatants().find(|c| c.name == ENGINE_BOARDS[1]).map(|c| c.id).unwrap();
+        run.world.combatant_mut(hold).unwrap().action = Action::Dead;
+        engine_tick(&mut world, &mut run, 1.0 / 60.0);
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[1]), format!("assets/{}", board_file(1, true)));
+        assert_eq!(mesh_of(&world, ENGINE_BOARDS[0]), format!("assets/{}", board_file(0, false)), "the others whole");
     }
 
     #[test]
