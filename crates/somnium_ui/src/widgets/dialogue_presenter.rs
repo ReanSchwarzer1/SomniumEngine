@@ -72,6 +72,9 @@ pub enum DialoguePresenterMessage {
     SetSettings(PresenterSettings),
     /// Dim everything under the presenter (alpha 0-255) while it is up: an editor preview, a game's cutscene.
     SetBackdrop(u8),
+    /// Whole portraits ([`PresenterLayout::whole`]): each stands on the screen's bottom edge and the box runs between
+    /// them, never over them. Off (the default): the box covers the portraits' lower part.
+    SetPortraitsWhole(bool),
     /// From the widget: what the player asked for.
     Output(PresenterOutput),
 }
@@ -93,36 +96,41 @@ pub struct PresenterLayout {
 impl PresenterLayout {
     #[must_use]
     pub fn new(bounds: Rect, choices: usize) -> Self {
+        Self::with(bounds, choices, false)
+    }
+
+    /// The layout for whole portraits: smaller, each standing on the screen's bottom edge, the box between them.
+    #[must_use]
+    pub fn whole(bounds: Rect, choices: usize) -> Self {
+        Self::with(bounds, choices, true)
+    }
+
+    fn with(bounds: Rect, choices: usize, whole: bool) -> Self {
         let unit = (bounds.h / 1080.0).max(0.25);
         let box_h = (bounds.h * 0.24).max(150.0 * unit);
-        let dialogue_box = Rect::new(
-            bounds.x + bounds.w * 0.08,
-            bounds.y + bounds.h - box_h - bounds.h * 0.04,
-            bounds.w * 0.84,
-            box_h,
-        );
+        let portrait_h = bounds.h * if whole { 0.62 } else { 0.74 };
+        let portrait_w = portrait_h * 0.62;
+        let edge = if whole { 0.02 } else { 0.05 };
+        let (left, right) = (bounds.x + bounds.w * edge, bounds.x + bounds.w * (1.0 - edge) - portrait_w);
+        let box_y = bounds.y + bounds.h - box_h - bounds.h * 0.04;
+        let dialogue_box = if whole {
+            // ponytail: on a window too narrow for both, the box keeps 40% of the width, centred, over them
+            let gutter = 16.0 * unit;
+            let w = (right - left - portrait_w - 2.0 * gutter).max(bounds.w * 0.4);
+            Rect::new(bounds.x + (bounds.w - w) * 0.5, box_y, w, box_h)
+        } else {
+            Rect::new(bounds.x + bounds.w * 0.08, box_y, bounds.w * 0.84, box_h)
+        };
         let text = Rect::new(
             dialogue_box.x + 44.0 * unit,
             dialogue_box.y + 40.0 * unit,
             dialogue_box.w - 88.0 * unit,
             dialogue_box.h - 64.0 * unit,
         );
-        let portrait_h = bounds.h * 0.74;
-        let portrait_w = portrait_h * 0.62;
-        let portrait_bottom = dialogue_box.y + dialogue_box.h * 0.35;
+        let portrait_bottom = if whole { bounds.y + bounds.h } else { dialogue_box.y + dialogue_box.h * 0.35 };
         let portraits = [
-            Rect::new(
-                bounds.x + bounds.w * 0.05,
-                portrait_bottom - portrait_h,
-                portrait_w,
-                portrait_h,
-            ),
-            Rect::new(
-                bounds.x + bounds.w * 0.95 - portrait_w,
-                portrait_bottom - portrait_h,
-                portrait_w,
-                portrait_h,
-            ),
+            Rect::new(left, portrait_bottom - portrait_h, portrait_w, portrait_h),
+            Rect::new(right, portrait_bottom - portrait_h, portrait_w, portrait_h),
         ];
         let width = (bounds.w * 0.5).min(940.0 * unit);
         let row = 56.0 * unit;
@@ -179,11 +187,13 @@ pub struct DialoguePresenter {
     clock_ms: u64,
     history_scroll: f32,
     backdrop: u8,
+    whole_portraits: bool,
 }
 
 impl DialoguePresenter {
     fn layout(&self, widget: &Widget) -> PresenterLayout {
-        PresenterLayout::new(widget.screen_bounds(), self.model.choices().len())
+        let (bounds, choices) = (widget.screen_bounds(), self.model.choices().len());
+        if self.whole_portraits { PresenterLayout::whole(bounds, choices) } else { PresenterLayout::new(bounds, choices) }
     }
 
     fn style(&self, px: f32, color: [u8; 4]) -> RichStyle {
@@ -771,6 +781,7 @@ impl Control for DialoguePresenter {
                 }
                 DialoguePresenterMessage::SetSettings(settings) => self.model.settings = settings,
                 DialoguePresenterMessage::SetBackdrop(alpha) => self.backdrop = alpha,
+                DialoguePresenterMessage::SetPortraitsWhole(on) => self.whole_portraits = on,
                 DialoguePresenterMessage::Output(_) => return,
             }
             msg.handled = true;
@@ -875,6 +886,7 @@ impl DialoguePresenterBuilder {
                 clock_ms: 0,
                 history_scroll: 0.0,
                 backdrop: 0,
+                whole_portraits: false,
             }),
         )
     }
@@ -941,6 +953,7 @@ mod tests {
                 clock_ms: 0,
                 history_scroll: 0.0,
                 backdrop: 0,
+                whole_portraits: false,
             };
             Self { presenter, widget }
         }
@@ -1055,5 +1068,20 @@ mod tests {
         assert!((large.dialogue_box.h / small.dialogue_box.h - 2.0).abs() < 0.01);
         assert!(small.portraits[0].x < small.portraits[1].x);
         assert!(small.buttons[0].x < small.buttons[1].x && small.buttons[1].x < small.buttons[2].x);
+    }
+
+    #[test]
+    fn whole_portraits_stand_on_the_bottom_edge_beside_the_box() {
+        for bounds in [Rect::new(0.0, 0.0, 1920.0, 1080.0), Rect::new(0.0, 0.0, 1280.0, 720.0), Rect::new(0.0, 0.0, 3440.0, 1440.0)] {
+            let l = PresenterLayout::whole(bounds, 3);
+            let b = l.dialogue_box;
+            for p in l.portraits {
+                assert!((p.y + p.h - bounds.h).abs() < 0.01, "on the bottom edge");
+                assert!(p.x + p.w <= b.x || p.x >= b.x + b.w, "the box never covers a portrait");
+            }
+            assert!(b.w >= bounds.w * 0.4 && l.text.x > b.x && l.text.x + l.text.w < b.x + b.w);
+        }
+        let usual = PresenterLayout::new(Rect::new(0.0, 0.0, 1920.0, 1080.0), 0);
+        assert!(usual.portraits[0].y + usual.portraits[0].h > usual.dialogue_box.y, "the default still overlaps, as before");
     }
 }

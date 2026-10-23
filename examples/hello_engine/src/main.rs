@@ -930,6 +930,15 @@ impl HelloGame {
         self.combat.restore_player(feet, yaw, health, riding)
     }
 
+    /// The boat E would board now (the top of its hull, its kind), for the game's prompt: none while riding or aboard.
+    pub fn boardable(&self, ctx: &EngineContext) -> Option<(Vec3, &'static str)> {
+        let (feet, riding) = self.combat.player_feet()?;
+        if riding {
+            return None;
+        }
+        self.boats.boardable(ctx.physics, feet)
+    }
+
     /// The life sim's people (positions, roles, who is out of doors), while Play runs it.
     pub fn life(&self) -> Option<&somnium_life::LifeWorld> {
         self.life.world()

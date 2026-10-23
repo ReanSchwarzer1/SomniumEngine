@@ -719,22 +719,33 @@ impl BoatHost {
                 if riding {
                     return;
                 }
-                let near = self.afloat.iter().position(|a| {
-                    let local = Mat4::from_rotation_translation(
-                        ctx.physics.get_rotation(a.body),
-                        ctx.physics.get_position(a.body),
-                    )
-                    .inverse()
-                    .transform_point3(feet);
-                    local.x.abs() <= a.kind.half.x + REACH && local.z.abs() <= a.kind.half.z + REACH
-                });
-                if let Some(i) = near {
+                if let Some(i) = self.in_reach(ctx.physics, feet) {
                     self.aboard = Some((i, feet));
                     self.afloat[i].moored = None;
                     combat.take_e = true;
                 }
             }
         }
+    }
+
+    /// The boat afloat within boarding reach of `feet`, if any.
+    fn in_reach(&self, physics: &PhysicsWorld, feet: Vec3) -> Option<usize> {
+        self.afloat.iter().position(|a| {
+            let local = Mat4::from_rotation_translation(physics.get_rotation(a.body), physics.get_position(a.body))
+                .inverse()
+                .transform_point3(feet);
+            local.x.abs() <= a.kind.half.x + REACH && local.z.abs() <= a.kind.half.z + REACH
+        })
+    }
+
+    /// The boat E would board now, for a prompt: the top of its hull and its kind (`rowboat`), when the protagonist
+    /// stands on foot within reach of one and is not already aboard.
+    pub fn boardable(&self, physics: &PhysicsWorld, feet: Vec3) -> Option<(Vec3, &'static str)> {
+        if !self.playing || self.aboard.is_some() {
+            return None;
+        }
+        let a = &self.afloat[self.in_reach(physics, feet)?];
+        Some((physics.get_position(a.body) + Vec3::Y * a.kind.half.y, a.kind.name))
     }
 
     /// One fixed step of every hull (before the fight's, and before Jolt's).
