@@ -12,6 +12,11 @@
 //! Kinds, by where they go: a Tyffir `rowboat` or `currach` for lakes and
 //! rivers, a `fjord` boat (oars and a sail) for the sea, and a Vespergate canal
 //! `barge`. A boat entity with no mesh of its own is drawn as a plain hull.
+//!
+//! Capture hook: `SOMNIUM_BOARD_BOAT=<x>,<z>[,<ahead>]` (the scene's metres, a
+//! mooring's `at`) puts the protagonist on the water there at Play and in the
+//! first boat afloat near it, rowing at `ahead` (0 still to 1 full; 0.3 if not
+//! given): a rower in a window with no hands on the keys.
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde::Deserialize;
@@ -147,6 +152,37 @@ pub fn kind_of(name: &str) -> Kind {
 pub const CURRENT: f32 = 0.6;
 /// How far from its hull a boat can be boarded.
 const REACH: f32 = 1.5;
+
+/// The capture hook boards the nearest boat afloat this close to its point (metres).
+const BOARD_REACH: f32 = 40.0;
+
+/// `SOMNIUM_BOARD_BOAT`'s point and stroke, and how far it has got.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BoardAt {
+    at: Vec2,
+    ahead: f32,
+    placed: bool,
+    boarded: bool,
+}
+
+/// `<x>,<z>[,<ahead>]`.
+fn board_at(text: &str) -> Option<BoardAt> {
+    let v: Vec<f32> = text
+        .split(',')
+        .map(|s| s.trim().parse().ok())
+        .collect::<Option<_>>()?;
+    let (at, ahead) = match v.as_slice() {
+        [x, z] => (Vec2::new(*x, *z), 0.3),
+        [x, z, a] => (Vec2::new(*x, *z), a.clamp(-0.5, 1.0)),
+        _ => return None,
+    };
+    Some(BoardAt {
+        at,
+        ahead,
+        placed: false,
+        boarded: false,
+    })
+}
 /// Where a boat's water is looked for, in its project (WS1's water surface).
 pub const WATER_MAP: &str = "data/scatter/water_surfaces.json";
 
@@ -505,6 +541,8 @@ pub struct BoatHost {
     board: bool,
     /// Seconds to the next look for boats that streamed in or out.
     look_in: f32,
+    /// `SOMNIUM_BOARD_BOAT`, this Play.
+    capture: Option<BoardAt>,
 }
 
 impl BoatHost {
@@ -512,7 +550,34 @@ impl BoatHost {
     pub fn begin(&mut self, ctx: &mut EngineContext) {
         self.end(ctx);
         self.playing = true;
+        if let Ok(text) = std::env::var("SOMNIUM_BOARD_BOAT") {
+            self.capture = board_at(&text);
+            if self.capture.is_none() {
+                warn!(%text, "boats: SOMNIUM_BOARD_BOAT wants <x>,<z>[,<ahead>]");
+            }
+        }
         self.adopt(ctx);
+    }
+
+    /// The project's water map, read once a Play.
+    fn load_water(&mut self, ctx: &EngineContext) {
+        if self.looked {
+            return;
+        }
+        self.looked = true;
+        let path = ctx.config.project_root.as_deref().map_or_else(
+            || std::path::PathBuf::from(WATER_MAP),
+            |r| r.join(WATER_MAP),
+        );
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| WaterMap::from_json(&t))
+        {
+            Ok(map) => self.water = Some(map),
+            Err(error) => {
+                warn!(path = %path.display(), %error, "boats: no water map; they sit where they are")
+            }
+        }
     }
 
     /// Float boats not yet afloat (a cell streamed them in); let go of those
@@ -542,22 +607,7 @@ impl BoatHost {
         if boats.is_empty() {
             return;
         }
-        if !self.looked {
-            self.looked = true;
-            let path = ctx.config.project_root.as_deref().map_or_else(
-                || std::path::PathBuf::from(WATER_MAP),
-                |r| r.join(WATER_MAP),
-            );
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| WaterMap::from_json(&t))
-            {
-                Ok(map) => self.water = Some(map),
-                Err(error) => {
-                    warn!(path = %path.display(), %error, "boats: no water map; they sit where they are")
-                }
-            }
-        }
+        self.load_water(ctx);
         for (entity, boat, authored) in boats {
             let kind = kind_of(&boat.kind);
             let at = world_matrix(ctx.world, entity).to_scale_rotation_translation();
@@ -627,6 +677,7 @@ impl BoatHost {
         }
         self.aboard = None;
         self.water = None;
+        self.capture = None;
     }
 
     pub fn event(&mut self, event: &EngineEvent) {
@@ -692,6 +743,7 @@ impl BoatHost {
                 t.rotation = turn;
             }
         }
+        self.board_for_capture(ctx, combat);
         if !pressed {
             return;
         }
@@ -748,6 +800,57 @@ impl BoatHost {
         Some((physics.get_position(a.body) + Vec3::Y * a.kind.half.y, a.kind.name))
     }
 
+    /// `SOMNIUM_BOARD_BOAT`: the protagonist on foot on the water at its point
+    /// once the fight has him, then in the nearest boat afloat there once one
+    /// streams in.
+    fn board_for_capture(
+        &mut self,
+        ctx: &mut EngineContext,
+        combat: &mut crate::combat_demo::CombatDemo,
+    ) {
+        let Some(c) = self.capture.filter(|c| !c.boarded) else {
+            return;
+        };
+        let Some((feet, _)) = combat.player_feet() else {
+            return;
+        };
+        if !c.placed {
+            self.load_water(ctx);
+            let level = self
+                .water
+                .as_ref()
+                .and_then(|w| w.surface(c.at))
+                .map_or(feet.y, |s| s.height);
+            let at = Vec3::new(c.at.x, level + 0.5, c.at.y);
+            if combat.restore_player(at, 0.0, f32::MAX, false) {
+                info!(%at, "boats: capture: on the water, waiting for a boat");
+                self.capture = Some(BoardAt { placed: true, ..c });
+            }
+            return;
+        }
+        let near = self
+            .afloat
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let p = ctx.physics.get_position(a.body);
+                (i, Vec2::new(p.x, p.z).distance(c.at))
+            })
+            .filter(|&(_, d)| d <= BOARD_REACH)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, d)) = near {
+            info!(
+                kind = self.afloat[i].kind.name,
+                metres = d,
+                ahead = c.ahead,
+                "boats: capture: aboard"
+            );
+            self.aboard = Some((i, feet));
+            self.afloat[i].moored = None;
+            self.capture = Some(BoardAt { boarded: true, ..c });
+        }
+    }
+
     /// One fixed step of every hull (before the fight's, and before Jolt's).
     pub fn fixed(&mut self, ctx: &mut EngineContext, combat: &mut crate::combat_demo::CombatDemo) {
         let Some(water) = self.water.as_ref() else {
@@ -755,8 +858,10 @@ impl BoatHost {
             return;
         };
         let k = |i: usize| if self.keys[i] { 1.0 } else { 0.0 };
+        // The capture hook's stroke as if W were held that far.
+        let held = self.capture.filter(|c| c.boarded).map_or(0.0, |c| c.ahead);
         let rowing = Oars {
-            ahead: k(0) - k(1),
+            ahead: (k(0) - k(1) + held).clamp(-1.0, 1.0),
             turn: k(2) - k(3),
         };
         for (i, a) in self.afloat.iter_mut().enumerate() {
@@ -907,6 +1012,19 @@ mod tests {
                        {"canal": true, "pts": [[1000, 2100, 0.6, 5], [1000, 2200, 0.6, 5]]}]}"#,
         )
         .unwrap()
+    }
+
+    /// The capture hook's point and stroke.
+    #[test]
+    fn board_boat_reads_a_point_and_a_stroke() {
+        let c = board_at("-1520.5, 3300").unwrap();
+        assert_eq!((c.at, c.ahead), (Vec2::new(-1520.5, 3300.0), 0.3));
+        assert!(!c.placed && !c.boarded);
+        assert_eq!(board_at("10,20,2").unwrap().ahead, 1.0, "full at most");
+        assert_eq!(board_at("10,20,0").unwrap().ahead, 0.0, "still");
+        for bad in ["", "10", "10,x", "1,2,3,4"] {
+            assert_eq!(board_at(bad), None, "{bad}");
+        }
     }
 
     /// The project's real water and moorings (`RIMEBORN=<games/Rimeborn>`): the

@@ -23,6 +23,7 @@ mod animated_preview;
 mod skinned_crowd;
 mod authoring_demo;
 mod boats;
+mod click_move;
 mod combat_bodies;
 pub mod combat_demo;
 mod life_demo;
@@ -2208,6 +2209,9 @@ impl GameApp for HelloGame {
         }
         self.was_playing = playing;
         if playing {
+            // A second place the game holds streamed (the protagonists' switch, a joint mission) thinks too.
+            let held = somnium_core::cell_streaming::held_points(ctx.world);
+            self.set_focus_points(&held);
             self.boats.update(ctx, &mut self.combat);
             self.combat.update(ctx);
             self.life.update(ctx);
@@ -2318,6 +2322,8 @@ impl GameApp for HelloGame {
             renderer.set_view(view_mat, proj, eye);
         }
         self.animated_previews.render(ctx);
+        // The hostile under the cursor is outlined (the combat host's click-move).
+        self.skinned.highlight = self.combat.hovered_body();
         self.skinned.render(ctx);
         // **Which canvas** and **whether it draws** are two questions, and
         // conflating them costs more than it looks. `EditorFlags::hidden` is an
