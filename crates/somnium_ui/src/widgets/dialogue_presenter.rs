@@ -75,8 +75,37 @@ pub enum DialoguePresenterMessage {
     /// Whole portraits ([`PresenterLayout::whole`]): each stands on the screen's bottom edge and the box runs between
     /// them, never over them. Off (the default): the box covers the portraits' lower part.
     SetPortraitsWhole(bool),
+    /// A game's own look ([`PresenterStyle`]) instead of the theme's colours, corners and sizes; `None` goes back to
+    /// the theme.
+    SetStyle(Option<PresenterStyle>),
     /// From the widget: what the player asked for.
     Output(PresenterOutput),
+}
+
+/// A game's look for the presenter ([`DialoguePresenterMessage::SetStyle`]). Pixel sizes are at 1080 lines and scale
+/// with the canvas. Without one, the presenter draws in the active theme as it always has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresenterStyle {
+    /// The box: fill, edge, edge width, corner radius (the plate, choices, buttons and log use them too).
+    pub box_fill: [u8; 4],
+    pub box_border: [u8; 4],
+    pub border: f32,
+    pub radius: f32,
+    /// The name plate's fill and face (the speaker's colour draws the name and the plate's edge).
+    pub plate_fill: [u8; 4],
+    pub name_font: Option<u8>,
+    pub name_px: f32,
+    /// Words: the line and the log, secondary labels, what is dimmed (an unavailable choice, a taken one's mark).
+    pub text: [u8; 4],
+    pub secondary: [u8; 4],
+    pub muted: [u8; 4],
+    pub text_px: f32,
+    /// The go-on mark, a timed menu's clock, the buttons that are on; words drawn on it.
+    pub accent: [u8; 4],
+    pub on_accent: [u8; 4],
+    /// A choice's row, and the focused or hovered one's.
+    pub choice_fill: [u8; 4],
+    pub choice_focus: [u8; 4],
 }
 
 /// Where everything goes, in screen pixels, for a canvas of `bounds`.
@@ -188,6 +217,7 @@ pub struct DialoguePresenter {
     history_scroll: f32,
     backdrop: u8,
     whole_portraits: bool,
+    look: Option<PresenterStyle>,
 }
 
 impl DialoguePresenter {
@@ -367,21 +397,24 @@ impl DialoguePresenter {
         let Some(line) = self.model.line() else {
             return;
         };
-        ctx.push_primitive(
-            Primitive::fill(
-                panel,
+        let look = self.look.as_ref();
+        let (fill, edge) = look.map_or(
+            (
                 theme::with_alpha(theme.semantic.surface.canvas.bytes(), 228),
-            )
-            .with_radius(18.0 * unit)
-            .with_border(
-                2.0 * unit,
                 theme::with_alpha(theme.semantic.border.strong.bytes(), 200),
             ),
+            |s| (s.box_fill, s.box_border),
+        );
+        ctx.push_primitive(
+            Primitive::fill(panel, fill)
+                .with_radius(look.map_or(18.0, |s| s.radius) * unit)
+                .with_border(look.map_or(2.0, |s| s.border) * unit, edge),
             None,
         );
         if !line.name.is_empty() {
-            let px = 26.0 * unit;
-            let w = ctx.font_atlas.measure_text(&line.name, px, self.font_id).x + 44.0 * unit;
+            let px = look.map_or(26.0, |s| s.name_px) * unit;
+            let name_font = look.and_then(|s| s.name_font).unwrap_or(self.font_id);
+            let w = ctx.font_atlas.measure_text(&line.name, px, name_font).x + 44.0 * unit;
             let x = if line.side == Side::Right && !line.portrait.is_empty() {
                 panel.x + panel.w - w - 40.0 * unit
             } else {
@@ -390,15 +423,15 @@ impl DialoguePresenter {
             let plate = Rect::new(x, panel.y - 26.0 * unit, w, 48.0 * unit);
             let colour = line.color.unwrap_or(theme.semantic.accent.default.bytes());
             ctx.push_primitive(
-                Primitive::fill(plate, theme.semantic.surface.raised.bytes())
-                    .with_radius(12.0 * unit)
-                    .with_border(2.0 * unit, colour),
+                Primitive::fill(plate, look.map_or(theme.semantic.surface.raised.bytes(), |s| s.plate_fill))
+                    .with_radius(look.map_or(12.0, |s| s.radius) * unit)
+                    .with_border(look.map_or(2.0, |s| s.border) * unit, colour),
                 None,
             );
             ctx.push_text(
                 &line.name,
                 Vec2::new(plate.x + 22.0 * unit, plate.y + 10.0 * unit),
-                self.font_id,
+                name_font,
                 px,
                 colour,
             );
@@ -406,8 +439,8 @@ impl DialoguePresenter {
         let text = self.model.display_text();
         let (plain, runs) =
             crate::text::markup::parse(text).unwrap_or_else(|_| (text.to_owned(), Vec::new()));
-        let px = 29.0 * unit;
-        let style = self.style(px, theme.semantic.text.primary.bytes());
+        let px = look.map_or(29.0, |s| s.text_px) * unit;
+        let style = self.style(px, look.map_or(theme.semantic.text.primary.bytes(), |s| s.text));
         let font_atlas = &ctx.font_atlas;
         let laid = rich::layout(&plain, &runs, layout.text.w, &style, |s, px, font| {
             font_atlas.measure_text(s, px, font).x
@@ -433,7 +466,7 @@ impl DialoguePresenter {
             ctx.push_primitive(
                 Primitive::fill(
                     Rect::new(at.x, at.y, s, s * 0.6),
-                    theme.semantic.accent.default.bytes(),
+                    look.map_or(theme.semantic.accent.default.bytes(), |s| s.accent),
                 )
                 .with_radius(s * 0.3),
                 None,
@@ -451,13 +484,14 @@ impl DialoguePresenter {
             ctx.push_primitive(
                 Primitive::fill(
                     *rect,
-                    if on {
-                        theme::with_alpha(theme.semantic.accent.default.bytes(), 200)
-                    } else {
-                        theme::with_alpha(theme.semantic.surface.raised.bytes(), 170)
+                    match (look, on) {
+                        (Some(s), true) => s.accent,
+                        (Some(s), false) => s.choice_fill,
+                        (None, true) => theme::with_alpha(theme.semantic.accent.default.bytes(), 200),
+                        (None, false) => theme::with_alpha(theme.semantic.surface.raised.bytes(), 170),
                     },
                 )
-                .with_radius(8.0 * unit),
+                .with_radius(look.map_or(8.0, |s| s.radius) * unit),
                 None,
             );
             let px = 15.0 * unit;
@@ -467,10 +501,11 @@ impl DialoguePresenter {
                 Vec2::new(rect.x + (rect.w - w) * 0.5, rect.y + 7.0 * unit),
                 self.font_id,
                 px,
-                if on {
-                    theme.semantic.text.inverse.bytes()
-                } else {
-                    theme.semantic.text.secondary.bytes()
+                match (look, on) {
+                    (Some(s), true) => s.on_accent,
+                    (Some(s), false) => s.secondary,
+                    (None, true) => theme.semantic.text.inverse.bytes(),
+                    (None, false) => theme.semantic.text.secondary.bytes(),
                 },
             );
         }
@@ -479,6 +514,7 @@ impl DialoguePresenter {
     fn draw_choices(&self, ctx: &mut DrawingContext, layout: &PresenterLayout) {
         let theme = theme::active();
         let unit = layout.unit;
+        let look = self.look.as_ref();
         let choices = self.model.choices();
         if choices.is_empty() {
             return;
@@ -494,7 +530,7 @@ impl DialoguePresenter {
             ctx.push_primitive(
                 Primitive::fill(
                     bar,
-                    theme::with_alpha(theme.semantic.surface.raised.bytes(), 180),
+                    look.map_or(theme::with_alpha(theme.semantic.surface.raised.bytes(), 180), |s| s.choice_fill),
                 )
                 .with_radius(3.0 * unit),
                 None,
@@ -502,7 +538,7 @@ impl DialoguePresenter {
             ctx.push_primitive(
                 Primitive::fill(
                     Rect::new(bar.x, bar.y, bar.w * fraction, bar.h),
-                    theme.semantic.status.warning.bytes(),
+                    look.map_or(theme.semantic.status.warning.bytes(), |s| s.accent),
                 )
                 .with_radius(3.0 * unit),
                 None,
@@ -511,31 +547,32 @@ impl DialoguePresenter {
         for (choice, rect) in choices.iter().zip(&layout.choices) {
             let focused = self.model.focus() == Some(choice.index);
             let hovered = self.hover == Some(choice.index);
-            let fill = if !choice.available {
-                theme::with_alpha(theme.semantic.surface.panel.bytes(), 170)
-            } else if focused || hovered {
-                theme::with_alpha(theme.semantic.accent.selected_bg.bytes(), 240)
-            } else {
-                theme::with_alpha(theme.semantic.surface.canvas.bytes(), 224)
+            let fill = match look {
+                Some(s) if choice.available && (focused || hovered) => s.choice_focus,
+                Some(s) => s.choice_fill,
+                None if !choice.available => theme::with_alpha(theme.semantic.surface.panel.bytes(), 170),
+                None if focused || hovered => theme::with_alpha(theme.semantic.accent.selected_bg.bytes(), 240),
+                None => theme::with_alpha(theme.semantic.surface.canvas.bytes(), 224),
+            };
+            let edge = match look {
+                Some(s) if focused => s.accent,
+                Some(s) => s.box_border,
+                None if focused => theme.semantic.accent.default.bytes(),
+                None => theme::with_alpha(theme.semantic.border.default.bytes(), 200),
             };
             ctx.push_primitive(
                 Primitive::fill(*rect, fill)
-                    .with_radius(12.0 * unit)
-                    .with_border(
-                        if focused { 2.5 * unit } else { 1.5 * unit },
-                        if focused {
-                            theme.semantic.accent.default.bytes()
-                        } else {
-                            theme::with_alpha(theme.semantic.border.default.bytes(), 200)
-                        },
-                    ),
+                    .with_radius(look.map_or(12.0, |s| s.radius) * unit)
+                    .with_border(if focused { 2.5 * unit } else { 1.5 * unit }, edge),
                 None,
             );
-            let px = 24.0 * unit;
-            let colour = if choice.available {
-                theme.semantic.text.primary.bytes()
-            } else {
-                theme.semantic.text.muted.bytes()
+            // ponytail: a styled choice's words are 0.8 of the line's (as the theme's 24 px are to its 29)
+            let px = look.map_or(24.0, |s| s.text_px * 0.8) * unit;
+            let colour = match (look, choice.available) {
+                (Some(s), true) => s.text,
+                (Some(s), false) => s.muted,
+                (None, true) => theme.semantic.text.primary.bytes(),
+                (None, false) => theme.semantic.text.muted.bytes(),
             };
             let number = format!("{}", choice.index + 1);
             ctx.push_text(
@@ -544,7 +581,7 @@ impl DialoguePresenter {
                 self.font_id,
                 px,
                 theme::with_alpha(
-                    theme.semantic.accent.default.bytes(),
+                    look.map_or(theme.semantic.accent.default.bytes(), |s| s.accent),
                     if choice.available { 255 } else { 120 },
                 ),
             );
@@ -602,7 +639,7 @@ impl DialoguePresenter {
                             8.0 * unit,
                             8.0 * unit,
                         ),
-                        theme::with_alpha(theme.semantic.text.muted.bytes(), 160),
+                        theme::with_alpha(look.map_or(theme.semantic.text.muted.bytes(), |s| s.muted), 160),
                     )
                     .with_radius(4.0 * unit),
                     None,
@@ -618,21 +655,24 @@ impl DialoguePresenter {
         let theme = theme::active();
         let unit = layout.unit;
         let panel = layout.history;
+        let look = self.look.as_ref();
+        // The log covers the scene: a styled box's fill at least as opaque as the theme's.
+        let (fill, edge) = look.map_or(
+            (theme::with_alpha(theme.semantic.surface.canvas.bytes(), 245), theme.semantic.border.strong.bytes()),
+            |s| (theme::with_alpha(s.box_fill, s.box_fill[3].max(245)), s.box_border),
+        );
         ctx.push_primitive(
-            Primitive::fill(
-                panel,
-                theme::with_alpha(theme.semantic.surface.canvas.bytes(), 245),
-            )
-            .with_radius(18.0 * unit)
-            .with_border(2.0 * unit, theme.semantic.border.strong.bytes()),
+            Primitive::fill(panel, fill)
+                .with_radius(look.map_or(18.0, |s| s.radius) * unit)
+                .with_border(look.map_or(2.0, |s| s.border) * unit, edge),
             None,
         );
         ctx.push_text(
             "History",
             Vec2::new(panel.x + 32.0 * unit, panel.y + 22.0 * unit),
-            self.font_id,
+            look.and_then(|s| s.name_font).unwrap_or(self.font_id),
             26.0 * unit,
-            theme.semantic.text.secondary.bytes(),
+            look.map_or(theme.semantic.text.secondary.bytes(), |s| s.secondary),
         );
         let body = Rect::new(
             panel.x + 32.0 * unit,
@@ -647,14 +687,11 @@ impl DialoguePresenter {
             let plain = crate::text::markup::parse(&entry.text)
                 .map_or_else(|_| entry.text.clone(), |(p, _)| p);
             let (prefix, colour) = if entry.choice {
-                ("› ".to_owned(), theme.semantic.accent.default.bytes())
+                ("› ".to_owned(), look.map_or(theme.semantic.accent.default.bytes(), |s| s.accent))
             } else if entry.name.is_empty() {
-                (String::new(), theme.semantic.text.secondary.bytes())
+                (String::new(), look.map_or(theme.semantic.text.secondary.bytes(), |s| s.secondary))
             } else {
-                (
-                    format!("{}: ", entry.name),
-                    theme.semantic.text.primary.bytes(),
-                )
+                (format!("{}: ", entry.name), look.map_or(theme.semantic.text.primary.bytes(), |s| s.text))
             };
             let lines =
                 crate::widgets::text::wrap_lines(&format!("{prefix}{plain}"), body.w, |s| {
@@ -782,6 +819,7 @@ impl Control for DialoguePresenter {
                 DialoguePresenterMessage::SetSettings(settings) => self.model.settings = settings,
                 DialoguePresenterMessage::SetBackdrop(alpha) => self.backdrop = alpha,
                 DialoguePresenterMessage::SetPortraitsWhole(on) => self.whole_portraits = on,
+                DialoguePresenterMessage::SetStyle(look) => self.look = look,
                 DialoguePresenterMessage::Output(_) => return,
             }
             msg.handled = true;
@@ -887,6 +925,7 @@ impl DialoguePresenterBuilder {
                 history_scroll: 0.0,
                 backdrop: 0,
                 whole_portraits: false,
+                look: None,
             }),
         )
     }
@@ -954,6 +993,7 @@ mod tests {
                 history_scroll: 0.0,
                 backdrop: 0,
                 whole_portraits: false,
+                look: None,
             };
             Self { presenter, widget }
         }
@@ -1068,6 +1108,45 @@ mod tests {
         assert!((large.dialogue_box.h / small.dialogue_box.h - 2.0).abs() < 0.01);
         assert!(small.portraits[0].x < small.portraits[1].x);
         assert!(small.buttons[0].x < small.buttons[1].x && small.buttons[1].x < small.buttons[2].x);
+    }
+
+    #[test]
+    fn a_style_draws_the_box_in_the_games_colours_and_none_gives_the_theme_back() {
+        let mut rig = Rig::new();
+        rig.send(DialoguePresenterMessage::ShowLine {
+            beat: beat("mira", Side::Right, "Hello there."),
+            display: None,
+        });
+        let fills = |rig: &Rig| {
+            let mut ctx = DrawingContext::new(1920.0, 1080.0);
+            ctx.push_clip_rect(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+            rig.presenter.draw(&rig.widget, &mut ctx);
+            ctx.instances.iter().map(|p| (p.fill_a, p.radii[0])).collect::<Vec<_>>()
+        };
+        let slate = [30, 34, 40, 237];
+        let theme = fills(&rig);
+        assert!(!theme.is_empty() && !theme.iter().any(|f| f.0 == slate), "the theme's look by default");
+        let look = PresenterStyle {
+            box_fill: slate,
+            box_border: [200, 150, 80, 115],
+            border: 1.5,
+            radius: 4.0,
+            plate_fill: [10, 10, 12, 240],
+            name_font: None,
+            name_px: 22.0,
+            text: [230, 220, 200, 255],
+            secondary: [180, 180, 180, 255],
+            muted: [120, 120, 120, 255],
+            text_px: 30.0,
+            accent: [240, 170, 70, 255],
+            on_accent: [10, 10, 12, 255],
+            choice_fill: [30, 34, 40, 219],
+            choice_focus: [200, 150, 80, 61],
+        };
+        rig.send(DialoguePresenterMessage::SetStyle(Some(look)));
+        assert!(fills(&rig).iter().any(|f| f.0 == slate && (f.1 - 4.0).abs() < 0.01), "the box in the game's slate");
+        rig.send(DialoguePresenterMessage::SetStyle(None));
+        assert_eq!(fills(&rig), theme, "back to the theme, exactly");
     }
 
     #[test]
