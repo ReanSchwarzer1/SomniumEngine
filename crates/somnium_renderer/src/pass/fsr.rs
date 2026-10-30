@@ -147,6 +147,17 @@ impl FsrPass {
         glam::Vec2::new(x * 2.0 / width as f32, -y * 2.0 / height as f32)
     }
 
+    /// What texture gradients are multiplied by while FSR upscales: render width over output width, so textures are
+    /// sampled at the output resolution's mip (`lod_scale` in global_pool.wgsl). 1 when FSR is off.
+    pub fn lod_scale(&self) -> f32 {
+        match &self.gpu {
+            Some(gpu) if self.enabled && gpu.upscale_size[0] > 0 => {
+                (gpu.render_size[0] as f32 / gpu.upscale_size[0] as f32).min(1.0)
+            }
+            _ => 1.0,
+        }
+    }
+
     fn jitter_pixels(&self) -> [f32; 2] {
         let Some(gpu) = &self.gpu else {
             return [0.0, 0.0];

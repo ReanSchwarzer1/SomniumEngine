@@ -66,6 +66,44 @@ class AdapterTests(unittest.TestCase):
             EditorClient(Path("absent")).call("shell", {})
         self.assertEqual(caught.exception.code, "method_not_found")
 
+    # Phase ALYX-M.
+    def ready(self):
+        server = Server(EditorClient(Path("absent.json")))
+        server.initialized = True
+        return server
+
+    def test_listed_names_suit_every_client_and_old_names_still_work(self):
+        import re
+        reply = self.ready().handle({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        for tool in reply["result"]["tools"]:
+            self.assertRegex(tool["name"], r"^[A-Za-z0-9_-]{1,64}$")
+            self.assertIn("readOnlyHint", tool["annotations"])
+        # A dotted name from before 0.2 reaches the editor (which is absent here), not "unknown tool".
+        old = self.ready().handle({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"authoring.discover","arguments":{}}})
+        self.assertTrue(old["result"]["isError"])
+        self.assertEqual(old["result"]["structuredContent"]["error"]["code"], "editor_unavailable")
+        composed = self.ready().handle({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"somnium_status","arguments":{}}})
+        self.assertTrue(composed["result"]["isError"])
+
+    def test_resources_and_prompts_are_listed_and_checked(self):
+        server = self.ready()
+        resources = server.handle({"jsonrpc":"2.0","id":1,"method":"resources/list"})["result"]["resources"]
+        self.assertIn("somnium://log/problems", {r["uri"] for r in resources})
+        missing = server.handle({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"somnium://nope"}})
+        self.assertEqual(missing["error"]["code"], -32002)
+        unreachable = server.handle({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"somnium://status"}})
+        self.assertIn("editor_unavailable", unreachable["result"]["contents"][0]["text"])
+        prompts = server.handle({"jsonrpc":"2.0","id":4,"method":"prompts/list"})["result"]["prompts"]
+        self.assertIn("block_out_space", {p["name"] for p in prompts})
+        needs = server.handle({"jsonrpc":"2.0","id":5,"method":"prompts/get","params":{"name":"block_out_space","arguments":{}}})
+        self.assertEqual(needs["error"]["code"], -32602)
+        prompt = server.handle({"jsonrpc":"2.0","id":6,"method":"prompts/get","params":{"name":"block_out_space","arguments":{"brief":"a cellar"}}})
+        self.assertIn("a cellar", prompt["result"]["messages"][0]["content"]["text"])
+
+    def test_run_command_needs_an_id_before_the_editor(self):
+        reply = self.ready().handle({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"somnium_run_command","arguments":{}}})
+        self.assertEqual(reply["result"]["structuredContent"]["error"]["code"], "invalid_arguments")
+
 
 if __name__ == "__main__":
     unittest.main()

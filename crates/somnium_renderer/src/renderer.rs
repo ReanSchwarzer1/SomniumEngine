@@ -160,6 +160,12 @@ pub struct SomniumRenderer {
     /// cascade only, so the player's own hands, tools and body never dirty the cached distant ones.
     first_person: bool,
     first_person_casters: std::collections::HashSet<(u32, u32)>,
+    /// Meshes (by vertex offset) left out of this frame's traced scene (`exclude_from_tracing`).
+    untraced_meshes: std::collections::HashSet<u32>,
+    /// Meshes (by vertex offset) traced only within a distance of the camera this frame (`limit_tracing`).
+    trace_reach: std::collections::HashMap<u32, f32>,
+    /// Meshes (by vertex offset) that cast no contact shadow this frame (`exclude_from_contact_shadows`).
+    no_contact_meshes: std::collections::HashSet<u32>,
     /// Posed (skinned) meshes with a bottom-level structure of their own, rebuilt from each frame's pose.
     rt_posed: std::collections::HashSet<u32>,
     /// The cascades' split depths as last fitted, for how far a skinned caster's shadow can reach (`CasterKind`),
@@ -229,6 +235,8 @@ pub struct SomniumRenderer {
     /// Phase 13D: packed flags. Bit 0 = cel, bit 1 = PCSS, bit 2 = contact,
     /// bit 3 = analytic grads, bit 4 = ReSTIR DI sun vis (set at upload).
     pub shading_mode: u32,
+    /// The light ramp, 0 off ..= 1 (`PostProcessComponent::light_ramp`): rides in `shading_mode`'s top byte.
+    pub light_ramp: f32,
     /// Phase TSUSHIMA-F: multiple-scattering compensation, direct and IBL.
     pub brdf_multiscatter: bool,
     /// Phase TSUSHIMA-F: Hammon's rough diffuse in place of Burley.
@@ -323,6 +331,9 @@ pub struct SomniumRenderer {
     pub grading: crate::pass::postprocess::Grading,
     /// A transition over the whole picture, set by the game each frame it runs; none by default.
     pub picture_shift: crate::pass::postprocess::PictureShift,
+    /// The scene's authored picture shift (Post Processing), set by the engine each frame. Drawn only while the
+    /// game's own `picture_shift` is none.
+    pub authored_picture_shift: crate::pass::postprocess::PictureShift,
     /// View-projection without TAA's sub-pixel jitter, for reprojection.
     view_proj_unjittered: glam::Mat4,
     /// Current render target size, for computing the jitter offset.
@@ -376,6 +387,9 @@ pub struct SomniumRenderer {
     game_ui_empty_warned: bool,
     /// AMD FSR 3 frame generation (pass/frame_gen.rs; hooks in renderer_frame_gen.rs).
     frame_gen: crate::pass::frame_gen::FrameGenPass,
+    /// A camera cut asked for (`camera_cut`) and the last primary view drawn, for the cut test (`camera_cut_now`).
+    camera_cut_requested: bool,
+    cut_view: Option<glam::Mat4>,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -392,6 +406,14 @@ pub struct SomniumRenderer {
     game_highlight_pass: crate::pass::game_highlight::GameHighlightPass,
     game_highlight_style: Option<crate::pass::game_highlight::HighlightStyle>,
     game_highlight_draws: std::collections::HashSet<crate::pass::taa::ReactiveDrawKey>,
+    /// Phase ALYX-J: the editor's selection and hover glow. Two masks made the way the game highlight makes its own,
+    /// and the entities (by index) each one covers.
+    editor_selection_mask: crate::pass::game_highlight::GameHighlightPass,
+    editor_hover_mask: crate::pass::game_highlight::GameHighlightPass,
+    editor_glow_pass: crate::pass::editor_glow::EditorGlowPass,
+    editor_selected: std::collections::HashSet<u32>,
+    editor_hovered: std::collections::HashSet<u32>,
+    pub editor_glow_style: crate::pass::editor_glow::GlowStyle,
 
     /// Phase 11.5J: GPU particle billboard pass.
     particle_pass: ParticlePass,
@@ -492,6 +514,15 @@ pub struct SomniumRenderer {
     pub terrains: Vec<crate::terrain::TerrainData>,
     /// Phase DF: one clipmap stack per terrain, same index as `terrains`.
     pub clipmaps: Vec<crate::terrain::clipmap::TerrainClipmap>,
+    /// Set only inside [`Self::create_streamed_terrain_with_asset_dir`].
+    streamed_terrain_distance: f32,
+    /// `SOMNIUM_RENDER_UNPRESENTED`: when the swap chain gives no image (a screensaver over the window, a locked
+    /// session), draw the frame into `unpresented_target` instead of dropping it, so captures and tours finish. Off,
+    /// a frame without an image is skipped as always. Frame generation stays off while it is set.
+    unpresented: bool,
+    unpresented_target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Frames left before the swap chain is asked again: a refused acquire waits out a timeout (about a second).
+    unpresented_wait: u32,
     clipmap_pass: crate::pass::terrain_clipmap::TerrainClipmapPass,
     /// Terrain ids (+ model matrices) submitted for the current frame.
     terrain_queue: Vec<(u32, glam::Mat4)>,
@@ -565,9 +596,12 @@ pub struct SomniumRenderer {
     graphics_budget_override: Option<crate::quality::GraphicsBudget>,
     /// The real-time path tracer switched on whatever the scene authored (a game's experimental setting).
     pub path_tracing_requested: bool,
-    /// Ray-traced reflections on glossy surfaces (the path tracer's reflection mode; a game's setting, or
-    /// `SOMNIUM_RT_REFLECTIONS=1`). Never under the retro picture or while the whole frame is path traced.
+    /// Ray-traced reflections on glossy surfaces switched on whatever the scene authored (the path tracer's
+    /// reflection mode; a game's setting). Never under the retro picture or while the whole frame is path traced.
     pub traced_reflections_requested: bool,
+    /// Lens-flare strength a game asks for (its settings menu); the engine draws the larger of this and the
+    /// scene's authored `lens_flare`.
+    pub lens_flare_requested: f32,
     /// When true, a draw is expanded into one indirect argument per cluster so
     /// culling works below whole-object granularity. `SOMNIUM_NO_MESHLETS=1`
     /// forces the whole-mesh path, for A/B measurement.
@@ -607,6 +641,8 @@ pub struct SomniumRenderer {
     transparent_pass: crate::pass::transparent::TransparentPass,
     /// D2: a small forward view of the scene into a texture (`request_capture`).
     scene_capture: crate::pass::scene_capture::SceneCapturePass,
+    /// The editor's preview studio: small lit renders beside the level (`studio_*`).
+    preview_studio: crate::pass::preview_studio::PreviewStudio,
     /// Blended draws submitted this frame (routed automatically by material).
     transparent_queue: Vec<DrawCommand>,
     /// Per-material flag: true when the material is alpha-blended. Lets
@@ -675,6 +711,274 @@ fn write_rgba(queue: &wgpu::Queue, texture: &wgpu::Texture, rgba: &[u8], width: 
             depth_or_array_layers: 1,
         },
     );
+}
+
+/// One terrain as the shading pipelines see it (`SomniumRenderer::shading_plan`).
+#[derive(Clone, Copy)]
+struct TerrainShade {
+    clipmapped: bool,
+    painted_layers: u32,
+    hex: bool,
+    pom: bool,
+    hero_bank_only: bool,
+}
+
+/// The shading pipelines one frame draws with: the fullscreen spec, the near and aerial pair while the split is on,
+/// and one spec per bin while binning is on.
+struct ShadingPlan {
+    main: crate::pass::shading::ShadingSpec,
+    split: Option<(crate::pass::shading::ShadingSpec, crate::pass::shading::ShadingSpec)>,
+    bins: Option<[crate::pass::shading::ShadingSpec; crate::pass::classify::BIN_COUNT]>,
+}
+
+impl ShadingPlan {
+    fn keys(&self) -> Vec<crate::pass::shading::ShadingKey> {
+        let mut keys = vec![(self.main, "vs_main", None)];
+        if let Some((near, aerial)) = self.split {
+            keys.push((near, "vs_main", Some(wgpu::CompareFunction::Greater)));
+            keys.push((aerial, "vs_main", Some(wgpu::CompareFunction::LessEqual)));
+        }
+        keys.extend(self.bins.iter().flatten().map(|&spec| (spec, "vs_tile", None)));
+        keys
+    }
+}
+
+impl SomniumRenderer {
+    /// What the shading pass draws with, for these shadow bits (`shading_mode`'s 2 and 4), traced sun or not, and
+    /// these terrains. The one place that decides it, for the frame and for `warm_pipelines` alike, so what is
+    /// warmed is what the frames ask for.
+    fn shading_plan(
+        &self,
+        shading_mode: u32,
+        restir_sun: bool,
+        any_terrain: bool,
+        terrains: impl Iterator<Item = TerrainShade>,
+    ) -> ShadingPlan {
+        let mut spec = crate::pass::shading::ShadingSpec {
+            hex: false,
+            pom: false,
+            pcss: (shading_mode & 2) != 0 && !restir_sun,
+            contact: (shading_mode & 4) != 0 && !restir_sun && self.contact_shadows,
+            clipmap: false,
+            debug: self.shading_debug != 0.0,
+            terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
+            terrain_active_layers: 0,
+            live_terrain: false,
+            // Phase DOOM-B. Read once at startup and held constant for the
+            // process: an ablation that could change mid-run would recreate
+            // the PSO and put a shader compile inside the window being
+            // timed.
+            ablate: self.shade_ablate,
+        };
+        // Phase DF audit: a clipmapped terrain shades from the cache, which
+        // already holds strongest-four + hex + height-blend and never
+        // marches POM. Folding its `hex_tiling` / `parallax_scale` into the
+        // spec kept both of those compiled into the shading shader for a
+        // path that cannot execute, and occupancy is the union of what is
+        // in the module — the same trap the runtime checkboxes fell into.
+        //
+        // The clipmap test must match `TerrainClipmap::fill_gpu` exactly.
+        // If it says "clipmapped" where `fill_gpu` writes
+        // `clipmap_enabled = 0`, the live path is deleted from under a
+        // terrain that still needs it and the ground renders unshaded.
+        for t in terrains {
+            if t.clipmapped {
+                spec.clipmap = true;
+                continue;
+            }
+            spec.live_terrain = true;
+            spec.terrain_active_layers |= t.painted_layers;
+            spec.hex |= t.hex;
+            spec.pom |= t.pom;
+            if !t.hero_bank_only {
+                spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
+            }
+        }
+        // No terrain queued at all: keep the live path so the next frame's
+        // first terrain does not have to wait on a pipeline rebuild.
+        if !any_terrain {
+            spec.live_terrain = true;
+            spec.terrain_active_layers = u32::MAX;
+        }
+        // Same binary A/B, default off: the sparse mask regressed Gardens
+        // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
+        // full palette until a specialization is measured faster.
+        static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*PAINTED_LAYERS.get_or_init(|| std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")) {
+            spec.terrain_active_layers = u32::MAX;
+        }
+        // Measurement rail only: how much of terrain shading is the splat scan.
+        if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
+            spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
+        }
+
+        // ── Phase DOOM-E: the aerial split ───────────────────────────────
+        //
+        // Two fullscreen draws instead of one, separated by a depth test
+        // against the scene depth the visibility pass already filled. The
+        // near draw keeps everything closer than `aerial_split`; the aerial
+        // draw takes the rest, including the sky at the cleared far value.
+        //
+        // What the aerial pipeline drops is what only resolves close up:
+        // hex tiling, which exists to break the repetition of a tiled layer
+        // and cannot be seen at distance, and the parallax march, which
+        // `gpu_material_for_camera` already fades out with height. Both are
+        // *deleted from the pipeline*, not skipped at runtime — a per-pixel
+        // sample-count branch is exactly what XV-Zeta §11.1 forbids, and a
+        // second pipeline is how the same effect is had without one.
+        //
+        // Enabled only when the near spec actually has something to drop.
+        // Compiling a second pipeline identical to the first would cost a
+        // shader compile and a second full-screen pass to save nothing. Never
+        // under the path tracer: the split's pipelines leave out the surface
+        // writes it reads (shading.wgsl `path_surface`), for their early-Z.
+        let split = (self.aerial_split_enabled
+            && !self.path_tracer_pass.enabled
+            && (spec.hex || spec.pom)
+            && self.shade_ablate == crate::pass::shading::ablate::OFF)
+            .then(|| {
+                let aerial = crate::pass::shading::ShadingSpec {
+                    hex: false,
+                    pom: false,
+                    terrain_scan: if self.aerial_hero_bank {
+                        crate::terrain::textures::TERRAIN_HERO_LAYERS
+                    } else {
+                        spec.terrain_scan
+                    },
+                    ..spec
+                };
+                (spec, aerial)
+            });
+
+        // Phase DOOM-C/E: the same spec, narrowed per bin.
+        //
+        // This is the whole point of the phase. `spec` above is the union
+        // of everything any pixel on screen might need, which is what the
+        // one fullscreen draw has to be compiled for. A tile that contains
+        // only sky needs almost none of it, and a tile of terrain 400 m away
+        // needs less than one at the player's feet.
+        let bins = self.classify_pass.enabled.then(|| {
+            use crate::pass::classify as bins;
+            std::array::from_fn(|bin| {
+                let mut s = spec;
+                match bin {
+                    // Sky, mesh and foliage never reach the terrain
+                    // material, so the 32-wide splat scan, hex tiling, POM
+                    // and the clipmap sampler all leave the module. Sky
+                    // additionally never samples a shadow map.
+                    bins::BIN_SKY => {
+                        s.live_terrain = false;
+                        s.clipmap = false;
+                        s.hex = false;
+                        s.pom = false;
+                        s.pcss = false;
+                        s.contact = false;
+                        s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                    }
+                    bins::BIN_MESH | bins::BIN_FOLIAGE => {
+                        s.live_terrain = false;
+                        s.clipmap = false;
+                        s.hex = false;
+                        s.pom = false;
+                        s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
+                    }
+                    // DOOM-E. Terrain past the aerial split drops the two
+                    // things that only resolve close up: hex tiling, which
+                    // exists to break tiling repetition the eye can only
+                    // see near the camera, and the parallax march, which
+                    // `gpu_material_for_camera` already fades out with
+                    // distance. Both are *deleted* from this pipeline
+                    // rather than skipped at runtime — a per-pixel
+                    // sample-count branch is what XV-Zeta §11.1 forbids,
+                    // and a separate pipeline is precisely the way to get
+                    // the same effect without one.
+                    bins::BIN_TERRAIN_AERIAL => {
+                        s.hex = false;
+                        s.pom = false;
+                    }
+                    // Near terrain and mixed tiles keep the full spec.
+                    _ => {}
+                }
+                s
+            })
+        });
+        ShadingPlan { main: spec, split, bins }
+    }
+
+    /// Every shading pipeline the frames could ask for under the switches as they are now, the likeliest first: with
+    /// traced sun shadows and without, every soft and contact shadow choice the options can make, and no terrain, a
+    /// live terrain (full or hero layer scan) or a clipmapped one.
+    fn shading_warm_keys(&self) -> Vec<crate::pass::shading::ShadingKey> {
+        let restir_now = self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
+        let restir = if self.raytrace_pass.supported() { vec![restir_now, !restir_now] } else { vec![false] };
+        let mode_now = self.shading_mode & 6;
+        let modes = [mode_now, 2 | 4, 2, 4, 0];
+        // A terrain as `Terrain::new` makes one (hex and POM from their switches), and the ones already here.
+        let fresh = TerrainShade {
+            clipmapped: false,
+            painted_layers: u32::MAX,
+            hex: std::env::var("SOMNIUM_HEXTILE").as_deref() == Ok("1"),
+            pom: std::env::var("SOMNIUM_TERRAIN_PARALLAX").as_deref() == Ok("1"),
+            hero_bank_only: false,
+        };
+        let mut sets: Vec<Vec<TerrainShade>> = vec![Vec::new(), vec![fresh], vec![TerrainShade { hero_bank_only: true, ..fresh }]];
+        if !crate::terrain::clipmap::TerrainClipmap::env_forced_off() {
+            sets.push(vec![TerrainShade { clipmapped: true, ..fresh }]);
+        }
+        for t in &self.terrains {
+            sets.push(vec![TerrainShade {
+                painted_layers: t.splatmap.painted_layers(),
+                hex: t.hex_tiling,
+                pom: t.parallax_scale > 0.0,
+                hero_bank_only: t.hero_bank_only,
+                ..fresh
+            }]);
+        }
+        let mut keys = Vec::new();
+        for &sun in &restir {
+            for &mode in &modes {
+                for set in &sets {
+                    let mode = (self.shading_mode & !6) | mode;
+                    for key in self.shading_plan(mode, sun, !set.is_empty(), set.iter().copied()).keys() {
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// Start compiling, on worker threads, every shading pipeline the frames could ask for, so no scene's first
+    /// frames stop to compile one. Returns at once; call again after changing graphics switches to add what they
+    /// need. The renderer starts this itself when it is built.
+    pub fn warm_pipelines(&mut self, ctx: &RenderContext) {
+        let keys = self.shading_warm_keys();
+        self.shading_pass.warm(&ctx.device, keys);
+    }
+
+    /// `(done, total)` of the pipelines `warm_pipelines` asked for.
+    pub fn pipeline_warm_progress(&mut self) -> (usize, usize) {
+        self.shading_pass.warm_progress()
+    }
+
+    /// This GPU, its driver and every shader the renderer composes, in one line. A game can keep it beside a record
+    /// of having warmed the pipelines: the driver's own cache keeps them across runs until the driver or a shader
+    /// changes, which changes this line.
+    pub fn pipeline_fingerprint(&self, ctx: &RenderContext) -> String {
+        let info = ctx.adapter.get_info();
+        format!(
+            "{} {:04x}:{:04x} {:?} {} {} shaders {}",
+            info.name,
+            info.vendor,
+            info.device,
+            info.backend,
+            info.driver,
+            info.driver_info,
+            self.shaders.fingerprint()
+        )
+    }
 }
 
 impl SomniumRenderer {
@@ -760,6 +1064,10 @@ impl SomniumRenderer {
             && (self.debug_toggles.is_on("terrain_clipmap")
                 || self.clipmap_owned_by_virtual_texturing());
         for clipmap in &mut self.clipmaps {
+            if clipmap.is_dormant() {
+                clipmap.enabled = false;
+                continue;
+            }
             // Coming back on has to force a refresh. While it was off the
             // camera kept moving and the rings kept their old centres, so the
             // first frame back shades the ground from a cache of somewhere
@@ -896,6 +1204,7 @@ impl SomniumRenderer {
             &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
+            HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
         );
@@ -991,6 +1300,15 @@ impl SomniumRenderer {
             &ctx.device, &shaders, &global_pool.layout, ctx.config.format,
             ctx.config.width, ctx.config.height,
         );
+        let editor_mask = || {
+            crate::pass::game_highlight::GameHighlightPass::new(
+                &ctx.device, &shaders, &global_pool.layout, ctx.config.format,
+                ctx.config.width, ctx.config.height,
+            )
+        };
+        let (editor_selection_mask, editor_hover_mask) = (editor_mask(), editor_mask());
+        let editor_glow_pass =
+            crate::pass::editor_glow::EditorGlowPass::new(&ctx.device, &shaders, ctx.config.format);
 
         // Phase 11B: Shadow atlas and comparison sampler.
         // Shading pass output format is now Rgba16Float (HDR target).
@@ -1069,6 +1387,7 @@ impl SomniumRenderer {
             if std::env::var("SOMNIUM_LOCAL_SHADOWS").as_deref() != Ok("0") {
                 raytrace_pass.tlas()
             } else { None },
+            path_tracer_pass.surface_views(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -1089,6 +1408,14 @@ impl SomniumRenderer {
             &ibl_pass.cube_view,
             &ibl_pass.sampler,
             &atmosphere_pass,
+        );
+
+        let preview_studio = crate::pass::preview_studio::PreviewStudio::new(
+            &ctx.device,
+            &shaders,
+            &global_pool.layout,
+            &ibl_pass.cube_view,
+            &ibl_pass.sampler,
         );
 
         let texture_pool = TexturePool::new(&ctx.device);
@@ -1138,7 +1465,7 @@ impl SomniumRenderer {
         );
 
         let skin_pass = crate::pass::skin::SkinPass::new(&ctx.device, &shaders);
-        Self {
+        let mut renderer = Self {
             skin_pass,
             animated_geometry: Default::default(),
             last_motion: Vec::new(),
@@ -1159,6 +1486,9 @@ impl SomniumRenderer {
             shadow_caster_content_revision: 0,
             first_person: false,
             first_person_casters: std::collections::HashSet::new(),
+            untraced_meshes: std::collections::HashSet::new(),
+            trace_reach: std::collections::HashMap::new(),
+            no_contact_meshes: std::collections::HashSet::new(),
             rt_posed: std::collections::HashSet::new(),
             cascade_split_depths: [f32::MAX; crate::shadow::NUM_CASCADES],
             cascade_texels: [0.0; crate::shadow::NUM_CASCADES],
@@ -1192,6 +1522,7 @@ impl SomniumRenderer {
             moon_intensity: 0.010,
             cascade_debug: false,
             shading_mode: 2 | 4 | 8,
+            light_ramp: 0.0,
             local_lights: Vec::new(),
             grid_pass,
             grid_enabled: false,
@@ -1258,6 +1589,7 @@ impl SomniumRenderer {
             exposure_compensation: 0.0,
             grading: crate::pass::postprocess::Grading::default(),
             picture_shift: Default::default(),
+            authored_picture_shift: Default::default(),
             sun_angular_radius: 0.004_654,
             view_proj_unjittered: glam::Mat4::IDENTITY,
             render_width: ctx.config.width,
@@ -1298,16 +1630,25 @@ impl SomniumRenderer {
             editor_overlays_enabled: true,
             game_ui_empty_warned: false,
             frame_gen: crate::pass::frame_gen::FrameGenPass::new(),
+            camera_cut_requested: false,
+            cut_view: None,
             outline_pass,
             outline_entity: None,
             game_highlight_pass,
             game_highlight_style: None,
             game_highlight_draws: std::collections::HashSet::new(),
+            editor_selection_mask,
+            editor_hover_mask,
+            editor_glow_pass,
+            editor_selected: std::collections::HashSet::new(),
+            editor_hovered: std::collections::HashSet::new(),
+            editor_glow_style: Default::default(),
             particle_pass,
             pending_particles: Vec::new(),
             indirect: crate::indirect::IndirectDrawBuffer::new(&ctx.device),
             transparent_pass,
             scene_capture,
+            preview_studio,
             transparent_queue: Vec::new(),
             material_blend: Vec::new(),
             material_double_sided: Vec::new(),
@@ -1333,7 +1674,8 @@ impl SomniumRenderer {
             graphics_preset: crate::quality::GraphicsPreset::from_env(),
             graphics_budget_override: None,
             path_tracing_requested: false,
-            traced_reflections_requested: std::env::var("SOMNIUM_RT_REFLECTIONS").as_deref() == Ok("1"),
+            traced_reflections_requested: false,
+            lens_flare_requested: 0.0,
             meshlet_draws: !std::env::var("SOMNIUM_NO_MESHLETS").is_ok_and(|v| v == "1"),
             culling_enabled: true,
             cpu_frustum_cull: !cpu_frustum_env_off(),
@@ -1390,6 +1732,10 @@ impl SomniumRenderer {
             terrain_material_ids: std::collections::HashSet::new(),
             terrains: Vec::new(),
             clipmaps: Vec::new(),
+            streamed_terrain_distance: 0.0,
+            unpresented: std::env::var_os("SOMNIUM_RENDER_UNPRESENTED").is_some(),
+            unpresented_target: None,
+            unpresented_wait: 0,
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
@@ -1401,7 +1747,11 @@ impl SomniumRenderer {
             // Shader ownership and its DREAMS sampling resource stay together.
             shaders,
             grain_masks,
-        }
+        };
+        // Every shading variant the frames could want, compiling on worker threads while startup and the first
+        // scene load go on (the first frame waits only for one still compiling).
+        renderer.warm_pipelines(ctx);
+        renderer
     }
 
     /// Add a texture to the global bindless pool.
@@ -1481,6 +1831,43 @@ impl SomniumRenderer {
         let index = self.add_texture(ctx, texture.create_view(&wgpu::TextureViewDescriptor::default())) as i32;
         self.dynamic_textures.insert(index, texture);
         index
+    }
+
+    /// A new preview-studio target, `size` texels square (`pass::preview_studio`).
+    pub fn studio_target(&mut self, ctx: &RenderContext, size: u32) -> crate::pass::preview_studio::StudioTargetId {
+        self.preview_studio.create_target(&ctx.device, size)
+    }
+
+    /// A studio target's picture as the UI binds it: 8-bit, sRGB-encoded bytes.
+    #[must_use]
+    pub fn studio_view(&self, id: crate::pass::preview_studio::StudioTargetId) -> Option<wgpu::TextureView> {
+        self.preview_studio.view(id)
+    }
+
+    /// A studio target's resolved texture, for a copy out.
+    #[must_use]
+    pub fn studio_texture(&self, id: crate::pass::preview_studio::StudioTargetId) -> Option<&wgpu::Texture> {
+        self.preview_studio.texture(id)
+    }
+
+    /// Draw `request` into studio target `id` this frame (before the UI, so the UI shows it the same frame).
+    pub fn studio_render(
+        &mut self,
+        id: crate::pass::preview_studio::StudioTargetId,
+        request: crate::pass::preview_studio::StudioRequest,
+    ) {
+        self.preview_studio.queue(id, request);
+    }
+
+    /// A built-in studio shape as a draw of `material_id` standing at `model`; None if the geometry pool is full.
+    pub fn studio_shape(
+        &mut self,
+        ctx: &RenderContext,
+        shape: crate::pass::preview_studio::StudioShape,
+        material_id: u32,
+        model: glam::Mat4,
+    ) -> Option<crate::pass::preview_studio::StudioDraw> {
+        self.preview_studio.shape_draw(&mut self.geometry, &ctx.queue, shape, material_id, model)
     }
 
     /// D2: draw `request` this frame into the scene capture (`pass::scene_capture`) and return the bindless slot a
@@ -1596,23 +1983,38 @@ impl SomniumRenderer {
         scene: &somnium_asset::LoadedScene,
         textured: Option<&std::collections::HashSet<usize>>,
     ) -> (usize, usize) {
+        use rayon::prelude::*;
         let (used, colour, _) = Self::texture_usage(scene, textured);
-        let (mut encoded, mut cached) = (0, 0);
-        for (index, tex) in scene.textures.iter().enumerate() {
-            if !used[index] || !crate::imported_bc::compressible(tex.width, tex.height) {
+        // Keys on every core, then each texture's chain on every core: one texture at a time left most of a machine
+        // idle on the small maps and the short mips (22 Oct 2026: the whole of TSF took 585 s that way).
+        let wanted: Vec<_> = (0..scene.textures.len())
+            .into_par_iter()
+            .filter(|&index| used[index])
+            .filter(|&index| crate::imported_bc::compressible(scene.textures[index].width, scene.textures[index].height))
+            .map(|index| {
+                let tex = &scene.textures[index];
+                (index, imported_texture_key(tex, colour[index]), crate::imported_bc::has_alpha(&tex.data))
+            })
+            .collect();
+        // One job per key: two threads storing the same key would share its temporary file.
+        let mut seen = std::collections::HashSet::new();
+        let (mut jobs, mut cached) = (Vec::new(), 0);
+        for (index, key, alpha) in wanted {
+            if !seen.insert((key, alpha)) {
                 continue;
             }
-            let key = imported_texture_key(tex, colour[index]);
-            let alpha = crate::imported_bc::has_alpha(&tex.data);
             if crate::imported_bc::is_cached(&key, alpha) {
                 cached += 1;
-                continue;
+            } else {
+                jobs.push((index, key, alpha));
             }
+        }
+        jobs.par_iter().for_each(|&(index, key, alpha)| {
+            let tex = &scene.textures[index];
             let blocks = crate::imported_bc::encode(&build_mip_chain(&tex.data, tex.width, tex.height), alpha);
             crate::imported_bc::store(&key, tex.width, tex.height, alpha, &blocks);
-            encoded += 1;
-        }
-        (encoded, cached)
+        });
+        (jobs.len(), cached)
     }
 
     /// As [`Self::upload_scene_materials`], but textures are uploaded only for
@@ -1625,6 +2027,77 @@ impl SomniumRenderer {
         ctx: &RenderContext,
         scene: &somnium_asset::LoadedScene,
         textured: Option<&std::collections::HashSet<usize>>,
+    ) -> Vec<u32> {
+        self.upload_scene_materials_prepared(ctx, scene, textured, None)
+    }
+
+    /// The textures' keys and cached chains for `indices`, on every core: the CPU half of a texture upload, safe on
+    /// any thread.
+    fn prepare_textures(
+        scene: &somnium_asset::LoadedScene,
+        indices: &[usize],
+        is_colour: &[bool],
+        compressing: bool,
+    ) -> Vec<(usize, [u8; 32], Option<PreparedChain>)> {
+        use rayon::prelude::*;
+        indices
+            .par_iter()
+            .map(|&index| {
+                let tex = &scene.textures[index];
+                let key = imported_texture_key(tex, is_colour[index]);
+                let chain = (compressing && crate::imported_bc::compressible(tex.width, tex.height)).then(|| {
+                    let alpha = crate::imported_bc::has_alpha(&tex.data);
+                    (alpha, crate::imported_bc::load(&key, tex.width, tex.height, alpha))
+                });
+                (index, key, chain)
+            })
+            .collect()
+    }
+
+    /// Whether imported textures go up as BC7 on this device: the `compressing` that
+    /// [`Self::prepare_scene_for`] needs.
+    #[must_use]
+    pub fn imported_compression(ctx: &RenderContext) -> bool {
+        crate::imported_bc::enabled(ctx.device.features())
+    }
+
+    /// The CPU half of [`Self::upload_scene_for`], made on any thread so an open world's streaming does not stall a
+    /// frame on it: every used texture's content key and cached BC7 chain, every mesh's clusters and SDF brick.
+    /// Hand it to [`Self::upload_prepared_scene_for`] with the same `scene` and `textured`.
+    #[must_use]
+    pub fn prepare_scene_for(
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        compressing: bool,
+    ) -> PreparedScene {
+        let (used_textures, is_colour, _) = Self::texture_usage(scene, textured);
+        let used: Vec<usize> = (0..scene.textures.len()).filter(|&index| used_textures[index]).collect();
+        let textures = Self::prepare_textures(scene, &used, &is_colour, compressing);
+        let meshes = {
+            use rayon::prelude::*;
+            scene.meshes.par_iter().map(|mesh| crate::geometry::prepare_mesh(&mesh.vertices, &mesh.indices)).collect()
+        };
+        PreparedScene { textures, meshes }
+    }
+
+    /// [`Self::upload_scene_for`] from a [`PreparedScene`]: only the GPU writes are left for this thread.
+    pub fn upload_prepared_scene_for(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        prepared: PreparedScene,
+    ) -> Vec<UploadedNode> {
+        let material_ids = self.upload_scene_materials_prepared(ctx, scene, textured, Some(prepared.textures));
+        self.upload_scene_meshes(ctx, scene, &material_ids, Some(prepared.meshes))
+    }
+
+    fn upload_scene_materials_prepared(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        textured: Option<&std::collections::HashSet<usize>>,
+        prepared_textures: Option<Vec<(usize, [u8; 32], Option<PreparedChain>)>>,
     ) -> Vec<u32> {
         // 1. Textures --------------------------------------------------------
         let (used_textures, is_colour, used_materials) = Self::texture_usage(scene, textured);
@@ -1642,20 +2115,15 @@ impl SomniumRenderer {
         let compressing = crate::imported_bc::enabled(ctx.device.features());
         let used: Vec<usize> = (0..scene.textures.len()).filter(|&index| used_textures[index]).collect();
         let mut texture_indices: Vec<Option<i32>> = vec![None; scene.textures.len()];
-        for batch in used.chunks(32) {
+        // Prepared on a streaming thread: every key is ready, so the batches below have nothing to do.
+        let ready = prepared_textures.is_some();
+        for (index, key, chain) in prepared_textures.unwrap_or_default() {
+            texture_indices[index] =
+                Some(self.upload_keyed_texture(ctx, &scene.textures[index], is_colour[index], key, chain, &mut staged));
+        }
+        for batch in used.chunks(32).filter(|_| !ready) {
             let preparing = std::time::Instant::now();
-            let prepared: Vec<(usize, [u8; 32], Option<PreparedChain>)> = {
-                use rayon::prelude::*;
-                batch.par_iter().map(|&index| {
-                    let tex = &scene.textures[index];
-                    let key = imported_texture_key(tex, is_colour[index]);
-                    let chain = (compressing && crate::imported_bc::compressible(tex.width, tex.height)).then(|| {
-                        let alpha = crate::imported_bc::has_alpha(&tex.data);
-                        (alpha, crate::imported_bc::load(&key, tex.width, tex.height, alpha))
-                    });
-                    (index, key, chain)
-                }).collect()
-            };
+            let prepared = Self::prepare_textures(scene, batch, &is_colour, compressing);
             self.texture_upload_stats.key_ms += preparing.elapsed().as_secs_f64() * 1000.0;
             for (index, key, chain) in prepared {
                 texture_indices[index] =
@@ -2034,13 +2502,24 @@ impl SomniumRenderer {
         textured: Option<&std::collections::HashSet<usize>>,
     ) -> Vec<UploadedNode> {
         let material_ids = self.upload_scene_materials_for(ctx, scene, textured);
+        self.upload_scene_meshes(ctx, scene, &material_ids, None)
+    }
+
+    fn upload_scene_meshes(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &somnium_asset::LoadedScene,
+        material_ids: &[u32],
+        prepared: Option<Vec<crate::geometry::PreparedMesh>>,
+    ) -> Vec<UploadedNode> {
         // 3. Meshes ----------------------------------------------------------
         let meshing = std::time::Instant::now();
-        // Clusters and SDF bricks on every core first; the uploads stay in order.
-        let prepared: Vec<crate::geometry::PreparedMesh> = {
+        // Clusters and SDF bricks on every core first (unless a streaming thread made them); the uploads stay in
+        // order.
+        let prepared: Vec<crate::geometry::PreparedMesh> = prepared.unwrap_or_else(|| {
             use rayon::prelude::*;
             scene.meshes.par_iter().map(|mesh| crate::geometry::prepare_mesh(&mesh.vertices, &mesh.indices)).collect()
-        };
+        });
         let mesh_allocs: Vec<crate::geometry::MeshAllocation> = scene
             .meshes
             .iter()
@@ -2143,7 +2622,8 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&self.camera_pos.to_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
-        view_data.extend_from_slice(bytemuck::bytes_of(&[0.0f32; 3]));
+        let tie_slope = crate::pass::visibility::depth_tie_slope(&self.proj_matrix, self.render_height);
+        view_data.extend_from_slice(bytemuck::bytes_of(&[self.fsr_pass.lod_scale(), tie_slope, 0.0]));
         let mut wind = self.foliage_wind;
         let budget = self.graphics_budget();
         if !budget.foliage_wind {
@@ -2218,6 +2698,11 @@ impl SomniumRenderer {
     /// Scene-wide indirect-light strength (Phase 22C), uploaded with the sun.
     pub fn set_ibl_intensity(&mut self, intensity: f32) {
         self.ibl_intensity = intensity.max(0.0);
+    }
+
+    /// The moonless night sky drawn into the environment cubemap (`NightSky`; Rimeborn's Undersun). Zero is none.
+    pub fn set_night_sky(&mut self, night: crate::pass::ibl::NightSky) {
+        self.ibl_pass.night = night;
     }
 
     /// Directional moonlight illuminance in lux (Phase 25M-2).
@@ -2535,6 +3020,17 @@ impl SomniumRenderer {
     /// Clear the selection outline (call when nothing is selected or selection has no mesh).
     pub fn clear_outline(&mut self) {
         self.outline_entity = None;
+    }
+
+    /// The entities (by index) the editor shows as selected and as under the pointer. Their visible draws glow:
+    /// matched by the entity index every scene submitter puts in the low 32 bits of the sort key.
+    pub fn set_editor_highlight(
+        &mut self,
+        selected: std::collections::HashSet<u32>,
+        hovered: std::collections::HashSet<u32>,
+    ) {
+        self.editor_selected = selected;
+        self.editor_hovered = hovered;
     }
 
     /// Select game feedback independently of the editor's selected entity.
@@ -3004,6 +3500,27 @@ impl SomniumRenderer {
         self.submit(cmd);
     }
 
+    /// Leave every draw of the mesh at `vertex_offset` out of this frame's ray-traced scene (TLAS) while still
+    /// rasterising it: generated ground cover, whose thousands of small instances would fill the TLAS's instance cap
+    /// and switch ray-traced reflections off for the frame. Lasts one frame, like the queues.
+    pub fn exclude_from_tracing(&mut self, vertex_offset: u32) {
+        self.untraced_meshes.insert(vertex_offset);
+    }
+
+    /// Keep the draws of the mesh at `vertex_offset` in this frame's ray-traced scene only where they come within
+    /// `reach` metres of the camera (they still rasterise everywhere): painted trees out to a 400 m draw distance,
+    /// whose far thousands would overflow the traced scene's instance cap. Lasts one frame, like the queues.
+    pub fn limit_tracing(&mut self, vertex_offset: u32, reach: f32) {
+        self.trace_reach.insert(vertex_offset, reach);
+    }
+
+    /// Let the mesh at `vertex_offset` cast no screen-space contact shadow this frame (its shadow-map shadow is
+    /// unchanged): generated grass, whose short contact shadows read as dark scribbles from a high camera. Lasts
+    /// one frame, like the queues.
+    pub fn exclude_from_contact_shadows(&mut self, vertex_offset: u32) {
+        self.no_contact_meshes.insert(vertex_offset);
+    }
+
     /// Draw geometry only into shadow maps. Useful for a first-person body
     /// whose head is hidden from the primary camera but still casts a shadow.
     /// The command uses the same instance layout and clears with the frame.
@@ -3166,6 +3683,22 @@ impl SomniumRenderer {
         self.create_terrain_inner(ctx, desc, true, std::path::Path::new("assets/terrain"))
     }
 
+    /// As [`Self::create_terrain_with_asset_dir`], for an open world's terrain windows: the terrain takes
+    /// geometry-pool space only while the camera is within `geometry_distance` metres of it
+    /// ([`crate::terrain::TerrainData::stream_geometry`]), so a world of many windows fits the pool.
+    pub fn create_streamed_terrain_with_asset_dir(
+        &mut self,
+        ctx: &RenderContext,
+        desc: crate::terrain::TerrainDescriptor,
+        asset_dir: &std::path::Path,
+        geometry_distance: f32,
+    ) -> u32 {
+        self.streamed_terrain_distance = geometry_distance.max(0.0);
+        let id = self.create_terrain_inner(ctx, desc, false, asset_dir);
+        self.streamed_terrain_distance = 0.0;
+        id
+    }
+
     fn create_terrain_inner(
         &mut self,
         ctx: &RenderContext,
@@ -3180,7 +3713,12 @@ impl SomniumRenderer {
             ctx.supports_bc_compression(),
             asset_dir,
         );
-        terrain.reserve_pool_spans(&mut self.geometry);
+        if self.streamed_terrain_distance > 0.0 {
+            // Spans come when the camera is near (the first frame, for a window the view starts in).
+            terrain.geometry_stream_distance = self.streamed_terrain_distance;
+        } else {
+            terrain.reserve_pool_spans(&mut self.geometry);
+        }
         if hero_bank_only {
             terrain.apply_hero_bank_gpu_budget();
         }
@@ -3274,7 +3812,12 @@ impl SomniumRenderer {
         terrain.texture_ids = ids;
         terrain.terrain_index = self.terrain_materials.allocate().unwrap_or(0);
 
-        let clipmap = crate::terrain::clipmap::TerrainClipmap::new(&ctx.device);
+        // A streamed open-world window keeps a dormant clipmap: 1 x 1 images instead of 96 MiB it would never use.
+        let clipmap = if self.streamed_terrain_distance > 0.0 {
+            crate::terrain::clipmap::TerrainClipmap::new_dormant(&ctx.device)
+        } else {
+            crate::terrain::clipmap::TerrainClipmap::new(&ctx.device)
+        };
 
         // The `GpuMaterial` itself is nearly empty: `terrain_index` is what
         // sends the shading pass down the splat path, and everything it would
@@ -3316,6 +3859,10 @@ impl SomniumRenderer {
         self.terrains.push(terrain);
         self.clipmaps.push(clipmap);
         let last = self.clipmaps.len() - 1;
+        if self.clipmaps[last].is_dormant() {
+            // The shading pass keeps the stacks it has: a dormant clipmap's stand-ins would replace a live one's.
+            return (self.terrains.len() - 1) as u32;
+        }
         let (detail_a, detail_s) = self.clipmaps[last].detail_sampled();
         let (macro_a, macro_s) = self.clipmaps[last].macro_sampled();
         let detail_a = detail_a.clone();
@@ -3366,7 +3913,17 @@ impl SomniumRenderer {
         self.water_bodies.clear();
         self.underwater_body = None;
         self.underwater_pass.invalidate();
+        self.cloud_pass.reset_history();
         self.clear_gizmo();
+        // A new scene's first frame follows from nothing drawn before it (a chapter's load).
+        self.camera_cut();
+    }
+
+    /// The next frame's camera does not follow from this one's: a cinematic's cut, a chapter's first frame. Its
+    /// temporal history starts over (FSR, TAA, frame generation, the clouds, the path tracer) and motion blur sits it
+    /// out, so the jump is not smeared as motion. Jumps of 2 m or 50 degrees in a frame count without being told.
+    pub fn camera_cut(&mut self) {
+        self.camera_cut_requested = true;
     }
 
     /// Mutable access to a terrain (sculpting, painting, raycasts).
@@ -3606,12 +4163,37 @@ impl SomniumRenderer {
         self.profiler.cpu_end();
         // FSR 3 frame generation: the scene goes to a picture and the swap chain
         // images are taken after it (renderer_frame_gen.rs).
-        let frame_gen_eligible = ui.is_immersive() && scene_target.is_none() && self.views.len() <= 1;
+        let frame_gen_eligible =
+            !self.unpresented && ui.is_immersive() && scene_target.is_none() && self.views.len() <= 1;
         let frame_gen_view = self.frame_gen_begin(ctx, window, game_ui.as_deref_mut(), frame_gen_eligible);
         let acquire_started = std::time::Instant::now();
-        let output = if frame_gen_view.is_some() { None } else { Some(match ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex) => tex,
-            wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+        let skip_acquire = self.unpresented && self.unpresented_wait > 0;
+        self.unpresented_wait = self.unpresented_wait.saturating_sub(1);
+        let acquired = if frame_gen_view.is_some() || skip_acquire { None } else { Some(ctx.surface.get_current_texture()) };
+        let output = if frame_gen_view.is_some() { None } else { match acquired {
+            Some(wgpu::CurrentSurfaceTexture::Success(tex)) => Some(tex),
+            Some(wgpu::CurrentSurfaceTexture::Suboptimal(tex)) => Some(tex),
+            _ if self.unpresented => {
+                if !skip_acquire {
+                    self.unpresented_wait = 120;
+                }
+                let (w, h) = (ctx.config.width.max(1), ctx.config.height.max(1));
+                if self.unpresented_target.as_ref().is_none_or(|t| (t.2, t.3) != (w, h)) {
+                    let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("unpresented frame"),
+                        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: ctx.config.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    self.unpresented_target = Some((texture, view, w, h));
+                }
+                None
+            }
             _ => {
                 tracing::warn!("Failed to acquire surface texture");
                 // The per-frame queues still have to be emptied. Returning
@@ -3622,12 +4204,16 @@ impl SomniumRenderer {
                 self.clear_frame_queues();
                 return;
             }
-        }) };
+        } };
         self.profiler.surface_acquire_ms = acquire_started.elapsed().as_secs_f32() * 1000.0;
         let surface_view = match (&output, &frame_gen_view) {
             (Some(output), _) => output.texture.create_view(&wgpu::TextureViewDescriptor::default()),
             (None, Some(picture)) => picture.clone(),
-            (None, None) => unreachable!("acquired above unless generating"),
+            (None, None) => self
+                .unpresented_target
+                .as_ref()
+                .map(|t| t.1.clone())
+                .expect("acquired above unless generating or drawing unpresented"),
         };
 
         // The picture and the chrome can be in different windows. Everything
@@ -3767,19 +4353,32 @@ impl SomniumRenderer {
             );
             self.profiler.end(&mut encoder);
         }
+        // The editor's preview studio: after the scene (its materials and environment are this frame's), before the UI.
+        if self.preview_studio.has_pending() {
+            self.profiler.begin(&mut encoder, "Preview studio");
+            let blend = &self.material_blend;
+            self.preview_studio.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                &|material| blend.get(material as usize).copied().unwrap_or(false),
+            );
+            self.profiler.end(&mut encoder);
+        }
 
         // FSR 3 frame generation: the frame between the last picture and this one
         // lands in the swap chain image the UI and the present below use.
         let (output, surface_view) = if frame_gen_view.is_some() {
             match self.frame_gen_finish(ctx, &mut encoder) {
-                Some(acquired) => acquired,
+                Some((acquired, view)) => (Some(acquired), view),
                 None => {
                     self.clear_frame_queues();
                     return;
                 }
             }
         } else {
-            (output.expect("acquired above"), surface_view.clone())
+            (output, surface_view.clone())
         };
 
         // Display-only evidence (tone map, bloom, FXAA, CAS). Capture before
@@ -3794,7 +4393,10 @@ impl SomniumRenderer {
                 self.capture.record_display(
                     &ctx.device,
                     &mut encoder,
-                    &output.texture,
+                    output.as_ref().map_or_else(
+                        || &self.unpresented_target.as_ref().expect("drawn unpresented").0,
+                        |o| &o.texture,
+                    ),
                     ctx.config.width,
                     ctx.config.height,
                     ctx.config.format,
@@ -3892,7 +4494,7 @@ impl SomniumRenderer {
             if drawn == 0 && !self.game_ui_empty_warned {
                 self.game_ui_empty_warned = true;
                 tracing::warn!(
-                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      bug MORROWIND-E2 exists to fix (plan A.7, track 1)"
+                    "on_render_ui drew no canvas; a game UI hook that draws nothing is the                      usually a missing draw call in the game's on_render_ui"
                 );
             }
         }
@@ -3912,7 +4514,10 @@ impl SomniumRenderer {
                 self.capture.record_ui(
                     &ctx.device,
                     &mut encoder,
-                    &output.texture,
+                    output.as_ref().map_or_else(
+                        || &self.unpresented_target.as_ref().expect("drawn unpresented").0,
+                        |o| &o.texture,
+                    ),
                     ctx.config.width,
                     ctx.config.height,
                     ctx.config.format,
@@ -4079,7 +4684,9 @@ impl SomniumRenderer {
         // so the present is ordered against submitted work explicitly rather
         // than implicitly by the texture's lifetime.
         let presenting = std::time::Instant::now();
-        ctx.queue.present(output);
+        if let Some(output) = output {
+            ctx.queue.present(output);
+        }
         self.profiler.submit_present_ms = submit_started.elapsed().as_secs_f32() * 1000.0;
         let ms = |from: std::time::Instant, to: std::time::Instant| (to - from).as_secs_f32() * 1000.0;
         self.profiler.submit_parts_ms = [
@@ -4168,6 +4775,8 @@ impl SomniumRenderer {
     ) {
         self.view_slot = slot;
         self.set_view(view.view, view.proj, view.camera_pos);
+        // The clouds' history belongs to the primary camera too (pass/clouds.rs).
+        self.cloud_pass.primary_view = primary;
         if !primary {
             self.taa_pass.set_enabled(false);
             self.fsr_pass.enabled = false;
@@ -4184,6 +4793,7 @@ impl SomniumRenderer {
     /// every frame after it — the classic shape of a bug that only appears once
     /// you have used a feature and then stopped.
     fn restore_primary_view(&mut self, views: &[crate::view::SceneView]) {
+        self.cloud_pass.primary_view = true;
         if views.len() > 1 {
             self.taa_pass.set_enabled(self.frame_view_state.taa);
             self.fsr_pass.enabled = self.frame_view_state.fsr;
@@ -4225,6 +4835,19 @@ impl SomniumRenderer {
         // of `&mut *encoder`.
         let mut encoder = encoder;
         self.apply_scene_view(ctx, view, primary, slot);
+        // A camera cut (`camera_cut`, or a jump between this frame's view and the last one drawn): the temporal passes
+        // start over and motion blur sits this frame out (FSR's reset and the blur below).
+        let cut = primary && {
+            let cut = camera_cut_now(std::mem::take(&mut self.camera_cut_requested), self.cut_view, self.view_matrix);
+            self.cut_view = Some(self.view_matrix);
+            if cut {
+                self.taa_pass.reset_history();
+                self.cloud_pass.reset_history();
+                self.path_tracer_pass.reset_history();
+                self.frame_gen.request_reset();
+            }
+            cut
+        };
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
         // Bit 4 must be uniform for the whole draw: a per-pixel `traced.a`
         // skip of PCSS is varying, DXC flattens it, and every terrain pixel
@@ -4260,6 +4883,7 @@ impl SomniumRenderer {
         if self.brdf_micro_shadow {
             shading_mode |= 256;
         }
+        shading_mode |= ((self.light_ramp.clamp(0.0, 1.0) * 255.0).round() as u32) << 24;
         self.global_pool.cluster_grid.assign_and_upload(
             &ctx.queue,
             &self.local_lights,
@@ -4460,6 +5084,36 @@ impl SomniumRenderer {
             let terrain = &mut self.terrains[id as usize];
             terrain.model = model;
             let local_cam = model.inverse().transform_point3(self.camera_pos);
+            // A window that gave its chunks back drops their BLAS too, or each return leaks a window's worth.
+            for offset in terrain.stream_geometry(&mut self.geometry, local_cam) {
+                self.raytrace_pass.unregister_mesh(offset);
+            }
+            // WS1-18: a streamed window with no geometry draws nothing, so its splat maps (~134 MB at 2048^2 x 8)
+            // go too, and come back, re-uploaded from the CPU weights, as its first chunks return. The bindless
+            // slots keep their numbers and point at the dummy image meanwhile.
+            if terrain.geometry_stream_distance > 0.0 {
+                let resident = terrain.chunks.iter().any(|c| c.vertex_offset != crate::terrain::UNALLOCATED);
+                if resident == terrain.splatmap.is_parked() {
+                    if resident {
+                        terrain.splatmap.unpark(&ctx.device);
+                    } else {
+                        terrain.splatmap.park(&ctx.device);
+                    }
+                    for (i, &slot) in terrain.texture_ids.splat_maps.iter().enumerate() {
+                        let Ok(slot) = usize::try_from(slot) else { continue };
+                        let view = if resident {
+                            terrain.splatmap.views[i].clone()
+                        } else {
+                            self.texture_pool.dummy_view.clone()
+                        };
+                        if let Some(owned) = self.texture_pool.views.get_mut(slot) {
+                            *owned = view.clone();
+                        }
+                        self.global_pool.set_slot(slot, view);
+                    }
+                    self.global_pool.update_textures(&ctx.device);
+                }
+            }
             terrain.select_lods(local_cam, &shoreline_regions);
             self.rebuilt_chunks.clear();
             terrain.rebuild_dirty_chunks(&ctx.queue, &mut self.geometry, &mut self.rebuilt_chunks);
@@ -4650,12 +5304,25 @@ impl SomniumRenderer {
         self.profiler.cpu_begin("Instances");
         self.instances.clear();
         for cmd in &self.draw_queue {
-            self.instances.add_instance(gpu_instance_from_cmd(
-                &self.terrain_lod_by_vertex,
-                cmd,
-                shadow_debug,
-            ));
+            let mut instance = gpu_instance_from_cmd(&self.terrain_lod_by_vertex, cmd, shadow_debug);
+            if instance._padding == 0 && self.no_contact_meshes.contains(&cmd.vertex_offset) {
+                instance._padding = crate::instance::NO_CONTACT_SHADOW;
+            }
+            self.instances.add_instance(instance);
         }
+        // Which of two faces in one plane the visibility pass keeps, the same every frame (`depth_tie`).
+        // `SOMNIUM_DEPTH_TIE=0` (comparisons only) leaves every tie at 0, as before 29 Oct 2026.
+        static DEPTH_TIES: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| std::env::var("SOMNIUM_DEPTH_TIE").as_deref() != Ok("0"));
+        let ties: Vec<u32> = self
+            .draw_queue
+            .iter()
+            .map(|cmd| {
+                let terrain = self.terrain_lod_by_vertex.contains_key(&cmd.vertex_offset);
+                if *DEPTH_TIES { depth_tie(cmd, self.geometry.mesh_aabb(cmd.vertex_offset), terrain) } else { 0 }
+            })
+            .collect();
+        self.vis_pass.set_depth_ties(&ctx.device, &ctx.queue, &ties);
         for cmd in &self.shadow_only_queue {
             self.instances.add_instance(gpu_instance_from_cmd(
                 &self.terrain_lod_by_vertex,
@@ -4699,6 +5366,26 @@ impl SomniumRenderer {
             );
             (style, members, transparent)
         }).filter(|(_, members, transparent)| members.iter().any(|m| *m != 0) || !transparent.is_empty());
+        // The editor's glow, by entity. Terrain chunks are keyed by their vertex offset, not an entity: never them.
+        let editor_glow_frame = {
+            let terrain = &self.terrain_lod_by_vertex;
+            let members = |entities: &std::collections::HashSet<u32>| {
+                (!entities.is_empty())
+                    .then(|| {
+                        crate::pass::editor_glow::entity_members(
+                            &self.draw_queue,
+                            self.shadow_only_queue.len(),
+                            &self.transparent_queue,
+                            entities,
+                            |offset| terrain.contains_key(&offset),
+                        )
+                    })
+                    .filter(|(members, transparent)| {
+                        members.iter().any(|m| *m != 0) || !transparent.is_empty()
+                    })
+            };
+            (members(&self.editor_selected), members(&self.editor_hovered))
+        };
 
         self.profiler.cpu_begin("Indirect args");
         // ── 3.5 Phase 15A: build this frame's indirect draw arguments ────────
@@ -4950,7 +5637,7 @@ impl SomniumRenderer {
             // Phase DOOM-A: bracketed. This was one of the passes the §17.7
             // table listed as landing in `unattributed`, which is why the row
             // existed at all.
-            self.profiler.begin(&mut encoder, "Cull (phase 1)");
+            self.profiler.begin(&mut encoder, "Cull (pass 1)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -4969,7 +5656,7 @@ impl SomniumRenderer {
         }
 
         // ── 6. Visibility Pass (phase 1) ─────────────────────────────────────
-        self.profiler.begin(&mut encoder, "Visibility (phase 1)");
+        self.profiler.begin(&mut encoder, "Visibility (pass 1)");
         self.record_visibility(&mut encoder, true);
         self.profiler.end(&mut encoder);
 
@@ -4980,7 +5667,7 @@ impl SomniumRenderer {
 
         if cull_active {
             // ── 6.7 Cull phase 2 ─────────────────────────────────────────────
-            self.profiler.begin(&mut encoder, "Cull (phase 2)");
+            self.profiler.begin(&mut encoder, "Cull (pass 2)");
             self.cull_pass.record(
                 &ctx.device,
                 &mut encoder,
@@ -4998,12 +5685,12 @@ impl SomniumRenderer {
             }
 
             // ── 6.8 Visibility Pass (phase 2) — disocclusions ────────────────
-            self.profiler.begin(&mut encoder, "Visibility (phase 2)");
+            self.profiler.begin(&mut encoder, "Visibility (pass 2)");
             self.record_visibility(&mut encoder, false);
             self.profiler.end(&mut encoder);
 
             // ── 6.9 Final pyramid, for the next frame's phase 1 ──────────────
-            self.profiler.begin(&mut encoder, "Hi-Z (phase 2)");
+            self.profiler.begin(&mut encoder, "Hi-Z (pass 2)");
             self.hiz_pass.record(&mut encoder);
             self.profiler.end(&mut encoder);
         }
@@ -5083,6 +5770,7 @@ impl SomniumRenderer {
                 .iter()
                 .enumerate()
                 .filter(|(_, cmd)| !self.first_person_casters.contains(&(cmd.vertex_offset, cmd.index_offset)))
+                .filter(|(_, cmd)| !self.untraced_meshes.contains(&cmd.vertex_offset))
                 // A posed mesh out of reach keeps whatever pose its bottom level last had: left out, not shown stale.
                 .filter(|(_, cmd)| !posed.contains_key(&cmd.vertex_offset) || live_posed.contains(&cmd.vertex_offset))
                 .filter_map(|(i, cmd)| {
@@ -5090,6 +5778,14 @@ impl SomniumRenderer {
                         let half = (glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5;
                         cmd.transform.transform_vector3(half).length()
                     });
+                    if let Some(&reach) = self.trace_reach.get(&cmd.vertex_offset) {
+                        let centre = geometry.mesh_aabb(cmd.vertex_offset).map_or(cmd.transform.w_axis.truncate(), |(min, max)| {
+                            cmd.transform.transform_point3((glam::Vec3::from(min) + glam::Vec3::from(max)) * 0.5)
+                        });
+                        if centre.distance(self.camera_pos) - radius.min(1.0e6) > reach {
+                            return None;
+                        }
+                    }
                     (radius >= TLAS_MIN_RADIUS).then(|| {
                         (
                             u32::try_from(i).unwrap_or(0),
@@ -5244,9 +5940,11 @@ impl SomniumRenderer {
             // half-grid extent. Publish the actual DDGI lattice rather than
             // the 64^3 SDF volume's dimensions.
             self.ddgi_pass.publish_shading_lattice(&mut lighting_params);
-            // The real-time path tracer's output is composited through the same path-mode bit as the old one; its
-            // reflections through the traced-specular bit (which lighting_extra's own specular trace then gives up).
-            if self.path_tracer_pass.enabled && self.path_tracer_pass.supported() {
+            // The real-time path tracer's mode 0 through the path-mode bit (shading writes its surface for it and
+            // leaves its ambient to it: only once there is a scene to trace); its reflections through the
+            // traced-specular bit (which lighting_extra's own specular trace then gives up).
+            let traced_scene = self.path_tracer_pass.supported() && self.raytrace_pass.tlas().is_some();
+            if self.path_tracer_pass.enabled && traced_scene {
                 lighting_params[0] = f32::from_bits(lighting_params[0].to_bits() | crate::pass::lighting_extra::FLAG_PATH);
             } else if self.path_tracer_pass.reflections && self.path_tracer_pass.supported() {
                 lighting_params[0] = f32::from_bits(lighting_params[0].to_bits() | crate::pass::lighting_extra::FLAG_SPECULAR);
@@ -5289,8 +5987,8 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
 
         // ── 6.85 The real-time path tracer (17 Oct 2026; path_tracer.rs) ────
-        // After velocity (its history reprojects through it), before shading
-        // (which composites its output where the path-mode bit is set).
+        // After velocity (its history reprojects through it). Its reflections (mode 1) record here, before shading,
+        // which reads them; the whole tracer (mode 0) records after shading (7.1), from the surface shading wrote.
         let path_on = (self.path_tracer_pass.enabled || self.path_tracer_pass.reflections)
             && self.path_tracer_pass.supported()
             && self.raytrace_pass.tlas().is_some();
@@ -5307,11 +6005,11 @@ impl SomniumRenderer {
             } else {
                 self.lighting_extra_pass.aux_view().clone()
             };
-            self.shading_pass.set_lighting_aux(&ctx.device, &aux);
+            self.shading_pass.set_lighting_aux(&ctx.device, &aux, self.path_tracer_pass.surface_views());
             self.path_aux_bound = path_on;
             self.path_tracer_pass.reset_history();
         }
-        if path_on && let Some(tlas) = self.raytrace_pass.tlas() {
+        if path_on && !self.path_tracer_pass.enabled && let Some(tlas) = self.raytrace_pass.tlas() {
             self.profiler.begin(&mut encoder, "Path tracer");
             self.path_tracer_pass.record(
                 &ctx.device,
@@ -5577,161 +6275,27 @@ impl SomniumRenderer {
         // per-frame cost; Island stays on COMPACT and never pays it.
         {
             let restir_sun = self.restir_pass.active() && self.raytrace_pass.tlas().is_some();
-            let mut spec = crate::pass::shading::ShadingSpec {
-                hex: false,
-                pom: false,
-                pcss: (self.shading_mode & 2) != 0 && !restir_sun,
-                contact: (self.shading_mode & 4) != 0 && !restir_sun && self.contact_shadows,
-                clipmap: false,
-                debug: self.shading_debug != 0.0,
-                terrain_scan: crate::terrain::textures::TERRAIN_HERO_LAYERS,
-                terrain_active_layers: 0,
-                live_terrain: false,
-                // Phase DOOM-B. Read once at startup and held constant for the
-                // process: an ablation that could change mid-run would recreate
-                // the PSO and put a shader compile inside the window being
-                // timed.
-                ablate: self.shade_ablate,
-            };
-            // Phase DF audit: a clipmapped terrain shades from the cache, which
-            // already holds strongest-four + hex + height-blend and never
-            // marches POM. Folding its `hex_tiling` / `parallax_scale` into the
-            // spec kept both of those compiled into the shading shader for a
-            // path that cannot execute, and occupancy is the union of what is
-            // in the module — the same trap the runtime checkboxes fell into.
-            //
-            // The clipmap test must match `TerrainClipmap::fill_gpu` exactly.
-            // If it says "clipmapped" where `fill_gpu` writes
-            // `clipmap_enabled = 0`, the live path is deleted from under a
-            // terrain that still needs it and the ground renders unshaded.
+            // The clipmap test must match `TerrainClipmap::fill_gpu` exactly; see `shading_plan`.
             let clipmap_forced_off = crate::terrain::clipmap::TerrainClipmap::env_forced_off();
-            for &(id, _) in &self.terrain_queue {
-                let Some(t) = self.terrains.get(id as usize) else {
-                    continue;
-                };
-                let clipmapped = self
-                    .clipmaps
-                    .get(id as usize)
-                    .is_some_and(|c| c.enabled && !clipmap_forced_off);
-                if clipmapped {
-                    spec.clipmap = true;
-                    continue;
-                }
-                spec.live_terrain = true;
-                spec.terrain_active_layers |= t.splatmap.painted_layers();
-                spec.hex |= t.hex_tiling;
-                spec.pom |= t.parallax_scale > 0.0;
-                if !t.hero_bank_only {
-                    spec.terrain_scan = crate::terrain::textures::TERRAIN_LAYER_COUNT;
-                }
+            let terrains = self.terrain_queue.iter().filter_map(|&(id, _)| {
+                let t = self.terrains.get(id as usize)?;
+                Some(TerrainShade {
+                    clipmapped: self.clipmaps.get(id as usize).is_some_and(|c| c.enabled && !clipmap_forced_off),
+                    painted_layers: t.splatmap.painted_layers(),
+                    hex: t.hex_tiling,
+                    pom: t.parallax_scale > 0.0,
+                    hero_bank_only: t.hero_bank_only,
+                })
+            });
+            let plan = self.shading_plan(self.shading_mode, restir_sun, !self.terrain_queue.is_empty(), terrains);
+            self.shading_pass.ensure_pipeline(&ctx.device, plan.main);
+            self.aerial_split_active = plan.split.is_some();
+            if let Some((near, aerial)) = plan.split {
+                self.shading_pass.ensure_split_pipelines(&ctx.device, near, aerial);
             }
-            // No terrain queued at all: keep the live path so the next frame's
-            // first terrain does not have to wait on a pipeline rebuild.
-            if self.terrain_queue.is_empty() {
-                spec.live_terrain = true;
-                spec.terrain_active_layers = u32::MAX;
-            }
-            // Same binary A/B, default off: the sparse mask regressed Gardens
-            // shading from 12.18 to 16.90 ms on the RTX 5080 Laptop. Keep the
-            // full palette until a specialization is measured faster.
-            static PAINTED_LAYERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if !*PAINTED_LAYERS.get_or_init(|| {
-                std::env::var("SOMNIUM_TERRAIN_PAINTED_MASK").as_deref() == Ok("1")
-            }) {
-                spec.terrain_active_layers = u32::MAX;
-            }
-            // Measurement rail only: how much of terrain shading is the splat scan.
-            if let Some(scan) = std::env::var("SOMNIUM_TERRAIN_SCAN").ok().and_then(|v| v.parse::<u32>().ok()) {
-                spec.terrain_scan = scan.clamp(4, crate::terrain::textures::TERRAIN_LAYER_COUNT);
-            }
-            self.shading_pass.ensure_pipeline(&ctx.device, spec);
-
-            // ── Phase DOOM-E: the aerial split ───────────────────────────────
-            //
-            // Two fullscreen draws instead of one, separated by a depth test
-            // against the scene depth the visibility pass already filled. The
-            // near draw keeps everything closer than `aerial_split`; the aerial
-            // draw takes the rest, including the sky at the cleared far value.
-            //
-            // What the aerial pipeline drops is what only resolves close up:
-            // hex tiling, which exists to break the repetition of a tiled layer
-            // and cannot be seen at distance, and the parallax march, which
-            // `gpu_material_for_camera` already fades out with height. Both are
-            // *deleted from the pipeline*, not skipped at runtime — a per-pixel
-            // sample-count branch is exactly what XV-Zeta §11.1 forbids, and a
-            // second pipeline is how the same effect is had without one.
-            //
-            // Enabled only when the near spec actually has something to drop.
-            // Compiling a second pipeline identical to the first would cost a
-            // shader compile and a second full-screen pass to save nothing.
-            self.aerial_split_active = self.aerial_split_enabled
-                && (spec.hex || spec.pom)
-                && self.shade_ablate == crate::pass::shading::ablate::OFF;
-            if self.aerial_split_active {
-                let aerial = crate::pass::shading::ShadingSpec {
-                    hex: false,
-                    pom: false,
-                    terrain_scan: if self.aerial_hero_bank {
-                        crate::terrain::textures::TERRAIN_HERO_LAYERS
-                    } else {
-                        spec.terrain_scan
-                    },
-                    ..spec
-                };
-                self.shading_pass
-                    .ensure_split_pipelines(&ctx.device, spec, aerial);
-            }
-
-            // Phase DOOM-C/E: the same spec, narrowed per bin.
-            //
-            // This is the whole point of the phase. `spec` above is the union
-            // of everything any pixel on screen might need, which is what the
-            // one fullscreen draw has to be compiled for. A tile that contains
-            // only sky needs almost none of it, and a tile of terrain 400 m away
-            // needs less than one at the player's feet.
-            if self.classify_pass.enabled {
-                use crate::pass::classify as bins;
-                for bin in 0..bins::BIN_COUNT {
-                    let mut s = spec;
-                    match bin {
-                        // Sky, mesh and foliage never reach the terrain
-                        // material, so the 32-wide splat scan, hex tiling, POM
-                        // and the clipmap sampler all leave the module. Sky
-                        // additionally never samples a shadow map.
-                        bins::BIN_SKY => {
-                            s.live_terrain = false;
-                            s.clipmap = false;
-                            s.hex = false;
-                            s.pom = false;
-                            s.pcss = false;
-                            s.contact = false;
-                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-                        }
-                        bins::BIN_MESH | bins::BIN_FOLIAGE => {
-                            s.live_terrain = false;
-                            s.clipmap = false;
-                            s.hex = false;
-                            s.pom = false;
-                            s.terrain_scan = crate::terrain::textures::TERRAIN_HERO_LAYERS;
-                        }
-                        // DOOM-E. Terrain past the aerial split drops the two
-                        // things that only resolve close up: hex tiling, which
-                        // exists to break tiling repetition the eye can only
-                        // see near the camera, and the parallax march, which
-                        // `gpu_material_for_camera` already fades out with
-                        // distance. Both are *deleted* from this pipeline
-                        // rather than skipped at runtime — a per-pixel
-                        // sample-count branch is what XV-Zeta §11.1 forbids,
-                        // and a separate pipeline is precisely the way to get
-                        // the same effect without one.
-                        bins::BIN_TERRAIN_AERIAL => {
-                            s.hex = false;
-                            s.pom = false;
-                        }
-                        // Near terrain and mixed tiles keep the full spec.
-                        _ => {}
-                    }
-                    self.shading_pass.ensure_bin_pipeline(&ctx.device, bin, s);
+            if let Some(bins) = plan.bins {
+                for (bin, spec) in bins.into_iter().enumerate() {
+                    self.shading_pass.ensure_bin_pipeline(&ctx.device, bin, spec);
                 }
             }
         }
@@ -5859,7 +6423,7 @@ impl SomniumRenderer {
                             rpass.draw(0..3, 0..1);
                         }
                         _ => {
-                            rpass.set_pipeline(&self.shading_pass.pipeline);
+                            rpass.set_pipeline(self.shading_pass.pipeline.as_ref().expect("ensure_pipeline ran this frame"));
                             rpass.draw(0..3, 0..1);
                         }
                     }
@@ -5870,6 +6434,28 @@ impl SomniumRenderer {
             }
         }
         self.profiler.end(&mut encoder);
+
+        // ── 7.1 The path tracer, the whole picture (mode 0; path_tracer.rs) ──
+        // From the surface the shading pass just wrote at every pixel; its traced bounced light is added over the
+        // shading pass's picture, which has the direct light and no ambient while this runs.
+        if path_on && self.path_tracer_pass.enabled && let Some(tlas) = self.raytrace_pass.tlas() {
+            self.profiler.begin(&mut encoder, "Path tracer");
+            self.path_tracer_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                tlas,
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                self.velocity_pass.view(),
+                &self.vis_pass.view,
+                self.view_proj_unjittered.inverse(),
+                self.camera_pos,
+            );
+            self.path_tracer_pass.composite(&ctx.device, &mut encoder, &self.postprocess_pass.hdr_view);
+            self.profiler.end(&mut encoder);
+        }
 
         // ── 7.2 Skin: gather the light the shading pass left on it ───────────
         // Straight after shading, while the HDR target holds nothing else and
@@ -6176,17 +6762,20 @@ impl SomniumRenderer {
         // gather's dither, and blurring the resolved image instead would smear
         // a frame that has already been blended with its own past.
         self.profiler.begin(&mut encoder, "Motion Blur");
-        self.motion_blur_pass.record(
-            &ctx.device,
-            &ctx.queue,
-            &mut encoder,
-            &self.postprocess_pass.hdr_view,
-            &self.postprocess_pass.hdr_texture,
-            self.velocity_pass.view(),
-            &self.vis_pass.depth_view,
-            self.render_width,
-            self.render_height,
-        );
+        // Not across a camera cut: its velocities are the jump itself, which smeared every lore film's cuts.
+        if !cut {
+            self.motion_blur_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.postprocess_pass.hdr_view,
+                &self.postprocess_pass.hdr_texture,
+                self.velocity_pass.view(),
+                &self.vis_pass.depth_view,
+                self.render_width,
+                self.render_height,
+            );
+        }
         self.profiler.end(&mut encoder);
 
         self.profiler.begin(&mut encoder, "TAA");
@@ -6377,7 +6966,7 @@ impl SomniumRenderer {
             self.exposure,
             self.proj_matrix,
             self.frame_delta_time,
-            false,
+            cut,
         );
         if fsr_ok {
             self.postprocess_pass
@@ -6419,7 +7008,13 @@ impl SomniumRenderer {
             } else {
                 self.grading
             },
-            if debugging { Default::default() } else { self.picture_shift },
+            if debugging {
+                Default::default()
+            } else if self.picture_shift.kind != 0 {
+                self.picture_shift
+            } else {
+                self.authored_picture_shift
+            },
             self.view_proj.inverse().to_cols_array(),
         );
         // Phase 15A2: with FXAA on, tone-map into the LDR intermediate and let
@@ -6521,6 +7116,36 @@ impl SomniumRenderer {
             self.profiler.end(&mut encoder);
         }
 
+        if self.editor_overlays_enabled
+            && (editor_glow_frame.0.is_some() || editor_glow_frame.1.is_some())
+        {
+            self.profiler.begin(&mut encoder, "Editor glow");
+            for (mask, frame) in [
+                (&mut self.editor_selection_mask, &editor_glow_frame.0),
+                (&mut self.editor_hover_mask, &editor_glow_frame.1),
+            ] {
+                if let Some((members, transparent)) = frame {
+                    mask.resize(self.render_width, self.render_height);
+                    mask.record_mask(
+                        &ctx.device, &ctx.queue, &mut encoder, &self.global_pool.bind_group,
+                        &self.vis_pass.view, &self.vis_pass.depth_view, members, transparent, slot as usize,
+                    );
+                }
+            }
+            self.editor_glow_pass.composite(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &surface_view,
+                output_extent,
+                view.rect,
+                editor_glow_frame.0.as_ref().and(self.editor_selection_mask.mask_view()),
+                editor_glow_frame.1.as_ref().and(self.editor_hover_mask.mask_view()),
+                self.editor_glow_style,
+            );
+            self.profiler.end(&mut encoder);
+        }
+
         // DOOM-A: `Post + present` closes here. Everything below is editor
         // chrome, and chrome that is billed to the post chain is chrome nobody
         // ever looks at — the whole reason to separate them is that the scene
@@ -6581,6 +7206,9 @@ impl SomniumRenderer {
         self.draw_queue.clear();
         self.reactive_draws.clear();
         self.first_person_casters.clear();
+        self.untraced_meshes.clear();
+        self.trace_reach.clear();
+        self.no_contact_meshes.clear();
         self.first_person = false;
         self.game_highlight_draws.clear();
         self.game_highlight_style = None;
@@ -7083,6 +7711,36 @@ fn gpu_instance_from_cmd(
     }
 }
 
+/// Whether this frame is a camera cut: one was asked for (`SomniumRenderer::camera_cut`), or the view jumped from
+/// the last one drawn by as much as frame generation's own test calls a cut (2 m or 50 degrees). The first frame is
+/// not: every temporal pass already starts over on it.
+fn camera_cut_now(requested: bool, last: Option<glam::Mat4>, now: glam::Mat4) -> bool {
+    requested || last.is_some_and(|last| crate::pass::frame_gen::is_cut(last, now))
+}
+
+/// A draw's depth tie (visibility.wgsl `depth_ties`, 29 Oct 2026): where two things' faces lie in one plane, the one
+/// with the higher tie is kept, every frame. Smaller things (a bounding radius under 0.6 m) take 8 to 15 and larger
+/// ones 0 to 7, so a sheet of paper, a book or a trim stays over its desk, shelf or wall; within each, three bits
+/// hashed from what the draw is (its mesh, index range, material and paint) and where it stands decide between
+/// equals: two copies of one table, two layers of one wall, two parts of one model in one plane. Seven pairs in eight
+/// tell apart; two draws the same in all of that draw the same pixels. Terrain takes 0. Unknown size counts as large.
+fn depth_tie(cmd: &DrawCommand, aabb: Option<([f32; 3], [f32; 3])>, terrain: bool) -> u32 {
+    use crate::pass::visibility::DEPTH_TIE_LEVELS;
+    if terrain {
+        return 0;
+    }
+    let radius = aabb.map_or(f32::INFINITY, |(min, max)| {
+        cmd.transform.transform_vector3((glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5).length()
+    });
+    let at = cmd.transform.w_axis;
+    let mut h = cmd.vertex_offset.wrapping_mul(0x9E37_79B1);
+    for v in [cmd.index_offset, cmd.material_id, cmd.paint, at.x.to_bits(), at.y.to_bits(), at.z.to_bits()] {
+        h = (h ^ v).wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+    }
+    u32::from(radius < 0.6) * DEPTH_TIE_LEVELS + h % DEPTH_TIE_LEVELS
+}
+
 /// What a caster is beyond its command: the first-person rig (nearest cascade only), and a skinned mesh posed in
 /// place (`Some(frame)`, which changes its cascades every frame).
 #[derive(Clone, Copy, Debug, Default)]
@@ -7264,6 +7922,12 @@ const STAGING_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 /// Content and interpretation both identify a reusable GPU image.
 /// A compressible texture's alpha and its BC7 chain from the cache, if stored.
 type PreparedChain = (bool, Option<Vec<Vec<u8>>>);
+
+/// The CPU half of an imported scene's upload ([`Renderer::prepare_scene_for`]), made off the render thread.
+pub struct PreparedScene {
+    textures: Vec<(usize, [u8; 32], Option<PreparedChain>)>,
+    meshes: Vec<crate::geometry::PreparedMesh>,
+}
 
 fn imported_texture_key(texture: &somnium_asset::LoadedTexture, colour: bool) -> [u8; 32] {
     use sha2::{Digest, Sha256};
@@ -7570,6 +8234,66 @@ mod frame_instance_layout_tests {
             transform: glam::Mat4::from_translation(glam::Vec3::new(tx, 0.0, 0.0)),
             casts_shadow: true,
         }
+    }
+
+    #[test]
+    fn a_depth_tie_keeps_small_things_over_large_and_splits_equals_by_place() {
+        use super::depth_tie;
+        let paper = ([-0.1, 0.0, -0.15], [0.1, 0.002, 0.15]);
+        let desk = ([-0.8, 0.0, -0.4], [0.8, 0.75, 0.4]);
+        let wall = ([-3.0, 0.0, -0.05], [3.0, 2.6, 0.05]);
+        for x in 0..40 {
+            let at = x as f32 * 0.37;
+            let small = depth_tie(&draw(5, 0, 1, at), Some(paper), false);
+            assert!((8..=15).contains(&small), "a sheet of paper is a small thing: {small}");
+            assert!(depth_tie(&draw(6, 0, 1, at), Some(desk), false) <= 7, "the paper stays over its desk");
+            assert!(depth_tie(&draw(7, 0, 1, at), Some(wall), false) <= 7, "a wall never goes over what is on it");
+            assert_eq!(depth_tie(&draw(7, 0, 1, at), Some(wall), true), 0, "terrain takes 0");
+            assert_eq!(small, depth_tie(&draw(5, 0, 1, at), Some(paper), false), "the same every frame");
+        }
+        // Two copies of one table a few centimetres apart, and two layers of one mesh at one place (another material,
+        // another index range), mostly get different ties: seven in eight.
+        let table = ([-0.5, 0.0, -0.5], [0.5, 0.74, 0.5]);
+        let tie = |index: u32, material: u32, x: f32| depth_tie(&draw(9, index, material, x), Some(table), false);
+        let moved = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(0, 1, k as f32 * 0.05 + 0.03)).count();
+        let layered = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(0, 2, k as f32 * 0.05)).count();
+        let parts = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(36, 1, k as f32 * 0.05)).count();
+        for (what, apart) in [("copies moved", moved), ("layers", layered), ("parts", parts)] {
+            assert!(apart > 200, "{what}: only {apart} of 256 pairs tell apart");
+        }
+    }
+
+    #[test]
+    fn a_camera_cut_is_one_asked_for_or_a_jump() {
+        use super::camera_cut_now;
+        let at = |x: f32, yaw: f32| {
+            glam::Mat4::look_at_rh(glam::vec3(x, 1.6, 0.0), glam::vec3(x + yaw.sin(), 1.6, -yaw.cos()), glam::Vec3::Y)
+        };
+        assert!(!camera_cut_now(false, None, at(0.0, 0.0)), "the first frame starts over anyway");
+        assert!(!camera_cut_now(false, Some(at(0.0, 0.0)), at(0.1, 0.05)), "a step and a small turn");
+        assert!(camera_cut_now(true, Some(at(0.0, 0.0)), at(0.0, 0.0)), "asked for (a cinematic's cut nearby)");
+        assert!(camera_cut_now(false, Some(at(0.0, 0.0)), at(3.0, 0.0)), "a 3 m jump");
+        assert!(camera_cut_now(false, Some(at(0.0, 0.0)), at(0.0, 1.2)), "a 69 degree turn");
+    }
+
+    #[test]
+    fn the_tie_constants_match_the_shaders() {
+        use crate::pass::visibility::{DEPTH_TIE_FADE, DEPTH_TIE_LEVELS, DEPTH_TIE_REACH, DEPTH_TIE_STEP_MAX};
+        let ties = include_str!("shaders/depth_tie.wgsl");
+        assert!(ties.contains(&format!("const DEPTH_TIE_STEP_MAX: f32 = {DEPTH_TIE_STEP_MAX:e};")), "STEP_MAX");
+        assert!(ties.contains(&format!("const DEPTH_TIE_REACH: f32 = {DEPTH_TIE_REACH:e};")), "REACH");
+        assert!(ties.contains(&format!("const DEPTH_TIE_FADE_START: f32 = {:.1};", DEPTH_TIE_FADE[0])), "FADE_START");
+        assert!(ties.contains(&format!("const DEPTH_TIE_FADE_END: f32 = {:.1};", DEPTH_TIE_FADE[1])), "FADE_END");
+        assert!(ties.contains(&format!("const DEPTH_TIE_GLASS: f32 = {:.1};", f64::from(2 * DEPTH_TIE_LEVELS))), "glass above all");
+        assert!(DEPTH_TIE_REACH >= (2 * DEPTH_TIE_LEVELS) as f32 * DEPTH_TIE_STEP_MAX, "the reach covers every tie");
+        for shader in [include_str!("shaders/visibility.wgsl"), include_str!("shaders/transparent.wgsl"), include_str!("shaders/cull.wgsl")] {
+            assert!(shader.contains("//!include \"depth_tie.wgsl\""), "every user of the ties includes depth_tie.wgsl");
+        }
+        // The slope for the game's camera (74 degrees, near 0.035 m) at 1440 rows: a step for a plane 1 m away.
+        let proj = glam::Mat4::perspective_rh(74f32.to_radians(), 16.0 / 9.0, 0.035, 350.0);
+        let slope = crate::pass::visibility::depth_tie_slope(&proj, 1440);
+        assert!((slope - 0.035 * 2.0 / (proj.y_axis.y * 1440.0) / 64.0).abs() < 1e-12, "{slope}");
+        assert_eq!(crate::pass::visibility::depth_tie_slope(&glam::Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, 0.1, 9.0), 1440), 0.0);
     }
 
     #[test]

@@ -1790,6 +1790,9 @@ pub struct Splatmap {
     /// Layers present in the uploaded rows. Partial edits conservatively retain
     /// old bits; a complete upload rebuilds the mask. Never omits a GPU weight.
     painted_layers: u32,
+    /// The GPU textures are 1 x 1 stand-ins (`park`): a far open-world window draws nothing, so its splat maps need
+    /// not hold ~134 MB of VRAM. `data` stays, and edits wait in `dirty` until `unpark`.
+    parked: bool,
 }
 
 fn merge_painted_layers(previous: u32, texels: &[SplatTexel], replaces_all: bool) -> u32 {
@@ -1810,6 +1813,46 @@ impl Splatmap {
         let mut first = [0u8; TERRAIN_LAYER_COUNT as usize];
         first[0] = 255;
         let data = vec![first; (width * height) as usize];
+        let (textures, views) = Self::gpu_textures(device, width, height);
+        let mut splat = Self {
+            textures,
+            views,
+            data,
+            width,
+            height,
+            dirty: None,
+            painted_layers: 0,
+            parked: false,
+        };
+        splat.mark_dirty(0, 0, width - 1, height - 1);
+        splat.upload_dirty(queue);
+        splat
+    }
+
+    /// Give the GPU textures back (a far window: nothing of the terrain is drawn), keeping the CPU weights.
+    pub fn park(&mut self, device: &wgpu::Device) {
+        (self.textures, self.views) = Self::gpu_textures(device, 1, 1);
+        self.parked = true;
+    }
+
+    /// Make the GPU textures again and upload every weight (on the next `upload_dirty`).
+    pub fn unpark(&mut self, device: &wgpu::Device) {
+        (self.textures, self.views) = Self::gpu_textures(device, self.width, self.height);
+        self.parked = false;
+        self.mark_dirty(0, 0, self.width - 1, self.height - 1);
+    }
+
+    /// Whether the GPU textures are stand-ins (`park`).
+    pub fn is_parked(&self) -> bool {
+        self.parked
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn gpu_textures(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> ([wgpu::Texture; super::splat::SPLAT_MAP_COUNT], [wgpu::TextureView; super::splat::SPLAT_MAP_COUNT]) {
         let labels = [
             "Terrain Splatmap 0-3",
             "Terrain Splatmap 4-7",
@@ -1839,18 +1882,7 @@ impl Splatmap {
         let views: [wgpu::TextureView; super::splat::SPLAT_MAP_COUNT] = std::array::from_fn(|i| {
             textures[i].create_view(&wgpu::TextureViewDescriptor::default())
         });
-        let mut splat = Self {
-            textures,
-            views,
-            data,
-            width,
-            height,
-            dirty: None,
-            painted_layers: 0,
-        };
-        splat.mark_dirty(0, 0, width - 1, height - 1);
-        splat.upload_dirty(queue);
-        splat
+        (textures, views)
     }
 
     /// Grow the dirty rectangle to include the given texel region.
@@ -1870,6 +1902,9 @@ impl Splatmap {
 
     /// Upload the dirty region to all splat textures (whole rows).
     pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
+        if self.parked {
+            return; // the edits wait in `dirty`; `unpark` uploads everything anyway
+        }
         let Some((_, z0, _, z1)) = self.dirty.take() else {
             return;
         };

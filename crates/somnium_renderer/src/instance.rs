@@ -2,6 +2,11 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// `GpuInstanceData::_padding` of a draw that casts no screen-space contact shadow (`exclude_from_contact_shadows`).
+/// Terrain chunks pack their LOD into the same word and always carry a vertex count in bits 4..13, so they never
+/// equal it; the CDLOD morph reads its own bits, all zero here, and does nothing.
+pub const NO_CONTACT_SHADOW: u32 = 0x8000_0000;
+
 /// Per-instance data matching the GPU layout.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]

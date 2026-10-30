@@ -23,7 +23,7 @@ belongs in [`dev records/`](<dev records/>). Provenance belongs in
 | Latest MORROWIND work | ALMSIVI acceptance slice: authored Audio Emitters, named script input, and CC0 map audio |
 | Current implementation priority | Continue PERSONA expansion one coherent slice at a time; preserve flat panel colors, immediate Content hover and existing authoring routes. |
 | Toolchain | Rust 1.88, edition 2024, wgpu 30, winit 0.30 |
-| Workspace | 17 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
+| Workspace | 20 engine crates, 2 examples, 1 workspace tool; `third_party/` holds wgpu-ffx, its SPIR-V and wgpu-ffx-fg |
 | Generated census, 2026-09-09 | 221,229 Rust/WGSL lines and 2,236 discovered tests. Not regenerated since: the generator now also counts `.claude/worktrees/` copies and must exclude them first |
 | Fast gate, 2026-08-29 | 5 passed, 1 failed, tests skipped |
 | Visual gate | PERSONA E/F fast gate: 5 pass, 1 golden mismatch, 1 workspace-test skip. Final shell differs in all three old regions; see [E/F evidence](<dev records/phase PERSONA/PERSONA-E_F.md>). References preserved; acceptance open. |
@@ -78,13 +78,32 @@ describe the older systems these build on.
 | Scene capture | A second, cheap forward view (384²) into a bindless slot, for mirrors and screens; own frustum, sun, lamps, fog | `pass/scene_capture.rs`, `shaders/scene_capture.wgsl` | features record D2 |
 | FSR 3 | The upscaler (wgpu-ffx, AMD's SPIR-V) plus frame generation: AMD's FidelityFX 1.1.4 frame interpolation and optical flow translated to WGSL (`third_party/wgpu-ffx-fg`). Paced by split submits, the game UI drawn fresh over both frames | `pass/fsr.rs`, `pass/frame_gen.rs`, `renderer_frame_gen.rs` | [`FRAME_GENERATION_2026-10-17.md`](<dev records/FRAME_GENERATION_2026-10-17.md>) |
 | Frame pacing | A game asks for V-sync on/off and a frame cap. The request is applied between frames (`PresentMode` AutoVsync/AutoNoVsync) | `somnium_core/src/time.rs` `request_frame_pacing`, `context.rs` `set_vsync` | game record |
-| A game's own graphics budget | `set_graphics_budget(Some(budget))` lays a game's per-feature choices over the scene in place of a tier. Requests switch on what no scene authors: `path_tracing_requested`, `traced_reflections_requested`, `bloom_pass.lens_flare` | `renderer.rs`, `quality.rs`, `app.rs` settings push | game record |
+| A game's own graphics budget | `set_graphics_budget(Some(budget))` lays a game's per-feature choices over the scene in place of a tier. Requests switch on what no scene authors: `path_tracing_requested`, `traced_reflections_requested`, `lens_flare_requested` | `renderer.rs`, `quality.rs`, `app.rs` settings push | game record |
 | PS2 picture | `PostProcess.retro` (a PS2-style picture: low resolution, no temporal smoothing, no traced light) and `PictureShift` (through a screen, eyes closing, a wave of decay) | `pass/postprocess.rs`, `postprocess.wgsl` | game record `CLAUDE_SESSION_2026-10-15B_…` |
 | Characters | Skin scattering past the shadow edge and through thin parts; hair cards; eye glint; game silhouettes and interaction highlights | `skin_scatter.wgsl`, `shading.wgsl`, `pass/game_highlight.rs` | game records `GAME_SILHOUETTE_HIGHLIGHT_2026-10-07.md`, `HAIR_RENDERING_NOTES.md` |
 | Vertex paint | Painted PBR layers or stains, de-tiled per layer, baked per level | `somnium_core/src/vertex_paint.rs`, `somnium_renderer/src/vertex_paint.rs` | game memory `vertex-paint-pipeline` |
 | ReSTIR GI | The bounce light picks from every lamp that reaches the hit, not four at random (the fireflies in dressed interiors) | `restir_gi.wgsl` | commit `fed2290` |
 | Spatial audio | Room reverb by enclosure, a muffled track for occluded sounds, binaural voices through the MIT KEMAR head responses | `somnium_audio/src/acoustics.rs`, `hrtf.rs` | game record `CLAUDE_SESSION_2026-10-15B_…` |
 | Editor automation | A semantic MCP authoring bridge, project launch, mouse and wheel input validated end to end; the standalone player | `somnium_core` authoring, `app_play_input.rs` | game `ENGINE_AND_MCP.md`, `MCP_PERFORMANCE_FIX_2026-09-25.md` |
+
+### In the editor, for designers (17 Oct 2026, written, not yet built or tested)
+
+Most of the table above began as something only the game's options menu could switch. These are now ordinary schema
+fields, so they appear in Details, save with the scene and can be scripted. The game's own requests still win in Play.
+
+| Where in the editor | Field | What it drives |
+|---|---|---|
+| Post Processing → Bloom | Lens Flare (0–2; hidden with bloom off) | `BloomPass::lens_flare`, the larger of this and `lens_flare_requested` |
+| Post Processing → Ray Tracing | Traced Reflections, Reflection Roughness | the path tracer's mode 1 (`PathTracerPass::reflection_roughness`; `SOMNIUM_RT_REFLECT_ROUGH` still overrides) |
+| Post Processing → Path Tracing | Path Tracing (Experimental), with its cost in the tooltip | mode 0, as before |
+| Post Processing → Picture Shift | Shift (Off, Screen, Eyelids, Wave), Progress, Wave Origin, Wave Reach | `Renderer::authored_picture_shift`, drawn while the game runs no shift of its own |
+| Light (spots) | Cookie (None, Torch, Blinds, Panes, Wire guard, Grime) | `LightComponent::local_light`, the one place a scene light becomes a `GpuLocalLight` (flicker and area size included) |
+| Camera → Graphics Scalability | Custom, with Custom Scale (0.5–1) | `CameraSettingsComponent::scene_scale` |
+| Preferences → Display | V-Sync, Frame Cap (`SOMNIUM_VSYNC`, `SOMNIUM_FRAME_CAP` override), Frame Generation, Graphics Tier | applied at start and when changed, never in a standalone player; a game's request in between wins |
+
+hello_engine and TSF's `bootstrap.rs` both gather lamps through `local_light`, so the editor's own app now draws cookies
+and `LightFlickerComponent` too. TSF's older `tsf.LampCookie` still wins where a scene carries one. `somnium.d.luau`
+is stale until the editor regenerates it.
 
 ### A frame now
 
@@ -176,6 +195,36 @@ flowchart LR
 | Skinned BLAS limits | TLAS build 1.87 → 0.75 ms |
 | Scene restore | 47.5 → 9.7 s |
 | Frame generation | 42.3 fps → 76.7 presented, 2.0–2.5 ms GPU per generated frame |
+
+## Combat for Rimeborn (18 October 2026)
+
+`crates/somnium_combat` is the engine's combat: a deterministic, headless simulation a host drives one fixed step
+at a time (`set_pose`, `command`, `animation_event` in; `intent` and `CombatEvent`s out; physics through the
+`CombatQuery` trait). It was built for Rimeborn, the second game on the engine, and is generic.
+
+| Area | What it does | Where |
+|---|---|---|
+| Damage | eight types, resistances, armour with diminishing returns, statuses that meet each other (water and fire cancel, wet bodies freeze faster, the frozen shatter) | `damage.rs`, `status.rs` |
+| Pools | health, stamina, mana in lamps with overdraw, poise, focus | `vitals.rs` |
+| Melee | weapons as data, chains, the heavy on hold, charges, parries and ripostes, blocks and guard breaks, dodge frames, backstabs; hit windows from animation events and blade sweeps from the skeleton | `weapon.rs`, `world/melee.rs`, `world/resolve.rs` |
+| Schools | Aetherlance, Meridian, Night Fang, Gale Edge: 17 forms as rules | `schools.rs` |
+| Spells | six-part requests, rote measures vs numbers, three casting speeds, cooldowns, channels, interruption; bolts, lances, walls, waves, steps, blooms, wards | `spell.rs`, `world/cast.rs`, `world/effects.rs` |
+| The ground | grass burns and spreads downwind, water freezes into walkable ice, stone stops fire | `environment.rs` |
+| AI | brains on `somnium_ai` trees (native `combat.*` tasks), perception, navmesh corridors; attack tokens and flank slots | `ai.rs` |
+| Input | the rebindable `combat` action map, cursor-to-ground aim | `input.rs` |
+| Editor | `Combatant`, `Combat Surface`, `Wind Volume` schemas; hello_engine's **Create > Examples > Combat Sandbox** | `components.rs`, `examples/hello_engine/src/combat_demo.rs` |
+| Mounts | riding, trample, mounted cuts, rider IK targets; left alone a mount grazes, ambles, bolts and comes to a whistle (H); falls hurt (`CombatWorld::landed`) | `mount.rs` |
+| Wilds | rime wolf packs (circle, dart in two at a time, leap from behind, break when the alpha falls) and bandit bands (spear, axe, bow, chief) | `wilds.rs`, `ai.rs` |
+| Stealth | awareness per enemy that fills with sight and drains unseen; heard versus seen; `CombatWorld::darkness` (the host copies `TimeOfDay` eclipse) cuts sight; blows on the unaware land 2.5x | `ai.rs` |
+
+`crates/somnium_character` is the character controller beside it: walk, run, step up, slopes, jump, fall,
+vault and climb ledges (with the edge for the hands' IK), swim in deep water, sledge. Kinematic, over a
+`Terrain` trait (capsule sweeps plus water lines), built on `somnium_anim::collide_and_slide`. The Combat
+Sandbox's bodies (mounts too, on their own slopes and steps) walk on it through Jolt, so on the engine's
+terrain heightfields they follow real ground. **Combat Wilds** (hello_engine) puts a horse, a wolf pack and a bandit camp
+on open ground or on a terrain.
+
+Record: [`COMBAT_2026-10-18.md`](<dev records/COMBAT_2026-10-18.md>). Help: [`docs/editor/combat.md`](docs/editor/combat.md).
 
 ## How to use this file
 
@@ -683,6 +732,9 @@ name is a mnemonic, not a claim of similarity.
 | `somnium_physics` | Safe Jolt-facing bodies, shapes, contacts, layers, world |
 | `somnium_physics_sys` | Raw Jolt FFI and C++ build boundary |
 | `somnium_voxel` | Voxel chunks, generation, edits, meshing, LOD |
+| `somnium_combat` | Combat simulation: hits, damage, statuses, weapons, spells, the reactive ground, combat AI, combat input, mounts |
+| `somnium_character` | Kinematic character controller: walk, step, slopes, jump, vault and climb ledges, swim, sledge |
+| `somnium_story` | World-state facts, condition and effect language, quests, dialogue, barks, journal, presenter and actor models; no rendering |
 
 ### Dependency layers
 
@@ -1563,6 +1615,10 @@ In tree:
   transforms, camera presets, bookmarks, and view modes.
 - Curve and gradient values with native editors and undo.
 - Node graph and timeline substrates with material and animation catalogues.
+- Dialogue and quest catalogues on the same graph surface: the JSON asset is the
+  source of truth and the graph a lossless view; Check against the whole
+  project, Find, Play from the selected node, and a Game View in the game's
+  presenter (Help → Story).
 - Play, pause, and stop transport at the shell level.
 - Scene open/save routing, unknown-data retention, autosave, and recovery.
 
@@ -1743,6 +1799,44 @@ Skinning writes into the same geometry pool everything else lives in, before
 culling, which is what keeps the renderer's seam unchanged: it draws posed
 vertices the same way it draws static ones. Graph and machine versions reject
 stale live instances rather than indexing a replacement definition.
+
+### Story
+
+`somnium_story` holds the story's state and rules and draws nothing. A project's
+`.somstory` manifest declares typed facts (bool, int, text, enum, set; `rep.*`
+families), the cast, truth tiers, commands and languages. Dialogue
+(`.somdialogue`), quests (`.somquest`), barks (`.sombarks`) and notes
+(`.somnotes`) are JSON assets, built into one `StoryDatabase` that checks every
+reference across files.
+
+- Conditions and effects are one-line text, type-checked against the schema
+  with byte-offset errors.
+- `Story` owns the world state, quest log, visit counts, journal, seeded RNG and
+  clock. After every change it settles quests step by step (budgeted, with loop
+  detection) and queues `StoryEvent`s for the game.
+- `Conversation` walks a dialogue as beats (line, choices, wait, end), with
+  gated and rolled checks, timed menus and interruption.
+- `Presenter` is the light-novel model (typewriter, auto, skip, history, inline
+  cues). `Director` is the actor model (talk, jaw, blink, look, gesture, mark).
+- `Ambience` arbitrates barks and chatter: one voice at a time, barks over
+  chatter, speakers resting, recent lines passed over. Barks are filtered by
+  place, hour and the Lid's `eclipse` through a `BarkContext`.
+- The journal view has quests, notes, people (cast heard or written about) and
+  the Voice's log. `voice('id')` logs an announcement with the values its text
+  names at that moment.
+- Saves go through `SaveGame.state["story"]`, and a mid-scene conversation goes
+  under `"story_conversation"` (`ConversationSave`). It restores without
+  re-running effects, with the presenter's log beside it. Lines get i18n keys
+  from where they are, and `strings()` exports them.
+
+The engine side is `somnium_ui`'s `DialoguePresenter`, `NoticeStack`,
+`ObjectiveMarkers` and `JournalScreen` widgets, `VectorGlyph` (an SVG drawn in
+one colour at any size and angle; the objective marks were drawn in
+VectorCraft), the graph catalogues and `somnium_core`'s `somnium.CastMember`
+component. The
+game owns the `Story`, sends beats and ticks, and applies the effects. Quest
+markers are in game metres, by anchor or region-local position. See
+[the story systems record](<dev records/STORY_SYSTEMS_2026-10-18.md>).
 
 ### Physics and characters
 

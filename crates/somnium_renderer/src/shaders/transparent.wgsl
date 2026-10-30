@@ -1,4 +1,5 @@
 //!include "spot_cookie.wgsl"
+//!include "depth_tie.wgsl"
 // Phase 21: forward pass for alpha-blended materials.
 //
 // The visibility buffer stores exactly one triangle per pixel, so it cannot
@@ -83,6 +84,10 @@ struct View {
     view:          mat4x4<f32>,
     camera_pos:    vec3<f32>,
     _padding:      f32,
+    time:          f32,
+    lod_scale:     f32,
+    depth_tie_slope: f32,  // pass/visibility.rs `depth_tie_slope`
+    _time_pad2:    f32,
 }
 
 struct DirectionalLight {
@@ -176,7 +181,11 @@ fn vs_main(
     let normal = normalize((instance.model * vec4<f32>(vertex.norm_x, vertex.norm_y, vertex.norm_z, 0.0)).xyz);
 
     var out: VOut;
-    out.clip        = view.view_proj * world;
+    out.clip        = depth_tie_clip(view.view_proj, world.xyz, view.camera_pos);
+    // One tie above every opaque draw (depth_tie.wgsl): the opaque depth it is tested against has been drawn nearer
+    // by its ties, which hid a picture's glass a millimetre over its print from 5 m off (F's check, 29 Oct).
+    out.clip.z     -= depth_tie_offset(DEPTH_TIE_GLASS, normal, world.xyz, out.clip.w, view.view, view.camera_pos,
+                                       view.depth_tie_slope);
     out.world_pos   = world.xyz;
     out.normal      = normal;
     out.uv          = vec2<f32>(vertex.u, vertex.v);

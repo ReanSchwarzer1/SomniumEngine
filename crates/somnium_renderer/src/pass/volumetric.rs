@@ -29,7 +29,8 @@ const VOLUME_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     depth_or_array_layers: 32,
 };
 
-/// How far the volume reaches, in metres.
+/// How far the volume reaches, in metres, unless a scene asks otherwise
+/// (`PostProcessComponent::fog_range`).
 ///
 /// Past this the last slice is held, so anything further reads as fully
 /// fogged. A kilometre covers the default terrain; the sky beyond it is drawn
@@ -58,7 +59,8 @@ struct VolumetricParams {
     frame: u32,
     grain_enabled: u32,
     fog_sky_occlusion: f32,
-    _pad: [f32; 3],
+    fog_skylight: f32,
+    _pad: [f32; 2],
 }
 
 #[cfg(test)]
@@ -98,6 +100,9 @@ pub struct FogSettings {
     /// How far the sun's shadow map also hides skylight from the fog, 0..=1.
     /// 0 lights the fog with the whole sky everywhere.
     pub sky_occlusion: f32,
+    /// Scale on the sky light the fog scatters, apart from the sun's and the lamps' (1 as the sky gives it). Under
+    /// 1, a moon can light the ground while the fog away from the lights stays dark.
+    pub skylight: f32,
 }
 
 impl Default for FogSettings {
@@ -120,6 +125,7 @@ impl Default for FogSettings {
             shafts: true,
             shaft_intensity: 1.5,
             sky_occlusion: 0.0,
+            skylight: 1.0,
         }
     }
 }
@@ -142,7 +148,7 @@ pub struct VolumetricPass {
     prev_view_proj: glam::Mat4,
     history_valid: bool,
     frame: u32,
-    last_settings: Option<[u32; 7]>,
+    last_settings: Option<[u32; 9]>,
     pub enabled: bool,
     pub fog: FogSettings,
     pub max_distance: f32,
@@ -473,6 +479,9 @@ impl VolumetricPass {
             u32::from(self.fog.shafts),
             self.fog.shaft_intensity.to_bits(),
             self.fog.sky_occlusion.to_bits(),
+            self.fog.skylight.to_bits(),
+            // A new range moves every slice: last frame's volume no longer lines up.
+            self.max_distance.to_bits(),
         ];
         if self.last_settings.is_some_and(|last| last != settings) {
             self.history_valid = false;
@@ -509,7 +518,8 @@ impl VolumetricPass {
                 frame: self.frame,
                 grain_enabled: u32::from(self.grain_enabled),
                 fog_sky_occlusion: self.fog.sky_occlusion.clamp(0.0, 1.0),
-                _pad: [0.0; 3],
+                fog_skylight: self.fog.skylight.max(0.0),
+                _pad: [0.0; 2],
             }),
         );
 

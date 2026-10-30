@@ -286,7 +286,7 @@ pub const TOGGLES: &[Toggle] = &[
         id: "occlusion",
         label: "Occlusion Culling",
         env: "SOMNIUM_NO_OCCLUSION",
-        help: "Two-phase Hi-Z occlusion culling.",
+        help: "Two-pass Hi-Z occlusion culling.",
     },
     Toggle {
         id: "cascade_cull",
@@ -316,17 +316,17 @@ pub const TOGGLES: &[Toggle] = &[
         id: "cloud_jitter",
         label: "Cloud Ray Jitter",
         env: "SOMNIUM_CLOUD_JITTER",
-        help: "Offset each cloud ray's start by blue noise. Measured both ways \u{2014} see CONTROL-M.",
+        help: "Offset each cloud ray's start by blue noise, which hides step banding in the clouds.",
     },
     Toggle {
         id: "dreams_grain",
-        label: "DREAMS Shared Grain",
+        label: "Shared Temporal Grain",
         env: "SOMNIUM_DREAMS_GRAIN",
         help: "Share the Slang-cooked temporal masks across GTAO, volumetrics, ReSTIR and TAA.",
     },
     Toggle {
         id: "dreams_stf",
-        label: "DREAMS Terrain STF",
+        label: "Terrain Stochastic Filtering",
         env: "SOMNIUM_DREAMS_STF",
         help: "Use the shared masks for stochastic terrain mip filtering.",
     },
@@ -394,7 +394,7 @@ pub const TOGGLES: &[Toggle] = &[
         id: "cull_stats",
         label: "Cull Statistics",
         env: "SOMNIUM_CULL_STATS",
-        help: "Read indirect args back after each cull phase. Stalls the pipeline.",
+        help: "Read indirect args back after each cull pass. Stalls the pipeline.",
     },
     Toggle {
         id: "shading_bins",
@@ -683,7 +683,37 @@ fn mebibytes(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// Project phases and their codenames belong in code and records, never in what a designer reads (the developer,
+    /// 18 Oct 2026: "that will confuse designers").
+    pub(crate) const CODENAMES: &[&str] = &[
+        "Phase ", "phase ", "MORROWIND", "PERSONA", "TSUSHIMA", "CONTROL-", "DOOM-", "KENSHI", "STALKER", "DREAMS",
+        "TALOS", "PORTAL-", "HALCYON", "Zeta", "Hades", "ALYX",
+    ];
+
+    #[test]
+    fn nothing_a_designer_reads_names_a_project_phase() {
+        let mut shown: Vec<&str> = Vec::new();
+        for view in DEBUG_VIEWS {
+            shown.extend([view.label, view.help]);
+        }
+        for toggle in TOGGLES {
+            shown.extend([toggle.label, toggle.help]);
+        }
+        for command in crate::commands::registry().commands() {
+            shown.extend([command.label, command.help, command.category]);
+        }
+        // The material editor's preview controls and presets.
+        shown.extend(crate::editor::material_studio::STUDIO_TEXT);
+        for preset in somnium_asset::material::MATERIAL_PRESETS {
+            shown.extend([preset.name, preset.description]);
+        }
+        for text in shown {
+            for name in CODENAMES {
+                assert!(!text.contains(name), "{text:?} names {name:?}");
+            }
+        }
+    }
     use super::*;
 
     /// The overlay states what the frame submitted, and omits what it cannot

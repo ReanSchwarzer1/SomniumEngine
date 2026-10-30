@@ -18,3 +18,7 @@ pub(crate) mod gallery;
 pub(crate) mod persona;
 
 pub mod tool_context;
+
+pub mod material_studio;
+
+pub mod welcome;

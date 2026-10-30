@@ -47,6 +47,11 @@ impl Thickness {
         }
     }
 
+    /// Each side on its own, in the order left, top, right, bottom.
+    pub const fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        Self { left, right, top, bottom }
+    }
+
     pub fn axes(h: f32, v: f32) -> Self {
         Self {
             left: h,

@@ -1358,14 +1358,22 @@ impl EditorCommand for DeleteEntityCmd {
 
 /// A set of commands presented to the undo stack as one authoring gesture.
 pub struct CommandGroup {
-    description: &'static str,
+    description: std::borrow::Cow<'static, str>,
     commands: Vec<Box<dyn EditorCommand>>,
 }
 
 impl CommandGroup {
     pub fn new(description: &'static str, commands: Vec<Box<dyn EditorCommand>>) -> Self {
         Self {
-            description,
+            description: description.into(),
+            commands,
+        }
+    }
+
+    /// A group whose history entry is made at run time ("Apply Glass preset").
+    pub fn named(description: String, commands: Vec<Box<dyn EditorCommand>>) -> Self {
+        Self {
+            description: description.into(),
             commands,
         }
     }
@@ -1383,7 +1391,7 @@ impl EditorCommand for CommandGroup {
         }
     }
     fn description(&self) -> &str {
-        self.description
+        &self.description
     }
     fn is_no_op(&self) -> bool {
         self.commands.is_empty() || self.commands.iter().all(|c| c.is_no_op())

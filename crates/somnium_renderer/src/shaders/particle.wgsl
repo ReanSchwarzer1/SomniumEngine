@@ -75,6 +75,9 @@ struct Fragment {
     out.colour = vec4(rgb,select(alpha,0.,(in.flags & 1u) != 0u));
     // Texture alpha and scene depth decide actual visible coverage. Empty sprite
     // corners leave static history intact, including for additive flame sprites.
-    out.reactive = vec4(select(0.,1.,alpha > .001),0.,0.,0.);
+    // As strong as the sprite is (AMD's guidance: the alpha it is composited with), not all-or-nothing: a ground-mist
+    // disc at 5% marked its whole six metres fully reactive, and under it FSR showed each raw jittered frame, so the
+    // trunks shimmered and thin leaves blinked in and out (18 Oct 2026). TAA never read this, which is why it held.
+    out.reactive = vec4(alpha,0.,0.,0.);
     return out;
 }

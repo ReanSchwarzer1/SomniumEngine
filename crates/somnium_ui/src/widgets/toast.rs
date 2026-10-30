@@ -32,6 +32,18 @@ struct Toast {
     sticky: bool,
 }
 
+/// Seconds a notification stays up (Phase ALYX-D: the Notification Time preference), as `f32` bits.
+static LIFETIME_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4080_0000); // 4.0
+
+/// Set how long notifications stay on screen (clamped to 1..=30 seconds).
+pub fn set_lifetime(seconds: f32) {
+    LIFETIME_BITS.store(seconds.clamp(1.0, 30.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn lifetime() -> Duration {
+    Duration::from_secs_f32(f32::from_bits(LIFETIME_BITS.load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 pub struct ToastHost {
     items: Vec<Toast>,
     font_id: u8,
@@ -41,7 +53,7 @@ impl ToastHost {
     fn prune(&mut self) {
         let now = Instant::now();
         self.items.retain(|toast| {
-            toast.sticky || now.duration_since(toast.raised) < Duration::from_secs(4)
+            toast.sticky || now.duration_since(toast.raised) < lifetime()
         });
     }
 
@@ -78,7 +90,7 @@ impl Control for ToastHost {
             .items
             .iter()
             .filter(|toast| {
-                toast.sticky || now.duration_since(toast.raised) < Duration::from_secs(4)
+                toast.sticky || now.duration_since(toast.raised) < lifetime()
             })
             .collect();
         let mut bottom = b.y + b.h - 48.0;
@@ -87,8 +99,8 @@ impl Control for ToastHost {
             let age = now.duration_since(toast.raised).as_secs_f32();
             let alpha = if toast.sticky || ctx.motion.reduced_motion() {
                 255
-            } else if age > 3.0 {
-                ((4.0 - age) * 255.0).clamp(0.0, 255.0) as u8
+            } else if age > lifetime().as_secs_f32() - 1.0 {
+                ((lifetime().as_secs_f32() - age) * 255.0).clamp(0.0, 255.0) as u8
             } else {
                 230
             };

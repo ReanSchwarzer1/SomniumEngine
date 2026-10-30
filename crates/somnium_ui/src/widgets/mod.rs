@@ -16,12 +16,19 @@ pub mod context_menu;
 pub mod curve_editor;
 /// MORROWIND-M item 2: the grid that draws a [`crate::data_table::DataTable`].
 pub mod data_grid;
+/// A light-novel dialogue box over `somnium_story`'s presenter model.
+pub mod dialogue_presenter;
+pub mod journal_screen;
+pub mod notice_stack;
+pub mod objective_markers;
 pub mod gradient_editor;
 pub mod grid;
 pub mod image;
 pub mod menu;
 pub mod numeric_field;
 pub mod popup;
+pub mod profiler_view;
+pub mod splash;
 pub mod property_row;
 pub mod scroll_viewer;
 pub mod search_box;

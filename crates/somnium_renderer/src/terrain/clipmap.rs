@@ -107,6 +107,9 @@ pub struct TerrainClipmap {
     /// Last terrain `edit_revision` we generated against.
     edit_revision: u64,
     initialized: bool,
+    /// Made with 1 x 1 images and never enabled (`new_dormant`): an open world's streamed terrain windows, whose
+    /// 96 MiB stacks each would sit unused (the shading pass binds one terrain's stacks, and the clipmap ships off).
+    dormant: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -210,7 +213,22 @@ impl TerrainClipmap {
     }
 
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_images(device, false)
+    }
+
+    /// A clipmap that never turns on, with 1 x 1 stand-in images (see `dormant`).
+    pub fn new_dormant(device: &wgpu::Device) -> Self {
+        Self::with_images(device, true)
+    }
+
+    /// Whether this clipmap was made by `new_dormant`.
+    pub fn is_dormant(&self) -> bool {
+        self.dormant
+    }
+
+    fn with_images(device: &wgpu::Device, dormant: bool) -> Self {
         let make = |label: &str, size: u32, layers: u32| {
+            let size = if dormant { 1 } else { size };
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -261,7 +279,7 @@ impl TerrainClipmap {
         });
 
         Self {
-            enabled: Self::env_default_enabled(),
+            enabled: !dormant && Self::env_default_enabled(),
             detail_albedo_sampled: sampled(&detail_albedo, "Terrain clipmap detail albedo sampled"),
             detail_surface_sampled: sampled(
                 &detail_surface,
@@ -285,6 +303,7 @@ impl TerrainClipmap {
             macro_rings,
             edit_revision: 0,
             initialized: false,
+            dormant,
         }
     }
 

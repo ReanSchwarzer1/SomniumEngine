@@ -279,6 +279,11 @@ impl TaaPass {
         self.enabled = enabled;
     }
 
+    /// A camera cut: the next frame starts without history.
+    pub fn reset_history(&mut self) {
+        self.history_valid = false;
+    }
+
     /// Select the shared DREAMS projection-jitter sequence at runtime.
     pub fn set_grain_enabled(&mut self, enabled: bool) {
         if self.grain_enabled != enabled {

@@ -86,6 +86,8 @@ pub struct PaletteItem {
     pub enabled: bool,
     /// Persisted last-used tick; larger values rank first after fuzzy score.
     pub recency: u64,
+    /// The row's glyph (Phase ALYX-B); none falls back to its category's.
+    pub icon: Option<crate::icons::IconId>,
 }
 
 impl PaletteItem {
@@ -102,6 +104,7 @@ impl PaletteItem {
             category: PaletteCategory::Command,
             enabled: true,
             recency: 0,
+            icon: None,
         }
     }
 
@@ -118,6 +121,7 @@ impl PaletteItem {
             category,
             enabled: true,
             recency: 0,
+            icon: None,
         }
     }
 
@@ -129,6 +133,25 @@ impl PaletteItem {
             self.hint = reason.to_string();
         }
         self
+    }
+
+    /// Attach the row's glyph.
+    #[must_use]
+    pub const fn with_icon(mut self, icon: crate::icons::IconId) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// The glyph drawn on the row: its own, else its category's.
+    pub fn glyph(&self) -> crate::icons::IconId {
+        use crate::icons::IconId as I;
+        self.icon.unwrap_or(match self.category {
+            PaletteCategory::Command => I::More,
+            PaletteCategory::Entity => I::EmptyEntity,
+            PaletteCategory::Asset => I::File,
+            PaletteCategory::Panel => I::AppWindow,
+            PaletteCategory::Help => I::HelpCircle,
+        })
     }
 
     /// Attach the persisted usage tick.
@@ -187,9 +210,21 @@ impl CommandPalette {
     }
 }
 
+/// Phase ALYX-B: one line per result (glyph, label, then what it is and its shortcut flush right), twelve shown.
+const PALETTE_WIDTH: f32 = 560.0;
+const PALETTE_HEIGHT: f32 = 444.0;
+const ROWS_TOP: f32 = 36.0;
+const ROW_HEIGHT: f32 = 32.0;
+const ROWS_SHOWN: usize = 12;
+
+/// The first result drawn while `selected` is the selection.
+const fn first_shown(selected: usize) -> usize {
+    selected.saturating_sub(ROWS_SHOWN - 1)
+}
+
 impl Control for CommandPalette {
     fn measure_override(&self, _widget: &Widget, _ctx: &mut LayoutCtx, _available: Vec2) -> Vec2 {
-        Vec2::new(480.0, 444.0)
+        Vec2::new(PALETTE_WIDTH, PALETTE_HEIGHT)
     }
 
     fn cursor_icon(&self, widget: &Widget, pos: Vec2) -> CursorKind {
@@ -252,47 +287,51 @@ impl Control for CommandPalette {
             return;
         }
         let sel = self.selected.min(filtered.len().saturating_sub(1));
-        for (row, item) in filtered.iter().take(10).enumerate() {
-            let y = b.y + 36.0 + row as f32 * 40.0;
-            let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, 40.0);
-            if row == sel {
+        // The list scrolls with the selection, so arrowing past the last row shown keeps it in view.
+        let first = first_shown(sel);
+        for (index, item) in filtered.iter().enumerate().skip(first).take(ROWS_SHOWN) {
+            let row = index - first;
+            let y = b.y + ROWS_TOP + row as f32 * ROW_HEIGHT;
+            let row_r = Rect::new(b.x + 8.0, y, b.w - 16.0, ROW_HEIGHT);
+            if index == sel {
                 let selected = crate::style::tree_row(crate::style::VisualState::with(
                     crate::style::Interaction::Selected,
                 ));
                 ctx.push_paint(row_r, &selected);
             }
-            let label_color = if item.enabled {
-                t.semantic.text.primary.bytes()
+            let (label_color, glyph_color) = if item.enabled {
+                (t.semantic.text.primary.bytes(), t.semantic.text.secondary.bytes())
             } else {
-                t.semantic.text.disabled.bytes()
+                (t.semantic.text.disabled.bytes(), t.semantic.text.disabled.bytes())
             };
-            let (label, _) =
-                ctx.font_atlas.ellipsise(&item.label, row_r.w - 112.0, 12.0, self.font_id);
-            ctx.push_text(
-                &label,
-                Vec2::new(row_r.x + 8.0, y + 4.0),
-                self.font_id,
-                12.0,
-                label_color,
-            );
-            // The category sits between the label and the shortcut, so a
-            // result reads "what it is" before "how to reach it".
-            ctx.push_text(
-                item.category.label(),
-                Vec2::new(row_r.x + row_r.w - 84.0, y + 5.0),
-                self.font_id,
-                11.0,
-                t.semantic.text.muted.bytes(),
-            );
+            let glyph = Rect::new(row_r.x + 10.0, y + (ROW_HEIGHT - 16.0) * 0.5, 16.0, 16.0);
+            let (uv, texture) = item.glyph().draw_quad(glyph);
+            ctx.push_textured_rect(glyph, uv, glyph_color, texture);
+            // Right to left: the shortcut (or why it cannot run) flush right, then what kind of thing the row is.
+            let mut right = row_r.x + row_r.w - 10.0;
             if !item.hint.is_empty() {
-                ctx.push_text(
-                    &item.hint,
-                    Vec2::new(row_r.x + 8.0, y + 22.0),
-                    self.font_id,
-                    11.0,
-                    t.semantic.text.secondary.bytes(),
-                );
+                let hint_color = if item.enabled {
+                    t.semantic.text.muted.bytes()
+                } else {
+                    t.semantic.text.secondary.bytes()
+                };
+                let (hint, _) = ctx.font_atlas.ellipsise(&item.hint, row_r.w * 0.4, 11.0, self.font_id);
+                let width = ctx.font_atlas.measure_text(&hint, 11.0, self.font_id).x;
+                right -= width;
+                ctx.push_text(&hint, Vec2::new(right, y + 9.0), self.font_id, 11.0, hint_color);
+                right -= 14.0;
             }
+            if item.category != PaletteCategory::Command {
+                let kind = item.category.label();
+                let width = ctx.font_atlas.measure_text(kind, 11.0, self.font_id).x;
+                right -= width;
+                ctx.push_text(kind, Vec2::new(right, y + 9.0), self.font_id, 11.0, t.semantic.text.muted.bytes());
+                right -= 14.0;
+            }
+            let label_x = row_r.x + 36.0;
+            let (label, _) =
+                ctx.font_atlas.ellipsise(&item.label, (right - label_x).max(40.0), 12.0, self.font_id);
+            ctx.push_text(&label, Vec2::new(label_x, y + 8.0), self.font_id, 12.0, label_color);
         }
     }
 
@@ -355,10 +394,11 @@ impl Control for CommandPalette {
             }
             WidgetMessage::MouseDown { pos, .. } => {
                 let b = widget.screen_bounds();
-                if pos.y > b.y + 36.0 {
-                    let row = ((pos.y - b.y - 36.0) / 40.0).floor() as usize;
+                if pos.y > b.y + ROWS_TOP {
+                    let row = ((pos.y - b.y - ROWS_TOP) / ROW_HEIGHT).floor() as usize;
                     let filtered = self.filtered();
-                    if let Some(item) = filtered.get(row).filter(|item| item.enabled) {
+                    let shown = first_shown(self.selected.min(filtered.len().saturating_sub(1))) + row;
+                    if let Some(item) = filtered.get(shown).filter(|item| row < ROWS_SHOWN && item.enabled) {
                         emit.push(UiMessage::new(
                             widget.handle,
                             MessageDirection::FromWidget,

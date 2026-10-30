@@ -31,6 +31,58 @@ struct GenParams {
     sun_direction: vec4<f32>,
     /// `.rgb` sun colour scaled by illuminance; `.w` sky-dome luminance scale.
     sun_color: vec4<f32>,
+    /// The moonless night (`NightSky`): x glow cd/m², y aurora, z Halo Road, w Thread. All zero draws nothing.
+    night: vec4<f32>,
+    /// `.rgb` the glow's colour.
+    night_tint: vec4<f32>,
+}
+
+/// The Undersun's night (`NightSky`, Rimeborn): no moon. A glow over the dome, brighter overhead and toward the hidden
+/// sun; the Halo Road, the Lid plates' lit edges, as a dashed ring through the sun across its bearing, with the gap of
+/// the Drowning's fallen plate; the Thread, a thin line from the horizon below the sun up toward it; aurora, folded
+/// curtains low on the side away from the sun, green over red. At cubemap resolution all of it is soft, as faint
+/// things in a dark sky are.
+fn undersun_night(dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let glow = params.night.x;
+    if glow <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let up = max(dir.y, 0.0);
+    let above = smoothstep(-0.06, 0.02, dir.y);
+    let toward_sun = max(dot(dir, sun_dir), 0.0);
+    var c = params.night_tint.rgb * glow * (0.3 + 0.7 * sqrt(up) + 0.6 * toward_sun * toward_sun) * above;
+
+    let sun_flat = normalize(vec3<f32>(sun_dir.x, 0.0, sun_dir.z) + vec3<f32>(1.0e-4, 0.0, 0.0));
+    let across = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), sun_flat));
+    let dir_flat = normalize(vec3<f32>(dir.x, 0.0, dir.z) + vec3<f32>(1.0e-4, 0.0, 0.0));
+
+    // The Halo Road.
+    let ring_normal = normalize(cross(sun_dir, across));
+    let off_ring = dot(dir, ring_normal);
+    let around = atan2(dot(dir, across), dot(dir, sun_dir));
+    let plate = fract(around * 14.0 / 6.2831853);
+    let seams = smoothstep(0.0, 0.06, plate) * smoothstep(0.0, 0.06, 1.0 - plate);
+    let fallen = smoothstep(0.08, 0.16, abs(around - 2.2));
+    let road = exp(-off_ring * off_ring / (2.0 * 0.007 * 0.007)) * seams * fallen * above;
+    c += vec3<f32>(1.0, 0.9, 0.78) * glow * 7.0 * params.night.z * road;
+
+    // The Thread.
+    let off_plane = dot(dir, across);
+    let sun_el = asin(clamp(sun_dir.y, -1.0, 1.0));
+    let el = asin(clamp(dir.y, -1.0, 1.0));
+    let sunward = smoothstep(0.0, 0.2, dot(dir_flat, sun_flat));
+    let rising = smoothstep(-0.01, 0.03, el) * (1.0 - smoothstep(sun_el - 0.08, sun_el, el)) * (0.5 + 0.5 * (1.0 - el / max(sun_el, 0.05)));
+    let thread = exp(-off_plane * off_plane / (2.0 * 0.0045 * 0.0045)) * rising * sunward;
+    c += vec3<f32>(0.82, 0.9, 1.0) * glow * 9.0 * params.night.w * thread;
+
+    // Aurora.
+    let away = smoothstep(0.0, 0.5, -dot(dir_flat, sun_flat));
+    let az = atan2(dir.x, dir.z);
+    let folds = 0.55 + 0.45 * sin(az * 9.0 + 2.0 * sin(az * 3.7));
+    let green = vec3<f32>(0.2, 1.0, 0.45) * smoothstep(0.03, 0.12, dir.y) * (1.0 - smoothstep(0.22, 0.5, dir.y));
+    let red = vec3<f32>(1.0, 0.22, 0.28) * 0.35 * smoothstep(0.2, 0.45, dir.y) * (1.0 - smoothstep(0.45, 0.75, dir.y));
+    c += (green + red) * folds * away * glow * 5.0 * params.night.y;
+    return c;
 }
 
 @group(0) @binding(0) var<uniform> params: GenParams;
@@ -114,6 +166,7 @@ fn sky(ray_dir: vec3<f32>) -> vec3<f32> {
     let moon_dir = -sun_dir;
     let moon_strength = saturate(1.0 - sun_illuminance / 10.0);
     radiance += night_sky_ambient(ray_dir, moon_dir, moon_strength);
+    radiance += undersun_night(ray_dir, sun_dir);
 
     return min(radiance, vec3<f32>(60000.0));
 }

@@ -539,3 +539,127 @@ fn cloud_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let transmittance = mix(1.0, exp(-optical_depth), clamp(cp.shadow_strength, 0.0, 1.0));
     textureStore(shadow_out, vec2<i32>(gid.xy), vec4<f32>(transmittance));
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// History (22 Oct 2026)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// The developer: "the clouds are too blocky and choppy". The march is a
+// quarter of the scene and takes few steps, and its ray start was the same
+// every frame: banding that stood still on the screen while the sky moved
+// behind it, and no TAA to settle it (a game running FSR has TAA off, and FSR
+// has no motion for a sky pixel). Now each frame starts its rays somewhere
+// else (`cp.frame`) and this pass keeps most of what the frames before found,
+// as Schneider's and Hillaire's clouds do: last frame's resolved clouds,
+// looked up where this texel's cloud was a frame ago, held inside the spread
+// of what the march sees round it now (variance clipping, Salvi 2016) so a
+// cloud that moved or a tree that crossed it leaves no trail.
+
+struct ResolveParams {
+    inv_view_proj: mat4x4<f32>,
+    prev_view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    /// Share of last frame kept. Zero on the first frame, after a resize and
+    /// after a cut: this frame's march alone.
+    keep: f32,
+    layer_bottom: f32,
+    layer_top: f32,
+    max_distance: f32,
+    _pad0: f32,
+}
+
+@group(0) @binding(12) var resolve_current: texture_2d<f32>;
+@group(0) @binding(13) var resolve_history: texture_2d<f32>;
+@group(0) @binding(14) var resolve_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(15) var<uniform> rp: ResolveParams;
+
+/// How far along the ray the cloud is, near enough to reproject by: the
+/// layer's near face, or from inside it half its thickness. A cloud is
+/// hundreds of metres off at the least, so a walking camera's parallax is a
+/// small part of a texel whichever depth inside it the cloud really has.
+fn resolve_distance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    if origin.y >= rp.layer_bottom && origin.y <= rp.layer_top {
+        return min((rp.layer_top - rp.layer_bottom) * 0.5, rp.max_distance);
+    }
+    if abs(dir.y) < 1e-4 {
+        return rp.max_distance;
+    }
+    let t0 = (rp.layer_bottom - origin.y) / dir.y;
+    let t1 = (rp.layer_top - origin.y) / dir.y;
+    if max(t0, t1) <= 0.0 {
+        return rp.max_distance;
+    }
+    return clamp(max(min(t0, t1), 0.0), 1.0, rp.max_distance);
+}
+
+/// Last frame's resolved clouds at `uv`, bilinear.
+fn resolve_history_at(uv: vec2<f32>, dims: vec2<i32>) -> vec4<f32> {
+    let p = uv * vec2<f32>(dims) - 0.5;
+    let base = floor(p);
+    let f = p - base;
+    let lo = clamp(vec2<i32>(base), vec2<i32>(0), dims - 1);
+    let hi = clamp(vec2<i32>(base) + 1, vec2<i32>(0), dims - 1);
+    let a = textureLoad(resolve_history, vec2<i32>(lo.x, lo.y), 0);
+    let b = textureLoad(resolve_history, vec2<i32>(hi.x, lo.y), 0);
+    let c = textureLoad(resolve_history, vec2<i32>(lo.x, hi.y), 0);
+    let d = textureLoad(resolve_history, vec2<i32>(hi.x, hi.y), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cloud_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(resolve_out);
+    if gid.x >= size.x || gid.y >= size.y {
+        return;
+    }
+    let dims = vec2<i32>(size);
+    let here = vec2<i32>(gid.xy);
+    let current = textureLoad(resolve_current, here, 0);
+    if rp.keep <= 0.0 {
+        textureStore(resolve_out, here, current);
+        return;
+    }
+
+    // The spread of what this frame's march found round this texel.
+    var mean = vec4<f32>(0.0);
+    var square = vec4<f32>(0.0);
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let s = textureLoad(resolve_current, clamp(here + vec2<i32>(x, y), vec2<i32>(0), dims - 1), 0);
+            mean += s;
+            square += s * s;
+        }
+    }
+    mean /= 9.0;
+    let spread = sqrt(max(square / 9.0 - mean * mean, vec4<f32>(0.0)));
+    let low = min(mean - 1.25 * spread, current);
+    let high = max(mean + 1.25 * spread, current);
+
+    // Where this texel's cloud was on the screen a frame ago.
+    let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(size);
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let near = rp.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let far = rp.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    let dir = normalize(far.xyz / far.w - near.xyz / near.w);
+    let world = rp.camera_pos + dir * resolve_distance(rp.camera_pos, dir);
+    let before = rp.prev_view_proj * vec4<f32>(world, 1.0);
+    if before.w <= 1e-6 {
+        textureStore(resolve_out, here, current);
+        return;
+    }
+    let before_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+    if any(before_uv < vec2<f32>(0.0)) || any(before_uv > vec2<f32>(1.0)) {
+        textureStore(resolve_out, here, current);
+        return;
+    }
+    let history = resolve_history_at(before_uv, dims);
+    // A NaN or an infinity (an f16 overflow) is not trusted. Tested on the
+    // exponent's bits: Vulkan lowers `x != x` to an ordered compare, false for
+    // a NaN, so the obvious test never fires there.
+    let bits = bitcast<vec4<u32>>(history) & vec4<u32>(0x7f800000u);
+    if any(bits == vec4<u32>(0x7f800000u)) {
+        textureStore(resolve_out, here, current);
+        return;
+    }
+    textureStore(resolve_out, here, mix(current, clamp(history, low, high), rp.keep));
+}

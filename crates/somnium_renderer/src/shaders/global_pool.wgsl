@@ -92,7 +92,11 @@ struct View {
     // bit 0 of _padding (reinterpreted as u32) = cascade debug overlay enable.
     // We use a separate f32 field below for clarity.
     time:          f32,           // offset 208  simulation seconds
-    _time_pad0:    f32,
+    // Texture gradients are scaled by this before sampling: the render width over the output width while FSR
+    // upscales (else 1), so a surface takes the mip it would at the output resolution. AMD's integration contract
+    // (a negative mip bias of log2(render / display)); without it alpha-cut leaves sampled a coarser mip, thinned and
+    // popped in and out with the jitter (18 Oct 2026).
+    lod_scale:     f32,
     _time_pad1:    f32,
     _time_pad2:    f32,
     // Foliage wind (`wind.rs`): xy m/s over the ground, z strength, w fade metres.
@@ -150,7 +154,8 @@ struct ClusterParams {
     near: f32,
     far: f32,
     // Bit 0 = cel, bit 1 = PCSS, bit 2 = contact shadows, bit 3 = analytic UV grads,
-    // bit 4 = ReSTIR DI wrote sun visibility; bit 5 = DREAMS-B terrain STF.
+    // bit 4 = ReSTIR DI wrote sun visibility; bit 5 = DREAMS-B terrain STF; bits 6-8 the BRDF energy terms;
+    // bits 24-31 the light ramp's amount, 0..255 (0 off).
     shading_mode: u32,
     num_local_lights: u32,
 }

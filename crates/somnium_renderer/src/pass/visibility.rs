@@ -18,6 +18,38 @@ use wgpu;
 /// with the attachment fails at creation rather than at the wrong pixel.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Levels of depth tie in each size class (renderer.rs `depth_tie`): larger things take `0..LEVELS`, smaller ones
+/// `LEVELS..2 * LEVELS`.
+pub const DEPTH_TIE_LEVELS: u32 = 8;
+/// The largest step of tie in depth (depth_tie.wgsl `DEPTH_TIE_STEP_MAX`).
+pub const DEPTH_TIE_STEP_MAX: f32 = 2.0e-6;
+/// The most a tie draws anything nearer, near the eye: glass's tie (one above the largest opaque one) in steps at their
+/// largest. The occlusion tests allow for it, less as ties fade (depth_tie.wgsl `DEPTH_TIE_REACH`, culling.rs).
+pub const DEPTH_TIE_REACH: f32 = 3.2e-5;
+/// Ties are whole to 12 m of view depth and gone past 24 m (depth_tie.wgsl).
+pub const DEPTH_TIE_FADE: [f32; 2] = [12.0, 24.0];
+
+/// How much of a tie is left at view depth `w` (depth_tie.wgsl `depth_tie_fade`).
+pub fn depth_tie_fade(w: f32) -> f32 {
+    ((DEPTH_TIE_FADE[1] - w) / (DEPTH_TIE_FADE[1] - DEPTH_TIE_FADE[0])).clamp(0.0, 1.0)
+}
+/// One step of tie, in pixels: how far the rasterizer's snapping of corners to its sub-pixel grid can put two copies of
+/// one plane apart, twice over. tests/depth_tie_jitter.rs holds ties one step apart with 1/128 and loses edge-on with
+/// 1/256.
+const DEPTH_TIE_SNAP: f32 = 1.0 / 64.0;
+
+/// The view's `depth_tie_slope` (visibility.wgsl): one step of tie for a plane 1 m from the eye and edge-on to it. A
+/// plane's depth runs across the screen at the near plane times a pixel's angle times how far it is turned from facing
+/// the eye over its distance from the eye, per pixel, so two copies of it round apart by that times the sub-pixel snap:
+/// a wall seen edge-on needs far more than a floor seen from standing height, and a wall faced next to nothing. 0 (the
+/// shader's floor) without a perspective.
+pub fn depth_tie_slope(proj: &glam::Mat4, render_height: u32) -> f32 {
+    let near = proj.w_axis.z / proj.z_axis.z;
+    let pixel = 2.0 / (proj.y_axis.y * render_height.max(1) as f32);
+    let slope = DEPTH_TIE_SNAP * near * pixel;
+    if proj.z_axis.w != 0.0 && slope.is_finite() && slope > 0.0 { slope } else { 0.0 }
+}
+
 /// Represents the high-resolution texture used to store the
 /// Instance ID and Triangle ID.
 pub struct VisibilityBufferPass {
@@ -29,8 +61,36 @@ pub struct VisibilityBufferPass {
     /// Phase 17D: same pipeline with back-face culling off, for glTF
     /// `doubleSided` materials.
     pub pipeline_two_sided: wgpu::RenderPipeline,
-    /// Sampler used by the alpha-cutout test.
+    /// Sampler used by the alpha-cutout test, and each instance's depth tie (`set_depth_ties`).
     pub cutout_bind_group: wgpu::BindGroup,
+    cutout_layout: wgpu::BindGroupLayout,
+    cutout_sampler: wgpu::Sampler,
+    depth_ties: wgpu::Buffer,
+}
+
+fn depth_ties_buffer(device: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Visibility Depth Ties"),
+        size: bytes.max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn cutout_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    depth_ties: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Visibility Cutout BG"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 1, resource: depth_ties.as_entire_binding() },
+        ],
+    })
 }
 
 impl VisibilityBufferPass {
@@ -95,12 +155,24 @@ impl VisibilityBufferPass {
         // sampler the visibility pass never had.
         let cutout_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Visibility Cutout BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            }],
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let cutout_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Visibility Cutout Sampler"),
@@ -112,14 +184,8 @@ impl VisibilityBufferPass {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let cutout_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Visibility Cutout BG"),
-            layout: &cutout_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Sampler(&cutout_sampler),
-            }],
-        });
+        let depth_ties = depth_ties_buffer(device, 4);
+        let cutout_bind_group = cutout_bind_group(device, &cutout_layout, &cutout_sampler, &depth_ties);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Visibility Pipeline Layout"),
@@ -228,6 +294,22 @@ impl VisibilityBufferPass {
             pipeline,
             pipeline_two_sided,
             cutout_bind_group,
+            cutout_layout,
+            cutout_sampler,
+            depth_ties,
+        }
+    }
+
+    /// This frame's depth tie per opaque instance, in instance order (renderer.rs `depth_tie`; visibility.wgsl).
+    pub fn set_depth_ties(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ties: &[u32]) {
+        let bytes = (ties.len().max(1) * 4) as u64;
+        if self.depth_ties.size() < bytes {
+            self.depth_ties = depth_ties_buffer(device, bytes.next_power_of_two());
+            self.cutout_bind_group =
+                cutout_bind_group(device, &self.cutout_layout, &self.cutout_sampler, &self.depth_ties);
+        }
+        if !ties.is_empty() {
+            queue.write_buffer(&self.depth_ties, 0, bytemuck::cast_slice(ties));
         }
     }
 

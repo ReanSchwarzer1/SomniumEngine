@@ -5,6 +5,16 @@ edition.workspace     = true
 rust-version.workspace = true
 publish = false
 
+# The editor shell is also a library, so a game can embed the whole editor (camera, imported meshes, terrain,
+# previews) and add its own systems instead of copying them (Rimeborn, 18 Oct 2026). The binary is unchanged.
+[lib]
+name = "hello_engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "hello_engine"
+path = "src/main.rs"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = { workspace = true }
 
@@ -22,6 +32,11 @@ somnium_audio = { workspace = true }
 somnium_asset = { workspace = true }
 somnium_voxel = { workspace = true }
 somnium_ui = { workspace = true }
+# The combat sandbox (Create > Examples > Combat Sandbox).
+somnium_character = { workspace = true }
+somnium_combat = { workspace = true }
+somnium_input = { workspace = true }
+somnium_ai = { workspace = true }
 glam = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }

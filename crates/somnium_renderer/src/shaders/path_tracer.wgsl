@@ -18,8 +18,18 @@ enable wgpu_ray_query;
 //   (Talbot 2005: up to eight candidates weighed by their unshadowed light here) with a shadow ray;
 // - emission where a path lands on a glowing surface; the sky where it leaves;
 // - Russian roulette after the second bounce, and a clamp on what any one bounce may add (fireflies).
-// The primary surface's lighting is written demodulated (divided by its albedo) so the denoiser blurs light, not
-// texture; emission and the sky go out apart, unfiltered.
+//
+// Mode 0 traces the light that reaches each surface after bouncing, which is what the raster's environment, probes
+// and GI only approximate (29 Oct 2026). It starts from the surface the raster itself lit: shading.wgsl writes the
+// finished material at every pixel while this runs (albedo with its paint, decals and terrain layers, metal, the
+// normal-mapped normal, roughness, the material's own occlusion), keeps its direct light (the sun's and the lamps'
+// traced shadows included) and the sky's light (its fill and its reflection, under GTAO), and leaves the rest of its
+// ambient (probes, GI, reflections of the scene) to this; the composite in path_denoise.wgsl adds this back. Before, the
+// tracer rebuilt each surface from vertex normals, a flat roughness and the bare albedo texture, and lit it all itself,
+// so normal maps, roughness and metal maps, vertex paint, baked light and decals were gone (the developer, 29 Oct).
+// A surface whose light is baked into it (`VertexPaint.baked_light`, the PS2 levels) receives nothing: its light is
+// the bake, as the raster has it. The light is written demodulated (divided by the albedo) so the denoiser blurs
+// light, not texture.
 //
 // Mode 1, ray-traced reflections (17 Oct 2026; engine features record D4): the raster lights the frame as usual and
 // only glossy surfaces (roughness up to `max_rough`) trace one ray along their GGX lobe, lit at its hit by the same
@@ -48,14 +58,19 @@ struct PtParams {
 @group(1) @binding(4) var<uniform> pt: PtParams;
 /// The primary surface's light divided by its albedo (rgb); a = 1 on a surface, 0 where the view sees the sky.
 @group(1) @binding(5) var out_light: texture_storage_2d<rgba16float, write>;
-/// The primary surface's normal (xyz) and its distance from the eye (w; 0 for the sky).
+/// The primary surface's normal (xyz) and its distance from the eye (w; 0 for the sky and for what is not traced).
 @group(1) @binding(6) var out_gbuf: texture_storage_2d<rgba16float, write>;
-/// The albedo the light was divided by.
+/// What the filtered light is multiplied back by (mode 0: the albedo it was divided by, the material's occlusion and
+/// the fog's transmittance; mode 1: white, with the roughness in a).
 @group(1) @binding(7) var out_albedo: texture_storage_2d<rgba16float, write>;
-/// What is not filtered: the primary surface's own glow, or the sky.
-@group(1) @binding(8) var out_emission: texture_storage_2d<rgba16float, write>;
 /// The raster's visibility buffer (instance + 1, triangle): the surface each pixel sees.
 @group(1) @binding(9) var vis_tex: texture_2d<u32>;
+/// Mode 0, the raster's finished surface at each pixel (shading.wgsl `path_surface_*`): albedo and metallic; the
+/// shading normal and roughness; the material's own occlusion (negative: its light is baked, trace nothing) and the
+/// fog's transmittance.
+@group(1) @binding(10) var surface_albedo: texture_2d<f32>;
+@group(1) @binding(11) var surface_normal: texture_2d<f32>;
+@group(1) @binding(12) var surface_extra: texture_2d<f32>;
 
 fn pt_rand(seed: ptr<function, u32>) -> f32 {
     *seed = *seed * 747796405u + 2891336453u;
@@ -260,8 +275,9 @@ fn pt_bary(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, c0: vec4<f32>, c1: vec4<
 /// The surface the raster drew at this pixel, as a ray hit: the visibility buffer names the instance and the triangle,
 /// the camera ray through the pixel meets that triangle (barycentrics), and its material is read as `rt_resolve` reads
 /// it, its albedo at full detail. Small props are not in the TLAS (renderer.rs `TLAS_MIN_RADIUS`), so tracing the
-/// primary ray would see through them; this sees exactly what the raster does.
-fn pt_primary(coord: vec2<i32>, origin: vec3<f32>, ndc: vec2<f32>) -> RtHit {
+/// primary ray would see through them; this sees exactly what the raster does. Untextured (mode 0, which takes the
+/// raster's own surface), only its place and its geometric normal are worked out.
+fn pt_primary(coord: vec2<i32>, origin: vec3<f32>, ndc: vec2<f32>, textured: bool) -> RtHit {
     let vis = textureLoad(vis_tex, coord, 0);
     if vis.x == 0u {
         return rt_miss(origin);
@@ -290,10 +306,7 @@ fn pt_primary(coord: vec2<i32>, origin: vec3<f32>, ndc: vec2<f32>) -> RtHit {
     let c1 = view.view_proj * vec4<f32>(p1, 1.0);
     let c2 = view.view_proj * vec4<f32>(p2, 1.0);
     let near_eye = min(c0.w, min(c1.w, c2.w)) < 1.0;
-    let step = 2.0 / vec2<f32>(textureDimensions(vis_tex));
     let b = pt_bary(p0, p1, p2, c0, c1, c2, near_eye, ndc);
-    let bx = pt_bary(p0, p1, p2, c0, c1, c2, near_eye, ndc + vec2<f32>(step.x, 0.0));
-    let by = pt_bary(p0, p1, p2, c0, c1, c2, near_eye, ndc - vec2<f32>(0.0, step.y));
     out.hit = true;
     out.pos = p0 * b.x + p1 * b.y + p2 * b.z;
     // The eye's true direction to the point: the line meets the triangle at the same point whichever way `dir`
@@ -313,6 +326,13 @@ fn pt_primary(coord: vec2<i32>, origin: vec3<f32>, ndc: vec2<f32>) -> RtHit {
     out.roughness = clamp(mat.roughness, 0.04, 1.0);
     out.metallic = clamp(mat.metallic, 0.0, 1.0);
     out.terrain_index = mat.terrain_index;
+    out.albedo = mat.base_color.rgb;
+    if !textured {
+        return out;
+    }
+    let step = 2.0 / vec2<f32>(textureDimensions(vis_tex));
+    let bx = pt_bary(p0, p1, p2, c0, c1, c2, near_eye, ndc + vec2<f32>(step.x, 0.0));
+    let by = pt_bary(p0, p1, p2, c0, c1, c2, near_eye, ndc - vec2<f32>(0.0, step.y));
     let t0 = vec2<f32>(v0.u, v0.v);
     let t1 = vec2<f32>(v1.u, v1.v);
     let t2 = vec2<f32>(v2.u, v2.v);
@@ -327,14 +347,35 @@ fn pt_primary(coord: vec2<i32>, origin: vec3<f32>, ndc: vec2<f32>) -> RtHit {
         out.albedo = rt_terrain_albedo(u32(mat.terrain_index), out.pos);
         out.roughness = 0.55;
         out.metallic = 0.0;
-    } else {
-        var albedo = mat.base_color.rgb;
-        if mat.albedo_map >= 0 {
-            albedo *= textureSampleGrad(textures[mat.albedo_map], default_sampler, uv, uv_dx, uv_dy).rgb;
-        }
-        out.albedo = albedo;
+    } else if mat.albedo_map >= 0 {
+        out.albedo *= textureSampleGrad(textures[mat.albedo_map], default_sampler, uv, uv_dx, uv_dy).rgb;
     }
     return out;
+}
+
+/// Mode 0: the raster's own finished surface at this pixel (shading.wgsl `path_surface_*`), seen along `view_dir`.
+fn pt_raster_surface(coord: vec2<u32>, geo_n: vec3<f32>, view_dir: vec3<f32>) -> Surface {
+    let a = textureLoad(surface_albedo, coord, 0);
+    let nr = textureLoad(surface_normal, coord, 0);
+    var s: Surface;
+    s.albedo = saturate(select(vec3<f32>(0.5), a.rgb, a.rgb == a.rgb));
+    s.metallic = saturate(select(0.0, a.a, a.a == a.a));
+    s.roughness = clamp(select(1.0, nr.w, nr.w == nr.w), 0.045, 1.0);
+    var n = geo_n;
+    if all(nr.xyz == nr.xyz) && dot(nr.xyz, nr.xyz) > 0.25 {
+        n = normalize(nr.xyz);
+    }
+    // A normal map can tilt the normal past the edge of what the eye sees; brought back just in front of it.
+    let n_dot_v = dot(n, view_dir);
+    if n_dot_v < 0.01 {
+        n = normalize(n + view_dir * (0.01 - n_dot_v));
+    }
+    s.normal = n;
+    s.view_dir = view_dir;
+    s.f0 = mix(vec3<f32>(0.04), s.albedo, s.metallic);
+    s.occlusion = 1.0;
+    s.bent_normal = n;
+    return s;
 }
 
 fn pt_surface(hit: RtHit, view_dir: vec3<f32>) -> Surface {
@@ -387,7 +428,6 @@ fn pt_reflect(coord: vec2<u32>, primary: RtHit, eye: vec3<f32>, seed: ptr<functi
     textureStore(out_gbuf, coord, vec4<f32>(n, select(0.0, dist, glossy)));
     // The roughness rides in the albedo's alpha, for the filter (path_denoise.wgsl) and the fade at `max_rough`.
     textureStore(out_albedo, coord, vec4<f32>(1.0, 1.0, 1.0, s.roughness));
-    textureStore(out_emission, coord, vec4<f32>(0.0));
     if !glossy {
         textureStore(out_light, coord, vec4<f32>(0.0));
         return;
@@ -432,13 +472,12 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dir = normalize(mid.xyz / mid.w - view.camera_pos);
     var origin = view.camera_pos;
 
-    let primary = pt_primary(vec2<i32>(gid.xy), origin, ndc);
-    if !primary.hit {
-        let sky = select(textureSampleLevel(env_cube, env_sampler, dir, 0.0).rgb * pt.env_intensity, vec3<f32>(0.0), pt.mode == 1u);
+    let primary = pt_primary(vec2<i32>(gid.xy), origin, ndc, pt.mode == 1u);
+    // Nothing traced here: the sky (the raster draws it), or in mode 0 a surface whose light is baked into it.
+    if !primary.hit || (pt.mode == 0u && textureLoad(surface_extra, gid.xy, 0).x < 0.0) {
         textureStore(out_light, gid.xy, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         textureStore(out_gbuf, gid.xy, vec4<f32>(0.0, 1.0, 0.0, 0.0));
         textureStore(out_albedo, gid.xy, vec4<f32>(1.0, 1.0, 1.0, 0.0));
-        textureStore(out_emission, gid.xy, vec4<f32>(sky, 1.0));
         return;
     }
 
@@ -447,9 +486,12 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // From here the ray is the eye's true one to the surface it sees (`pt_primary`).
+    // From here the ray is the eye's true one to the surface it sees (`pt_primary`), and the surface is the raster's.
     dir = normalize(primary.pos - origin);
-    var surface = pt_surface(primary, -dir);
+    var surface = pt_raster_surface(gid.xy, primary.normal, -dir);
+    // The denoiser stops at edges where neighbours' normals differ, so it gets the smooth normal: the normal-mapped one
+    // (the BRDF's) stopped it at every brick, stone and plank, which stayed noisy (F's check, 29 Oct).
+    let primary_normal = primary.normal;
     // The primary surface's albedo the light is divided by: what it reflects of diffuse light and of specular.
     let demod = max(surface.albedo * (1.0 - surface.metallic) + surface.f0, vec3<f32>(0.04));
     var radiance = vec3<f32>(0.0);
@@ -458,17 +500,16 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bounces = clamp(pt.bounces, 1u, 8u);
     for (var b = 0u; b < bounces; b++) {
         let geo_n = hit.normal;
-        // Light straight from the sun, the moon and a lamp.
-        var add = throughput * pt_direct(surface, hit.pos, geo_n, &seed);
         if b > 0u {
-            // A glowing surface met on the way (the primary's own glow goes out unfiltered, below).
-            add += throughput * hit.emissive;
+            // At each surface the path reaches: light straight from the sun, the moon and a lamp, and its own glow.
+            // (The primary's own direct light and glow are the raster's.)
+            var add = throughput * (pt_direct(surface, hit.pos, geo_n, &seed) + hit.emissive);
             let l = pt_luma(add);
             if l > pt.firefly {
                 add *= pt.firefly / l;
             }
+            radiance += add;
         }
-        radiance += add;
         // The next direction: one lobe, picked by its weight.
         let p_spec = pt_specular_chance(surface);
         let basis = pt_basis(surface.normal);
@@ -482,7 +523,8 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             l = cosine_hemisphere(surface.normal, vec2<f32>(pt_rand(&seed), pt_rand(&seed)));
         }
         let pdf = pt_pdf(surface, l, p_spec);
-        if pdf <= 1e-6 {
+        // A direction a normal map tilted under the surface itself goes nowhere.
+        if pdf <= 1e-6 || dot(l, geo_n) <= 0.0 {
             break;
         }
         throughput *= evaluate_brdf(surface, l) / pdf;
@@ -498,6 +540,11 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         dir = l;
         hit = rt_trace(origin, dir, 0.01, 1000.0);
         if !hit.hit {
+            // The sky the primary itself sees, its fill and its reflection, is the raster's (shading.wgsl keeps both
+            // under the tracer), so only sky reached after a bounce off the scene is added here.
+            if b == 0u {
+                break;
+            }
             var sky = throughput * textureSampleLevel(env_cube, env_sampler, dir, 3.0).rgb * light.ibl_intensity;
             let sl = pt_luma(sky);
             if sl > pt.firefly {
@@ -511,7 +558,7 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Nothing that is not a finite number leaves here: one NaN in the history would spread through the filter
     // to the whole picture in a second or two.
-    var n = primary.normal;
+    var n = primary_normal;
     if !all(n == n) || dot(n, n) < 0.5 {
         n = vec3<f32>(0.0, 1.0, 0.0);
     }
@@ -522,7 +569,10 @@ fn path_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let safe = select(vec3<f32>(0.0), radiance, radiance == radiance);
     textureStore(out_light, gid.xy, vec4<f32>(min(safe / demod, vec3<f32>(60000.0)), 1.0));
     textureStore(out_gbuf, gid.xy, vec4<f32>(n, dist));
-    textureStore(out_albedo, gid.xy, vec4<f32>(select(vec3<f32>(0.5), demod, demod == demod), 1.0));
-    let glow = select(vec3<f32>(0.0), primary.emissive, primary.emissive == primary.emissive);
-    textureStore(out_emission, gid.xy, vec4<f32>(min(glow, vec3<f32>(60000.0)), 1.0));
+    // Multiplied back after the filter, so their detail stays sharp: the albedo, the material's own occlusion (a
+    // crevice the geometry does not have, which no ray can find) and the fog's transmittance (its light is already in
+    // the raster's picture).
+    let extra = textureLoad(surface_extra, gid.xy, 0);
+    let back = demod * saturate(extra.x) * saturate(extra.y);
+    textureStore(out_albedo, gid.xy, vec4<f32>(select(vec3<f32>(0.0), back, back == back), 1.0));
 }

@@ -31,6 +31,9 @@ pub struct Grading {
     /// rather than passed as a `Curve` so this crate stays free of the
     /// reflection vocabulary — a renderer should not know what a keyframe is.
     pub response: Option<[f32; 32]>,
+    /// Painterly amount and ink-line amount (`PostProcessComponent::painterly`, `ink_lines`), then padding. Zero is
+    /// off and the shader skips the stage.
+    pub stylise: [f32; 4],
 }
 
 impl Default for Grading {
@@ -47,6 +50,7 @@ impl Default for Grading {
             dream: [0.0; 4],
             time: 0.0,
             response: None,
+            stylise: [0.0; 4],
         }
     }
 }
@@ -68,7 +72,7 @@ pub struct PictureShift {
 
 /// 16 scalars, 32 response samples, the dream-lens vector, the picture shift (two vectors) and the inverse
 /// view-projection the wave reads the world through.
-const POST_PARAM_FLOATS: usize = 76;
+const POST_PARAM_FLOATS: usize = 80;
 
 /// Post-processing pass: HDR texture → tone-mapped swapchain output.
 pub struct PostProcessPass {
@@ -555,6 +559,7 @@ impl PostProcessPass {
         data[52..56].copy_from_slice(&[shift.kind as f32, shift.progress, shift.reach, f32::from(u8::from(shift.steady))]);
         data[56..60].copy_from_slice(&[shift.at[0], shift.at[1], shift.at[2], 0.0]);
         data[60..76].copy_from_slice(&inv_view_proj);
+        data[76..80].copy_from_slice(&grading.stylise);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&data));
     }
 

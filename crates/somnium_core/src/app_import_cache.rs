@@ -229,6 +229,16 @@ impl ImportedUploadCache {
         released
     }
 
+    /// Forget one canonical source, returning its uploads for the caller to release (streamed meshes no cell uses).
+    pub(super) fn remove(&mut self, source: &std::path::Path) -> Option<Vec<UploadedNode>> {
+        self.sources.remove(source).map(|entry| entry.nodes)
+    }
+
+    /// The canonical sources uploaded now (a streaming reader skips decoding these).
+    pub(super) fn source_paths(&self) -> std::collections::HashSet<PathBuf> {
+        self.sources.keys().cloned().collect()
+    }
+
     /// Vertex offsets still owned by retained entries.
     pub(super) fn vertex_offsets(&self) -> std::collections::HashSet<u32> {
         self.sources

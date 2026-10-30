@@ -87,7 +87,7 @@ pub fn standard_editing_rules(types: &TypeRegistry) -> EditingRulesRegistry {
     if let Some(schema) = types.by_name("somnium.PostProcess") {
         let mut rules = ConditionalRules::default();
         let gated = [
-            ("bloom_enabled", &["bloom_intensity"][..]),
+            ("bloom_enabled", &["bloom_intensity", "lens_flare"][..]),
             ("dof_enabled", &["dof_focus_distance"][..]),
             (
                 "use_physical_camera",
@@ -111,6 +111,7 @@ pub fn standard_editing_rules(types: &TypeRegistry) -> EditingRulesRegistry {
             ("path_tracer", &["path_bounces"][..]),
             ("probes", &["probe_intensity"][..]),
             ("fsr_enabled", &["fsr_sharpness"][..]),
+            ("traced_reflections", &["traced_reflection_roughness"][..]),
         ];
         for (controller, targets) in gated {
             let Some(controller) = schema.field_by_name(controller).map(|item| item.id) else {
@@ -124,6 +125,14 @@ pub fn standard_editing_rules(types: &TypeRegistry) -> EditingRulesRegistry {
                 }
             }
         }
+        // The wave's origin and reach mean nothing to the other picture shifts (index 3 is Wave).
+        if let Some(shift) = schema.field_by_name("picture_shift").map(|item| item.id) {
+            for name in ["picture_shift_origin", "picture_shift_reach"] {
+                if let Some(target) = schema.field_by_name(name) {
+                    rules.hidden.push((target.id, Condition::Enum(shift, 3)));
+                }
+            }
+        }
         registry.register(schema.stable_id, rules);
     }
 
@@ -132,10 +141,22 @@ pub fn standard_editing_rules(types: &TypeRegistry) -> EditingRulesRegistry {
         field("somnium.Light", "light_type"),
     ) {
         let mut rules = ConditionalRules::default();
-        for name in ["inner_angle", "outer_angle"] {
+        for name in ["inner_angle", "outer_angle", "cookie"] {
             if let Some(target) = schema.field_by_name(name) {
                 rules.hidden.push((target.id, Condition::Enum(kind, 2)));
             }
+        }
+        registry.register(schema.stable_id, rules);
+    }
+
+    // Custom Scale only means something on the Custom rung (index 3).
+    if let (Some(schema), Some(rung)) = (
+        types.by_name("somnium.CameraSettings"),
+        field("somnium.CameraSettings", "graphics_scalability"),
+    ) {
+        let mut rules = ConditionalRules::default();
+        if let Some(target) = schema.field_by_name("custom_scale") {
+            rules.hidden.push((target.id, Condition::Enum(rung, 3)));
         }
         registry.register(schema.stable_id, rules);
     }

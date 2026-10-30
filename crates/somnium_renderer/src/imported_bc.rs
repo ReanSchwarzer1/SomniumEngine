@@ -185,6 +185,63 @@ pub fn store(key: &[u8; 32], width: u32, height: u32, alpha: bool, levels: &[Vec
     }
 }
 
+/// What to fill the cache with before a level opens: each glTF source (relative to the content root) and the parts
+/// of it that levels use (`None`: every part). Built by [`plan_warm`], encoded by
+/// `SomniumRenderer::warm_texture_cache`; `examples/warm_texture_cache.rs` and a game's warm-up screen share it.
+pub type WarmPlan = std::collections::BTreeMap<String, Option<std::collections::HashSet<usize>>>;
+
+fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // `SOMNIUM-SCENE 1 <len>`, a header line, then the document; plain JSON otherwise.
+    let body = if text.starts_with("SOMNIUM-SCENE") { text.splitn(3, '\n').nth(2).unwrap_or("") } else { &text };
+    serde_json::from_str(body).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn add_to_plan(plan: &mut WarmPlan, source: String, parts: Option<std::collections::HashSet<usize>>) {
+    let entry = plan.entry(source).or_insert_with(|| Some(Default::default()));
+    match (entry.as_mut(), parts) {
+        (Some(have), Some(more)) => have.extend(more),
+        _ => *entry = None,
+    }
+}
+
+/// Add what uploading `item` would encode: for a scene (`*.json` with entities), the parts its imported meshes use;
+/// for a foliage palette (`*palette.json`), every material of each entry's model and its far LOD; for a model
+/// (`*.gltf` / `*.glb`) or a folder of them, every material. Paths inside scenes and palettes are relative to `root`.
+pub fn plan_warm(root: &std::path::Path, item: &std::path::Path, plan: &mut WarmPlan) -> Result<(), String> {
+    let relative = |path: &std::path::Path| path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    if item.is_dir() {
+        for entry in std::fs::read_dir(item).map_err(|e| format!("{}: {e}", item.display()))?.flatten() {
+            let path = entry.path();
+            if path.is_dir() || path.extension().is_some_and(|e| e == "gltf" || e == "glb") {
+                plan_warm(root, &path, plan)?;
+            }
+        }
+        return Ok(());
+    }
+    match item.extension().and_then(|e| e.to_str()) {
+        Some("gltf" | "glb") => add_to_plan(plan, relative(item), None),
+        Some("json") => {
+            let document = read_json(item)?;
+            for entry in document["entries"].as_array().into_iter().flatten() {
+                for source in [&entry["source"], &entry["lod"]["source"]] {
+                    if let Some(source) = source.as_str() {
+                        add_to_plan(plan, source.to_owned(), None);
+                    }
+                }
+            }
+            for entity in document["entities"].as_array().into_iter().flatten() {
+                let fields = &entity["components"]["somnium.ImportedMesh"]["fields"];
+                if let (Some(source), Some(node)) = (fields["source"].as_str(), fields["node"].as_u64()) {
+                    add_to_plan(plan, source.to_owned(), Some(std::collections::HashSet::from([node as usize])));
+                }
+            }
+        }
+        _ => return Err(format!("{}: not a scene, palette, model or folder", item.display())),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

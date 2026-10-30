@@ -58,6 +58,17 @@ fn log_pacing(delta: Duration) {
     samples.clear();
 }
 
+/// `SOMNIUM_MOVIE_DIR` set (17 Oct 2026, trailer captures; `SOMNIUM_MOVIE_FPS`, default 30): every frame is exactly
+/// one 1/fps slice of game time however long it took to draw, so the frames `App::movie_frame` writes play back smooth.
+pub fn movie_step() -> Option<Duration> {
+    static STEP: std::sync::LazyLock<Option<Duration>> = std::sync::LazyLock::new(|| {
+        std::env::var_os("SOMNIUM_MOVIE_DIR")?;
+        let fps = std::env::var("SOMNIUM_MOVIE_FPS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| (1.0..=240.0).contains(f));
+        Some(Duration::from_secs_f64(1.0 / fps.unwrap_or(30.0)))
+    });
+    *STEP
+}
+
 /// Per-frame timing data and frame-rate limiter state.
 ///
 /// This struct is **not** `Clone` or `Copy` by design — it contains
@@ -125,6 +136,10 @@ impl TimeState {
         self.elapsed = now.duration_since(self.startup);
         self.last_frame = now;
         self.frame_count += 1;
+        if let Some(step) = movie_step() {
+            self.delta_time = step;
+            self.elapsed = step.mul_f64(self.frame_count as f64);
+        }
         log_pacing(self.delta_time);
 
         // Exponential moving average of FPS.

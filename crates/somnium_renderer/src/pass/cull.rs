@@ -361,9 +361,9 @@ impl CullPass {
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: if phase == 0 {
-                Some("Instance Cull Phase 1")
+                Some("Instance Cull Pass 1")
             } else {
-                Some("Instance Cull Phase 2")
+                Some("Instance Cull Pass 2")
             },
             timestamp_writes: None,
         });

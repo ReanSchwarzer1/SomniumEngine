@@ -65,6 +65,7 @@ pub mod editor_commands;
 mod editor_gizmo;
 pub mod error;
 pub mod event;
+mod foliage_grid;
 mod foliage_palette;
 pub mod foliage_visibility;
 pub mod i18n;
@@ -84,6 +85,8 @@ pub mod save_game;
 pub mod scatter_scene;
 mod scene_delta;
 pub mod spline;
+pub mod story_actor;
+pub mod story_authoring;
 pub mod staged_mirror;
 pub mod work;
 /// The `.somnium` container: a framed header the Content Drawer can read
@@ -113,6 +116,13 @@ pub mod time;
 pub mod vertex_paint;
 /// Phase CONTROL-L: the day cycle.
 pub mod time_of_day;
+/// An isometric camera rig for mouse-and-keyboard games (Rimeborn, 18 Oct 2026).
+pub mod isometric_camera;
+/// Roofs and upper floors that open for the camera while the viewer is inside (Rimeborn, 18 Oct 2026).
+pub mod cutaway;
+pub mod lod_group;
+pub mod cell_streaming;
+pub mod ground_cover;
 /// Phase CONTROL-N: weather and the wetness it leaves.
 pub mod weather;
 /// MORROWIND-S: deterministic cell streaming and one-file-per-actor storage.
@@ -424,6 +434,10 @@ pub struct LightComponent {
     pub area_width: f32,
     /// Rect-light half-height in metres (Phase 24R). Ignored for other kinds.
     pub area_height: f32,
+    /// What a spot shines through, a pattern laid over its beam (`spot_cookie.wgsl`): 0 nothing, 1 a torch's
+    /// reflector rings, 2 venetian blinds, 3 a window's panes, 4 a work lamp's wire guard, 5 a grimy diffuser.
+    /// Spots only.
+    pub cookie: u32,
 }
 
 impl LightComponent {
@@ -455,6 +469,41 @@ impl LightComponent {
         self.tint() * scale
     }
 
+    /// The renderer's lamp for this light at `position`, its beam along `forward` (the way the light travels,
+    /// the entity's -Z), dimmed by `flicker` (1 steady; `LightFlickerComponent::factor`). A spot keeps its
+    /// `cookie`. `None` for a directional light, which is the sun and not a local light. What a game's light
+    /// gathering hands `submit_local_light` for each authored lamp.
+    #[must_use]
+    pub fn local_light(
+        &self,
+        position: glam::Vec3,
+        forward: glam::Vec3,
+        flicker: f32,
+    ) -> Option<somnium_renderer::cluster::GpuLocalLight> {
+        let light_type = match self.light_type {
+            LightType::Directional => return None,
+            LightType::Point => 0,
+            LightType::Spot => 1,
+            LightType::Rect => 2,
+            LightType::Disc => 3,
+            LightType::Tube => 4,
+        };
+        let lamp = somnium_renderer::cluster::GpuLocalLight {
+            position_ws: position.to_array(),
+            range: self.range,
+            color: (self.photometric_color() * flicker).to_array(),
+            // Authored emitting shapes stay: a window or strip treated as a point loses the renderer's area
+            // integration and shows pin highlights.
+            light_type,
+            direction_ws: forward.normalize_or_zero().to_array(),
+            spot_cos_outer: self.outer_angle.cos(),
+            spot_cos_inner: self.inner_angle.cos(),
+            radius: self.source_radius,
+            _pad: [self.area_width, self.area_height],
+        };
+        Some(if light_type == 1 && self.cookie > 0 { lamp.with_cookie(self.cookie) } else { lamp })
+    }
+
     /// Convenience constructor for a white directional light, in **lux**.
     pub fn directional(intensity: f32) -> Self {
         Self {
@@ -470,6 +519,7 @@ impl LightComponent {
             moon_intensity: 0.010,
             area_width: 0.0,
             area_height: 0.0,
+            cookie: 0,
         }
     }
 
@@ -488,6 +538,7 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: 0.0,
             area_height: 0.0,
+            cookie: 0,
         }
     }
 
@@ -506,6 +557,7 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: 0.0,
             area_height: 0.0,
+            cookie: 0,
         }
     }
 
@@ -524,6 +576,7 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: half_width,
             area_height: half_height,
+            cookie: 0,
         }
     }
 
@@ -542,6 +595,7 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: 0.0,
             area_height: 0.0,
+            cookie: 0,
         }
     }
 
@@ -563,6 +617,7 @@ impl LightComponent {
             moon_intensity: 0.0,
             area_width: half_length.max(0.05),
             area_height: 0.0,
+            cookie: 0,
         }
     }
 }
@@ -1272,7 +1327,9 @@ pub struct PostProcessComponent {
     pub specular_gi: bool,
     /// Roughness cutoff for the specular GI trace.
     pub spec_roughness: f32,
-    /// Offline path tracer (Phase 24O). Replaces the image while on. Default off.
+    /// The real-time path tracer (Phase 24O, real-time since 17 Oct 2026): every light traced as it travels, in
+    /// place of the raster's light; TAA or FSR, fog and the camera's effects still run over it. Experimental and
+    /// expensive (Town: +3.7 ms GPU). Default off.
     pub path_tracer: bool,
     /// Bounces the path tracer takes. 1..=8.
     pub path_bounces: u32,
@@ -1300,6 +1357,16 @@ pub struct PostProcessComponent {
     /// 0 (default) lights fog with the whole sky everywhere; toward 1, fog
     /// under roofs and dense canopy loses its skylit glow.
     pub fog_sky_occlusion: f32,
+    /// How far the fog volume reaches, in metres (default 1200). Its 32
+    /// slices are spread evenly over this, so thick fog that hides everything
+    /// past ~100 m reads finer up close with a short range (~150 m puts a
+    /// slice every 5 m instead of every 37). Past the range the last slice
+    /// holds, so it should reach about as far as the fog lets anyone see.
+    pub fog_range: f32,
+    /// Scale on the sky light the fog scatters (default 1), apart from the
+    /// sun's and the lamps'. Under 1, a moon can light the ground while the fog
+    /// away from the lights stays blue-black.
+    pub fog_skylight: f32,
     /// How far every vertex-painted layer and every material's authored
     /// weathering is taken back toward the bare material, 0..=1. 0 (default)
     /// is as authored. A whole level shown as it was before it decayed.
@@ -1309,6 +1376,33 @@ pub struct PostProcessComponent {
     pub foliage_green: f32,
     /// FSR RCAS sharpness, 0..=1. Default 0.8.
     pub fsr_sharpness: f32,
+    /// Lens-flare ghosts and halo off bright lights (bloom's flare pass), 0 off, 1 the full strength. Needs bloom.
+    /// A game's own setting (`Renderer::lens_flare_requested`) wins where it asks for more.
+    pub lens_flare: f32,
+    /// Ray-traced reflections on glossy surfaces (the path tracer's reflection mode, 17 Oct 2026). Needs ray
+    /// query; never under the retro picture or while the whole frame is path traced.
+    pub traced_reflections: bool,
+    /// The roughest surface that traces a reflection, 0..=1 (reflections fade out over the last 30% below it).
+    /// Default 0.5: polished wood, lacquer, wet floors and glass, not plaster.
+    pub traced_reflection_roughness: f32,
+    /// A transition drawn over the whole picture: 0 none, 1 into a screen, 2 eyelids, 3 a wave of the retro
+    /// picture (see `PictureShift`). A game's own transition, while one runs, wins.
+    pub picture_shift: u32,
+    /// How far through the picture shift, 0..=1. Animate it from a timeline or a script.
+    pub picture_shift_progress: f32,
+    /// Where the wave starts (world metres); kind 3 only.
+    pub picture_shift_origin: [f32; 3],
+    /// How far the wave has gone at progress 1, in metres; kind 3 only.
+    pub picture_shift_reach: f32,
+    /// Painterly filter, 0 off ..= 1 full: a Kuwahara filter over the finished picture flattens fine texture into
+    /// brush-like patches while keeping edges, for a look between photo-real and painted. 0 skips it entirely.
+    pub painterly: f32,
+    /// Ink lines, 0 off ..= 1 full: silhouettes and creases found in the depth buffer are darkened into soft lines
+    /// that fade with distance. 0 skips it entirely.
+    pub ink_lines: f32,
+    /// Light ramp, 0 off ..= 1 full: the sun's light on a surface follows a soft painterly ramp (lit faces come up
+    /// flat, the terminator is a narrow soft band) while GI, reflections and shadows stay physical. 0 skips it.
+    pub light_ramp: f32,
 }
 
 impl Default for PostProcessComponent {
@@ -1450,6 +1544,8 @@ impl Default for PostProcessComponent {
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
             fog_sky_occlusion: 0.0,
+            fog_range: 1200.0,
+            fog_skylight: 1.0,
             paint_fade: 0.0,
             foliage_green: 0.0,
             aa,
@@ -1458,6 +1554,16 @@ impl Default for PostProcessComponent {
             // authored control is the Details checkbox.
             oit_enabled: std::env::var("SOMNIUM_OIT").as_deref() == Ok("1"),
             fsr_sharpness: 0.8,
+            lens_flare: 0.0,
+            traced_reflections: std::env::var("SOMNIUM_RT_REFLECTIONS").as_deref() == Ok("1"),
+            traced_reflection_roughness: 0.5,
+            picture_shift: 0,
+            picture_shift_progress: 0.0,
+            picture_shift_origin: [0.0; 3],
+            picture_shift_reach: 40.0,
+            painterly: 0.0,
+            ink_lines: 0.0,
+            light_ramp: 0.0,
         }
     }
 }
@@ -1790,7 +1896,10 @@ impl somnium_ecs::Component for PostProcessComponent {}
 
 #[cfg(test)]
 mod post_process_tests {
-    use super::{AntiAliasing, PostProcessComponent, SmaaPreset};
+    use super::{
+        AntiAliasing, CameraSettingsComponent, GraphicsScalability, LightComponent, PostProcessComponent,
+        SmaaPreset,
+    };
 
     /// MORROWIND-AC. Three tests used to live here proving that
     /// `set_taa_enabled` / `set_fsr_enabled` / `set_cas_enabled` restored a
@@ -1903,6 +2012,33 @@ mod post_process_tests {
         pp.set_world_cache_enabled(true);
         assert!(pp.world_cache && !pp.mesh_sdf);
     }
+
+    #[test]
+    fn a_light_becomes_a_lamp_with_its_cookie_on_spots_only() {
+        let at = glam::Vec3::new(1.0, 2.0, 3.0);
+        assert!(LightComponent::directional(10.0).local_light(at, glam::Vec3::NEG_Z, 1.0).is_none());
+        let spot = LightComponent { cookie: 2, ..LightComponent::spot(800.0, 12.0, 0.4, 0.6) };
+        let lamp = spot.local_light(at, glam::Vec3::new(0.0, 0.0, -2.0), 0.5).unwrap();
+        assert_eq!(lamp.light_type, 1);
+        assert_eq!(lamp.position_ws, at.to_array());
+        assert_eq!(lamp.direction_ws, [0.0, 0.0, -1.0]);
+        assert_eq!(lamp._pad[1], -2.0);
+        assert_eq!(glam::Vec3::from(lamp.color), spot.photometric_color() * 0.5);
+        // A cookie on anything but a spot is ignored: a rect's half-extents ride in the same slots.
+        let rect = LightComponent { cookie: 2, ..LightComponent::rect(800.0, 12.0, 0.5, 0.25) };
+        assert_eq!(rect.local_light(at, glam::Vec3::NEG_Z, 1.0).unwrap()._pad, [0.5, 0.25]);
+    }
+
+    #[test]
+    fn a_custom_camera_scale_is_its_own_and_clamped() {
+        let mut camera = CameraSettingsComponent::default();
+        assert_eq!(camera.scene_scale(), 0.75);
+        camera.graphics_scalability = GraphicsScalability::Custom;
+        camera.custom_scale = 0.85;
+        assert_eq!(camera.scene_scale(), 0.85);
+        camera.custom_scale = 0.1;
+        assert_eq!(camera.scene_scale(), 0.5);
+    }
 }
 
 // ─── Phase CR: Camera settings ──────────────────────────────────────────────
@@ -1917,6 +2053,8 @@ pub enum GraphicsScalability {
     Balanced,
     /// Two thirds of each dimension; about 44.4% of the scene pixels.
     Performance,
+    /// The Camera's own `custom_scale` (a game's render-scale slider, 17 Oct 2026).
+    Custom,
 }
 
 impl GraphicsScalability {
@@ -1926,13 +2064,15 @@ impl GraphicsScalability {
             Self::Native => 0,
             Self::Balanced => 1,
             Self::Performance => 2,
+            Self::Custom => 3,
         }
     }
 
-    /// Scale applied to the existing viewport resolution cap.
+    /// Scale applied to the existing viewport resolution cap. `Custom` has none of its own: the Camera's
+    /// `custom_scale` ([`CameraSettingsComponent::scene_scale`]); full resolution here.
     pub fn scale(self) -> f32 {
         match self {
-            Self::Native => 1.0,
+            Self::Native | Self::Custom => 1.0,
             Self::Balanced => 0.75,
             Self::Performance => 2.0 / 3.0,
         }
@@ -1980,6 +2120,8 @@ pub struct CameraSettingsComponent {
     /// Lowest scale it may choose, as a fraction of the preset resolution.
     /// 0.67 renders about 45% of the pixels.
     pub dynamic_floor: f32,
+    /// Scene resolution as a fraction of each dimension when `graphics_scalability` is `Custom`, 0.5..=1.
+    pub custom_scale: f32,
 }
 
 impl Default for CameraSettingsComponent {
@@ -1990,6 +2132,7 @@ impl Default for CameraSettingsComponent {
             dynamic_resolution: false,
             dynamic_target_ms: 1000.0 / 60.0,
             dynamic_floor: 0.67,
+            custom_scale: 0.67,
         }
     }
 }
@@ -2017,6 +2160,16 @@ impl CameraSettingsComponent {
             dynamic_resolution: std::env::var("SOMNIUM_DYNRES").as_deref() == Ok("1"),
             dynamic_target_ms: num("SOMNIUM_DYNRES_TARGET_MS", default.dynamic_target_ms),
             dynamic_floor: num("SOMNIUM_DYNRES_FLOOR", default.dynamic_floor).clamp(0.25, 1.0),
+            custom_scale: default.custom_scale,
+        }
+    }
+
+    /// The scene resolution this camera asks for, as a fraction of each dimension (before the graphics tier's cap).
+    #[must_use]
+    pub fn scene_scale(&self) -> f32 {
+        match self.graphics_scalability {
+            GraphicsScalability::Custom => self.custom_scale.clamp(0.5, 1.0),
+            rung => rung.scale(),
         }
     }
 }

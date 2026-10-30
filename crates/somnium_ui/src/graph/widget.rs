@@ -21,6 +21,39 @@ use crate::{
 use somnium_anim::{CompareOp, Condition};
 
 mod authoring;
+mod story;
+pub use story::PreviewInput;
+
+/// A node's kind as a glyph and a colour, so a graph reads at a glance: clips, blends, states and the output each
+/// look like themselves. Kinds without one get a neutral band.
+fn node_kind(archetype: &str) -> (Option<crate::icons::IconId>, [u8; 4]) {
+    use crate::icons::IconId;
+    let s = &crate::theme::active().semantic;
+    match archetype {
+        "animation.clip" => (Some(IconId::AnimClip), s.accent.default.bytes()),
+        "animation.state" => (Some(IconId::StateMachine), s.status.success.bytes()),
+        "animation.output" => (Some(IconId::Rig), s.status.error.bytes()),
+        "animation.layer" | "animation.cache" => (Some(IconId::Layers), s.status.info.bytes()),
+        id if id.starts_with("animation.blend") => (Some(IconId::BlendSpace), s.status.info.bytes()),
+        id if id.starts_with("material.") => (Some(IconId::MaterialBall), s.accent.default.bytes()),
+        id if id.starts_with("behavior.") || id.starts_with("ai.") => {
+            (Some(IconId::Activity), s.status.warning.bytes())
+        }
+        "dialogue.start" | "quest.quest" => (Some(IconId::Play), s.status.success.bytes()),
+        "dialogue.entry" => (Some(IconId::Bookmark), s.status.success.bytes()),
+        "dialogue.line" => (Some(IconId::User), s.accent.default.bytes()),
+        "dialogue.option" => (Some(IconId::ListView), s.status.info.bytes()),
+        "dialogue.branch" => (Some(IconId::Route), s.status.warning.bytes()),
+        "dialogue.action" => (Some(IconId::Activity), s.status.warning.bytes()),
+        "dialogue.call" => (Some(IconId::Link), s.status.info.bytes()),
+        "dialogue.jump" | "quest.goto" => (Some(IconId::Forward), s.border.strong.bytes()),
+        "dialogue.end" => (Some(IconId::Stop), s.status.error.bytes()),
+        "quest.stage" => (Some(IconId::Sequence), s.accent.default.bytes()),
+        "quest.objective" => (Some(IconId::Check), s.status.info.bytes()),
+        "quest.journal" => (Some(IconId::Docs), s.status.warning.bytes()),
+        _ => (None, s.border.strong.bytes()),
+    }
+}
 
 const PIN_GRAB: f32 = 9.0;
 const GRID_STEP: f32 = 32.0;
@@ -29,8 +62,8 @@ const PIN_ROW: f32 = 24.0;
 const NODE_PADDING: f32 = 8.0;
 const LITERAL_LEFT: f32 = 78.0;
 const LITERAL_RIGHT: f32 = 8.0;
-const TRANSITION_LABEL_WIDTH: f32 = 176.0;
-const TRANSITION_LABEL_HEIGHT: f32 = 20.0;
+const TRANSITION_LABEL_WIDTH: f32 = 204.0;
+const TRANSITION_LABEL_HEIGHT: f32 = 22.0;
 const TRANSITION_PANEL_WIDTH: f32 = 292.0;
 const TRANSITION_PANEL_HEIGHT: f32 = 190.0;
 /// A single wheel line changes graph scale by ten percent. Routed wheel
@@ -104,6 +137,34 @@ pub enum GraphEditorMessage {
     Changed(Graph),
     /// The user committed a graph or overlay mutation in state-machine mode.
     StateMachineChanged(AnimationStateMachineDocument),
+    /// Open a story asset (`*.somdialogue`, `*.somquest`) as a graph. `json` is the asset; the control keeps what
+    /// the graph does not hold (text keys, forms) so a save is lossless, and emits [`Self::Document`] with the
+    /// asset's JSON, not a graph's.
+    OpenStory {
+        catalogue: String,
+        json: String,
+        source: Option<String>,
+    },
+    /// Problems the host found checking a story asset against the whole project: `(where, message, warning)`.
+    StoryProblems(Vec<(String, String, bool)>),
+    /// Play the open dialogue from the selected node over this content (the host built it with the edits in).
+    StoryPreview(std::sync::Arc<somnium_story::StoryDatabase>),
+    /// From the control: what the Game View presenter should show; `None` closes it.
+    PreviewBeat(Option<somnium_story::Beat>),
+    /// From the control: quest news from the play-through, for the Game View's notices.
+    PreviewNotice { heading: String, text: String },
+    /// To the control: the Game View presenter's player moved the play-through.
+    PreviewInput(story::PreviewInput),
+    /// To the control: turn the Game View on or off, as its button does.
+    PreviewGameView(bool),
+    /// To the control: select the story node with this id and bring it into view, as Find does.
+    RevealNode(String),
+    /// To the control: moves for the next play-through to make as soon as it starts.
+    PreviewScript(Vec<story::PreviewInput>),
+    /// From the control: the play-through's journal, for the game's journal screen over the editor.
+    PreviewJournal(somnium_story::story::JournalView),
+    /// To the control: the journal screen's player read, tracked or closed.
+    PreviewJournalOutput(crate::widgets::journal_screen::JournalOutput),
 }
 
 impl GraphEditorMessage {
@@ -332,6 +393,29 @@ impl GraphEditor {
             .screen_to_graph(Self::local(widget, point) - self.authoring_offset())
     }
 
+    /// Fit every node in view, centred, never larger than life (Home, as in other node editors).
+    fn frame_all(&mut self, widget: &Widget) {
+        let layouts = geometry::layout_nodes(&self.surface().graph, &self.surface().catalogue);
+        let Some(first) = layouts.first() else {
+            return;
+        };
+        let (mut min, mut max) = (first.bounds.pos(), first.bounds.pos() + first.bounds.size());
+        for layout in &layouts {
+            min = min.min(layout.bounds.pos());
+            max = max.max(layout.bounds.pos() + layout.bounds.size());
+        }
+        let canvas = widget.screen_bounds().size() - self.authoring_offset();
+        let room = canvas - Vec2::splat(64.0);
+        if room.x <= 0.0 || room.y <= 0.0 {
+            return;
+        }
+        let size = (max - min).max(Vec2::ONE);
+        let zoom = (room.x / size.x).min(room.y / size.y).clamp(geometry::GraphView::MIN_ZOOM, 1.0);
+        let view = &mut self.surface_mut().view;
+        view.zoom = zoom;
+        view.pan = canvas * 0.5 - (min + size * 0.5) * zoom;
+    }
+
     fn screen_point(&self, widget: &Widget, point: Vec2) -> Vec2 {
         widget.screen_bounds().pos()
             + self.authoring_offset()
@@ -390,10 +474,11 @@ impl GraphEditor {
         let Some(archetype) = surface.catalogue.get(&node.archetype) else {
             return false;
         };
-        if surface
-            .graph
-            .input_source(PinRef::input(node.id, pin))
-            .is_some()
+        if archetype.input_row(pin).is_none()
+            || surface
+                .graph
+                .input_source(PinRef::input(node.id, pin))
+                .is_some()
         {
             return false;
         }
@@ -408,10 +493,10 @@ impl GraphEditor {
                     .is_some_and(|input| input.default.is_some()))
     }
 
-    fn literal_bounds(layout: &geometry::NodeLayout, pin: u16) -> Rect {
+    fn literal_bounds(layout: &geometry::NodeLayout, row: usize) -> Rect {
         Rect::new(
             layout.bounds.x + LITERAL_LEFT,
-            layout.bounds.y + NODE_HEADER + NODE_PADDING + f32::from(pin) * PIN_ROW + 2.0,
+            layout.bounds.y + NODE_HEADER + NODE_PADDING + row as f32 * PIN_ROW + 2.0,
             (layout.bounds.w - LITERAL_LEFT - LITERAL_RIGHT).max(20.0),
             PIN_ROW - 4.0,
         )
@@ -439,8 +524,9 @@ impl GraphEditor {
                     .enumerate()
                     .find_map(|(pin, input)| {
                         let pin = pin as u16;
+                        let row = archetype.input_row(pin)?;
                         if !self.literal_visible(node.id, pin)
-                            || !Self::literal_bounds(&layout, pin).contains(graph_point)
+                            || !Self::literal_bounds(&layout, row).contains(graph_point)
                         {
                             return None;
                         }
@@ -461,9 +547,12 @@ impl GraphEditor {
         let Some(edit) = self.literal_edit.take() else {
             return false;
         };
-        let changed = self
-            .surface_mut()
-            .set_literal(edit.node, edit.pin, edit.draft);
+        let changed = if edit.pin == story::TITLE_PIN {
+            self.surface_mut().set_title(edit.node, edit.draft.trim())
+        } else {
+            self.surface_mut()
+                .set_literal(edit.node, edit.pin, edit.draft)
+        };
         if changed {
             self.emit_changed(widget, emit);
         }
@@ -914,9 +1003,9 @@ impl Control for GraphEditor {
                             if condition_count == 1 { "" } else { "s" },
                             transition.sync_track.as_deref().unwrap_or("no sync")
                         ),
-                        Vec2::new(label.x + 6.0, label.y + 5.0),
+                        Vec2::new(label.x + 7.0, label.y + 5.0),
                         self.font_id,
-                        8.0,
+                        10.0,
                         theme.semantic.text.primary.bytes(),
                     );
                 }
@@ -948,8 +1037,11 @@ impl Control for GraphEditor {
             } else {
                 theme.semantic.surface.raised.bytes()
             };
+            let marked = self.story_border(node.id);
             let border = if initial {
                 theme.semantic.status.success.bytes()
+            } else if let Some(colour) = marked {
+                colour
             } else if selected {
                 theme.semantic.accent.default.bytes()
             } else {
@@ -958,15 +1050,31 @@ impl Control for GraphEditor {
             ctx.push_primitive(
                 Primitive::fill(node_bounds, fill)
                     .with_radius(theme.geometry.radius_tile)
-                    .with_border(if selected || initial { 2.0 } else { 1.0 }, border),
+                    .with_border(if selected || initial || marked.is_some() { 2.0 } else { 1.0 }, border),
                 None,
             );
+            // Nothing a node says may spill out of it; the pins, drawn after, sit on its edges.
+            ctx.push_clip_rect(node_bounds);
+            let zoom = surface.view.zoom;
             if !archetype.is_reroute {
-                let header_height = NODE_HEADER * surface.view.zoom;
+                let header_height = NODE_HEADER * zoom;
                 ctx.push_rect_filled(
                     Rect::new(node_bounds.x, node_bounds.y, node_bounds.w, header_height),
                     theme.semantic.surface.header.bytes(),
                 );
+                // What kind of node this is, before its name: a band of its kind's colour and its glyph.
+                let (glyph, band) = node_kind(&node.archetype);
+                ctx.push_rect_filled(
+                    Rect::new(node_bounds.x, node_bounds.y, node_bounds.w, 3.0 * zoom.max(0.75)),
+                    band,
+                );
+                let mut title_x = node_bounds.x + 9.0 * zoom;
+                if let Some(glyph) = glyph {
+                    let at = Rect::new(title_x, node_bounds.y + 7.0 * zoom, 15.0 * zoom, 15.0 * zoom);
+                    let (uv, texture) = glyph.draw_quad(at);
+                    ctx.push_textured_rect(at, uv, band, texture);
+                    title_x += 21.0 * zoom;
+                }
                 let title = if node.title.is_empty() {
                     archetype.title
                 } else {
@@ -974,25 +1082,28 @@ impl Control for GraphEditor {
                 };
                 ctx.push_text(
                     title,
-                    Vec2::new(node_bounds.x + 8.0, node_bounds.y + 7.0),
+                    Vec2::new(title_x, node_bounds.y + 7.0 * zoom),
                     self.font_id,
-                    11.0,
+                    12.0 * zoom,
                     theme.semantic.text.primary.bytes(),
                 );
             }
             for (pin, input) in archetype.inputs.iter().enumerate() {
+                let Some(row) = archetype.input_row(pin as u16) else {
+                    continue;
+                };
                 let y = node_bounds.y
-                    + (NODE_HEADER + NODE_PADDING + pin as f32 * PIN_ROW + 5.0) * surface.view.zoom;
+                    + (NODE_HEADER + NODE_PADDING + row as f32 * PIN_ROW + 5.0) * surface.view.zoom;
                 ctx.push_text(
                     input.name,
-                    Vec2::new(node_bounds.x + 8.0 * surface.view.zoom, y),
+                    Vec2::new(node_bounds.x + 9.0 * zoom, y - 1.0 * zoom),
                     self.font_id,
-                    9.0 * surface.view.zoom,
+                    10.5 * zoom,
                     theme.semantic.text.secondary.bytes(),
                 );
                 let pin = pin as u16;
                 if self.literal_visible(node.id, pin) {
-                    let field = self.screen_rect(widget, Self::literal_bounds(&layout, pin));
+                    let field = self.screen_rect(widget, Self::literal_bounds(&layout, row));
                     let editing = self
                         .literal_edit
                         .as_ref()
@@ -1019,23 +1130,26 @@ impl Control for GraphEditor {
                     let display = input
                         .unit
                         .map_or_else(|| value.to_owned(), |unit| format!("{value} {unit}"));
+                    ctx.push_clip_rect(field);
                     ctx.push_text(
                         &display,
-                        Vec2::new(field.x + 4.0, field.y + 4.0),
+                        Vec2::new(field.x + 5.0, field.y + 3.0 * zoom),
                         self.font_id,
-                        9.0 * surface.view.zoom,
+                        10.5 * zoom,
                         theme.semantic.text.primary.bytes(),
                     );
+                    ctx.pop_clip_rect();
                 }
             }
             for (pin, output) in archetype.outputs.iter().enumerate() {
                 let y = node_bounds.y
                     + (NODE_HEADER + NODE_PADDING + pin as f32 * PIN_ROW + 5.0) * surface.view.zoom;
+                let name_w = ctx.font_atlas.measure_text(output.name, 10.5 * zoom, self.font_id).x;
                 ctx.push_text(
                     output.name,
-                    Vec2::new(node_bounds.x + node_bounds.w - 56.0 * surface.view.zoom, y),
+                    Vec2::new(node_bounds.x + node_bounds.w - 12.0 * zoom - name_w, y - 1.0 * zoom),
                     self.font_id,
-                    9.0 * surface.view.zoom,
+                    10.5 * zoom,
                     theme.semantic.text.secondary.bytes(),
                 );
             }
@@ -1045,9 +1159,9 @@ impl Control for GraphEditor {
                 match element {
                     NodeElementArchetype::Label(label) => ctx.push_text(
                         label,
-                        Vec2::new(node_bounds.x + 8.0 * surface.view.zoom, y),
+                        Vec2::new(node_bounds.x + 9.0 * zoom, y),
                         self.font_id,
-                        8.0 * surface.view.zoom,
+                        10.0 * zoom,
                         theme.semantic.text.muted.bytes(),
                     ),
                     NodeElementArchetype::Separator => ctx.push_rect_filled(
@@ -1064,13 +1178,15 @@ impl Control for GraphEditor {
                     | NodeElementArchetype::Literal(_) => {}
                 }
             }
+            ctx.pop_clip_rect();
             for pin in layout.pins {
                 let centre = self.screen_point(widget, pin.position);
-                let circle = Path::circle(centre, 4.0);
+                let circle = Path::circle(centre, 4.5);
                 ctx.push_path(&circle, ShapedInstance::identity(pin_colour(pin.ty)));
             }
         }
         self.draw_transition_inspector(widget, ctx);
+        self.draw_story(widget, ctx);
         self.draw_authoring(widget, ctx);
     }
 
@@ -1237,13 +1353,63 @@ impl Control for GraphEditor {
                         self.emit_changed(widget, emit);
                     }
                 }
+                GraphEditorMessage::Command { id, .. } if id == "graph.frame_all" => {
+                    self.frame_all(widget);
+                }
                 GraphEditorMessage::Command { id, paste_offset } => {
                     if self.surface_mut().dispatch_command(&id, paste_offset) {
                         self.emit_changed(widget, emit);
                     }
                 }
-                GraphEditorMessage::Changed(_) | GraphEditorMessage::StateMachineChanged(_) => {}
+                GraphEditorMessage::OpenStory {
+                    catalogue,
+                    json,
+                    source,
+                } => {
+                    self.open_story(&catalogue, &json, source);
+                    self.gesture = Gesture::None;
+                    self.literal_edit = None;
+                    self.selected_transition = None;
+                    self.transition_edit = None;
+                    self.frame_all(widget);
+                    widget.invalidate_layout();
+                }
+                GraphEditorMessage::StoryProblems(problems) => {
+                    let mut all: Vec<(String, String, bool)> = match self.surface().catalogue.id {
+                        super::dialogue::CATALOGUE => super::dialogue::problems(&self.surface().graph),
+                        super::quest::CATALOGUE => super::quest::problems(&self.surface().graph),
+                        _ => Vec::new(),
+                    }
+                    .into_iter()
+                    .map(|p| (p.at, p.message, p.warning))
+                    .collect();
+                    for problem in problems {
+                        if !all.contains(&problem) {
+                            all.push(problem);
+                        }
+                    }
+                    self.set_story_problems(&all);
+                }
+                GraphEditorMessage::StoryPreview(database) => self.start_preview(widget, database),
+                GraphEditorMessage::PreviewInput(input) => self.preview_input(widget, input),
+                GraphEditorMessage::PreviewGameView(on) => self.authoring.story.game_view = on,
+                GraphEditorMessage::PreviewScript(script) => self.authoring.story.script = script,
+                GraphEditorMessage::PreviewJournalOutput(output) => self.preview_journal(&output),
+                GraphEditorMessage::RevealNode(id) => {
+                    let graph = &self.surface().graph;
+                    if let Some(node) =
+                        super::dialogue::find_node(graph, &id).or_else(|| super::quest::find_node(graph, &id))
+                    {
+                        self.reveal(widget, node);
+                    }
+                }
+                GraphEditorMessage::PreviewBeat(_)
+                | GraphEditorMessage::PreviewNotice { .. }
+                | GraphEditorMessage::PreviewJournal(_)
+                | GraphEditorMessage::Changed(_)
+                | GraphEditorMessage::StateMachineChanged(_) => {}
             }
+            self.emit_story_beat(widget, emit);
             return;
         }
 
@@ -1251,6 +1417,11 @@ impl Control for GraphEditor {
             return;
         };
         if self.handle_authoring_input(widget, &message, emit) {
+            msg.handled = true;
+            return;
+        }
+        if self.handle_story_input(widget, &message, emit) {
+            self.emit_story_beat(widget, emit);
             msg.handled = true;
             return;
         }
@@ -1348,6 +1519,8 @@ impl Control for GraphEditor {
             }
             WidgetMessage::MouseMove { pos, .. } => {
                 widget.tooltip = self
+                    .story_tooltip(widget, pos)
+                    .or_else(|| self
                     .transition_field_at(widget, pos)
                     .map(|field| match field {
                         TransitionField::BlendSeconds => {
@@ -1374,9 +1547,13 @@ impl Control for GraphEditor {
                         }
                         Some(help)
                     }))
+                    )
                     .unwrap_or_else(|| {
-                        "Animation Graph — Alt-click State: initial; Shift-drag State: transition"
-                            .into()
+                        if self.is_story() {
+                            "Story graph — drag from a pin to wire · Find searches nodes · Play runs a dialogue".into()
+                        } else {
+                            "Animation Graph — Alt-click State: initial; Shift-drag State: transition".into()
+                        }
                     });
                 let zoom = self.surface().view.zoom;
                 match &mut self.gesture {
@@ -1489,8 +1666,14 @@ impl Control for GraphEditor {
                     msg.handled = true;
                 }
             }
-            WidgetMessage::KeyDown(key, _) => {
-                if let Some(edit) = self.transition_edit.as_mut() {
+            WidgetMessage::KeyDown(key, mods) => {
+                if key == crate::message::KeyCode::Home
+                    && self.transition_edit.is_none()
+                    && self.literal_edit.is_none()
+                {
+                    self.frame_all(widget);
+                    msg.handled = true;
+                } else if let Some(edit) = self.transition_edit.as_mut() {
                     match key {
                         crate::message::KeyCode::Backspace => {
                             edit.replace_on_input = false;
@@ -1509,10 +1692,26 @@ impl Control for GraphEditor {
                         _ => {}
                     }
                 } else if let Some(edit) = self.literal_edit.as_mut() {
+                    let multiline = edit.pin != story::TITLE_PIN
+                        && self
+                            .document
+                            .surface()
+                            .graph
+                            .node(edit.node)
+                            .and_then(|n| self.document.surface().catalogue.get(&n.archetype))
+                            .and_then(|a| a.inputs.get(usize::from(edit.pin)))
+                            .is_some_and(|p| p.multiline);
                     match key {
                         crate::message::KeyCode::Backspace => {
                             edit.replace_on_input = false;
                             edit.draft.pop();
+                            msg.handled = true;
+                        }
+                        crate::message::KeyCode::Enter | crate::message::KeyCode::NumpadEnter
+                            if mods.shift && multiline =>
+                        {
+                            edit.replace_on_input = false;
+                            edit.draft.push('\n');
                             msg.handled = true;
                         }
                         crate::message::KeyCode::Enter | crate::message::KeyCode::NumpadEnter => {

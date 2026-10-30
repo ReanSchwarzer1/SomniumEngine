@@ -241,6 +241,138 @@ impl MaterialAsset {
     }
 }
 
+/// A starting point for a material: how a common kind of surface answers light.
+///
+/// The editor applies one as ordinary field edits, one undo step for the lot. Texture slots, relief, cut-out and
+/// foliage settings are never touched: a preset is the surface's response, not its pictures. With a base-colour
+/// texture assigned the base colour is left alone too, because it would tint the texture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaterialPreset {
+    /// What the button says.
+    pub name: &'static str,
+    /// What its tooltip says.
+    pub description: &'static str,
+    pub base_color: [f32; 3],
+    pub opacity: f32,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive: [f32; 3],
+    pub emissive_intensity: f32,
+    pub porosity: f32,
+    pub alpha_mode: AlphaMode,
+    pub double_sided: bool,
+}
+
+/// The editor's presets, in the order the Material panel shows them. Colours are linear.
+pub const MATERIAL_PRESETS: &[MaterialPreset] = &[
+    MaterialPreset {
+        name: "Metal",
+        description: "Bare steel: fully metallic, a soft polish, sheds water.",
+        base_color: [0.56, 0.57, 0.58],
+        opacity: 1.0,
+        metallic: 1.0,
+        roughness: 0.35,
+        emissive: [0.0; 3],
+        emissive_intensity: 1.0,
+        porosity: 0.0,
+        alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
+    },
+    MaterialPreset {
+        name: "Painted wood",
+        description: "Old off-white paint over wood: satin, slightly porous.",
+        base_color: [0.55, 0.5, 0.4],
+        opacity: 1.0,
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        emissive_intensity: 1.0,
+        porosity: 0.3,
+        alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
+    },
+    MaterialPreset {
+        name: "Plaster",
+        description: "Pale wall plaster: matte and thirsty, darkens a lot when wet.",
+        base_color: [0.68, 0.64, 0.58],
+        opacity: 1.0,
+        metallic: 0.0,
+        roughness: 0.9,
+        emissive: [0.0; 3],
+        emissive_intensity: 1.0,
+        porosity: 0.85,
+        alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
+    },
+    MaterialPreset {
+        name: "Glass",
+        description: "Clear window glass: blended, two-sided, mirror-smooth, faintly green.",
+        base_color: [0.85, 0.92, 0.92],
+        opacity: 0.1,
+        metallic: 0.0,
+        roughness: 0.04,
+        emissive: [0.0; 3],
+        emissive_intensity: 1.0,
+        porosity: 0.0,
+        alpha_mode: AlphaMode::Blend,
+        double_sided: true,
+    },
+    MaterialPreset {
+        name: "Fabric",
+        description: "Heavy wine-red cloth: fully rough, soaks up rain.",
+        base_color: [0.155, 0.045, 0.045],
+        opacity: 1.0,
+        metallic: 0.0,
+        roughness: 0.95,
+        emissive: [0.0; 3],
+        emissive_intensity: 1.0,
+        porosity: 0.9,
+        alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
+    },
+    MaterialPreset {
+        name: "Glow",
+        description: "A lit panel: warm light of its own, for signs, screens and bulbs.",
+        base_color: [0.8, 0.8, 0.8],
+        opacity: 1.0,
+        metallic: 0.0,
+        roughness: 0.4,
+        emissive: [1.0, 0.8, 0.55],
+        emissive_intensity: 6.0,
+        porosity: 0.0,
+        alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
+    },
+];
+
+impl MaterialPreset {
+    /// `material` with this preset's response; everything else, textures first, stays as it was.
+    #[must_use]
+    pub fn applied_to(&self, material: &MaterialAsset) -> MaterialAsset {
+        let mut out = material.clone();
+        if material.albedo_map == AssetId::NONE {
+            out.base_color = LinearColor(self.base_color);
+        }
+        out.opacity = self.opacity;
+        out.metallic = self.metallic;
+        out.roughness = self.roughness;
+        out.emissive = LinearColor(self.emissive);
+        out.emissive_intensity = self.emissive_intensity;
+        // The thin-leaf light lobe: no preset is a leaf.
+        out.transmission = 0.0;
+        out.porosity = self.porosity;
+        out.alpha_mode = self.alpha_mode;
+        out.double_sided = self.double_sided;
+        out
+    }
+
+    /// The preset on a plain material, for its swatch.
+    #[must_use]
+    pub fn sample(&self) -> MaterialAsset {
+        self.applied_to(&MaterialAsset::default())
+    }
+}
+
 /// Read and validate a `.sommat` document.
 pub fn load_material(path: impl AsRef<Path>) -> Result<MaterialAsset, String> {
     let path = path.as_ref();
@@ -512,6 +644,59 @@ mod tests {
         (schema.apply)(&mut world, entity, &patch).unwrap();
         let material = world.get::<MaterialAsset>(entity).unwrap();
         assert_eq!((material.roughness, material.metallic), (0.2, 1.0));
+    }
+
+    /// Every preset is a value the schema accepts field by field, so the editor's ordinary field writes can apply it.
+    #[test]
+    fn every_preset_is_valid_through_the_schema() {
+        let schema = material_asset_schema();
+        let mut world = somnium_ecs::World::new();
+        for preset in MATERIAL_PRESETS {
+            let entity = world.spawn((preset.sample(),));
+            let values = (schema.snapshot)(&world, entity).unwrap();
+            for field in &schema.fields {
+                field.validate(&values[&field.id]).unwrap_or_else(|error| panic!("{}.{}: {error}", preset.name, field.name));
+            }
+        }
+    }
+
+    #[test]
+    fn a_preset_keeps_textures_and_a_textured_base_colour() {
+        let textured = MaterialAsset {
+            base_color: LinearColor([0.9, 0.1, 0.1]),
+            albedo_map: AssetId::from_raw(7),
+            normal_map: AssetId::from_raw(8),
+            height_map: AssetId::from_raw(9),
+            transmission: 0.6,
+            alpha_cutoff: 0.3,
+            foliage: true,
+            ..Default::default()
+        };
+        let glass = MATERIAL_PRESETS.iter().find(|p| p.name == "Glass").unwrap();
+        let out = glass.applied_to(&textured);
+        assert_eq!(out.base_color, textured.base_color, "a base-colour texture keeps its tint");
+        assert_eq!((out.albedo_map, out.normal_map, out.height_map), (textured.albedo_map, textured.normal_map, textured.height_map));
+        assert_eq!((out.alpha_cutoff, out.foliage), (0.3, true), "cut-out and foliage settings are not the preset's");
+        assert_eq!((out.alpha_mode, out.opacity, out.double_sided, out.transmission), (AlphaMode::Blend, 0.1, true, 0.0));
+        // Untextured, the preset's colour comes through; a later preset undoes an earlier one's blending.
+        let metal = MATERIAL_PRESETS.iter().find(|p| p.name == "Metal").unwrap();
+        let plain = metal.applied_to(&glass.sample());
+        assert_eq!(plain.base_color, LinearColor(metal.base_color));
+        assert_eq!((plain.alpha_mode, plain.opacity, plain.double_sided), (AlphaMode::Opaque, 1.0, false));
+    }
+
+    #[test]
+    fn presets_are_distinct_and_named() {
+        let mut names: Vec<_> = MATERIAL_PRESETS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), MATERIAL_PRESETS.len());
+        for (i, a) in MATERIAL_PRESETS.iter().enumerate() {
+            assert!(!a.description.is_empty());
+            for b in &MATERIAL_PRESETS[i + 1..] {
+                assert_ne!(a.sample(), b.sample(), "{} and {} would look the same", a.name, b.name);
+            }
+        }
     }
 
     #[test]

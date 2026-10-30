@@ -322,7 +322,7 @@ pub fn animation() -> Catalogue {
             .with_element(NodeElementArchetype::Input(0))
             .with_element(NodeElementArchetype::Literal(1))
             .with_element(NodeElementArchetype::Label(
-                "Alt-click: initial state; Shift-drag: add transition",
+                "Alt-click to start here",
             )),
     );
     catalogue.register(

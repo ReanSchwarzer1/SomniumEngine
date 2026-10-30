@@ -397,7 +397,10 @@ pub struct TerrainData {
     pub splat_lock: Vec<u8>,
     /// Global wetness 0..1 (XV-H). `SOMNIUM_TERRAIN_WETNESS` seeds it.
     pub wetness: f32,
-    pub layer_textures: TerrainLayerTextures,
+    /// The ground materials' texture arrays. Shared by every terrain made from the same packed assets on the same
+    /// device without virtual texturing (`shared_layer_textures`): an open world's windows are many terrains of
+    /// one ground, and each used to load its own ~700 MB copy (nine 4 km windows ran a 16 GB GPU out of memory).
+    pub layer_textures: std::sync::Arc<TerrainLayerTextures>,
     /// MORROWIND-AD bounded source-page residency feeding the material clipmap.
     pub virtual_texture: virtual_texture::VirtualTextureCache,
     /// Authored virtual-source switch mirrored from `TerrainComponent`.
@@ -492,6 +495,8 @@ pub struct TerrainData {
     /// offset supplies the difference. Allocated on first use and never
     /// rewritten — at most 5 LODs × 16 masks exist.
     index_blocks: HashMap<(u8, u8), (u32, u32)>,
+    /// See [`TerrainData::stream_geometry`]; 0 keeps the geometry resident.
+    pub geometry_stream_distance: f32,
 
     /// Vertices reserved per chunk — `(chunk_cells + 1)²`, fixed for life.
     chunk_vertex_capacity: u32,
@@ -662,6 +667,43 @@ fn feedback_page_indices(uv0: f32, uv1: f32, mip_size: u32) -> Vec<u32> {
     }
 }
 
+/// The layer arrays for a new terrain: the live set another terrain already uses when one was made from the same
+/// packed assets on the same device without virtual texturing (whose page atlas is per terrain), else a fresh load.
+/// Held weakly, so a set goes when its last terrain does (a scene change still reloads, as before).
+fn shared_layer_textures(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bc_supported: bool,
+    virtual_texturing: bool,
+    asset_dir: &std::path::Path,
+) -> std::sync::Arc<TerrainLayerTextures> {
+    type Key = (usize, std::path::PathBuf, bool);
+    static SHARED: std::sync::Mutex<Vec<(Key, std::sync::Weak<TerrainLayerTextures>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let load = || {
+        std::sync::Arc::new(TerrainLayerTextures::load_or_generate_at(
+            device,
+            queue,
+            bc_supported,
+            virtual_texturing,
+            asset_dir,
+        ))
+    };
+    if virtual_texturing {
+        return load();
+    }
+    // The device's address names it for as long as it lives; a set made on a dropped device is dead with it.
+    let key: Key = (std::ptr::from_ref(device) as usize, asset_dir.to_path_buf(), bc_supported);
+    let mut shared = SHARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    shared.retain(|(_, weak)| weak.strong_count() > 0);
+    if let Some(live) = shared.iter().find(|(k, _)| *k == key).and_then(|(_, weak)| weak.upgrade()) {
+        return live;
+    }
+    let fresh = load();
+    shared.push((key, std::sync::Arc::downgrade(&fresh)));
+    fresh
+}
+
 impl TerrainData {
     /// Create a flat terrain with the default grass/dirt/rock/snow layers.
     ///
@@ -748,13 +790,7 @@ impl TerrainData {
         // is loaded instead, which is the arrangement that predates the cache.
         let virtual_texturing =
             desc.virtual_texturing && clipmap::TerrainClipmap::env_default_enabled();
-        let layer_textures = TerrainLayerTextures::load_or_generate_at(
-            device,
-            queue,
-            bc_supported,
-            virtual_texturing,
-            asset_dir,
-        );
+        let layer_textures = shared_layer_textures(device, queue, bc_supported, virtual_texturing, asset_dir);
         let virtual_capacity = layer_textures
             .virtual_texture
             .as_ref()
@@ -847,6 +883,7 @@ impl TerrainData {
             virtual_texture_cache_mib: 64,
             virtual_texture_frame: 0,
             index_blocks: HashMap::new(),
+            geometry_stream_distance: 0.0,
             chunk_vertex_capacity: verts_per_chunk,
             texture_ids: TerrainTextureIds::default(),
             material_id: 0,
@@ -1072,6 +1109,50 @@ impl TerrainData {
         for chunk in &mut self.chunks {
             chunk.vertex_offset = pool.reserve_vertices(capacity).unwrap_or(UNALLOCATED);
         }
+    }
+
+    /// An open world's distant windows: give the chunk spans back to the pool while the camera (terrain-local) is
+    /// more than `geometry_stream_distance` (+200 m) from this terrain, and take them again, rewritten from the heights,
+    /// when it comes within that distance. 0 (the default) keeps the terrain's geometry resident as always.
+    /// Returns the vertex offsets it gave back, whose ray-tracing BLAS the caller must drop.
+    pub fn stream_geometry(&mut self, pool: &mut crate::geometry::GeometryPool, local_camera: glam::Vec3) -> Vec<u32> {
+        if self.geometry_stream_distance <= 0.0 {
+            return Vec::new();
+        }
+        let [w, d] = self.desc.world_size();
+        let dx = (-local_camera.x).max(local_camera.x - w).max(0.0);
+        let dz = (-local_camera.z).max(local_camera.z - d).max(0.0);
+        let far = dx.hypot(dz);
+        if far <= self.geometry_stream_distance {
+            // A few chunks a frame, nearest first: each one is rebuilt from the heights (and its BLAS) when it lands,
+            // and a whole window at once stalled the frame.
+            const CHUNKS_PER_FRAME: usize = 64;
+            let capacity = self.chunk_vertex_capacity;
+            let span = self.desc.chunk_cells as f32 * self.desc.cell_size;
+            let mut waiting: Vec<(f32, usize)> = self
+                .chunks
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.vertex_offset == UNALLOCATED)
+                .map(|(i, c)| {
+                    let centre = (glam::Vec2::new(c.grid_pos[0] as f32, c.grid_pos[1] as f32) + 0.5) * span;
+                    (centre.distance(glam::Vec2::new(local_camera.x, local_camera.z)), i)
+                })
+                .collect();
+            waiting.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (_, i) in waiting.into_iter().take(CHUNKS_PER_FRAME) {
+                let Some(offset) = pool.try_reserve_vertices(capacity) else { break };
+                self.chunks[i].vertex_offset = offset;
+                self.chunks[i].dirty = true;
+            }
+        } else if far > self.geometry_stream_distance + 200.0
+            && self.chunks.iter().any(|c| c.vertex_offset != UNALLOCATED)
+        {
+            let released = self.chunks.iter().map(|c| c.vertex_offset).filter(|&o| o != UNALLOCATED).collect();
+            self.release_pool_spans(pool);
+            return released;
+        }
+        Vec::new()
     }
 
     pub fn release_pool_spans(&mut self, pool: &mut crate::geometry::GeometryPool) {

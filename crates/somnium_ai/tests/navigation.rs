@@ -227,3 +227,34 @@ fn a_kerb_lower_than_a_step_is_walked_up() {
     nav.install(bake(&data).unwrap());
     assert!(nav.path(Vec3::new(2.0, 0.0, 5.0), Vec3::new(8.0, 0.15, 5.0), 0.1).is_some());
 }
+fn cuboid(min: [f32; 3], max: [f32; 3]) -> Vec<Triangle> {
+    let c = |i: usize| [[min[0], max[0]][i & 1], [min[1], max[1]][(i >> 1) & 1], [min[2], max[2]][(i >> 2) & 1]];
+    [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]]
+        .iter()
+        .flat_map(|f| [[c(f[0]), c(f[1]), c(f[2])], [c(f[0]), c(f[2]), c(f[3])]])
+        .collect()
+}
+#[test]
+fn a_flight_of_stairs_between_walls_is_climbed() {
+    // Nine 0.3 m treads with 0.167 m risers up to a landing 1.5 m high, each tread a box down below the ground (as a
+    // level's collision builds them), between side walls 0.9 m above the treads. The riser after next is more than a
+    // step above a tread, but only a step above the tread before it.
+    let mut data = input();
+    data.triangles = plane(0.0, 0.0, 10.0, 3.0, 0.0);
+    for k in 0..9 {
+        let (z, top) = (3.0 + 0.3 * k as f32, 1.5 * (k + 1) as f32 / 9.0);
+        data.triangles.extend(cuboid([3.0, -0.2, z], [6.0, top, z + 0.3]));
+        data.triangles.extend(cuboid([2.7, -0.2, z], [3.0, top + 0.9, z + 0.3]));
+        data.triangles.extend(cuboid([6.0, -0.2, z], [6.3, top + 0.9, z + 0.3]));
+    }
+    data.triangles.extend(cuboid([0.0, -0.2, 5.7], [10.0, 1.5, 10.0]));
+    for (voxel_size, agent_radius, max_step) in [(0.25, 0.3, 0.3), (0.5, 0.3, 0.4)] {
+        data.settings = BakeSettings { voxel_size, agent_radius, max_step, max_slope_degrees: 40.0, ..BakeSettings::default() };
+        let mut nav = NavWorld::default();
+        nav.install(bake(&data).unwrap());
+        let (foot, top) = (Vec3::new(4.5, 0.0, 1.0), Vec3::new(4.5, 1.5, 8.0));
+        assert!(nav.path(foot, top, 0.2).is_some(), "up the flight at {voxel_size} m voxels");
+        assert!(nav.path(top, foot, 0.2).is_some(), "down the flight at {voxel_size} m voxels");
+        assert!(nav.nearest(Vec3::new(3.2, 0.5, 3.75), 0.1).is_none(), "the side wall stays a wall");
+    }
+}

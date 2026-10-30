@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "id": "lamplighter",
+  "title": "The lamplighter, first meeting",
+  "entries": { "after_lamps": "thanks" },
+  "on_interrupt": "hey",
+  "note": "Engine sample: lines, a hub, a gated language check, a seeded roll, a timed menu, a branch, a waiting action, a call and an interruption.",
+  "nodes": [
+    {
+      "type": "line",
+      "id": "n1",
+      "speaker": "oren",
+      "expression": "smile",
+      "text": "You there. You've got young knees. Mine stopped bending the year the river froze.",
+      "effects": "met.oren = true",
+      "next": ["n2"]
+    },
+    {
+      "type": "line",
+      "id": "n2",
+      "speaker": "oren",
+      "expression": "thinking",
+      "text": "Three lamps on this street have gone out[pause=300], and the watch fines me for every dark one by morning.",
+      "next": ["ask_why", "help", "refuse", "old_words"]
+    },
+    { "type": "option", "id": "ask_why", "text": "Why do they go out?", "once": true, "next": ["why"] },
+    {
+      "type": "line",
+      "id": "why",
+      "speaker": "oren",
+      "expression": "squint",
+      "text": "Wind, they say. [expr=angry]I say somebody's pinching the oil.",
+      "next": ["n2"]
+    },
+    {
+      "type": "option",
+      "id": "help",
+      "text": "I'll climb them for you.",
+      "effects": "oren.trust += 1; start_quest('relight_lamps'); give_item('flint')",
+      "next": ["help_ok"]
+    },
+    {
+      "type": "line",
+      "id": "help_ok",
+      "speaker": "oren",
+      "expression": "laugh",
+      "text": "Ha! There's flint in the box by the fountain. Start with the one by the bridge.",
+      "next": ["look"]
+    },
+    { "type": "action", "id": "look", "effects": "camera('lamp')", "wait": true, "next": ["offer_tale"] },
+    {
+      "type": "line",
+      "id": "offer_tale",
+      "speaker": "oren",
+      "text": "Before you go. Do you want to know why we light them at all?",
+      "next": ["tale_yes", "tale_no"]
+    },
+    { "type": "option", "id": "tale_yes", "text": "Tell me.", "next": ["tale"] },
+    { "type": "call", "id": "tale", "dialogue": "lamplighter_tale", "next": ["helping"] },
+    { "type": "option", "id": "tale_no", "text": "Later.", "next": ["helping"] },
+    { "type": "end", "id": "helping", "result": "helping" },
+    {
+      "type": "option",
+      "id": "refuse",
+      "text": "Not my lamps.",
+      "effects": "oren.trust -= 1",
+      "next": ["refused"]
+    },
+    {
+      "type": "line",
+      "id": "refused",
+      "speaker": "oren",
+      "expression": "sad",
+      "text": "No. No, I suppose they're not.",
+      "next": ["watch_near"]
+    },
+    {
+      "type": "branch",
+      "id": "watch_near",
+      "when": "oren.trust < 0 and not night.dark",
+      "next": ["guard_call"],
+      "else": ["walked_on"]
+    },
+    {
+      "type": "line",
+      "id": "guard_call",
+      "speaker": "guard",
+      "text": "You two! What's all this, then?",
+      "tags": ["shout"],
+      "next": ["answer", "run", "say_nothing"]
+    },
+    { "type": "option", "id": "answer", "text": "Just talking, sir.", "next": ["walked_on"] },
+    {
+      "type": "option",
+      "id": "run",
+      "text": "Run for the wall.",
+      "check": { "category": "skill", "fact": "skill.climbing", "roll": { "sides": 20, "difficulty": 12 } },
+      "next": ["over"],
+      "fail": ["caught"]
+    },
+    { "type": "option", "id": "say_nothing", "timeout_ms": 6000, "next": ["silence"] },
+    {
+      "type": "line",
+      "id": "over",
+      "text": "You are over the wall before he finishes the word.",
+      "next": ["walked_on"]
+    },
+    {
+      "type": "line",
+      "id": "caught",
+      "speaker": "guard",
+      "text": "Not so fast. I'll remember that face.",
+      "effects": "watch.suspicious = true",
+      "next": ["walked_on"]
+    },
+    {
+      "type": "line",
+      "id": "silence",
+      "text": "You say nothing. The watchman spits and walks on.",
+      "next": ["walked_on"]
+    },
+    { "type": "end", "id": "walked_on", "result": "refused" },
+    {
+      "type": "option",
+      "id": "old_words",
+      "text": "[Old tongue] \"Light keeps the ledger.\"",
+      "check": { "category": "language", "fact": "lang.old_tongue", "at_least": "phrases" },
+      "next": ["old_words_reply"]
+    },
+    {
+      "type": "line",
+      "id": "old_words_reply",
+      "speaker": "oren",
+      "expression": "surprised",
+      "text": "Where did you learn the old words? Nobody says that any more.",
+      "language": "old_tongue",
+      "effects": "oren.trust += 2",
+      "next": ["n2"]
+    },
+    {
+      "type": "line",
+      "id": "thanks",
+      "speaker": "oren",
+      "expression": "smile",
+      "text": "All {lamps.lit} burning. The watch can choke on its fines.",
+      "next": ["thanked"]
+    },
+    { "type": "end", "id": "thanked", "result": "thanked" },
+    { "type": "line", "id": "hey", "speaker": "oren", "expression": "angry", "text": "Oi! I'm not finished!" }
+  ]
+}

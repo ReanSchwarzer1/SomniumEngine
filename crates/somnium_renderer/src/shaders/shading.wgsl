@@ -261,6 +261,14 @@ struct VirtualShadowParams {
 // the built-in weathering (R dirt, G rust, B wetness, A blood).
 @group(1) @binding(30) var<storage, read> vertex_paint: array<u32>;
 
+// While the path tracer runs (path mode bit, 29 Oct 2026): each pixel's finished surface, so it traces the bounced
+// light from exactly the material lit here (path_tracer.wgsl `pt_raster_surface`). Albedo and metallic; the shading
+// normal and roughness; the material's own occlusion (negative: the light is baked into the surface, trace nothing)
+// and the fog's transmittance.
+@group(1) @binding(31) var path_surface_albedo: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(32) var path_surface_normal: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(33) var path_surface_extra: texture_storage_2d<rgba16float, write>;
+
 /// Sun visibility through the cloud layer at a world position.
 ///
 /// Returns 1 — no shadow at all — when the cloud pass is off, when the point
@@ -851,6 +859,12 @@ override enable_debug: bool = true;
 // the occupancy tax, and it is the part DOOM-C's separate pipelines recover on
 // top of the execution savings.
 override shade_ablate: u32 = 0u;
+
+// Whether this pipeline writes the surface for the path tracer (29 Oct 2026). False in the depth split's near and
+// aerial pipelines (shading.rs `make_pipeline`): they rely on early-Z to skip the half of the screen the other owns,
+// and a storage write anywhere in the shader makes the driver test depth late, so both would shade every pixel. The
+// split never runs under the tracer (renderer.rs), so the writes are dead code there and the compiler drops them.
+override path_surface: bool = true;
 
 const ABLATE_OFF:     u32 = 0u;
 const ABLATE_SKY:     u32 = 1u;
@@ -2004,6 +2018,17 @@ const CONTACT_LENGTH: f32 = 0.35;
 /// a wall extending away from the camera.
 const CONTACT_THICKNESS: f32 = 0.05;
 
+/// `Instance._padding` of a draw that casts no contact shadow (Rust: `instance::NO_CONTACT_SHADOW`).
+const NO_CONTACT_SHADOW: u32 = 0x80000000u;
+
+/// Whether what the visibility buffer holds at `uv` may cast a contact shadow.
+fn casts_contact_shadow(uv: vec2<f32>) -> bool {
+    let dims = vec2<i32>(textureDimensions(vis_buffer));
+    let texel = min(vec2<i32>(uv * vec2<f32>(dims)), dims - vec2<i32>(1));
+    let vis = textureLoad(vis_buffer, texel, 0).x;
+    return vis == 0u || instances[vis - 1u]._padding != NO_CONTACT_SHADOW;
+}
+
 fn contact_shadow(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
@@ -2067,8 +2092,10 @@ fn contact_shadow(
         let diff = ray_view_depth - scene_view_depth;
 
         // The upper bound is what stops a surface far behind the ray from
-        // registering as an occluder.
-        if diff > 0.0 && diff < CONTACT_THICKNESS {
+        // registering as an occluder. Draws the CPU marked (generated grass,
+        // `exclude_from_contact_shadows`) occlude nothing here; looked up only
+        // on a hit, so a frame without them pays nothing.
+        if diff > 0.0 && diff < CONTACT_THICKNESS && casts_contact_shadow(uv) {
             // Fade with distance so the shadow ends softly instead of stopping
             // at a hard ring where the march runs out.
             occluded = max(occluded, 1.0 - f32(i) / f32(CONTACT_STEPS));
@@ -2336,14 +2363,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 bary_y = ry.xyz;
             }
         }
-        uv_ddx = (uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv;
-        uv_ddy = (uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv;
+        uv_ddx = ((uv0 * bary_x.x + uv1 * bary_x.y + uv2 * bary_x.z) - uv) * view.lod_scale;
+        uv_ddy = ((uv0 * bary_y.x + uv1 * bary_y.y + uv2 * bary_y.z) - uv) * view.lod_scale;
         // World-position gradients for the world-projected paint layers,
         // only where a layer can show.
         if paint_slot != 0u {
             let here = p0 * bary.x + p1 * bary.y + p2 * bary.z;
-            paint_pos_ddx = (p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here;
-            paint_pos_ddy = (p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here;
+            paint_pos_ddx = ((p0 * bary_x.x + p1 * bary_x.y + p2 * bary_x.z) - here) * view.lod_scale;
+            paint_pos_ddy = ((p0 * bary_y.x + p1 * bary_y.y + p2 * bary_y.z) - here) * view.lod_scale;
         }
         // The PS2 picture (`retro`, bit 512): textures two mip levels coarser than the screen asks for (its 128 to 256
         // texel maps), a whole level with no blend to the next (the bands show, as they did: it filtered within one
@@ -3243,6 +3270,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── Shading ───────────────────────────────────────────────────────────────
     var result: vec3<f32>;
+    // The path tracer's mode (path_tracer.rs): this pass keeps the direct light and the glow, and the tracer adds the
+    // bounced light after it, traced from this pixel's surface (written at the end) in place of the ambient here.
+    let path_traced = (bitcast<u32>(lighting_extra.x) & 4u) != 0u;
 
     if (cluster_params.shading_mode & 1u) == 1u {
         // ── Cel-shading path ─────────────────────────────────────────────────
@@ -3342,6 +3372,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var direct_light = evaluate_brdf_area(surface, light_dir, light.sun_angular_radius)
             * light_color * shadow_factor + moonlight;
 
+        // The light ramp (`PostProcessComponent::light_ramp`, the top byte of `shading_mode`; 0 skips it): the sun's
+        // N.L times its shadow is replaced by a soft ramp of itself, so a lit face comes up fast and flat and the
+        // terminator is a narrow soft band, as a painter would place it. Only the sun's direct term changes; GI,
+        // reflections and every shadow stay physical, which keeps the look between photo-real and painted.
+        let ramp_amount = f32((cluster_params.shading_mode >> 24u) & 255u) / 255.0;
+        if ramp_amount > 0.0 {
+            let lit = saturate(dot(surface.normal, light_dir)) * shadow_factor;
+            let ramped = smoothstep(0.02, 0.35, lit);
+            let gain = mix(1.0, min(ramped / max(lit, 0.05), 4.0), ramp_amount);
+            direct_light = (direct_light - moonlight) * gain + moonlight;
+        }
+
         // Transmitted sunlight follows the same atmospheric fade as every
         // other direct term, with no independent elevation threshold.
         var transmitted = vec3<f32>(0.0);
@@ -3415,6 +3457,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // ambient mix discarded diffuse illumination and treated raw hit
             // radiance as an already-evaluated BRDF, bleaching boats/terrain.
             ambient += (traced_spec - baseline_spec) * spec_w;
+        }
+        // Traced instead (`path_traced`): the light bounced off the scene's surfaces and their reflections come from the
+        // path tracer, added after this pass. The sky's light stays the raster's, its fill and its reflection, under
+        // GTAO and specular occlusion as here, and the eyes keep their glint (29 Oct): the game's rooms are lit by it,
+        // and a traced sky reaches a room only through its windows, which left the Town's houses fog and their metal
+        // and glossy things without the sky they reflect.
+        if path_traced {
+            ambient = evaluate_ibl(surface, vec4<f32>(0.0));
+            if (material.flags & 8u) != 0u {
+                ambient += eye_glint(surface, ambient);
+            }
         }
 
         // Local lights (clustered)
@@ -3555,15 +3608,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The sky is not touched: it returned far above, and its radiance already
     // came from a full march through the same atmosphere. Applying this to it
     // as well would count the air twice.
-    // The path tracer's picture (pass/path_tracer.rs) in place of the raster's light, before the fog, so the fog
-    // still lies over it (17 Oct: composited after, it wiped the fog out of every traced frame).
-    if (bitcast<u32>(lighting_extra.x) & 4u) != 0u {
-        let traced = textureSampleLevel(lighting_aux, default_sampler, screen_uv, 0.0);
-        if traced.a > 0.01 {
-            result = traced.rgb;
-        }
-    }
-
+    // The path tracer's bounced light is added after this pass, through the same transmittance (written below), so
+    // the fog lies over it as over this (17 Oct: a traced picture composited after the fog wiped the fog out).
+    var fog_transmittance = 1.0;
     if volumetric_range.x > 0.0 {
         let dist = length(hit_point - view.camera_pos);
         let slices = f32(textureDimensions(volumetrics).z);
@@ -3583,6 +3630,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let transmittance = mix(1.0, sample.a, fade);
 
         result = result * transmittance + inscatter;
+        fog_transmittance = transmittance;
+    }
+
+    // The surface lit here, for the path tracer (`path_traced`). A surface whose light is baked into it
+    // (`VertexPaint.baked_light`) is marked to receive nothing: its light is the bake, as above. Only in pipelines
+    // built with `path_surface` (all but the depth split's, below).
+    if path_surface {
+        if path_traced {
+            textureStore(path_surface_albedo, pixel_coords, vec4<f32>(surface.albedo, surface.metallic));
+            textureStore(path_surface_normal, pixel_coords, vec4<f32>(surface.normal, surface.roughness));
+            textureStore(path_surface_extra, pixel_coords,
+                vec4<f32>(select(micro_occlusion, -1.0, baked), fog_transmittance, 0.0, 0.0));
+        }
     }
 
     // Phase 24AB: lighting debug views (24–31). 0–23 remain the existing

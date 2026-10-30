@@ -3,14 +3,19 @@
 //! Phase 11 additions:
 //!   @group(1) binding 2 — shadow_atlas (texture_depth_2d)
 //!   @group(1) binding 3 — shadow_sampler (sampler_comparison for PCF)
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc, Mutex};
 use wgpu;
+
+/// One compiled shading pipeline: its spec, vertex entry and depth split.
+pub type ShadingKey = (ShadingSpec, &'static str, Option<wgpu::CompareFunction>);
 
 /// Compile-time feature set for the shading PSO.
 ///
 /// Runtime uniforms cannot delete hex/POM/PCSS from the shader, so occupancy
 /// stayed at the union of every path. Recreating the pipeline with these
 /// overrides is what actually drops Shading ms when the features are off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ShadingSpec {
     pub hex: bool,
     pub pom: bool,
@@ -137,8 +142,48 @@ pub struct TileParams {
 /// target; the struct itself is 32 bytes and the rest is padding.
 const TILE_PARAMS_STRIDE: u64 = 256;
 
+/// Shading variants compiling on worker threads, ahead of the frames that will want them (`ShadingPass::warm`).
+///
+/// A cold compile of this shader is about 2.4 s on an RTX 5080 Laptop (22 Oct 2026), and a chapter's first frames used
+/// to pay two or three of them on the main thread. The driver keeps what it compiled on disk, so the next run finds
+/// them in milliseconds; warming ahead is what makes the *first* run not stall.
+#[derive(Default)]
+struct Warm {
+    queue: Arc<Mutex<WarmQueue>>,
+    rx: Option<mpsc::Receiver<(ShadingKey, wgpu::RenderPipeline)>>,
+    tx: Option<mpsc::Sender<(ShadingKey, wgpu::RenderPipeline)>>,
+    /// Asked for, queued or compiling, and not arrived yet.
+    pending: HashSet<ShadingKey>,
+    total: usize,
+    done: usize,
+}
+
+#[derive(Default)]
+struct WarmQueue {
+    keys: std::collections::VecDeque<ShadingKey>,
+    workers: usize,
+}
+
+/// Gives a worker's place back if it panics (a validation error in a pipeline), so a frame waiting on its variant
+/// stops waiting and compiles it itself.
+struct WorkerGuard(Arc<Mutex<WarmQueue>>, bool);
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if !self.1 {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).workers -= 1;
+        }
+    }
+}
+
 pub struct ShadingPass {
-    pub pipeline: wgpu::RenderPipeline,
+    /// The fullscreen pipeline for `spec`. `None` until the first frame's `ensure_pipeline`, so startup does not wait
+    /// on a compile the workers are already doing.
+    pub pipeline: Option<wgpu::RenderPipeline>,
+    /// Every variant compiled so far. A spec that comes back (PCSS goes off and on as traced shadows come and go, a
+    /// scene with terrain and then one without) is free the second time, and what `warm` compiled ahead is found here.
+    variants: HashMap<ShadingKey, wgpu::RenderPipeline>,
+    warm: Warm,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
     /// Phase DOOM-C.
@@ -205,6 +250,8 @@ pub struct ShadingPass {
     /// Vertex paint words (see `crate::vertex_paint`), grown on demand.
     paint_buffer: wgpu::Buffer,
     paint_capacity_words: u64,
+    /// Where the finished surface goes while the path tracer runs (bindings 31-33).
+    path_surface: [wgpu::TextureView; 3],
     /// Kept so growing the paint buffer can rebuild the bind group.
     visibility_view: wgpu::TextureView,
     _virtual_shadow_dummy: wgpu::Texture,
@@ -243,6 +290,7 @@ impl ShadingPass {
         decals: &crate::pass::decal::DecalGrid,
         grain_packed: &wgpu::Buffer,
         local_shadow_tlas: Option<&wgpu::Tlas>,
+        path_surface: [&wgpu::TextureView; 3],
     ) -> Self {
         let mut layout_entries = vec![
                 // binding 0: vis_buffer (R32Uint)
@@ -550,6 +598,19 @@ impl ShadingPass {
                     count: None,
                 },
             ];
+        // bindings 31-33: the finished surface, for the path tracer while it runs (path_tracer.rs `surface_views`).
+        for binding in 31..34 {
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            });
+        }
         if local_shadow_tlas.is_some() {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 29,
@@ -681,6 +742,7 @@ impl ShadingPass {
             grain_packed,
             &paint_buffer,
             local_shadow_tlas,
+            path_surface,
         );
 
         // MORROWIND-C: composition is declared in `shading.wgsl` and
@@ -766,18 +828,10 @@ impl ShadingPass {
         });
 
         let spec = ShadingSpec::COMPACT;
-        let pipeline = Self::make_pipeline(
-            device,
-            &shader,
-            &pipeline_layout,
-            surface_format,
-            spec,
-            "vs_main",
-            None,
-        );
-
-        Self {
-            pipeline,
+        let mut pass = Self {
+            pipeline: None,
+            variants: HashMap::new(),
+            warm: Warm::default(),
             shader,
             pipeline_layout,
             tile_layout,
@@ -819,6 +873,7 @@ impl ShadingPass {
             grain_packed: grain_packed.clone(),
             paint_buffer,
             paint_capacity_words,
+            path_surface: path_surface.map(Clone::clone),
             visibility_view: visibility_view.clone(),
             _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
@@ -826,7 +881,10 @@ impl ShadingPass {
             clipmap_bind_group,
             _clipmap_dummy_detail: dummy_detail,
             _clipmap_dummy_macro: dummy_macro,
-        }
+        };
+        // The first frame's likeliest pipeline, compiled while the rest of startup goes on.
+        pass.warm(device, [(spec, "vs_main", None)]);
+        pass
     }
 
     /// Rebuild the shader module and every pipeline built from it.
@@ -865,7 +923,12 @@ impl ShadingPass {
             None,
         );
 
-        self.pipeline = pipeline;
+        // Every variant of the old module goes, and so does anything still compiling from it (its workers stop at
+        // their next send).
+        self.warm = Warm::default();
+        self.variants.clear();
+        self.variants.insert((self.spec, "vs_main", None), pipeline.clone());
+        self.pipeline = Some(pipeline);
         self.shader = shader;
         // The per-bin and split pipelines are built lazily from `self.shader`
         // on first use, so dropping them is the whole of their reload. Rebuilding
@@ -886,12 +949,16 @@ impl ShadingPass {
         vertex_entry: &str,
         depth_split: Option<wgpu::CompareFunction>,
     ) -> wgpu::RenderPipeline {
-        let constants = spec.constants();
+        // The depth split's pipelines leave out the path tracer's surface writes, which would cost them early-Z
+        // (shading.wgsl `path_surface`); the split never runs under the tracer (renderer.rs).
+        let mut constants = spec.constants().to_vec();
+        constants.push(("path_surface", f64::from(u32::from(depth_split.is_none()))));
         let compilation_options = wgpu::PipelineCompilationOptions {
             constants: &constants,
             zero_initialize_workgroup_memory: true,
         };
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let started = std::time::Instant::now();
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Shading Pipeline"),
             layout: Some(layout),
             multiview_mask: None,
@@ -941,35 +1008,162 @@ impl ShadingPass {
             }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
-        })
+        });
+        tracing::info!(ms = started.elapsed().as_millis() as u64, vertex_entry, split = ?depth_split, ?spec,
+            "shading pipeline compiled");
+        pipeline
+    }
+
+    /// The pipeline for `key`: from the variants compiled so far, from a worker already compiling it (waited for, not
+    /// compiled twice), or compiled here.
+    fn variant(&mut self, device: &wgpu::Device, key: ShadingKey) -> wgpu::RenderPipeline {
+        self.collect();
+        if let Some(pipeline) = self.variants.get(&key) {
+            return pipeline.clone();
+        }
+        if self.warm.pending.contains(&key) {
+            let queued = {
+                let mut queue = self.warm.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let at = queue.keys.iter().position(|k| *k == key);
+                at.and_then(|at| queue.keys.remove(at)).is_some()
+            };
+            if queued {
+                // No worker has started it: quicker to compile it here than to wait for one to come free.
+                self.warm.pending.remove(&key);
+                self.warm.done += 1;
+            } else {
+                let started = std::time::Instant::now();
+                while !self.variants.contains_key(&key) {
+                    let Some(rx) = &self.warm.rx else { break };
+                    match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                        Ok(arrived) => self.arrive(arrived),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            // Every worker gone without it (one panicked): compile it here.
+                            if self.warm.queue.lock().unwrap_or_else(|e| e.into_inner()).workers == 0 {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                tracing::info!(ms = started.elapsed().as_millis() as u64, "waited for a shading variant compiling ahead");
+                if let Some(pipeline) = self.variants.get(&key) {
+                    return pipeline.clone();
+                }
+                // Its worker died: compiled here, and counted, so the warm still reaches its total.
+                if self.warm.pending.remove(&key) {
+                    self.warm.done += 1;
+                }
+            }
+        }
+        let pipeline =
+            Self::make_pipeline(device, &self.shader, &self.pipeline_layout, self.hdr_format, key.0, key.1, key.2);
+        self.variants.insert(key, pipeline.clone());
+        pipeline
+    }
+
+    fn arrive(&mut self, (key, pipeline): (ShadingKey, wgpu::RenderPipeline)) {
+        if self.warm.pending.remove(&key) {
+            self.warm.done += 1;
+        }
+        self.variants.entry(key).or_insert(pipeline);
+    }
+
+    /// Take in whatever the workers have finished.
+    fn collect(&mut self) {
+        loop {
+            let Some(arrived) = self.warm.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { break };
+            self.arrive(arrived);
+        }
+    }
+
+    /// Compile `keys` on worker threads, in order, skipping any compiled or on the way. Returns at once; the frame
+    /// that wants one finds it in the variants, or waits for it if it is compiling.
+    pub fn warm(&mut self, device: &wgpu::Device, keys: impl IntoIterator<Item = ShadingKey>) {
+        self.collect();
+        let mut fresh = Vec::new();
+        for key in keys {
+            if !self.variants.contains_key(&key) && !self.warm.pending.contains(&key) && !fresh.contains(&key) {
+                fresh.push(key);
+            }
+        }
+        if fresh.is_empty() {
+            return;
+        }
+        if self.warm.tx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.warm.tx = Some(tx);
+            self.warm.rx = Some(rx);
+        }
+        self.warm.pending.extend(fresh.iter().copied());
+        self.warm.total += fresh.len();
+        // Half the cores: the scene loading beside it decodes and uploads on the rest.
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 8);
+        let spawn = {
+            let mut queue = self.warm.queue.lock().unwrap_or_else(|e| e.into_inner());
+            queue.keys.extend(fresh);
+            let spawn = threads.saturating_sub(queue.workers).min(queue.keys.len());
+            queue.workers += spawn;
+            spawn
+        };
+        for _ in 0..spawn {
+            let (queue, tx) = (self.warm.queue.clone(), self.warm.tx.clone().expect("made above"));
+            let (device, shader, layout, format) =
+                (device.clone(), self.shader.clone(), self.pipeline_layout.clone(), self.hdr_format);
+            let worker = move || {
+                let mut guard = WorkerGuard(queue.clone(), false);
+                loop {
+                    let key = {
+                        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        match queue.keys.pop_front() {
+                            Some(key) => key,
+                            None => {
+                                // Leave under the same lock that saw the queue empty, so `warm` adding keys now
+                                // starts a worker for them.
+                                queue.workers -= 1;
+                                guard.1 = true;
+                                return;
+                            }
+                        }
+                    };
+                    let pipeline = Self::make_pipeline(&device, &shader, &layout, format, key.0, key.1, key.2);
+                    if tx.send((key, pipeline)).is_err() {
+                        return; // the pass reloaded or went: nobody wants the rest
+                    }
+                }
+            };
+            if std::thread::Builder::new().name("shading warm".into()).spawn(worker).is_err() {
+                self.warm.queue.lock().unwrap_or_else(|e| e.into_inner()).workers -= 1;
+            }
+        }
+    }
+
+    /// Variants warmed so far, of all asked for: `(done, total)`.
+    pub fn warm_progress(&mut self) -> (usize, usize) {
+        self.collect();
+        (self.warm.done, self.warm.total)
     }
 
     /// Recreate the PSO when hex/POM/PCSS/clipmap/debug/layer-scan change.
-    /// Hitch is one shader compile, not a per-frame cost.
+    /// A hitch only the first time a spec is seen and was not warmed (`warm`).
     pub fn ensure_pipeline(&mut self, device: &wgpu::Device, spec: ShadingSpec) {
-        if self.spec == spec {
+        if self.spec == spec && self.pipeline.is_some() {
             return;
         }
-        tracing::info!(
-            hex = spec.hex,
-            pom = spec.pom,
-            pcss = spec.pcss,
-            contact = spec.contact,
-            clipmap = spec.clipmap,
-            debug = spec.debug,
-            terrain_scan = spec.terrain_scan,
-            live_terrain = spec.live_terrain,
-            "shading pipeline spec changed"
-        );
-        self.pipeline = Self::make_pipeline(
-            device,
-            &self.shader,
-            &self.pipeline_layout,
-            self.hdr_format,
-            spec,
-            "vs_main",
-            None,
-        );
+        if self.spec != spec {
+            tracing::info!(
+                hex = spec.hex,
+                pom = spec.pom,
+                pcss = spec.pcss,
+                contact = spec.contact,
+                clipmap = spec.clipmap,
+                debug = spec.debug,
+                terrain_scan = spec.terrain_scan,
+                live_terrain = spec.live_terrain,
+                "shading pipeline spec changed"
+            );
+        }
+        self.pipeline = Some(self.variant(device, (spec, "vs_main", None)));
         self.spec = spec;
     }
 
@@ -990,18 +1184,8 @@ impl ShadingPass {
         aerial: ShadingSpec,
     ) {
         if self.split_near.as_ref().is_none_or(|(s, _)| *s != near) {
-            self.split_near = Some((
-                near,
-                Self::make_pipeline(
-                    device,
-                    &self.shader,
-                    &self.pipeline_layout,
-                    self.hdr_format,
-                    near,
-                    "vs_main",
-                    Some(wgpu::CompareFunction::Greater),
-                ),
-            ));
+            let pipeline = self.variant(device, (near, "vs_main", Some(wgpu::CompareFunction::Greater)));
+            self.split_near = Some((near, pipeline));
         }
         if self.split_aerial.as_ref().is_none_or(|(s, _)| *s != aerial) {
             tracing::info!(
@@ -1010,18 +1194,8 @@ impl ShadingPass {
                 terrain_scan = aerial.terrain_scan,
                 "aerial shading pipeline spec changed"
             );
-            self.split_aerial = Some((
-                aerial,
-                Self::make_pipeline(
-                    device,
-                    &self.shader,
-                    &self.pipeline_layout,
-                    self.hdr_format,
-                    aerial,
-                    "vs_main",
-                    Some(wgpu::CompareFunction::LessEqual),
-                ),
-            ));
+            let pipeline = self.variant(device, (aerial, "vs_main", Some(wgpu::CompareFunction::LessEqual)));
+            self.split_aerial = Some((aerial, pipeline));
         }
     }
 
@@ -1037,62 +1211,34 @@ impl ShadingPass {
 
     /// Compile (or reuse) the pipeline for one bin.
     ///
-    /// Each bin caches its own spec, so the six pipelines only recompile when
-    /// *that* bin's spec changes. Sharing one cache keyed by spec would be
-    /// tidier and would mean a terrain change recompiling the sky pipeline.
+    /// Each bin holds its own spec, so a terrain change swaps only the bins
+    /// that reach terrain; the pipelines themselves come from the shared
+    /// variants, so a spec two bins agree on is compiled once.
     pub fn ensure_bin_pipeline(&mut self, device: &wgpu::Device, bin: usize, spec: ShadingSpec) {
-        if self.bin_pipelines.len() <= bin {
-            // Placeholder entries so `bin` indexes directly. The spec stored
-            // alongside is deliberately *not* the requested one, so the loop
-            // below always compiles a real pipeline for every slot it creates.
-            while self.bin_pipelines.len() <= bin {
-                let idx = self.bin_pipelines.len();
-                let init = if idx == bin {
-                    spec
-                } else {
-                    ShadingSpec::COMPACT
-                };
-                let pipeline = Self::make_pipeline(
-                    device,
-                    &self.shader,
-                    &self.pipeline_layout,
-                    self.hdr_format,
-                    init,
-                    "vs_tile",
-                    None,
-                );
-                self.bin_pipelines.push((init, pipeline));
-            }
+        if self.bin_pipelines.get(bin).is_some_and(|(s, _)| *s == spec) {
             return;
         }
-        if self.bin_pipelines[bin].0 == spec {
-            return;
+        if bin < self.bin_pipelines.len() {
+            tracing::info!(
+                bin,
+                name = crate::pass::classify::BIN_NAMES
+                    .get(bin)
+                    .copied()
+                    .unwrap_or("?"),
+                hex = spec.hex,
+                pom = spec.pom,
+                pcss = spec.pcss,
+                terrain_scan = spec.terrain_scan,
+                live_terrain = spec.live_terrain,
+                "shading bin pipeline spec changed"
+            );
         }
-        tracing::info!(
-            bin,
-            name = crate::pass::classify::BIN_NAMES
-                .get(bin)
-                .copied()
-                .unwrap_or("?"),
-            hex = spec.hex,
-            pom = spec.pom,
-            pcss = spec.pcss,
-            terrain_scan = spec.terrain_scan,
-            live_terrain = spec.live_terrain,
-            "shading bin pipeline spec changed"
-        );
-        self.bin_pipelines[bin] = (
-            spec,
-            Self::make_pipeline(
-                device,
-                &self.shader,
-                &self.pipeline_layout,
-                self.hdr_format,
-                spec,
-                "vs_tile",
-                None,
-            ),
-        );
+        let pipeline = self.variant(device, (spec, "vs_tile", None));
+        // Slots below `bin` not asked for yet hold this one, under its own spec, so their own call replaces them.
+        while self.bin_pipelines.len() <= bin {
+            self.bin_pipelines.push((spec, pipeline.clone()));
+        }
+        self.bin_pipelines[bin] = (spec, pipeline);
     }
 
     pub fn bin_pipeline(&self, bin: usize) -> Option<&wgpu::RenderPipeline> {
@@ -1216,6 +1362,7 @@ impl ShadingPass {
         grain_packed: &wgpu::Buffer,
         paint: &wgpu::Buffer,
         local_shadow_tlas: Option<&wgpu::Tlas>,
+        path_surface: [&wgpu::TextureView; 3],
     ) -> wgpu::BindGroup {
         let mut entries = vec![
                 wgpu::BindGroupEntry {
@@ -1343,6 +1490,9 @@ impl ShadingPass {
             entries.push(wgpu::BindGroupEntry {
                 binding: 29, resource: wgpu::BindingResource::AccelerationStructure(tlas),
             });
+        }
+        for (binding, view) in (31..).zip(path_surface) {
+            entries.push(wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) });
         }
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"), layout, entries: &entries,
@@ -1517,9 +1667,16 @@ impl ShadingPass {
         self.rebind(device);
     }
 
-    /// Read another target as the lighting aux (the path tracer's output while it runs, lighting_extra's otherwise).
-    pub fn set_lighting_aux(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+    /// Read another target as the lighting aux (the path tracer's output while it runs, lighting_extra's otherwise),
+    /// and write the finished surface to the path tracer's current targets (`PathTracerPass::surface_views`).
+    pub fn set_lighting_aux(
+        &mut self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        path_surface: [&wgpu::TextureView; 3],
+    ) {
         self.lighting_aux_view = view.clone();
+        self.path_surface = path_surface.map(Clone::clone);
         self.rebind(device);
     }
 
@@ -1555,6 +1712,7 @@ impl ShadingPass {
             &self.grain_packed,
             &self.paint_buffer,
             self.local_shadow_tlas.as_ref(),
+            [&self.path_surface[0], &self.path_surface[1], &self.path_surface[2]],
         );
     }
 

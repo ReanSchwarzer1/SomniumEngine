@@ -220,6 +220,14 @@ impl Devices {
         self.mouse_delta += delta;
     }
 
+    /// Accumulate wheel notches, for a host that receives the wheel as its
+    /// own event rather than as a `winit` window event (a game's `EngineEvent`).
+    pub fn add_scroll(&mut self, lines: f32) {
+        if lines.is_finite() {
+            self.scroll += lines;
+        }
+    }
+
     /// Replace a pad's state. Called by a platform backend.
     pub fn set_pad(&mut self, index: u8, state: PadState) {
         self.pads.insert(index, state);

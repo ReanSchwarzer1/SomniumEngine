@@ -41,6 +41,9 @@ pub const FLAG_GRADIENT: u32 = 1 << 5;
 pub const FLAG_EMBOSS: u32 = 1 << 6;
 /// Deterministic display-space gradient dither; amplitude in shadow.x.
 pub const FLAG_DITHER: u32 = 1 << 7;
+/// The bound texture's RGB is sRGB-encoded colour (a picture, not a mask): decode it like the colour fields before it
+/// multiplies the fill. Above the texture-layer byte. Opt-in, so atlases and game images keep their old response.
+pub const FLAG_SRGB_TEXELS: u32 = 1 << 16;
 
 /// Bit offset of the texture-layer selector inside [`Primitive::flags`].
 ///

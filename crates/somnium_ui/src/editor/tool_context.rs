@@ -10,6 +10,7 @@ pub enum ToolMode {
     Lighting,
     Materials,
     VertexPaint,
+    Animation,
 }
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ToolContext {
@@ -29,6 +30,8 @@ pub struct ToolContext {
     pub paint_brush: [f32; 3],
     /// Vertex Paint erase, dirt, rust, wet, blood, preview.
     pub paint_flags: [bool; 6],
+    /// The Material panel's live preview: its shape, its turntable, and whether the renderer drew it this frame.
+    pub material_preview: super::material_studio::MaterialPreviewState,
 }
 #[derive(Default)]
 pub struct ToolPanel {
@@ -43,8 +46,11 @@ pub struct ToolPanel {
     paint_fields: Vec<NodeHandle>,
     paint_actions: Vec<(NodeHandle, VertexPaintEvent)>,
     pub properties: NodeHandle,
+    /// The Material panel's preview, shape and turntable controls and presets (built with Details).
+    pub studio: super::material_studio::MaterialStudio,
     lighting_actions: NodeHandle,
     material_actions: NodeHandle,
+    animation_actions: NodeHandle,
     pub commands: Vec<(NodeHandle, &'static str)>,
     fields: Vec<NodeHandle>,
     operation: NodeHandle,
@@ -52,10 +58,31 @@ pub struct ToolPanel {
     pub popups: Vec<(NodeHandle, NodeHandle)>,
     finish: NodeHandle,
     previous: Option<(ToolContext, ToolMode)>,
+    /// Widths the designer dragged the tools column to, per mode, for this session.
+    widths: Vec<(ToolMode, f32)>,
+}
+impl ToolMode {
+    /// Modes that take their components' Details into the tool panel.
+    #[must_use]
+    pub fn hosts_details(self) -> bool {
+        matches!(self, ToolMode::Lighting | ToolMode::Materials | ToolMode::Animation)
+    }
+
+    /// The tools column's width when this mode opens it, logical pixels. Materials is the widest: its preview fills
+    /// the column. `visible` is whether the column shows at all in Select (the authoring panel may hold it open).
+    #[must_use]
+    pub fn default_tools_width(self, visible: bool) -> f32 {
+        match self {
+            ToolMode::Materials => 440.0,
+            mode if mode.hosts_details() => 320.0,
+            _ if visible => 280.0,
+            _ => 48.0,
+        }
+    }
 }
 impl ToolPanel {
     pub fn build(ui: &mut UserInterface, parent: NodeHandle, font: u8) -> Self {
-        use crate::editor::persona::{action, combo};
+        use crate::editor::persona::{action, combo, icon_action};
         let stack = |ui: &mut UserInterface, parent| {
             ui.add_node(
                 StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
@@ -176,7 +203,7 @@ impl ToolPanel {
             ("Sun light", "editor.create.directional_light"),
             ("Area light", "editor.create.area_light"),
         ] {
-            commands.push((action(ui, lighting_actions, label, 140.0), id));
+            commands.push((icon_action(ui, lighting_actions, crate::commands::icon_for(id), label), id));
         }
         let material_actions = ui.add_node(
             crate::widgets::wrap_panel::WrapPanelBuilder::new(
@@ -186,14 +213,33 @@ impl ToolPanel {
             .build(),
             host,
         );
-        commands.push((
-            action(ui, material_actions, "New material", 140.0),
-            "editor.asset.new_material",
-        ));
-        commands.push((
-            action(ui, material_actions, "Save", 100.0),
-            "editor.scene.save",
-        ));
+        // New and Save, then what a designer does next with a material: put it on what is selected, or find its file.
+        for (icon, label, id) in [
+            (crate::icons::IconId::NewAsset, "New", "editor.asset.new_material"),
+            (crate::icons::IconId::Save, "Save", "editor.scene.save"),
+            (crate::icons::IconId::Check, "Assign to selection", "editor.content.assign_to_selection"),
+            (crate::icons::IconId::ShowInExplorer, "Show in Explorer", "editor.content.show_in_folder"),
+        ] {
+            commands.push((icon_action(ui, material_actions, icon, label), id));
+        }
+        // The rig's own verbs, in the order a designer reaches for them.
+        let animation_actions = ui.add_node(
+            crate::widgets::wrap_panel::WrapPanelBuilder::new(
+                WidgetBuilder::new().with_background(theme::TRANSPARENT),
+            )
+            .with_gap(4.0, 4.0)
+            .build(),
+            host,
+        );
+        for id in [
+            "editor.animation.rig",
+            "editor.animation.events",
+            "editor.animation.save_events",
+            "editor.animation.reload",
+        ] {
+            let label = crate::commands::registry().get(id).map_or(id, |command| command.label);
+            commands.push((icon_action(ui, animation_actions, crate::commands::icon_for(id), label), id));
+        }
         let properties = stack(ui, host);
         let finish = action(ui, host, "Finish · return to Select", 0.0);
         Self {
@@ -208,7 +254,9 @@ impl ToolPanel {
             paint_fields,
             paint_actions,
             properties,
+            studio: Default::default(),
             lighting_actions,
+            animation_actions,
             material_actions,
             commands,
             fields,
@@ -217,6 +265,32 @@ impl ToolPanel {
             popups: vec![(operation, operation_popup), (layer, layer_popup)],
             finish,
             previous: None,
+            widths: Vec::new(),
+        }
+    }
+
+    /// The width to open the tools column at for `shown`: the one the designer dragged it to in that mode, else the
+    /// mode's own, never more than a third of a `window_width`-wide window (but never under 280). A collapsed column
+    /// (48) stays collapsed.
+    #[must_use]
+    pub fn tools_width(&self, shown: ToolMode, visible: bool, window_width: f32) -> f32 {
+        let default = shown.default_tools_width(visible);
+        if default <= 48.0 {
+            return default;
+        }
+        let width = self.widths.iter().find(|(mode, _)| *mode == shown).map_or(default, |(_, width)| *width);
+        width.min((window_width / 3.0).max(280.0))
+    }
+
+    /// Remember a width the designer dragged the tools column to while `shown` was open.
+    pub fn remember_tools_width(&mut self, shown: ToolMode, width: f32) {
+        // A collapse is not a preference: dragging it shut is what the hide button is for.
+        if width < 120.0 {
+            return;
+        }
+        match self.widths.iter_mut().find(|(mode, _)| *mode == shown) {
+            Some((_, kept)) => *kept = width,
+            None => self.widths.push((shown, width)),
         }
     }
     pub fn refresh(&mut self, ui: &mut UserInterface, state: ToolContext, shown: ToolMode) -> bool {
@@ -227,6 +301,7 @@ impl ToolPanel {
         {
             return false;
         }
+        self.studio.show(ui, state.material_preview);
         let mode_changed = self
             .previous
             .as_ref()
@@ -235,7 +310,7 @@ impl ToolPanel {
             ToolMode::Landscape => state.landscape_reason.as_deref(),
             ToolMode::Foliage => state.foliage_reason.as_deref(),
             ToolMode::VertexPaint => state.paint_reason.as_deref(),
-            ToolMode::Select | ToolMode::Lighting | ToolMode::Materials => None,
+            ToolMode::Select | ToolMode::Lighting | ToolMode::Materials | ToolMode::Animation => None,
         };
         ui.send(TextMessage::set_text(
             self.title,
@@ -246,6 +321,7 @@ impl ToolPanel {
                 ToolMode::Lighting => "Lighting",
                 ToolMode::Materials => "Material",
                 ToolMode::VertexPaint => "Vertex Paint",
+                ToolMode::Animation => "Animation",
             },
         ));
         ui.send(TextMessage::set_text(
@@ -260,7 +336,8 @@ impl ToolPanel {
         ));
         ui.send(TextMessage::set_text(self.hint, reason.unwrap_or(match shown {
             ToolMode::Lighting => "Select a light or Environment to edit its lighting. Changes use the same Details and undo controls.",
-            ToolMode::Materials => "Select a material in the Content Drawer, or an object using one. Save writes the material asset. Material graphs are planned for a later phase.",
+            ToolMode::Materials => "Select a material in the Content Drawer, or an object using one. Save writes the material asset.",
+            ToolMode::Animation => "Select a rig, or create one. Play and scrub it in the dock under the viewport. Its settings are below.",
             ToolMode::Select => "Choose Landscape or Foliage in the toolbar.",
             ToolMode::Landscape => "Choose an operation, then drag on terrain. Esc cancels a stroke; Ctrl+Z undoes it.",
             ToolMode::Foliage if !state.foliage_visible => "Foliage is hidden. Enable Visible below before painting.",
@@ -269,10 +346,8 @@ impl ToolPanel {
         })));
         ui.set_visibility(self.lighting_actions, shown == ToolMode::Lighting);
         ui.set_visibility(self.material_actions, shown == ToolMode::Materials);
-        ui.set_visibility(
-            self.properties,
-            matches!(shown, ToolMode::Lighting | ToolMode::Materials),
-        );
+        ui.set_visibility(self.animation_actions, shown == ToolMode::Animation);
+        ui.set_visibility(self.properties, shown.hosts_details());
         ui.set_visibility(self.landscape, shown == ToolMode::Landscape);
         ui.set_visibility(self.foliage, shown == ToolMode::Foliage);
         ui.set_visibility(self.vertex_paint, shown == ToolMode::VertexPaint);
@@ -325,6 +400,9 @@ impl ToolPanel {
     pub fn event(&self, msg: &UiMessage) -> Option<EditorEvent> {
         if msg.direction != MessageDirection::FromWidget {
             return None;
+        }
+        if let Some(event) = self.studio.event(msg) {
+            return Some(event);
         }
         if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
             && msg.destination == self.finish
@@ -399,6 +477,21 @@ mod tests {
         assert!(ui.visibility(panel.foliage));
         assert!(!ui.visibility(panel.landscape));
     }
+    #[test]
+    fn materials_opens_wide_and_a_dragged_width_is_kept_per_mode() {
+        let mut ui = UserInterface::new(320.0, 600.0);
+        let root = ui.root();
+        let mut panel = ToolPanel::build(&mut ui, root, 0);
+        assert_eq!(panel.tools_width(ToolMode::Materials, true, 1920.0), 440.0, "room for the preview");
+        assert_eq!(panel.tools_width(ToolMode::Lighting, true, 1920.0), 320.0);
+        assert_eq!(panel.tools_width(ToolMode::Select, false, 1920.0), 48.0);
+        assert!((panel.tools_width(ToolMode::Materials, true, 1200.0) - 400.0).abs() < 0.01, "a third of a small window");
+        panel.remember_tools_width(ToolMode::Materials, 520.0);
+        panel.remember_tools_width(ToolMode::Lighting, 60.0);
+        assert_eq!(panel.tools_width(ToolMode::Materials, true, 1920.0), 520.0, "the designer's own width");
+        assert_eq!(panel.tools_width(ToolMode::Lighting, true, 1920.0), 320.0, "a drag shut is not remembered");
+    }
+
     #[test]
     fn hidden_foliage_explains_visibility_without_disabling_the_visible_checkbox() {
         let mut ui = UserInterface::new(280.0, 600.0);

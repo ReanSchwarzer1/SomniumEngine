@@ -197,6 +197,21 @@ impl LocalBridge {
     pub fn descriptor(&self) -> &ConnectionDescriptor {
         &self.descriptor
     }
+    /// Where the protected descriptor was published (the path an MCP host is given; the file holds the credential).
+    pub fn descriptor_path(&self) -> &Path {
+        &self.descriptor_path
+    }
+    /// Whether a client holds the pipe right now (Phase ALYX-C: the authoring panel's status).
+    pub fn client_connected(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.pipe.is_connected()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
     pub fn session_id(&self) -> &str {
         &self.descriptor.session_id
     }

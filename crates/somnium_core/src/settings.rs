@@ -95,6 +95,36 @@ pub struct EditorSettings {
     /// identical in both modes, because a high-contrast build that relaid out
     /// would be a second interface nobody tests.
     pub high_contrast: bool,
+    /// Wait for the display's refresh (no tearing). Applied at start and when changed; a game that asks for its
+    /// own pacing (`time::request_frame_pacing`) wins until this is changed again. Not in a standalone player.
+    pub vsync: bool,
+    /// Frames a second at most; `0` uncapped. A cap keeps frame times even, which screen recorders need.
+    pub frame_cap: u32,
+    /// AMD FSR 3 frame generation: one generated frame between each pair the GPU draws. It runs only in the
+    /// game's own view (immersive Play, one view, not floated).
+    pub frame_generation: bool,
+    /// The graphics tier laid over every scene's authored settings: 0 Low, 1 Medium, 2 High, 3 Somnium (as
+    /// authored). `SOMNIUM_GRAPHICS` wins; a game's own settings menu wins in Play.
+    pub graphics_tier: u32,
+    /// Phase ALYX-D. The editor's colours: 0 Nocturne (dark), 1 Dawn (light). Widgets take their colours when they
+    /// are built, so a change applies the next time the editor starts. `SOMNIUM_UI_THEME` wins.
+    pub ui_theme: u32,
+    /// How tightly rows and controls are packed: 0 Compact, 1 Comfortable. Applies on restart;
+    /// `SOMNIUM_UI_DENSITY` wins.
+    pub ui_density: u32,
+    /// How long a notification stays on screen, in seconds (errors stay until dismissed).
+    pub notification_seconds: f32,
+    /// The fly camera's speed when the editor starts, in metres a second (the viewport's slider changes it after).
+    pub camera_speed: f32,
+    /// Phase ALYX-M. Whether an agent over MCP may change the scene and its assets (plans, commits, presets, strokes,
+    /// graphs, editor commands). Reading is always allowed.
+    pub agent_edits: bool,
+    /// Whether an agent may import, save, load or rename files, or change preferences.
+    pub agent_files: bool,
+    /// Whether an agent may start, stop, pause and step Play, and send it input.
+    pub agent_play: bool,
+    /// Whether an agent may capture the viewport.
+    pub agent_captures: bool,
 }
 
 impl Default for EditorSettings {
@@ -111,6 +141,18 @@ impl Default for EditorSettings {
             show_statistics: false,
             reduced_motion: false,
             high_contrast: false,
+            vsync: true,
+            frame_cap: 60,
+            frame_generation: false,
+            graphics_tier: 3,
+            ui_theme: 0,
+            ui_density: 0,
+            notification_seconds: 4.0,
+            camera_speed: 5.0,
+            agent_edits: true,
+            agent_files: true,
+            agent_play: true,
+            agent_captures: true,
         }
     }
 }
@@ -192,6 +234,8 @@ pub const ENV_OVERRIDES: &[(&str, &str, &str)] = &[
         "snap_rotate_deg",
         "SOMNIUM_SNAP_ROTATE",
     ),
+    ("somnium.EditorSettings", "vsync", "SOMNIUM_VSYNC"),
+    ("somnium.EditorSettings", "frame_cap", "SOMNIUM_FRAME_CAP"),
 ];
 
 /// The live settings, their files, and which of them the environment has taken
@@ -727,6 +771,21 @@ mod tests {
             Err("overridden by SOMNIUM_SNAP_ROTATE".into()),
             "an overridden setting refuses the write instead of appearing to take it"
         );
+    }
+
+    /// The Display preferences take the pacing variables a recording or timing run already sets.
+    #[test]
+    fn pacing_variables_override_the_display_preferences() {
+        let mut store = SettingsStore::in_memory();
+        assert!(store.editor().vsync);
+        assert_eq!(store.editor().frame_cap, 60);
+        store.apply_environment(|name| match name {
+            "SOMNIUM_FRAME_CAP" => Some("0".to_string()),
+            "SOMNIUM_VSYNC" => Some("0".to_string()),
+            _ => None,
+        });
+        assert_eq!(store.editor().frame_cap, 0);
+        assert!(!store.editor().vsync);
     }
 
     /// A file's value beats the default and loses to the environment. The

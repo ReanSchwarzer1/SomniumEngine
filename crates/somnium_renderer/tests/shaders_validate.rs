@@ -80,6 +80,7 @@ fn every_composed_root_validates() {
         "postprocess.wgsl",
         "game_highlight.wgsl",
         "game_highlight_mask.wgsl",
+        "editor_glow.wgsl",
         "classify.wgsl",
         "clipmap_gen.wgsl",
         "volumetric.wgsl",
@@ -102,6 +103,8 @@ fn every_composed_root_validates() {
         "skinning.wgsl",
         // D2: the small forward capture (a pocket mirror's picture).
         "scene_capture.wgsl",
+        // The editor's preview studio (a material's turning sphere, an asset's thumbnail).
+        "preview_studio.wgsl",
     ] {
         check(root, &shaders.source_or_panic(root));
     }
@@ -191,7 +194,7 @@ fn fog_skylight_follows_the_sun_shadow_when_asked() {
     let vol = include_str!("../src/shaders/volumetric.wgsl");
     assert!(vol.contains("if vol.shafts_enabled != 0u || vol.fog_sky_occlusion > 0.0 {"), "lookup gate");
     assert!(vol.contains("sky_vis = mix(1.0, shadow_vis, saturate(vol.fog_sky_occlusion));"));
-    assert!(vol.contains("+ vec3<f32>(fog) * multiscatter * sky_vis;"), "fog skylight term");
+    assert!(vol.contains("+ vec3<f32>(fog) * multiscatter * sky_vis * vol.fog_skylight;"), "fog skylight term");
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass
@@ -781,8 +784,7 @@ fn decal_axes_come_from_the_rows_of_the_inverse() {
     let shading = include_str!("../src/shaders/shading.wgsl");
     let start = shading.find("fn apply_decals").expect("apply_decals");
     let body = &shading[start..start + shading[start..].find("
-}
-").expect("end")];
+}").expect("end")];
     assert!(body.contains("vec3<f32>(inv[0].y, inv[1].y, inv[2].y)"), "facing axis from row 1");
     assert!(!body.contains("inv_transform * vec4<f32>(0.0, 1.0, 0.0, 0.0)"), "direction through the inverse");
 }

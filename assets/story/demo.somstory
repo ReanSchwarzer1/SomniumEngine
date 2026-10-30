@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "id": "somnium_demo",
+  "source_locale": "en",
+  "facts": [
+    { "id": "met.oren", "type": "bool", "doc": "Wren has met the lamplighter." },
+    { "id": "oren.trust", "type": "int", "min": -5, "max": 5, "doc": "How far Oren trusts Wren." },
+    { "id": "lamps.lit", "type": "int", "min": 0, "max": 3, "doc": "Street lamps relit tonight." },
+    { "id": "skill.climbing", "type": "int", "min": 0, "max": 10, "default": 2, "doc": "Wren's climbing." },
+    {
+      "id": "lang.old_tongue",
+      "type": "enum",
+      "values": ["none", "phrases", "fluent"],
+      "doc": "How much of the old tongue Wren reads."
+    },
+    { "id": "heard.lamp_story", "type": "bool", "doc": "Oren has told why the lamps are lit." },
+    { "id": "watch.suspicious", "type": "bool", "doc": "The watch has noticed Wren." },
+    {
+      "id": "wren.items",
+      "type": "set",
+      "values": ["lantern", "flint", "oil"],
+      "doc": "What Wren carries."
+    },
+    { "id": "night.dark", "type": "bool", "saved": false, "doc": "Set by the game every frame: is it full dark?" },
+    { "id": "rep.*", "type": "int", "min": -100, "max": 100, "doc": "Standing with a faction, by name." }
+  ],
+  "cast": [
+    { "id": "wren", "name": "Wren", "portrait": "portraits/wren", "side": "left", "color": "#9fc7ff", "language": "common", "journal": false },
+    {
+      "id": "oren",
+      "name": "Oren",
+      "portrait": "portraits/oren",
+      "side": "right",
+      "color": "#ffcf8a",
+      "expressions": ["squint"],
+      "language": "common",
+      "note": "An old lamplighter; gruff, warm under it."
+    },
+    { "id": "guard", "name": "Watchman", "language": "common" },
+    { "id": "baker", "name": "Baker", "language": "common" },
+    { "id": "carter", "name": "Carter", "language": "common" }
+  ],
+  "tiers": ["absolute", "measured", "witnessed", "recorded", "retold"],
+  "commands": [
+    { "name": "camera", "params": ["text"], "doc": "Cut the dialogue camera: wide, close or lamp." },
+    { "name": "give_item", "params": ["text"], "doc": "Put an item in Wren's hands." }
+  ],
+  "expressions": ["neutral", "smile", "laugh", "angry", "sad", "afraid", "surprised", "thinking"],
+  "languages": ["common", "old_tongue"]
+}

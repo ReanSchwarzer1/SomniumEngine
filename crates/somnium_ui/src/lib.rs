@@ -38,6 +38,7 @@ pub mod thumbnail;
 pub mod timeline;
 pub mod types;
 pub mod typography;
+pub mod vector_glyph;
 pub mod ui;
 /// MORROWIND-J step 2: a panel living in its own OS window.
 /// `wgpu`, as this crate sees it.
@@ -262,6 +263,8 @@ pub(crate) enum ContentToolbarAction {
     Forward,
     Up,
     Kind(crate::metaphor::ContentFilterKind),
+    /// A quick action on the drawer's toolbar: runs the registry command of that id (Phase ALYX-F).
+    Command(&'static str),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -420,17 +423,87 @@ pub struct TerrainInspectorState {
     pub damp_tint: f32,
 }
 
+/// One entity's glyph in the viewport (Phase ALYX-J): where it stands, in the view's normalised device coordinates
+/// (x right, y up), what it is, and how strongly to draw it (it fades with distance).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportIcon {
+    pub ndc: [f32; 2],
+    pub icon: crate::icons::IconId,
+    /// The entity's index, for selecting it.
+    pub entity: u32,
+    pub selected: bool,
+    pub fade: f32,
+}
+
+/// What the Animation dock's header says about the rig being previewed (Phase ALYX-G).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimationTransport {
+    /// The rig's name.
+    pub rig: String,
+    /// Where its clock is within the clip, in seconds.
+    pub time: f32,
+    /// The clip's length, in seconds.
+    pub length: f32,
+    pub playing: bool,
+    pub speed: f32,
+    /// The preview's own state line ("Ready", or what is wrong).
+    pub status: String,
+}
+
+impl AnimationTransport {
+    /// The header's readout: name, clock, and whether it runs.
+    #[must_use]
+    pub fn readout(&self) -> String {
+        let mut text = format!(
+            "{}  ·  {:.2} / {:.2} s  ·  {}",
+            self.rig,
+            self.time,
+            self.length,
+            if self.playing { "Playing" } else { "Paused" }
+        );
+        if (self.speed - 1.0).abs() > 1e-3 {
+            text.push_str(&format!(" at {:.2}×", self.speed));
+        }
+        let status = self.status.trim();
+        if !status.is_empty() && status != "Ready" && !status.starts_with("Evaluating") && !status.starts_with("Playing") {
+            text.push_str(&format!("  ·  {status}"));
+        }
+        text
+    }
+}
+
 /// One line of the profiler overlay (Phase 29).
 ///
 /// Split into label and value rather than one pre-formatted string because the
 /// editor font is proportional: padding a name to a fixed character count lines
 /// the numbers up in a log and not on screen. Two columns lay out properly.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProfilerRow {
     pub label: String,
     pub value: String,
     /// Nesting depth, drawn as indentation.
     pub depth: u8,
+    /// The row's time, when it is one: drawn as a share-of-frame bar, and a row under a microsecond folds away.
+    pub ms: Option<f32>,
+    /// A section heading's glyph; none for an ordinary row.
+    pub section: Option<crate::icons::IconId>,
+}
+
+impl ProfilerRow {
+    /// A section heading, with its glyph and an optional figure (a section's total).
+    pub fn section(label: impl Into<String>, icon: crate::icons::IconId, value: impl Into<String>) -> Self {
+        Self { label: label.into(), value: value.into(), depth: 0, ms: None, section: Some(icon) }
+    }
+
+    /// A timed row: its value is the time.
+    pub fn timing(label: impl Into<String>, ms: f32, depth: u8) -> Self {
+        Self { label: label.into(), value: format!("{ms:.3} ms"), depth, ms: Some(ms), section: None }
+    }
+
+    /// Any other figure: counts, sizes, a status.
+    pub fn stat(label: impl Into<String>, value: impl Into<String>, depth: u8) -> Self {
+        Self { label: label.into(), value: value.into(), depth, ms: None, section: None }
+    }
 }
 
 /// Engine-neutral status-bar projection of an active background job.
@@ -619,6 +692,8 @@ struct EditorLayout {
     viewport_handle: NodeHandle,
     /// Hidden composite shown by the Animation workspace.
     animation_workspace: NodeHandle,
+    /// Its tabs, transport and body.
+    animation_dock: crate::editor::shell::AnimationDock,
     /// Production animation graph/state-machine surface inside that composite.
     animation_graph_editor: NodeHandle,
     /// Production track timeline and its retained CONTROL-K child.
@@ -632,8 +707,7 @@ struct EditorLayout {
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
     profiler_toggle_lbl: NodeHandle,
-    profiler_names: Vec<NodeHandle>,
-    profiler_values: Vec<NodeHandle>,
+    profiler_view: NodeHandle,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
     status_dirty: NodeHandle,
@@ -682,6 +756,15 @@ struct EditorLayout {
     gizmo_space_label: NodeHandle,
     select_only_toggle: NodeHandle,
     snap_overflow: NodeHandle,
+    /// The context bar's view-mode button and its label (the mode in force).
+    view_mode_button: NodeHandle,
+    view_mode_label: NodeHandle,
+    /// The click-through layer holding the entity glyphs.
+    viewport_icons: NodeHandle,
+    /// The floating Tools strip: move, rotate, scale, then focus.
+    tools_overlay: NodeHandle,
+    transform_tools: [NodeHandle; 3],
+    focus_tool: NodeHandle,
     /// CONTROL-L: the day-cycle scrub cluster, hidden when the scene has none.
     time_cluster: NodeHandle,
     time_label: NodeHandle,
@@ -871,8 +954,86 @@ enum LogView {
     History,
 }
 
+/// How a shipped player's window is shown while immersive: a game's display options.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowMode {
+    /// Fills the screen at its own resolution, as a window without borders (quick to switch away from).
+    #[default]
+    Borderless,
+    /// Takes the screen over in one of its video modes.
+    Fullscreen,
+    /// A window with a title bar, moved and sized as any other.
+    Windowed,
+}
+
+/// A window mode and a size in physical pixels: the video mode in `Fullscreen`, the window's inner size in
+/// `Windowed`, unused in `Borderless`. `None` is the screen's own size (`Windowed`: the window as it is).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowDisplay {
+    pub mode: WindowMode,
+    pub size: Option<[u32; 2]>,
+}
+
+/// A process-wide slot, as `somnium_core::time::request_frame_pacing` is, since the request comes from game callbacks
+/// that never see the [`UiManager`]. The app hands the latest one over between frames.
+static DISPLAY_REQUEST: std::sync::Mutex<Option<WindowDisplay>> = std::sync::Mutex::new(None);
+/// The window's screen as last seen: its own size, and the sizes of its video modes (smallest first).
+static DISPLAY_SIZES: std::sync::Mutex<(Option<[u32; 2]>, Vec<[u32; 2]>)> = std::sync::Mutex::new((None, Vec::new()));
+
+/// `SOMNIUM_BACKGROUND_WINDOW=WIDTHxHEIGHT` (29 Oct 2026): checks run while someone works at the machine. The window
+/// opens at that size off every screen, is never activated and stays off the taskbar; it never goes fullscreen or
+/// resizes for a game's display options, and never captures the pointer (somnium_core `sync_play_cursor`). Pictures
+/// still come from its own frames, since the capture copies the swap chain. The developer: "i would prefer it if you
+/// stopped taking the mouse away for checks".
+pub fn background_window() -> Option<[u32; 2]> {
+    static SIZE: std::sync::LazyLock<Option<[u32; 2]>> = std::sync::LazyLock::new(|| {
+        parse_window_size(&std::env::var("SOMNIUM_BACKGROUND_WINDOW").ok()?)
+    });
+    *SIZE
+}
+
+fn parse_window_size(text: &str) -> Option<[u32; 2]> {
+    let (w, h) = text.split_once(['x', 'X'])?;
+    let size = [w.trim().parse().ok()?, h.trim().parse().ok()?];
+    size.iter().all(|v| (240..=8192).contains(v)).then_some(size)
+}
+
+#[cfg(test)]
+mod background_window_tests {
+    #[test]
+    fn a_background_window_size_is_width_by_height() {
+        use super::parse_window_size;
+        assert_eq!(parse_window_size("2560x1440"), Some([2560, 1440]));
+        assert_eq!(parse_window_size(" 1920 X 1080 "), Some([1920, 1080]));
+        assert_eq!(parse_window_size("1"), None, "a size, not a switch");
+        assert_eq!(parse_window_size("100x100"), None, "too small to picture anything");
+        assert_eq!(parse_window_size("2560x"), None);
+    }
+}
+
+/// Ask for the player's window to be shown this way; applied before the next frame, and whenever the window goes
+/// immersive after that.
+pub fn request_window_display(display: WindowDisplay) {
+    if let Ok(mut slot) = DISPLAY_REQUEST.lock() {
+        *slot = Some(display);
+    }
+}
+
+/// The pending request, once.
+pub fn take_window_display_request() -> Option<WindowDisplay> {
+    DISPLAY_REQUEST.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// The window's screen: its own size, and every size its video modes offer, smallest first (empty with no window).
+pub fn display_sizes() -> (Option<[u32; 2]>, Vec<[u32; 2]>) {
+    DISPLAY_SIZES.lock().map(|sizes| sizes.clone()).unwrap_or_default()
+}
+
 pub struct UiManager {
     authoring_panel: Option<crate::authoring_panel::AuthoringPanel>,
+    /// The welcome screen, built the first time it is shown.
+    welcome: Option<crate::editor::welcome::WelcomeScreen>,
+    welcome_open: bool,
     authoring_tool_mode: crate::editor::tool_context::ToolMode,
     window: Arc<Window>,
     /// Window size in **logical units** — what the widget tree, the collapse
@@ -885,6 +1046,13 @@ pub struct UiManager {
     /// Wall clock of the previous `end_frame`, for the motion delta. `None`
     /// until the first frame, which therefore advances nothing.
     last_frame_at: Option<std::time::Instant>,
+    /// The dialogue graph's Game View: the game's presenter over the editor, made on first use.
+    story_presenter: Option<NodeHandle>,
+    /// The Game View's quest notices, over the presenter.
+    story_notices: Option<NodeHandle>,
+    /// The game's journal screen over the editor, for a play-through's story, and whether it is open.
+    story_journal: Option<NodeHandle>,
+    story_journal_open: bool,
     native_ui: UserInterface,
     ui_pass: UiPass,
     font_id: u8,
@@ -974,14 +1142,28 @@ pub struct UiManager {
     #[allow(dead_code)]
     viewport_handle: NodeHandle,
     animation_workspace: NodeHandle,
+    animation_dock: crate::editor::shell::AnimationDock,
+    /// 0 Timeline, 1 State Machine.
+    animation_tab: usize,
+    /// The dock has the whole viewport.
+    animation_expanded: bool,
+    /// The expand state the dock's height last followed, and a glide in progress (from, to, started).
+    animation_dock_expanded_shown: bool,
+    animation_dock_glide: Option<(f32, f32, std::time::Instant)>,
+    /// What the dock's header last showed.
+    animation_transport: Option<AnimationTransport>,
+    animation_readout: String,
+    /// The playhead time last sent to the timeline, so its echo is not taken for a designer's scrub.
+    animation_playhead_sent: f32,
+    /// The graph in the dock has been fitted to its first view; a newly opened graph is fitted again.
+    animation_graph_framed: bool,
     animation_graph_editor: NodeHandle,
     animation_timeline: crate::timeline::TimelineEditorHandles,
     animation_timeline_document: crate::timeline::TimelineDocument,
     profiler_panel: NodeHandle,
     profiler_toggle: NodeHandle,
     profiler_toggle_lbl: NodeHandle,
-    profiler_names: Vec<NodeHandle>,
-    profiler_values: Vec<NodeHandle>,
+    profiler_view: NodeHandle,
     last_outliner_state: Option<(Vec<OutlinerRow>, Option<u32>)>,
     outer_grid: NodeHandle,
     menu_bar_h: NodeHandle,
@@ -1114,6 +1296,21 @@ pub struct UiManager {
     gizmo_space_label: NodeHandle,
     select_only_toggle: NodeHandle,
     snap_overflow: NodeHandle,
+    view_mode_button: NodeHandle,
+    view_mode_label: NodeHandle,
+    viewport_icons: NodeHandle,
+    /// The glyph buttons built so far (button, image), reused frame to frame, and what they last showed.
+    viewport_icon_pool: Vec<(NodeHandle, NodeHandle)>,
+    viewport_icons_shown: Vec<ViewportIcon>,
+    tools_overlay: NodeHandle,
+    transform_tools: [NodeHandle; 3],
+    focus_tool: NodeHandle,
+    /// The transform tool the strip last showed as on.
+    gizmo_mode_shown: Option<u8>,
+    /// The launch splash while it is up: its node, when it went up, and when it was told to finish.
+    splash: Option<(NodeHandle, std::time::Instant, Option<std::time::Instant>)>,
+    /// Components a designer may add, (stable id, display name).
+    component_catalogue: Vec<(String, String)>,
     time_cluster: NodeHandle,
     time_label: NodeHandle,
     time_slider: NodeHandle,
@@ -1209,6 +1406,10 @@ pub struct UiManager {
     preferences_open: bool,
     /// Which Preferences tab is showing.
     preferences_bindings_tab: bool,
+    /// Phase ALYX-D: which rail row is chosen, the rail's rows, and the groups they were built from.
+    preferences_category: crate::editor::preferences::PreferencesCategory,
+    preferences_rail: Vec<(NodeHandle, crate::editor::preferences::PreferencesCategory)>,
+    preferences_rail_groups: Vec<(String, &'static str)>,
     preferences_query: String,
     preferences_modified_only: bool,
     /// Generated settings rows, mounted in the Preferences window. A separate
@@ -1351,6 +1552,8 @@ pub struct UiManager {
     immersive: bool,
     immersive_restore_fullscreen: Option<Fullscreen>,
     immersive_restore_maximized: bool,
+    /// How the window is shown while immersive ([`request_window_display`]).
+    player_display: WindowDisplay,
 }
 
 /// Load the bundled Nocturne faces and publish the [`FontRole`] table.
@@ -1462,6 +1665,8 @@ const SEP: [char; 2] = ['/', '\\'];
 /// directly; entities/assets use namespaced ids in this map.
 #[derive(Clone, Debug, PartialEq)]
 enum PaletteTarget {
+    /// Add this component (stable id) to the selected entity.
+    AddComponent(String),
     Entity(u32),
     Asset(std::path::PathBuf),
     Help(u8),
@@ -1737,6 +1942,10 @@ impl UiManager {
             physical_size: (size.width, size.height),
             ui_scale,
             last_frame_at: None,
+            story_presenter: None,
+            story_notices: None,
+            story_journal: None,
+            story_journal_open: false,
             native_ui,
             ui_pass,
             font_id,
@@ -1745,6 +1954,8 @@ impl UiManager {
             inspector_stack: layout.inspector_stack,
             persona: layout.persona,
             authoring_panel: None,
+            welcome: None,
+            welcome_open: false,
             authoring_tool_mode: crate::editor::tool_context::ToolMode::Select,
             details_empty: layout.details_empty,
             outliner_empty: layout.outliner_empty,
@@ -1800,14 +2011,22 @@ impl UiManager {
             next_property_gesture: 1,
             viewport_handle: layout.viewport_handle,
             animation_workspace: layout.animation_workspace,
+            animation_dock: layout.animation_dock,
+            animation_tab: 0,
+            animation_expanded: false,
+            animation_dock_expanded_shown: false,
+            animation_dock_glide: None,
+            animation_transport: None,
+            animation_readout: String::new(),
+            animation_playhead_sent: f32::NAN,
+            animation_graph_framed: false,
             animation_graph_editor: layout.animation_graph_editor,
             animation_timeline: layout.animation_timeline,
             animation_timeline_document: layout.animation_timeline_document,
             profiler_panel: layout.profiler_panel,
             profiler_toggle: layout.profiler_toggle,
             profiler_toggle_lbl: layout.profiler_toggle_lbl,
-            profiler_names: layout.profiler_names,
-            profiler_values: layout.profiler_values,
+            profiler_view: layout.profiler_view,
             last_outliner_state: None,
             outer_grid: layout.outer_grid,
             menu_bar_h: layout.menu_bar_h,
@@ -1902,6 +2121,17 @@ impl UiManager {
             gizmo_space_label: layout.gizmo_space_label,
             select_only_toggle: layout.select_only_toggle,
             snap_overflow: layout.snap_overflow,
+            view_mode_button: layout.view_mode_button,
+            view_mode_label: layout.view_mode_label,
+            viewport_icons: layout.viewport_icons,
+            viewport_icon_pool: Vec::new(),
+            viewport_icons_shown: Vec::new(),
+            tools_overlay: layout.tools_overlay,
+            transform_tools: layout.transform_tools,
+            focus_tool: layout.focus_tool,
+            gizmo_mode_shown: None,
+            splash: None,
+            component_catalogue: Vec::new(),
             time_cluster: layout.time_cluster,
             time_label: layout.time_label,
             time_slider: layout.time_slider,
@@ -1958,6 +2188,9 @@ impl UiManager {
             rebinding: None,
             preferences_open: false,
             preferences_bindings_tab: false,
+            preferences_category: crate::editor::preferences::PreferencesCategory::All,
+            preferences_rail: Vec::new(),
+            preferences_rail_groups: Vec::new(),
             preferences_query: String::new(),
             preferences_modified_only: false,
             settings_presentation: crate::editor::persona::Persona::default(),
@@ -2031,6 +2264,7 @@ impl UiManager {
             immersive: false,
             immersive_restore_fullscreen: None,
             immersive_restore_maximized: false,
+            player_display: WindowDisplay::default(),
         };
         // CONTROL-A evidence harness. A relative drawer path lets a timing run
         // queue the real `assets/terrain/` workload before frame one, without
@@ -2185,6 +2419,96 @@ impl UiManager {
                 self.scene_dirty = true;
                 self.prompt_unsaved_new();
             }
+            // The Materials workspace with one material selected, as a Content Drawer click selects it. After the
+            // path, `|shape=<0-2>`, `|spin=<0|1>` and `|preset=<index>` press the preview's buttons, in that order, and
+            // `|filter=<text>` types into the Details search (as `persona-search` does) and `|reveal=<field>` scrolls
+            // that Material row into view once it exists, to bring rows into frame.
+            material if material.starts_with("material:") => {
+                self.set_workspace(crate::workspace::Workspace::Materials);
+                let mut spec = raw.trim()["material:".len()..].split('|');
+                self.select_content(std::path::PathBuf::from(spec.next().unwrap_or_default().trim()), false);
+                for option in spec {
+                    use crate::editor_event::MaterialStudioEvent as Studio;
+                    if let Some(("reveal", field)) = option.trim().split_once('=') {
+                        self.persona.tool_panel.studio.reveal =
+                            Some(format!("somnium.asset.Material/{}", field.trim()));
+                        continue;
+                    }
+                    if let Some(("filter", text)) = option.trim().split_once('=') {
+                        self.inspector_filter = text.trim().into();
+                        self.native_ui.send(UiMessage::new(
+                            self.inspector_search,
+                            MessageDirection::ToWidget,
+                            SearchBoxMessage::SetText(self.inspector_filter.clone()),
+                        ));
+                        continue;
+                    }
+                    let event = match option.trim().split_once('=') {
+                        Some(("shape", v)) => v.trim().parse().ok().map(Studio::Shape),
+                        Some(("spin", v)) => Some(Studio::Spin(v.trim() != "0")),
+                        Some(("preset", v)) => v.trim().parse().ok().map(Studio::Preset),
+                        _ => None,
+                    };
+                    match event {
+                        Some(event) => self.editor_events.push_back(EditorEvent::MaterialStudio(event)),
+                        None => warn!("SOMNIUM_AUDIT_UI_STATE material option {option:?} ignored"),
+                    }
+                }
+            }
+            // A dialogue or quest file on the graph, as Open loads it: `story:<path>`, then `|from=<node>` selects a
+            // node as Find does, `|game-view` turns the Game View on and `|play` presses Play, in the order given.
+            // `|choose=0,2` takes those choices as soon as the play-through starts, and `|journal` then opens the
+            // game's journal on it.
+            story if story.starts_with("story:") => {
+                let mut spec = raw.trim()["story:".len()..].split('|');
+                let path = spec.next().unwrap_or_default().trim().to_owned();
+                let catalogue = if path.ends_with(".somquest") {
+                    crate::graph::quest::CATALOGUE
+                } else {
+                    crate::graph::dialogue::CATALOGUE
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(json) => self.open_story_document(catalogue, &json, Some(&path)),
+                    Err(error) => warn!("SOMNIUM_AUDIT_UI_STATE story {path}: {error}"),
+                }
+                let mut script = Vec::new();
+                for option in spec.map(str::trim) {
+                    match option {
+                        "journal" => script.push(crate::graph::PreviewInput::Journal),
+                        "game-view" => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::PreviewGameView(true),
+                        )),
+                        "play" => self.request_graph_document(true, false),
+                        choose if choose.starts_with("choose=") => script.extend(
+                            choose["choose=".len()..]
+                                .split(',')
+                                .filter_map(|i| i.trim().parse().ok())
+                                .map(crate::graph::PreviewInput::Choose),
+                        ),
+                        from if from.starts_with("from=") => self.native_ui.send(UiMessage::new(
+                            self.animation_graph_editor,
+                            MessageDirection::ToWidget,
+                            crate::graph::GraphEditorMessage::RevealNode(from["from=".len()..].trim().to_owned()),
+                        )),
+                        other => warn!("SOMNIUM_AUDIT_UI_STATE story option {other:?} ignored"),
+                    }
+                }
+                if !script.is_empty() {
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewScript(script),
+                    ));
+                }
+            }
+            // Any surface a command opens: `cmd:editor.workspace.animation`, several joined by `+`.
+            commands if commands.starts_with("cmd:") => {
+                for id in commands["cmd:".len()..].split('+').map(str::trim).filter(|id| !id.is_empty()) {
+                    self.run_command_id(id);
+                }
+            }
             other => warn!("SOMNIUM_AUDIT_UI_STATE={other} ignored: unknown audit surface"),
         }
     }
@@ -2249,6 +2573,7 @@ impl UiManager {
             self.animation_workspace,
             workspace == crate::workspace::Workspace::Animation,
         );
+        self.sync_animation_dock_height();
         let (w, h) = (self.window_size.0 as f32, self.window_size.1 as f32);
         let preset = workspace.preset(w, h);
         self.apply_workspace_layout(preset, w);
@@ -2264,6 +2589,8 @@ impl UiManager {
         document: crate::graph::AnimationStateMachineDocument,
     ) {
         self.set_graph_only_layout(false);
+        self.animation_graph_framed = false;
+        self.show_animation_tab(1);
         self.native_ui.send(
             crate::graph::GraphEditorMessage::set_state_machine_document(
                 self.animation_graph_editor,
@@ -2277,6 +2604,7 @@ impl UiManager {
     /// Animation workspace.
     pub fn edit_animation_timeline(&mut self, document: crate::timeline::TimelineDocument) {
         self.set_graph_only_layout(false);
+        self.show_animation_tab(0);
         self.animation_timeline_document = document.clone();
         self.native_ui
             .send(crate::timeline::TimelineEditorMessage::set_document(
@@ -2445,6 +2773,20 @@ impl UiManager {
             // A stalled frame (breakpoint, minimised window) must not teleport
             // every track to its end state.
             self.native_ui.draw_ctx.motion.tick(dt_ms.min(100.0));
+            if let Some(presenter) = self.story_presenter {
+                self.native_ui.send(UiMessage::new(
+                    presenter,
+                    MessageDirection::ToWidget,
+                    crate::widgets::dialogue_presenter::DialoguePresenterMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
+            if let Some(notices) = self.story_notices {
+                self.native_ui.send(UiMessage::new(
+                    notices,
+                    MessageDirection::ToWidget,
+                    crate::widgets::notice_stack::NoticeMessage::Tick(dt_ms.min(100.0) as u64),
+                ));
+            }
         }
         self.last_frame_at = Some(now);
 
@@ -3345,10 +3687,8 @@ impl UiManager {
     /// was under the cursor: a file or folder gets Rename and Show in
     /// Folder, empty space does not.
     ///
-    /// **Delete is deliberately absent.** Removing a file from a
-    /// right-click, with no undo and no confirmation, is not a mistake
-    /// anyone recovers from; the OS file browser is one menu item away
-    /// and has a recycle bin.
+    /// Delete only ever moves to the Recycle Bin, so a wrong right-click is
+    /// restored from there; the host refuses where there is no bin.
     /// The Outliner's right-click menu, built from the registry.
     ///
     /// Right-clicking a row that is *not* in the selection selects it first,
@@ -3452,6 +3792,9 @@ impl UiManager {
                         command.action,
                         crate::commands::CommandAction::ContentRename
                             | crate::commands::CommandAction::ContentShowInFolder
+                            | crate::commands::CommandAction::ContentCopyPath
+                            | crate::commands::CommandAction::ContentDuplicate
+                            | crate::commands::CommandAction::ContentDelete
                     )
             })
             .map(|command| MenuItem {
@@ -3661,6 +4004,7 @@ impl UiManager {
                 ));
             }
             self.close_all_menus();
+            self.close_welcome();
         }
     }
 
@@ -3848,6 +4192,10 @@ impl UiManager {
         // open one (the project picker) but never the other way round.
         if self.preferences_open {
             self.toggle_preferences();
+            return true;
+        }
+        if self.welcome_open {
+            self.close_welcome();
             return true;
         }
         // Modal name prompts share the same focus trap as the unsaved prompt.
@@ -4191,6 +4539,7 @@ impl UiManager {
                 )
                 .with_enablement(enablement.is_enabled(), enablement.reason())
                 .with_recency(self.command_history.recency(command.id))
+                .with_icon(crate::commands::icon_for(command.id))
             })
             .collect();
         let mut targets = std::collections::HashMap::new();
@@ -4200,7 +4549,8 @@ impl UiManager {
             let key = format!("entity:{id}");
             items.push(
                 PaletteItem::new(&key, name.clone(), "Select", Cat::Entity)
-                    .with_recency(self.command_history.recency(&key)),
+                    .with_recency(self.command_history.recency(&key))
+                    .with_icon(crate::metaphor::icon_for_entity_name(name)),
             );
             targets.insert(key, PaletteTarget::Entity(*id));
         }
@@ -4213,9 +4563,33 @@ impl UiManager {
             let key = format!("asset:{}", entry.path.to_string_lossy());
             items.push(
                 PaletteItem::new(&key, entry.name.clone(), "Open", Cat::Asset)
-                    .with_recency(self.command_history.recency(&key)),
+                    .with_recency(self.command_history.recency(&key))
+                    .with_icon(crate::metaphor::icon_for_path(&entry.path, false)),
             );
             targets.insert(key, PaletteTarget::Asset(entry.path.clone()));
+        }
+
+        // Components the selected entity does not have yet, as "Add <name>": Details' Add Component opens the
+        // palette on these.
+        if self.selected_entity.is_some() {
+            let present: Vec<&str> = self
+                .persona
+                .component_hosts
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect();
+            for (id, name) in &self.component_catalogue {
+                if present.contains(&id.as_str()) {
+                    continue;
+                }
+                let key = format!("component:{id}");
+                items.push(
+                    PaletteItem::new(&key, format!("Add {name}"), "Component", Cat::Command)
+                        .with_recency(self.command_history.recency(&key))
+                        .with_icon(crate::editor::persona::component_icon(id)),
+                );
+                targets.insert(key, PaletteTarget::AddComponent(id.clone()));
+            }
         }
 
         // Help pages, so a question is answerable from the same surface.
@@ -4229,13 +4603,14 @@ impl UiManager {
         }
 
         // Panels, so the palette can also be used to reach a surface.
-        for (key, label, target) in [
-            ("panel:content", "Content Drawer", PaletteTarget::Drawer),
-            ("panel:log", "Output Log", PaletteTarget::Log),
+        for (key, label, target, icon) in [
+            ("panel:content", "Content Drawer", PaletteTarget::Drawer, crate::icons::IconId::ContentDrawer),
+            ("panel:log", "Output Log", PaletteTarget::Log, crate::icons::IconId::OutputLog),
         ] {
             items.push(
                 PaletteItem::new(key, label, "", Cat::Panel)
-                    .with_recency(self.command_history.recency(key)),
+                    .with_recency(self.command_history.recency(key))
+                    .with_icon(icon),
             );
             targets.insert(key.to_string(), target);
         }
@@ -4245,6 +4620,24 @@ impl UiManager {
             self.palette_widget,
             MessageDirection::ToWidget,
             CommandPaletteMessage::SetItems(items),
+        ));
+    }
+
+    /// The components a designer may add, as (stable id, display name), sorted by name. The host sends it once.
+    pub fn set_component_catalogue(&mut self, mut catalogue: Vec<(String, String)>) {
+        catalogue.sort_by(|a, b| a.1.cmp(&b.1));
+        self.component_catalogue = catalogue;
+    }
+
+    /// Open the palette on the components the selection can take.
+    fn open_add_component(&mut self) {
+        if !self.palette_open {
+            self.toggle_palette();
+        }
+        self.native_ui.send(UiMessage::new(
+            self.palette_widget,
+            MessageDirection::ToWidget,
+            CommandPaletteMessage::SetQuery("add ".into()),
         ));
     }
 
@@ -4277,6 +4670,62 @@ impl UiManager {
         self.preferences_open
     }
 
+    /// Show the welcome screen with this Recent Projects list, or refresh the list when it is already showing.
+    pub fn show_welcome(&mut self, projects: &[crate::editor::welcome::WelcomeProject]) {
+        let root = self.native_ui.root();
+        let screen = self
+            .welcome
+            .get_or_insert_with(|| crate::editor::welcome::WelcomeScreen::build(&mut self.native_ui, root));
+        screen.set_projects(&mut self.native_ui, projects);
+        let (overlay, focus) = (screen.overlay, screen.open_project);
+        if !self.welcome_open {
+            self.welcome_open = true;
+            self.native_ui
+                .send(UiMessage::new(overlay, MessageDirection::ToWidget, PopupMessage::Open));
+            self.enter_modal_focus(overlay, focus);
+        } else if !self.native_ui.is_under(self.native_ui.focused(), overlay) {
+            // Remove took the focused row with it: the keyboard goes back to Open Project….
+            self.native_ui.set_focus(focus);
+            self.native_ui
+                .send(UiMessage::new(focus, MessageDirection::ToWidget, WidgetMessage::Focus));
+        }
+        self.native_ui.invalidate_ancestors(overlay);
+    }
+
+    /// Put the welcome screen away.
+    pub fn close_welcome(&mut self) {
+        let Some(overlay) = self.welcome.as_ref().map(|screen| screen.overlay) else {
+            return;
+        };
+        if !std::mem::take(&mut self.welcome_open) {
+            return;
+        }
+        self.native_ui
+            .send(UiMessage::new(overlay, MessageDirection::ToWidget, PopupMessage::Close));
+        self.exit_modal_focus(overlay);
+        self.native_ui.invalidate_ancestors(overlay);
+    }
+
+    /// Whether the welcome screen is showing.
+    #[must_use]
+    pub fn welcome_open(&self) -> bool {
+        self.welcome_open
+    }
+
+    fn welcome_action(&mut self, action: crate::editor::welcome::WelcomeAction) {
+        use crate::editor::welcome::WelcomeAction as W;
+        match action {
+            W::Open(path) => self.editor_events.push_back(EditorEvent::OpenProject(path)),
+            W::Forget(path) => self.editor_events.push_back(EditorEvent::ForgetRecentProject(path)),
+            W::OpenPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
+            W::Help(page) => {
+                self.close_welcome();
+                self.toggle_help(Some(page));
+            }
+            W::Close => self.close_welcome(),
+        }
+    }
+
     /// The settings panels core should publish, filtered by the search box.
     ///
     /// Filtering here rather than in core keeps the query where the box is,
@@ -4291,9 +4740,31 @@ impl UiManager {
             String,
         )],
     ) {
+        use crate::editor::preferences::PreferencesCategory;
+        let mut groups: Vec<(String, &'static str)> = Vec::new();
+        for panel in &panels {
+            for row in &panel.rows {
+                let key = (panel.label.clone(), row.group.unwrap_or("General"));
+                if !groups.contains(&key) {
+                    groups.push(key);
+                }
+            }
+        }
+        if groups != self.preferences_rail_groups {
+            self.preferences_rail_groups = groups;
+            self.rebuild_preferences_rail();
+        }
+        let category = self.preferences_category.clone();
         let filtered: Vec<_> = panels
             .into_iter()
             .map(|mut panel| {
+                if let PreferencesCategory::Group(label, group) = &category {
+                    if &panel.label != label {
+                        panel.rows.clear();
+                    } else {
+                        panel.rows.retain(|row| row.group.unwrap_or("General") == *group);
+                    }
+                }
                 if !self.preferences_query.trim().is_empty() {
                     let kept: Vec<_> = crate::editor::inspector_gen::search_rows(
                         &panel.rows,
@@ -4622,6 +5093,14 @@ impl UiManager {
     /// Which debug visualisation is active, so the View menu can mark it and
     /// the status bar can say so. `"lit"` means the ordinary image.
     pub fn set_active_debug_view(&mut self, id: &'static str) {
+        if self.active_debug_view != id {
+            let label = crate::debug::DEBUG_VIEWS
+                .iter()
+                .find(|view| view.id == id)
+                .map_or("Lit", |view| view.label);
+            self.native_ui
+                .send(TextMessage::set_text(self.view_mode_label, label.to_string()));
+        }
         self.active_debug_view = id;
         self.native_ui
             .set_texel_density_legend(id == "texel_density");
@@ -4653,6 +5132,209 @@ impl UiManager {
     #[must_use]
     pub fn render_toggles(&self) -> &crate::debug::DebugToggles {
         &self.render_toggles
+    }
+
+    /// The view modes a designer reaches for, under the context bar's View button; the rest are one row further, in
+    /// the View menu. Reuses the Outliner's context-menu popup, as the piercing menu does.
+    fn open_view_mode_menu(&mut self) {
+        const COMMON: [&str; 14] = [
+            "lit",
+            "albedo",
+            "shading_normal",
+            "geometric_normal",
+            "triangle_edges",
+            "occlusion",
+            "texel_density",
+            "luminance",
+            "sun_only",
+            "ambient_only",
+            "shadow_factor",
+            "contact_shadows",
+            "restir_gi",
+            "cluster_heat",
+        ];
+        let mut items: Vec<MenuItem> = COMMON
+            .iter()
+            .filter_map(|id| crate::debug::DEBUG_VIEWS.iter().find(|view| view.id == *id))
+            .map(|view| MenuItem {
+                id: format!("editor.view.debug.{}", view.id),
+                label: if view.id == self.active_debug_view {
+                    format!("{}  (on)", view.label)
+                } else {
+                    view.label.to_string()
+                },
+                enabled: true,
+            })
+            .collect();
+        items.push(MenuItem {
+            id: "open:view_menu".into(),
+            label: "All view modes…".into(),
+            enabled: true,
+        });
+        // Under the button, its right edge on the button's, since the button sits at the viewport's right.
+        let anchor = self.native_ui.screen_bounds(self.view_mode_button);
+        const ASSUMED_WIDTH: f32 = 220.0;
+        let pos = Vec2::new(
+            (anchor.x + anchor.w - ASSUMED_WIDTH).max(0.0),
+            anchor.y + anchor.h + 4.0,
+        );
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu,
+            MessageDirection::ToWidget,
+            ContextMenuMessage::SetItems(items),
+        ));
+        self.native_ui.set_desired_position(self.outliner_menu, pos);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_menu_popup,
+            MessageDirection::ToWidget,
+            PopupMessage::Open,
+        ));
+        self.native_ui
+            .invalidate_ancestors(self.outliner_menu_popup);
+    }
+
+    /// Put the launch splash over everything, saying `status`. Above every panel and popup, and it takes the pointer
+    /// until it has gone, so nothing half-built can be clicked.
+    pub fn begin_splash(&mut self, status: &str) {
+        use crate::widgets::splash::{SplashBuilder, SplashMessage};
+        if self.splash.is_none() {
+            let root = self.native_ui.root();
+            let node = self.native_ui.add_node(
+                SplashBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
+                    .with_status(status)
+                    .with_font_id(self.font_id)
+                    .build(),
+                root,
+            );
+            self.splash = Some((node, std::time::Instant::now(), None));
+            // Modal while it is up: keys go nowhere underneath, and the viewport's overlays (the axis widget, the
+            // statistics) do not paint over it.
+            self.native_ui.enter_modal(node, node);
+        }
+        if let Some((node, _, _)) = self.splash {
+            let reduced = self.native_ui.draw_ctx.motion.reduced_motion();
+            for message in [SplashMessage::Status(status.to_owned()), SplashMessage::ReducedMotion(reduced)] {
+                self.native_ui
+                    .send(UiMessage::new(node, MessageDirection::ToWidget, message));
+            }
+        }
+    }
+
+    /// Loading is done: the splash finishes its intro, then turns away and fades.
+    pub fn finish_splash(&mut self) {
+        if let Some((node, _, finish)) = self.splash.as_mut() {
+            let node = *node;
+            finish.get_or_insert_with(std::time::Instant::now);
+            self.native_ui.send(UiMessage::new(
+                node,
+                MessageDirection::ToWidget,
+                crate::widgets::splash::SplashMessage::Finish,
+            ));
+        }
+    }
+
+    /// Once a frame: drop the splash once it has finished leaving.
+    pub fn update_splash(&mut self) {
+        let Some((node, born, finish)) = self.splash else { return };
+        // Anything opened since (the welcome screen, a recovery prompt) goes under the splash until it has gone.
+        self.native_ui.bring_to_front(node);
+        if crate::widgets::splash::exit_progress(born, finish, std::time::Instant::now()) >= 1.0 {
+            self.native_ui.exit_modal(node);
+            self.native_ui.remove_node(node);
+            self.splash = None;
+        }
+    }
+
+    /// Whether the pointer is over the 3D view itself, not a panel or a control floating on it.
+    #[must_use]
+    pub fn pointer_over_viewport(&self) -> bool {
+        let hit = self.native_ui.hit_test(self.native_ui.cursor_pos);
+        hit == self.viewport_handle
+            || (hit.is_none()
+                && self
+                    .native_ui
+                    .screen_bounds(self.viewport_handle)
+                    .contains(self.native_ui.cursor_pos))
+    }
+
+    /// Place the entity glyphs. The same list as last frame does nothing, so a still camera costs no layout.
+    pub fn set_viewport_icons(&mut self, icons: Vec<ViewportIcon>) {
+        if icons == self.viewport_icons_shown {
+            return;
+        }
+        const SIZE: f32 = 26.0;
+        let bounds = self.native_ui.screen_bounds(self.viewport_icons);
+        let t = theme::active();
+        while self.viewport_icon_pool.len() < icons.len() {
+            let button = self.native_ui.add_node(
+                ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_width(SIZE)
+                        .with_height(SIZE)
+                        .with_background(theme::with_alpha(t.semantic.surface.window.bytes(), 0xC8)),
+                )
+                .with_hover_animation(false)
+                .build(),
+                self.viewport_icons,
+            );
+            let image = self.native_ui.add_node(
+                ImageBuilder::new(
+                    WidgetBuilder::new()
+                        .with_horizontal_alignment(crate::types::HorizontalAlignment::Center)
+                        .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+                )
+                .with_icon(crate::icons::IconId::Light)
+                .with_size(16.0)
+                .with_tint(t.semantic.text.primary.bytes())
+                .build(),
+                button,
+            );
+            self.viewport_icon_pool.push((button, image));
+        }
+        for (index, &(button, image)) in self.viewport_icon_pool.iter().enumerate() {
+            let Some(icon) = icons.get(index) else {
+                self.native_ui.set_visibility(button, false);
+                continue;
+            };
+            let previous = self.viewport_icons_shown.get(index);
+            self.native_ui.set_visibility(button, true);
+            let x = (icon.ndc[0] * 0.5 + 0.5) * bounds.w - SIZE * 0.5;
+            let y = (0.5 - icon.ndc[1] * 0.5) * bounds.h - SIZE * 0.5;
+            self.native_ui
+                .set_desired_position(button, glam::Vec2::new(x.round(), y.round()));
+            if previous.is_none_or(|p| p.icon != icon.icon) {
+                self.native_ui
+                    .send(crate::widgets::image::ImageMessage::set_icon(image, icon.icon));
+            }
+            if previous.is_none_or(|p| p.fade != icon.fade || p.selected != icon.selected) {
+                let base = if icon.selected {
+                    t.semantic.accent.default.bytes()
+                } else {
+                    t.semantic.text.primary.bytes()
+                };
+                let alpha = (f32::from(base[3]) * icon.fade.clamp(0.25, 1.0)) as u8;
+                self.native_ui.send(UiMessage::new(
+                    image,
+                    MessageDirection::ToWidget,
+                    crate::widgets::image::ImageMessage::SetTint([base[0], base[1], base[2], alpha]),
+                ));
+                self.native_ui
+                    .send(ButtonMessage::set_selected(button, icon.selected));
+            }
+        }
+        self.viewport_icons_shown = icons;
+    }
+
+    /// Light the transform tool in force on the Tools strip: 0 move, 1 rotate, 2 scale.
+    pub fn set_gizmo_mode(&mut self, mode: u8) {
+        if self.gizmo_mode_shown == Some(mode) {
+            return;
+        }
+        self.gizmo_mode_shown = Some(mode);
+        for (index, handle) in self.transform_tools.into_iter().enumerate() {
+            self.native_ui
+                .send(ButtonMessage::set_selected(handle, index == usize::from(mode)));
+        }
     }
 
     /// Show every selectable entity under the cursor — Unity 6's piercing
@@ -4738,6 +5420,29 @@ impl UiManager {
         if !matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
             return false;
         }
+        if let Some(slot) = self
+            .viewport_icon_pool
+            .iter()
+            .position(|(button, _)| *button == msg.destination)
+        {
+            if let Some(icon) = self.viewport_icons_shown.get(slot) {
+                self.editor_events
+                    .push_back(EditorEvent::SelectEntity(Some(icon.entity)));
+            }
+            return true;
+        }
+        if let Some(tool) = self.transform_tools.iter().position(|h| *h == msg.destination) {
+            self.run_command_id(["editor.gizmo.translate", "editor.gizmo.rotate", "editor.gizmo.scale"][tool]);
+            return true;
+        }
+        if msg.destination == self.focus_tool {
+            self.run_command_id("editor.view.focus_selection");
+            return true;
+        }
+        if msg.destination == self.view_mode_button {
+            self.open_view_mode_menu();
+            return true;
+        }
         if msg.destination == self.snap_overflow {
             // The overflow opens Preferences at the Settings tab rather than
             // duplicating the cluster in a popup: one place these live.
@@ -4796,7 +5501,37 @@ impl UiManager {
         });
     }
 
+    fn rebuild_preferences_rail(&mut self) {
+        self.preferences_rail = crate::editor::preferences::build_sidebar(
+            &mut self.native_ui,
+            self.preferences.sidebar,
+            self.font_id,
+            &self.preferences_rail_groups,
+            &self.preferences_category,
+        );
+        self.native_ui.invalidate_ancestors(self.preferences.sidebar);
+    }
+
     fn handle_preferences_message(&mut self, msg: &UiMessage) -> bool {
+        if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click))
+            && let Some((_, category)) = self
+                .preferences_rail
+                .iter()
+                .find(|(row, _)| *row == msg.destination)
+                .cloned()
+        {
+            use crate::editor::preferences::PreferencesCategory;
+            self.preferences_bindings_tab = category == PreferencesCategory::Keyboard;
+            self.native_ui
+                .set_visibility(self.preferences.settings_body, !self.preferences_bindings_tab);
+            self.native_ui
+                .set_visibility(self.preferences.bindings_body, self.preferences_bindings_tab);
+            self.preferences_category = category;
+            self.settings_signature.clear();
+            self.rebuild_preferences_rail();
+            self.rebuild_binding_rows();
+            return true;
+        }
         if matches!(msg.data::<ButtonMessage>(), Some(ButtonMessage::Click)) {
             if msg.destination == self.preferences.close {
                 self.toggle_preferences();
@@ -4921,6 +5656,32 @@ impl UiManager {
         self.clipboard_filled = filled;
     }
 
+    /// Output Log lines for an agent (Phase ALYX-M): at least `min` severe, newer than id `after`, containing
+    /// `contains` (any case), the newest `limit` of them, oldest first.
+    pub fn log_lines(
+        &self,
+        min: crate::log::LogSeverity,
+        after: u64,
+        contains: &str,
+        limit: usize,
+    ) -> Vec<crate::log::LogEntry> {
+        let needle = contains.to_lowercase();
+        let mut lines: Vec<_> = self
+            .log
+            .entries()
+            .filter(|entry| {
+                entry.severity >= min
+                    && entry.id > after
+                    && (needle.is_empty() || entry.text.to_lowercase().contains(&needle))
+            })
+            .cloned()
+            .collect();
+        if lines.len() > limit {
+            lines.drain(..lines.len() - limit);
+        }
+        lines
+    }
+
     /// Registry-derived command inventory, including current native enablement.
     pub fn authoring_commands(&self) -> Vec<crate::authoring_panel::CommandCapability> {
         crate::authoring_panel::command_capabilities(&self.command_context())
@@ -4957,14 +5718,9 @@ impl UiManager {
                 self.persona.tool_panel.host,
                 shown != ToolMode::Select || !enabled,
             );
-            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
-            {
-                320.0
-            } else if visible {
-                280.0
-            } else {
-                48.0
-            };
+            // Materials opens widest, for its preview; a width the designer dragged to in a mode is kept for it.
+            self.chrome_layout.tools =
+                self.persona.tool_panel.tools_width(shown, visible, self.window_size.0 as f32);
             self.chrome_layout.viewport = (self.window_size.0 as f32
                 - self.chrome_layout.tools
                 - self.chrome_layout.details
@@ -5004,6 +5760,9 @@ impl UiManager {
                 }
                 Some(PaletteTarget::Help(page)) => self.toggle_help(Some(page)),
                 Some(PaletteTarget::Drawer) => self.toggle_drawer(),
+                Some(PaletteTarget::AddComponent(component)) => {
+                    self.editor_events.push_back(EditorEvent::AddComponent(component));
+                }
                 Some(PaletteTarget::Log) => self.toggle_log_panel(),
                 None => return false,
             }
@@ -5065,6 +5824,8 @@ impl UiManager {
             }
             A::OpenPreferences => self.toggle_preferences(),
             A::OpenProjectPicker => self.editor_events.push_back(EditorEvent::OpenProjectPicker),
+            A::OpenWelcome => self.editor_events.push_back(EditorEvent::OpenWelcome),
+            A::SaveProjectThumbnail => self.editor_events.push_back(EditorEvent::SaveProjectThumbnail),
             A::CopySelected => self.editor_events.push_back(EditorEvent::CopySelected),
             A::PasteClipboard => self.editor_events.push_back(EditorEvent::PasteClipboard),
             A::SelectAll => self.editor_events.push_back(EditorEvent::SelectAll),
@@ -5128,6 +5889,12 @@ impl UiManager {
                 }
             }
             A::SetWorkspace(workspace) => self.set_workspace(workspace),
+            A::ShowAnimationTab(tab) => {
+                if self.active_workspace != Workspace::Animation {
+                    self.set_workspace(Workspace::Animation);
+                }
+                self.show_animation_tab(usize::from(tab));
+            }
             A::ResetWorkspace => self.reset_workspace(),
             A::ContentNewFolder => self.open_name_prompt(
                 NamePrompt::NewFolder {
@@ -5161,6 +5928,25 @@ impl UiManager {
                         .push_back(EditorEvent::ShowContentItemInFolder(
                             entry.path.to_string_lossy().into_owned(),
                         ));
+                }
+            }
+            A::ContentCopyPath => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.editor_events
+                        .push_back(EditorEvent::CopyText(entry.path.to_string_lossy().into_owned()));
+                }
+            }
+            A::ContentDuplicate => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.editor_events
+                        .push_back(EditorEvent::DuplicateContentItem(entry.path.to_string_lossy().into_owned()));
+                }
+            }
+            A::ContentDelete => {
+                if let Some(entry) = self.content_menu_target.clone() {
+                    self.content_selection.retain(|path| path != &entry.path);
+                    self.editor_events
+                        .push_back(EditorEvent::DeleteContentItem(entry.path.to_string_lossy().into_owned()));
                 }
             }
             A::ContentRefresh => self.refresh_content_list(),
@@ -5539,6 +6325,7 @@ impl UiManager {
     pub fn set_asset_snapshot(&mut self, snapshot: somnium_asset::database::AssetDbSnapshot) {
         self.asset_db = snapshot;
         self.refresh_content_list();
+        self.refresh_asset_pickers();
     }
 
     /// Whether a panel is currently living in its own OS window.
@@ -6263,6 +7050,9 @@ impl UiManager {
             crate::metaphor::ContentFilterKind::Audio => {
                 somnium_asset::database::AssetKind::Audio.bit()
             }
+            crate::metaphor::ContentFilterKind::Materials => {
+                somnium_asset::database::AssetKind::Material.bit()
+            }
         };
         let mut entries: Vec<crate::metaphor::ContentEntry> = self
             .asset_db
@@ -6289,6 +7079,127 @@ impl UiManager {
         self.content_window = None;
         self.sync_content_tiles();
         self.refresh_content_breadcrumb();
+        self.refresh_content_tree();
+        self.refresh_content_footer();
+    }
+
+    /// The drawer's folder tree: the top folders, opened down the path to the current one, which is highlighted.
+    /// Built from the scan's folder records, so it costs no disk access (Phase ALYX-F).
+    fn refresh_content_tree(&mut self) {
+        let tree = self.persona.content_tree;
+        if tree.is_none() {
+            return;
+        }
+        let normalise = |p: &str| p.replace('\\', "/").trim_matches('/').to_string();
+        let current = normalise(&self.content_path);
+        let mut rows: Vec<(String, String, usize)> = Vec::new();
+        let mut stack: Vec<(String, usize)> = vec![(String::new(), 0)];
+        while let Some((parent, depth)) = stack.pop() {
+            let folders = self.asset_db.query(&somnium_asset::database::AssetQuery {
+                parent: parent.clone(),
+                text: String::new(),
+                kind_mask: somnium_asset::database::AssetKind::Folder.bit(),
+                sort: somnium_asset::database::AssetSort::Name,
+                descending: false,
+            });
+            // Depth-first, in name order: push children reversed so the first pops first.
+            let at = rows.iter().position(|(p, _, _)| normalise(p) == normalise(&parent)).map_or(rows.len(), |i| i + 1);
+            let mut children = Vec::new();
+            for folder in folders {
+                let relative = normalise(&folder.relative_path);
+                let open = current == relative || current.starts_with(&format!("{relative}/"));
+                children.push((relative.clone(), folder.name.clone(), depth));
+                if open && depth < 8 {
+                    stack.push((relative, depth + 1));
+                }
+            }
+            rows.splice(at..at, children);
+        }
+        for child in self.native_ui.children(tree) {
+            self.native_ui.remove_node(child);
+        }
+        self.persona.content_tree_rows.clear();
+        let mut all = vec![(String::new(), "Content".to_string(), 0usize)];
+        all.extend(rows.into_iter().map(|(rel, name, depth)| (rel, name, depth + 1)));
+        for (relative, name, depth) in all {
+            let chosen = relative == current;
+            let button = self.native_ui.add_node(
+                ButtonBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(22.0)
+                        .with_background(if chosen {
+                            theme::active().semantic.accent.selected_bg.bytes()
+                        } else {
+                            theme::TRANSPARENT
+                        })
+                        .with_tooltip(if relative.is_empty() { "Content" } else { relative.as_str() }),
+                )
+                .build(),
+                tree,
+            );
+            let line = self.native_ui.add_node(
+                StackPanelBuilder::new(
+                    WidgetBuilder::new()
+                        .with_margin(Thickness::new(6.0 + 12.0 * depth as f32, 0.0, 4.0, 0.0))
+                        .with_background(theme::TRANSPARENT)
+                        .with_hit_test_visibility(false),
+                )
+                .with_orientation(Orientation::Horizontal)
+                .build(),
+                button,
+            );
+            let open = chosen || current.starts_with(&format!("{relative}/")) || relative.is_empty();
+            self.native_ui.add_node(
+                crate::widgets::image::ImageBuilder::new(
+                    WidgetBuilder::new().with_vertical_alignment(crate::types::VerticalAlignment::Center),
+                )
+                .with_icon(if open { crate::icons::IconId::FolderOpen } else { crate::icons::IconId::Folder })
+                .with_size(14.0)
+                .with_tint(theme::active().semantic.folder.bytes())
+                .build(),
+                line,
+            );
+            self.native_ui.add_node(
+                TextBuilder::new(
+                    WidgetBuilder::new()
+                        .with_margin(Thickness::axes(6.0, 0.0))
+                        .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+                )
+                .with_text(name)
+                .with_font_size(12.0)
+                .with_font_id(self.font_id)
+                .with_color(if chosen {
+                    theme::active().semantic.text.emphasis.bytes()
+                } else {
+                    theme::active().semantic.text.secondary.bytes()
+                })
+                .build(),
+                line,
+            );
+            self.persona.content_tree_rows.push((button, relative));
+        }
+        self.native_ui.invalidate_ancestors(tree);
+    }
+
+    /// "42 items · rocks_02.gltf" under the tiles.
+    fn refresh_content_footer(&mut self) {
+        let footer = self.persona.content_footer;
+        if footer.is_none() {
+            return;
+        }
+        let count = self.content_all.len();
+        let mut text = format!("{count} {}", if count == 1 { "item" } else { "items" });
+        match self.content_selection.len() {
+            0 => {}
+            1 => {
+                if let Some(name) = self.content_selection.iter().next().and_then(|p| p.file_name()) {
+                    text.push_str(" · ");
+                    text.push_str(&name.to_string_lossy());
+                }
+            }
+            n => text.push_str(&format!(" · {n} selected")),
+        }
+        self.native_ui.send(TextMessage::set_text(footer, text));
     }
 
     /// Which tiles the drawer can show, given the layout it last had.
@@ -6706,13 +7617,64 @@ impl UiManager {
             self.set_play_overlays_hidden(true);
             self.immersive_restore_maximized = self.window.is_maximized();
             self.immersive_restore_fullscreen = self.window.fullscreen();
-            self.window
-                .set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.apply_player_display();
         } else {
+            // The editor's window draws its own title bar; a windowed player had the system's.
+            self.window.set_decorations(false);
             self.window
                 .set_fullscreen(self.immersive_restore_fullscreen.take());
             if self.immersive_restore_maximized {
                 self.window.set_maximized(true);
+            }
+        }
+    }
+
+    /// Show the window as a game's display options ask ([`request_window_display`]): now while immersive, and each
+    /// time it goes immersive after.
+    pub fn set_player_display(&mut self, display: WindowDisplay) {
+        self.player_display = display;
+        if self.immersive {
+            self.apply_player_display();
+        }
+    }
+
+    fn apply_player_display(&self) {
+        let monitor = self.window.current_monitor();
+        let native = monitor.as_ref().map(|m| [m.size().width, m.size().height]);
+        let mut sizes: Vec<[u32; 2]> = monitor.iter().flat_map(|m| m.video_modes()).map(|v| [v.size().width, v.size().height])
+            .chain(native).collect();
+        sizes.sort_by_key(|s| (s[0], s[1]));
+        sizes.dedup();
+        if let Ok(mut published) = DISPLAY_SIZES.lock() {
+            *published = (native, sizes);
+        }
+        // A background window (`background_window`) keeps its size and its place off the screens.
+        if background_window().is_some() {
+            return;
+        }
+        match self.player_display.mode {
+            WindowMode::Borderless => self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor))),
+            WindowMode::Fullscreen => {
+                // At the screen's own size, borderless: it looks the same and asks the display for no mode change.
+                // A mode change can fail (a locked screen, a laptop's switched graphics), and winit then panics on it:
+                // a start at 4 a.m. on 23 Oct 2026 died on its `assert_eq!(res, DISP_CHANGE_SUCCESSFUL)`. Another size
+                // takes the screen's mode at that size, at the screen's own refresh rate where it has one (the
+                // smallest change to ask for); borderless if it has none.
+                let wanted = self.player_display.size.or(native);
+                let hz = monitor.as_ref().and_then(|m| m.refresh_rate_millihertz());
+                let mode = monitor.as_ref().filter(|_| wanted != native).and_then(|m| {
+                    m.video_modes().filter(|v| Some([v.size().width, v.size().height]) == wanted)
+                        .max_by_key(|v| (Some(v.refresh_rate_millihertz()) == hz, v.refresh_rate_millihertz(), v.bit_depth()))
+                });
+                self.window.set_fullscreen(Some(mode.map_or(Fullscreen::Borderless(monitor), Fullscreen::Exclusive)));
+            }
+            WindowMode::Windowed => {
+                self.window.set_fullscreen(None);
+                self.window.set_maximized(false);
+                self.window.set_decorations(true);
+                if let Some([w, h]) = self.player_display.size {
+                    let _ = self.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                }
             }
         }
     }
@@ -7052,14 +8014,17 @@ impl UiManager {
                 asset_searches,
                 asset_actions,
                 collection_actions,
-            ) = build_generated_details(
+            ) = {
+                self.persona.entity_details = entity.is_some();
+                build_generated_details(
                 &mut self.native_ui,
                 self.persona.generated_host,
                 self.font_id,
                 &panels,
                 &self.asset_db,
                 &mut self.persona,
-            );
+            )
+            };
             self.generated_root = root;
             self.generated_bindings = bindings;
             self.generated_rows = rows;
@@ -7303,7 +8268,7 @@ impl UiManager {
             .set_visibility(self.details_empty, !has_selection);
     }
 
-    pub fn update_profiler(&mut self, rows: Option<&[ProfilerRow]>) {
+    pub fn update_profiler(&mut self, rows: Option<&[ProfilerRow]>, fps: f32) {
         let panel = self.profiler_panel;
         let Some(rows) = rows else {
             self.native_ui.set_visibility(panel, false);
@@ -7318,19 +8283,11 @@ impl UiManager {
             self.profiler_toggle_lbl,
             "Profiler".to_string(),
         ));
-        let names = self.profiler_names.clone();
-        let values = self.profiler_values.clone();
-        for i in 0..names.len() {
-            let (label, value) = match rows.get(i) {
-                Some(row) => (
-                    format!("{}{}", "   ".repeat(row.depth as usize), row.label),
-                    row.value.clone(),
-                ),
-                None => (String::new(), String::new()),
-            };
-            self.native_ui.send(TextMessage::set_text(names[i], label));
-            self.native_ui.send(TextMessage::set_text(values[i], value));
-        }
+        self.native_ui.send(UiMessage::new(
+            self.profiler_view,
+            MessageDirection::ToWidget,
+            crate::widgets::profiler_view::ProfilerViewMessage::SetRows { rows: rows.to_vec(), fps },
+        ));
     }
 
     pub fn update_tool_context(&mut self, context: crate::editor::tool_context::ToolContext) {
@@ -7343,6 +8300,7 @@ impl UiManager {
                 crate::workspace::Workspace::Foliage => ToolMode::Foliage,
                 crate::workspace::Workspace::Lighting => ToolMode::Lighting,
                 crate::workspace::Workspace::Materials => ToolMode::Materials,
+                crate::workspace::Workspace::Animation => ToolMode::Animation,
                 _ => ToolMode::Select,
             }
         };
@@ -7350,6 +8308,7 @@ impl UiManager {
         for (component, host) in &self.persona.component_hosts {
             let in_tools = match shown {
                 ToolMode::Materials => component.as_str() == "somnium.asset.Material",
+                ToolMode::Animation => component.as_str() == "somnium.AnimationAuthoring",
                 ToolMode::Lighting => matches!(
                     component.as_str(),
                     "somnium.Light"
@@ -7384,6 +8343,8 @@ impl UiManager {
                 self.native_ui
                     .send(ButtonMessage::set_selected(handle, mode == active));
             }
+            self.native_ui
+                .set_visibility(self.tools_overlay, active == ToolMode::Select);
             let authoring_visible = self
                 .authoring_panel
                 .as_ref()
@@ -7394,14 +8355,9 @@ impl UiManager {
                 shown != ToolMode::Select || !authoring_visible,
             );
             self.native_ui.set_visibility(self.persona.tools, visible);
-            self.chrome_layout.tools = if matches!(shown, ToolMode::Lighting | ToolMode::Materials)
-            {
-                320.0
-            } else if visible {
-                280.0
-            } else {
-                48.0
-            };
+            // Materials opens widest, for its preview; a width the designer dragged to in a mode is kept for it.
+            self.chrome_layout.tools =
+                self.persona.tool_panel.tools_width(shown, visible, self.window_size.0 as f32);
             self.chrome_layout.viewport = (self.window_size.0 as f32
                 - self.chrome_layout.tools
                 - self.chrome_layout.details
@@ -7958,6 +8914,18 @@ impl UiManager {
         ];
         for msg in msgs {
             if msg.destination == self.animation_timeline.editor
+                && let Some(crate::timeline::TimelineEditorMessage::PlayheadChanged(time)) =
+                    msg.data::<crate::timeline::TimelineEditorMessage>()
+            {
+                if self.animation_transport.as_ref().is_some_and(|t| !t.playing)
+                    && (time - self.animation_playhead_sent).abs() > 1e-3
+                {
+                    self.animation_playhead_sent = *time;
+                    self.editor_events.push_back(EditorEvent::ScrubAnimation(*time));
+                }
+                continue;
+            }
+            if msg.destination == self.animation_timeline.editor
                 && let Some(crate::timeline::TimelineEditorMessage::Changed(document)) =
                     msg.data::<crate::timeline::TimelineEditorMessage>()
             {
@@ -7989,6 +8957,54 @@ impl UiManager {
             {
                 if msg.direction == MessageDirection::FromWidget {
                     self.run_graph_tool_action(*action);
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::PreviewBeat(beat)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_game_view(beat.clone());
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::PreviewJournal(view)) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_journal(view.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::journal_screen::JournalMessage::Output(output)) =
+                msg.data::<crate::widgets::journal_screen::JournalMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    if *output == crate::widgets::journal_screen::JournalOutput::Closed {
+                        self.story_journal_open = false;
+                        self.native_ui.set_focus(self.animation_graph_editor);
+                    }
+                    self.native_ui.send(UiMessage::new(
+                        self.animation_graph_editor,
+                        MessageDirection::ToWidget,
+                        crate::graph::GraphEditorMessage::PreviewJournalOutput(output.clone()),
+                    ));
+                }
+                continue;
+            }
+            if let Some(crate::graph::GraphEditorMessage::PreviewNotice { heading, text }) =
+                msg.data::<crate::graph::GraphEditorMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.show_story_notice(heading.clone(), text.clone());
+                }
+                continue;
+            }
+            if let Some(crate::widgets::dialogue_presenter::DialoguePresenterMessage::Output(output)) =
+                msg.data::<crate::widgets::dialogue_presenter::DialoguePresenterMessage>()
+            {
+                if msg.direction == MessageDirection::FromWidget {
+                    self.story_presenter_output(output.clone());
                 }
                 continue;
             }
@@ -8101,6 +9117,7 @@ impl UiManager {
             if let Some(SplitterMessage::Changed(size)) = msg.data::<SplitterMessage>() {
                 if msg.destination == self.inner_h {
                     self.chrome_layout.tools = *size;
+                    self.persona.tool_panel.remember_tools_width(self.authoring_tool_mode, *size);
                 } else if msg.destination == self.content_split_h {
                     // The splitter reports the viewport pane; persist the
                     // *column* it implies, because that is what survives a
@@ -8149,6 +9166,10 @@ impl UiManager {
                 self.editor_events.push_back(event);
                 continue;
             }
+            if let Some(action) = self.welcome.as_ref().and_then(|screen| screen.event(&msg)) {
+                self.welcome_action(action);
+                continue;
+            }
             if let Some(panel) = &mut self.authoring_panel {
                 let (handled, event) = panel.event(&mut self.native_ui, &msg);
                 if let Some(event) = event {
@@ -8159,6 +9180,15 @@ impl UiManager {
                 }
             }
             if let Some(ButtonMessage::Click) = msg.data::<ButtonMessage>() {
+                if let Some(component) = self.persona.removal(msg.destination) {
+                    self.editor_events
+                        .push_back(EditorEvent::RemoveComponent(component.to_string()));
+                    continue;
+                }
+                if msg.destination == self.persona.add_component && msg.destination.is_some() {
+                    self.open_add_component();
+                    continue;
+                }
                 if self.persona.click(&mut self.native_ui, msg.destination)
                     || self
                         .settings_presentation
@@ -8255,7 +9285,20 @@ impl UiManager {
                             self.navigate_content(up);
                         }
                         ContentToolbarAction::Kind(kind) => self.set_content_kind(kind),
+                        ContentToolbarAction::Command(id) => {
+                            self.run_command_id(id);
+                        }
                     }
+                    continue;
+                }
+                if let Some(folder) = self
+                    .persona
+                    .content_tree_rows
+                    .iter()
+                    .find(|(handle, _)| *handle == msg.destination)
+                    .map(|(_, folder)| folder.clone())
+                {
+                    self.navigate_content(folder);
                     continue;
                 }
                 if let Some((component, field, action)) = self
@@ -8404,6 +9447,10 @@ impl UiManager {
                 }
                 if msg.destination == self.outliner_menu {
                     self.close_outliner_menu();
+                    if id == "open:view_menu" {
+                        self.open_menu(3);
+                        continue;
+                    }
                     if let Some(index) = id.strip_prefix("pierce:")
                         && let Ok(index) = index.parse::<u32>()
                     {
@@ -8522,6 +9569,23 @@ impl UiManager {
                 // straight back to its starting value.
                 if msg.destination == self.profiler_toggle {
                     self.run_command_id("editor.view.profiler");
+                    continue;
+                }
+                if let Some(tab) = self.animation_dock.tabs.iter().position(|h| *h == msg.destination) {
+                    self.show_animation_tab(tab);
+                    continue;
+                }
+                if msg.destination == self.animation_dock.rewind {
+                    self.run_command_id("editor.animation.reset");
+                    continue;
+                }
+                if msg.destination == self.animation_dock.play {
+                    self.run_command_id("editor.animation.play_pause");
+                    continue;
+                }
+                if msg.destination == self.animation_dock.expand {
+                    let expanded = !self.animation_expanded;
+                    self.set_animation_expanded(expanded);
                     continue;
                 }
                 if msg.destination == self.play_button {
@@ -9538,17 +10602,18 @@ mod elysium_tests {
                 .nodes
                 .try_borrow(layout.animation_graph_editor.transmute())
                 .unwrap();
-            assert_eq!(graph.widget.parent, layout.animation_workspace);
+            assert_eq!(graph.widget.parent, layout.animation_dock.body);
             assert!(
-                graph.widget.visibility,
-                "the composite parent exclusively owns workspace visibility"
+                !graph.widget.visibility,
+                "the dock opens on the Timeline tab; the graph waits behind its own"
             );
         }
 
         assert_eq!(
             ui.parent_of(layout.animation_timeline.editor),
-            Some(layout.animation_workspace)
+            Some(layout.animation_dock.body)
         );
+        assert!(ui.is_under(layout.animation_dock.body, layout.animation_workspace));
         assert_eq!(
             ui.parent_of(layout.animation_timeline.curve_editor),
             Some(layout.animation_timeline.editor)
@@ -9563,9 +10628,19 @@ mod elysium_tests {
 
         ui.set_visibility(layout.animation_workspace, true);
         ui.perform_layout();
-        assert!(ui.is_globally_visible(layout.animation_graph_editor));
         assert!(ui.is_globally_visible(layout.animation_timeline.editor));
         assert!(ui.is_globally_visible(layout.animation_timeline.curve_editor));
+        assert!(ui.is_globally_visible(layout.animation_dock.play));
+        // The viewport above the dock is still the viewport: a click there reaches the scene.
+        let viewport = ui.screen_bounds(layout.viewport_handle);
+        let dock = ui.screen_bounds(layout.animation_workspace);
+        assert!(dock.h < viewport.h, "the dock leaves the viewport visible above it");
+        let above = glam::Vec2::new(viewport.x + viewport.w * 0.5, viewport.y + 8.0);
+        let hit = ui.hit_test(above);
+        assert!(
+            hit == layout.viewport_handle || !ui.is_under(hit, layout.animation_workspace),
+            "the dock must not swallow clicks meant for the preview"
+        );
         assert!(
             crate::commands::registry()
                 .get("editor.workspace.animation")
@@ -10093,8 +11168,10 @@ mod styx_budget_tests {
             // for scroll regions and thumbnails — rather than done here to chase
             // an invented number, because 146 scissor-plus-draw pairs cost
             // microseconds of command recording.
+            // 18 Oct 2026: the Content Drawer gained icon buttons, filter chips with glyphs, quick actions, a folder
+            // tree and a footer (Phase ALYX-F): 216 measured at 1920x1080. Still clip transitions, still microseconds.
             assert!(
-                batches <= 192,
+                batches <= 256,
                 "{w}x{h}: {batches} batches exceeds the measured budget"
             );
         }
@@ -10127,7 +11204,9 @@ mod styx_budget_tests {
         // startup; those rows exist only when a selected entity supplies a
         // schema. Keep a floor for real idle-shell strokes without fabricating
         // invisible legacy chrome merely to preserve the old count.
-        assert!(rounded >= 40, "corner radius regressed to {rounded}");
+        // 35: the idle shell measured 37 at HEAD on 18 Oct 2026 (later shell work drew fewer rounded chrome
+        // pieces before ALYX touched it); the floor still catches the paint path losing its radii.
+        assert!(rounded >= 35, "corner radius regressed to {rounded}");
         assert!(
             gradients <= 4,
             "ordinary chrome must stay flat: {gradients} washes"
@@ -10507,7 +11586,14 @@ mod zeta_layout_tests {
             .iter()
             .map(|(_, command_id)| *command_id)
             .collect();
-        assert_eq!(shell_create_ids, expected_create_ids);
+        // Phase ALYX-B groups a menu into sections (shapes and lights first), so the order is the sections' and
+        // every command must still be there exactly once.
+        let mut sorted_shell = shell_create_ids.clone();
+        let mut sorted_expected = expected_create_ids.clone();
+        sorted_shell.sort_unstable();
+        sorted_expected.sort_unstable();
+        assert_eq!(sorted_shell, sorted_expected);
+        assert_eq!(shell_create_ids.first().map(|id| crate::commands::menu_section(id)), Some("shapes"));
         for handle in [
             layout.save_button,
             layout.select_button,
@@ -10992,14 +12078,138 @@ mod panel_drag_tests {
 }
 
 impl UiManager {
+    /// A behaviour or scatter graph wants the whole canvas, and has no rig to watch: show the graph tab with the dock
+    /// over the whole viewport. Anything else gives the viewport back.
     fn set_graph_only_layout(&mut self, only_graph: bool) {
+        if only_graph {
+            self.animation_graph_framed = false;
+            self.show_animation_tab(1);
+        }
+        self.set_animation_expanded(only_graph);
+    }
+
+    /// Show the Timeline (0) or the State Machine (1) in the Animation dock.
+    fn show_animation_tab(&mut self, tab: usize) {
+        self.animation_tab = tab.min(1);
         self.native_ui
-            .set_visibility(self.animation_timeline.editor, !only_graph);
-        self.native_ui.send(UiMessage::new(
-            self.animation_workspace,
-            MessageDirection::ToWidget,
-            crate::widgets::splitter::SplitterMessage::SetSinglePane(only_graph),
+            .set_visibility(self.animation_timeline.editor, self.animation_tab == 0);
+        self.native_ui
+            .set_visibility(self.animation_graph_editor, self.animation_tab == 1);
+        for (index, handle) in self.animation_dock.tabs.into_iter().enumerate() {
+            self.native_ui
+                .send(ButtonMessage::set_selected(handle, index == self.animation_tab));
+        }
+    }
+
+    /// Give the dock the whole viewport, or the share it starts with.
+    fn set_animation_expanded(&mut self, expanded: bool) {
+        self.animation_expanded = expanded;
+        self.native_ui.send(crate::widgets::image::ImageMessage::set_icon(
+            self.animation_dock.expand_icon,
+            if expanded {
+                crate::icons::IconId::Minimize
+            } else {
+                crate::icons::IconId::Maximize
+            },
         ));
+        self.sync_animation_dock_height();
+    }
+
+    /// The dock follows the viewport's height: its share of it, or all of it when expanded.
+    fn sync_animation_dock_height(&mut self) {
+        let viewport = self.native_ui.screen_bounds(self.viewport_handle).h;
+        if viewport <= 0.0 {
+            return;
+        }
+        let target = if self.animation_expanded {
+            viewport
+        } else {
+            (viewport * crate::editor::shell::ANIMATION_DOCK_SHARE)
+                .clamp(240.0, (viewport - 120.0).max(240.0))
+                .round()
+        };
+        // Expanding and giving the viewport back glide (Phase ALYX-J), on the same Easy Ease as the splash; a window
+        // resize, or reduced motion, just lands.
+        let now = std::time::Instant::now();
+        let current = self.native_ui.nodes.try_borrow(self.animation_workspace.transmute()).map_or(target, |n| n.widget.height);
+        let toggled = self.animation_dock_expanded_shown != self.animation_expanded;
+        if toggled && current.is_finite() && !self.native_ui.draw_ctx.motion.reduced_motion() {
+            self.animation_dock_glide = Some((current, target, now));
+        }
+        self.animation_dock_expanded_shown = self.animation_expanded;
+        let height = match self.animation_dock_glide {
+            Some((from, to, start)) if to == target => {
+                let t = (now - start).as_secs_f32() / 0.24;
+                if t >= 1.0 {
+                    self.animation_dock_glide = None;
+                    target
+                } else {
+                    let eased = crate::widgets::splash::ease_progress(0.0, 0.33, 0.0, 0.75, f64::from(t)) as f32;
+                    (from + (to - from) * eased).round()
+                }
+            }
+            _ => {
+                self.animation_dock_glide = None;
+                target
+            }
+        };
+        self.native_ui.set_height(self.animation_workspace, height);
+    }
+
+    /// The host's per-frame report on the rig the Animation workspace previews; `None` outside that workspace or
+    /// with no rig in the scene.
+    pub fn set_animation_transport(&mut self, transport: Option<AnimationTransport>) {
+        if self.active_workspace != Workspace::Animation {
+            self.animation_transport = None;
+            return;
+        }
+        self.sync_animation_dock_height();
+        // Fit the graph the first time it can be seen at its real size.
+        if self.animation_tab == 1
+            && !self.animation_graph_framed
+            && self.native_ui.screen_bounds(self.animation_graph_editor).h > 0.0
+        {
+            self.animation_graph_framed = true;
+            self.native_ui.send(UiMessage::new(
+                self.animation_graph_editor,
+                MessageDirection::ToWidget,
+                crate::graph::GraphEditorMessage::Command {
+                    id: "graph.frame_all".into(),
+                    paste_offset: glam::Vec2::ZERO,
+                },
+            ));
+        }
+        let readout = transport.as_ref().map_or_else(
+            || "No rig. Create one in Tools.".to_string(),
+            AnimationTransport::readout,
+        );
+        if readout != self.animation_readout {
+            self.native_ui
+                .send(TextMessage::set_text(self.animation_dock.readout, readout.clone()));
+            self.animation_readout = readout;
+        }
+        let playing = transport.as_ref().is_some_and(|t| t.playing);
+        if self.animation_transport.as_ref().is_none_or(|t| t.playing != playing) {
+            self.native_ui.send(crate::widgets::image::ImageMessage::set_icon(
+                self.animation_dock.play_icon,
+                if playing {
+                    crate::icons::IconId::Pause
+                } else {
+                    crate::icons::IconId::Play
+                },
+            ));
+        }
+        // The timeline's playhead follows the rig's clock.
+        if let Some(time) = transport.as_ref().map(|t| t.time) {
+            if !((time - self.animation_playhead_sent).abs() < 0.004) {
+                self.animation_playhead_sent = time;
+                self.native_ui.send(crate::timeline::TimelineEditorMessage::set_playhead(
+                    self.animation_timeline.editor,
+                    time,
+                ));
+            }
+        }
+        self.animation_transport = transport;
     }
 
     fn run_graph_tool_action(&mut self, action: crate::editor_event::GraphToolAction) {
@@ -11024,10 +12234,29 @@ impl UiManager {
                     "Behavior graph: edit tasks, then Save Authoring Graph"
                 });
             }
+            A::Dialogue | A::Quest => {
+                self.set_graph_only_layout(true);
+                let surface = if action == A::Dialogue {
+                    crate::graph::dialogue::default_surface()
+                } else {
+                    crate::graph::quest::default_surface()
+                };
+                self.native_ui.send(UiMessage::new(
+                    self.animation_graph_editor,
+                    MessageDirection::ToWidget,
+                    crate::graph::GraphEditorMessage::ActivateSurface(surface),
+                ));
+                self.set_workspace(Workspace::Animation);
+                self.push_toast(if action == A::Dialogue {
+                    "Dialogue graph: write lines and choices, then Check and Play"
+                } else {
+                    "Quest graph: wire stages, objectives and journal lines, then Check"
+                });
+            }
             A::Open => self
                 .editor_events
                 .push_back(EditorEvent::OpenAuthoringGraph),
-            A::Save | A::Preview | A::Apply => self.native_ui.send(UiMessage::new(
+            A::Save | A::Preview | A::Apply | A::Play => self.native_ui.send(UiMessage::new(
                 self.animation_graph_editor,
                 MessageDirection::ToWidget,
                 crate::graph::GraphEditorMessage::RequestDocument {
@@ -11100,6 +12329,176 @@ impl UiManager {
         ));
         self.set_workspace(Workspace::Animation);
         Ok(())
+    }
+
+    /// Open a story asset (`*.somdialogue`, `*.somquest`) on the graph control. The control keeps what the graph
+    /// does not draw (text keys, forms) so saving back is lossless.
+    pub fn open_story_document(&mut self, catalogue: &str, json: &str, source: Option<&str>) {
+        self.set_graph_only_layout(true);
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::OpenStory {
+                catalogue: catalogue.to_owned(),
+                json: json.to_owned(),
+                source: source.map(str::to_owned),
+            },
+        ));
+        self.set_workspace(Workspace::Animation);
+    }
+
+    /// Ask the graph control for its document (a story graph converts to its asset): Save, Preview/Check or
+    /// Apply/Play, the same as the toolbar.
+    pub fn request_graph_document(&mut self, apply: bool, preview: bool) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::RequestDocument { apply, preview },
+        ));
+    }
+
+    /// Show (or, with `None` or an end, close) the dialogue graph's Game View.
+    fn show_story_game_view(&mut self, beat: Option<somnium_story::Beat>) {
+        // UI blends in linear light, so the editor needs a heavy dim before the presenter reads as in front.
+        const GAME_VIEW_BACKDROP: u8 = 215;
+        use crate::widgets::dialogue_presenter::{DialoguePresenterBuilder, DialoguePresenterMessage as P};
+        let handle = match self.story_presenter {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = DialoguePresenterBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_presenter = Some(handle);
+                handle
+            }
+        };
+        let send = |ui: &mut UserInterface, message: P| {
+            ui.send(UiMessage::new(handle, MessageDirection::ToWidget, message));
+        };
+        match beat {
+            Some(somnium_story::Beat::Line(line)) => {
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
+                send(&mut self.native_ui, P::ShowLine { beat: line, display: None });
+                self.native_ui.set_focus(handle);
+            }
+            Some(somnium_story::Beat::Choices { choices, timeout_ms, .. }) => {
+                send(&mut self.native_ui, P::SetBackdrop(GAME_VIEW_BACKDROP));
+                send(&mut self.native_ui, P::ShowChoices(choices));
+                send(&mut self.native_ui, P::SetTimeLeft(timeout_ms.map(|ms| (ms, ms))));
+                self.native_ui.set_focus(handle);
+            }
+            // An action holding for the game: the line stays up; the panel's Space resumes it.
+            Some(somnium_story::Beat::Wait { .. }) => {}
+            Some(somnium_story::Beat::End { .. }) | None => {
+                send(&mut self.native_ui, P::Close);
+                send(&mut self.native_ui, P::SetBackdrop(0));
+                self.native_ui.set_focus(self.animation_graph_editor);
+                if let Some(notices) = self.story_notices {
+                    self.native_ui.send(UiMessage::new(
+                        notices,
+                        MessageDirection::ToWidget,
+                        crate::widgets::notice_stack::NoticeMessage::Clear,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The game's journal screen over the editor, on a play-through's journal (opened, or kept open and refreshed).
+    fn show_story_journal(&mut self, view: somnium_story::story::JournalView) {
+        use crate::widgets::journal_screen::{JournalMessage, JournalScreenBuilder};
+        let handle = match self.story_journal {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = JournalScreenBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_journal = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::SetView(view)));
+        if !std::mem::replace(&mut self.story_journal_open, true) {
+            self.native_ui.send(UiMessage::new(handle, MessageDirection::ToWidget, JournalMessage::Open(true)));
+            self.native_ui.set_focus(handle);
+        }
+    }
+
+    /// A quest notice in the Game View, the way a game's notices would show it.
+    fn show_story_notice(&mut self, heading: String, text: String) {
+        use crate::widgets::notice_stack::{Notice, NoticeMessage, NoticeStackBuilder};
+        let handle = match self.story_notices {
+            Some(handle) => handle,
+            None => {
+                let root = self.native_ui.root();
+                let node = NoticeStackBuilder::new(WidgetBuilder::new())
+                    .with_font(self.font_id)
+                    .build();
+                let handle = self.native_ui.add_node(node, root);
+                self.story_notices = Some(handle);
+                handle
+            }
+        };
+        self.native_ui.send(UiMessage::new(
+            handle,
+            MessageDirection::ToWidget,
+            NoticeMessage::Push(Notice {
+                category: "quest".into(),
+                heading,
+                text,
+                hold_ms: None,
+            }),
+        ));
+    }
+
+    /// The Game View's player moved: drive the play-through on the graph.
+    fn story_presenter_output(&mut self, output: somnium_story::PresenterOutput) {
+        use crate::graph::PreviewInput;
+        use somnium_story::PresenterOutput as O;
+        let input = match output {
+            O::Next => PreviewInput::Next,
+            O::Chose(index) => PreviewInput::Choose(index),
+            O::Back => PreviewInput::Leave,
+            O::PlayVoice(_) => {
+                // No voice in the editor's preview: the line has finished speaking at once.
+                if let Some(presenter) = self.story_presenter {
+                    self.native_ui.send(UiMessage::new(
+                        presenter,
+                        MessageDirection::ToWidget,
+                        crate::widgets::dialogue_presenter::DialoguePresenterMessage::VoiceFinished,
+                    ));
+                }
+                return;
+            }
+            O::StopVoice => return,
+        };
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::PreviewInput(input),
+        ));
+    }
+
+    /// Mark the problems a project-wide story check found on the open graph.
+    pub fn set_story_problems(&mut self, problems: Vec<(String, String, bool)>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryProblems(problems),
+        ));
+    }
+
+    /// Play the open dialogue from its selected node over `database`.
+    pub fn start_story_preview(&mut self, database: std::sync::Arc<somnium_story::StoryDatabase>) {
+        self.native_ui.send(UiMessage::new(
+            self.animation_graph_editor,
+            MessageDirection::ToWidget,
+            crate::graph::GraphEditorMessage::StoryPreview(database),
+        ));
     }
 
     /// Retain the source file in the document owner after a successful open/save.

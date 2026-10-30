@@ -368,7 +368,8 @@ mod tests {
             &PropertyEditorRegistry::standard(),
             &EditingRulesRegistry::default(),
         );
-        assert_eq!(panel.rows.len(), 18);
+        // 21 since the material schema grew (somnium_asset pins the same count in material.rs).
+        assert_eq!(panel.rows.len(), 21);
         assert!(
             panel
                 .rows
@@ -381,7 +382,7 @@ mod tests {
                 .iter()
                 .filter(|row| row.ty == FieldType::Asset)
                 .count(),
-            5
+            6
         );
     }
 }

@@ -77,6 +77,8 @@ struct Row {
 }
 struct Section {
     button: NodeHandle,
+    /// What sync shows and hides: the header row (a component's header and its Remove button), or the button.
+    row: NodeHandle,
     text: NodeHandle,
     body: NodeHandle,
     key: String,
@@ -85,7 +87,18 @@ struct Section {
 
 #[derive(Default)]
 pub struct Persona {
+    /// The Content Drawer's folder tree (Phase ALYX-F), its rows (button, folder relative to the content root),
+    /// and the footer line under the tiles.
+    pub content_tree: NodeHandle,
+    pub content_tree_rows: Vec<(NodeHandle, String)>,
+    pub content_footer: NodeHandle,
     pub component_hosts: Vec<(somnium_ecs::reflect::StableId, NodeHandle)>,
+    /// These Details belong to an entity, so components can be added and removed (not Preferences, not an asset).
+    pub entity_details: bool,
+    /// Each component header's Remove button and the component it removes.
+    remove_buttons: Vec<(NodeHandle, String)>,
+    /// Details' Add Component button, when there is an entity to add to.
+    pub add_component: NodeHandle,
     pub prefs: Preferences,
     persist: bool,
     indices: HashMap<
@@ -139,6 +152,8 @@ impl Persona {
     }
     pub fn begin(&mut self) {
         self.component_hosts.clear();
+        self.remove_buttons.clear();
+        self.add_component = NodeHandle::NONE;
         self.rows.clear();
         self.sections.clear();
         self.indices.clear();
@@ -153,6 +168,25 @@ impl Persona {
         label: &str,
     ) -> NodeHandle {
         let group = key.contains("/group/");
+        // An entity's component gets its glyph before its name and a Remove button after it (Phase ALYX-I). The
+        // identity components stay: an entity without a transform or a name is not one the editor can show.
+        let component = !group && self.entity_details && !key.starts_with("somnium.asset.");
+        let removable =
+            component && !matches!(key.as_str(), "somnium.Transform" | "somnium.Name" | "somnium.Parent");
+        let header_parent = if component {
+            ui.add_node(
+                crate::widgets::grid::GridBuilder::new(
+                    WidgetBuilder::new().with_background(theme::TRANSPARENT),
+                )
+                .add_row(crate::widgets::grid::Row::auto())
+                .add_column(crate::widgets::grid::Column::stretch())
+                .add_column(crate::widgets::grid::Column::auto())
+                .build(),
+                parent,
+            )
+        } else {
+            parent
+        };
         let button = ui.add_node(
             ButtonBuilder::new(
                 WidgetBuilder::new()
@@ -171,24 +205,78 @@ impl Persona {
                 crate::style::ButtonVariant::Secondary
             })
             .build(),
-            parent,
+            header_parent,
         );
-        ui.add_node(
-            TextBuilder::new(
-                WidgetBuilder::new()
-                    .with_margin(Thickness::axes(8.0, 0.0))
-                    .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+        let text = if component {
+            let line = ui.add_node(
+                StackPanelBuilder::new(
+                    WidgetBuilder::new()
+                        .with_background(theme::TRANSPARENT)
+                        .with_hit_test_visibility(false),
+                )
+                .with_orientation(Orientation::Horizontal)
+                .build(),
+                button,
+            );
+            let centred = || {
+                WidgetBuilder::new().with_vertical_alignment(crate::types::VerticalAlignment::Center)
+            };
+            let chevron = ui.add_node(
+                TextBuilder::new(centred().with_margin(Thickness::new(8.0, 0.0, 0.0, 0.0)))
+                    .with_role(TextRole::Section)
+                    .with_text("▾")
+                    .build(),
+                line,
+            );
+            ui.add_node(
+                crate::widgets::image::ImageBuilder::new(
+                    centred().with_margin(Thickness::new(8.0, 0.0, 0.0, 0.0)),
+                )
+                .with_icon(component_icon(&key))
+                .with_size(16.0)
+                .with_tint(theme::active().semantic.text.secondary.bytes())
+                .build(),
+                line,
+            );
+            ui.add_node(
+                TextBuilder::new(centred().with_margin(Thickness::new(7.0, 0.0, 8.0, 0.0)))
+                    .with_role(TextRole::Section)
+                    .with_text(label)
+                    .build(),
+                line,
+            );
+            chevron
+        } else {
+            ui.add_node(
+                TextBuilder::new(
+                    WidgetBuilder::new()
+                        .with_margin(Thickness::axes(8.0, 0.0))
+                        .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+                )
+                .with_role(if group {
+                    TextRole::Label
+                } else {
+                    TextRole::Section
+                })
+                .with_text(label)
+                .build(),
+                button,
             )
-            .with_role(if group {
-                TextRole::Label
-            } else {
-                TextRole::Section
-            })
-            .with_text(label)
-            .build(),
-            button,
-        );
-        let text = ui.nodes.borrow(button.transmute()).widget.children[0];
+        };
+        if removable {
+            let remove = crate::editor::parts::icon_tool_button(
+                ui,
+                header_parent,
+                crate::icons::IconId::Remove,
+                &format!("Remove {label} from this entity (undoable)"),
+            );
+            {
+                let widget = &mut ui.nodes.borrow_mut(remove.transmute()).widget;
+                widget.column = 1;
+                widget.margin = Thickness::new(4.0, 8.0, 0.0, 2.0);
+            }
+            self.remove_buttons.push((remove, key.clone()));
+        }
         let body = ui.add_node(
             StackPanelBuilder::new(WidgetBuilder::new().with_background(theme::TRANSPARENT))
                 .with_orientation(Orientation::Vertical)
@@ -197,13 +285,21 @@ impl Persona {
         );
         self.sections.push(Section {
             button,
+            row: if component { header_parent } else { button },
             text,
             body,
             key,
-            label: label.to_owned(),
+            // A component's name is its own text; the chevron is all sync rewrites.
+            label: if component { String::new() } else { label.to_owned() },
         });
         body
     }
+    /// The row for `component/field` (the schema's stable names), if Details shows one.
+    #[must_use]
+    pub fn row_handle(&self, key: &str) -> Option<NodeHandle> {
+        self.rows.iter().find(|row| row.key == key).map(|row| row.handle)
+    }
+
     pub fn register(
         &mut self,
         ui: &mut UserInterface,
@@ -319,17 +415,30 @@ impl Persona {
             let expanded = !self.prefs.collapsed.contains(&section.key)
                 || !self.query.is_empty()
                 || self.filter != Filter::All;
-            ui.set_visibility(section.button, any);
+            ui.set_visibility(section.row, any);
             ui.set_visibility(section.body, any && expanded);
+            let chevron = if expanded { "▾" } else { "▸" };
             ui.send(TextMessage::set_text(
                 section.text,
-                format!("{}  {}", if expanded { "▾" } else { "▸" }, section.label),
+                if section.label.is_empty() {
+                    chevron.to_string()
+                } else {
+                    format!("{chevron}  {}", section.label)
+                },
             ));
         }
         ui.set_visibility(self.empty, count == 0 && !self.rows.is_empty());
         for (handle, filter) in &self.filters {
             ui.send(ButtonMessage::set_selected(*handle, *filter == self.filter));
         }
+    }
+    /// The component a header's Remove button removes, if `handle` is one.
+    #[must_use]
+    pub fn removal(&self, handle: NodeHandle) -> Option<&str> {
+        self.remove_buttons
+            .iter()
+            .find(|(button, _)| *button == handle)
+            .map(|(_, component)| component.as_str())
     }
     pub fn click(&mut self, ui: &mut UserInterface, handle: NodeHandle) -> bool {
         if handle == self.advanced {
@@ -410,6 +519,101 @@ pub fn action(ui: &mut UserInterface, parent: NodeHandle, label: &str, width: f3
     );
     h
 }
+/// A raised button with its glyph before its words (Phase ALYX): the tool panels' actions.
+pub fn icon_action(
+    ui: &mut UserInterface,
+    parent: NodeHandle,
+    icon: crate::icons::IconId,
+    label: &str,
+) -> NodeHandle {
+    let h = ui.add_node(
+        ButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_height(theme::active().density.row_chrome)
+                .with_background(theme::active().semantic.surface.raised.bytes())
+                .with_tooltip(label),
+        )
+        .build(),
+        parent,
+    );
+    let line = ui.add_node(
+        crate::widgets::stack_panel::StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(8.0, 0.0))
+                .with_background(theme::TRANSPARENT)
+                .with_hit_test_visibility(false),
+        )
+        .with_orientation(crate::widgets::stack_panel::Orientation::Horizontal)
+        .build(),
+        h,
+    );
+    ui.add_node(
+        crate::widgets::image::ImageBuilder::new(
+            WidgetBuilder::new().with_vertical_alignment(crate::types::VerticalAlignment::Center),
+        )
+        .with_icon(icon)
+        .with_size(16.0)
+        .with_tint(theme::active().semantic.text.primary.bytes())
+        .build(),
+        line,
+    );
+    ui.add_node(
+        TextBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::axes(6.0, 0.0))
+                .with_vertical_alignment(crate::types::VerticalAlignment::Center),
+        )
+        .with_text(label)
+        .with_role(TextRole::Label)
+        .build(),
+        line,
+    );
+    h
+}
+
+/// A component's glyph, for its Details header and the Add Component list.
+#[must_use]
+pub fn component_icon(id: &str) -> crate::icons::IconId {
+    use crate::icons::IconId as I;
+    match id {
+        "somnium.Transform" => I::Transform,
+        "somnium.Name" | "somnium.SurfaceTags" => I::Tag,
+        "somnium.Parent" => I::Hierarchy,
+        "somnium.Light" | "somnium.LightFlicker" => I::Light,
+        "somnium.Material" | "somnium.asset.Material" => I::MaterialBall,
+        "somnium.Mesh" | "somnium.MeshKind" | "somnium.ImportedMesh" => I::Mesh,
+        "somnium.CameraSettings" => I::Camera,
+        "somnium.PostProcess" => I::PostFx,
+        "somnium.Sky" => I::World,
+        "somnium.SkyEye" | "somnium.Perception" | "somnium.StagedMirror" => I::Visibility,
+        "somnium.TimeOfDay" => I::Clock,
+        "somnium.Weather" => I::Weather,
+        "somnium.AudioEmitter" => I::Audio,
+        "somnium.AnimationAuthoring" => I::Rig,
+        "somnium.AnimationPreviewJoint" => I::Bone,
+        "somnium.Behavior" => I::BehaviorTree,
+        "somnium.NavigationProfile" | "somnium.NavigationAgent" | "somnium.NavigationObstacle" => I::NavMesh,
+        "somnium.NavigationLink" | "somnium.Spline" => I::Route,
+        "somnium.RigidBody" => I::RigidBody,
+        "somnium.ParticleEmitter" => I::Particle,
+        "somnium.Decal" => I::Texture,
+        "somnium.Terrain" => I::Terrain,
+        "somnium.VoxelTerrain" => I::VoxelTerrain,
+        "somnium.Foliage" | "somnium.ScatterSettings" => I::Foliage,
+        "somnium.VertexPaint" => I::PaintLayer,
+        "somnium.Water" => I::Water,
+        "somnium.BuoyantVessel" => I::Vessel,
+        "somnium.Interactable" => I::Select,
+        "somnium.Blockout" => I::Cube,
+        "somnium.UiCanvas" => I::AppWindow,
+        "somnium.WorkTarget" => I::Bookmark,
+        "somnium.WorldPartition" => I::Grid,
+        id if id.contains("Collider") => I::Collider,
+        id if id.contains("Script") => I::Script,
+        _ => I::Component,
+    }
+}
+
 pub fn combo(
     ui: &mut UserInterface,
     parent: NodeHandle,
@@ -465,6 +669,42 @@ mod tests {
         assert_eq!(retain_asset_choice(&mut choices, current), (1, false));
         assert_eq!(retain_asset_choice(&mut choices, None), (0, false));
         assert_eq!(choices.len(), 2);
+    }
+    #[test]
+    fn entity_details_offer_add_and_remove_and_keep_loose_fields_above_groups() {
+        let mut panels = panels();
+        let light = somnium_ecs::reflect::StableId::new("somnium.Light");
+        panels[0].component = light;
+        for row in &mut panels[0].rows {
+            row.component = light;
+        }
+        let loose = panels[0].rows.len() - 1;
+        assert!(panels[0].rows[loose].group.is_some(), "the material's last field is grouped");
+        panels[0].rows[loose].group = None;
+        let mut ui = UserInterface::new(800.0, 600.0);
+        let mut state = Persona {
+            entity_details: true,
+            ..Persona::default()
+        };
+        let root = ui.root();
+        build_generated_details(&mut ui, root, 0, &panels, &Default::default(), &mut state);
+        assert!(state.add_component.is_some(), "an entity's Details can add a component");
+        assert_eq!(state.remove_buttons.len(), 1);
+        assert_eq!(state.removal(state.remove_buttons[0].0), Some("somnium.Light"));
+
+        // A field with no group belongs to the component, above its groups' headings.
+        let body = state.sections[0].body;
+        let children = ui.children(body);
+        let key = format!("somnium.Light/{}", panels[0].rows[loose].name);
+        let loose_row = state.rows.iter().find(|row| row.key == key).unwrap().handle;
+        let first_group = state.sections.iter().find(|s| s.key.contains("/group/")).unwrap().row;
+        let at = |handle| children.iter().position(|child| *child == handle).unwrap();
+        assert!(at(loose_row) < at(first_group));
+
+        // Preferences and assets get neither.
+        let mut settings = Persona::default();
+        build_generated_details(&mut ui, root, 0, &panels, &Default::default(), &mut settings);
+        assert!(settings.add_component.is_none() && settings.remove_buttons.is_empty());
     }
     fn panels() -> Vec<GeneratedComponentPanel> {
         let schema = somnium_asset::material::material_asset_schema();

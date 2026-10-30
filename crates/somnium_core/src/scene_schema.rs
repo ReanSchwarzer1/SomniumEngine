@@ -406,6 +406,8 @@ pub fn scene_to_json(world: &mut World, registry: &TypeRegistry) -> serde_json::
         .filter(|e| {
             world.get::<crate::AssetEditSession>(*e).is_none()
                 && world.get::<crate::weather::PrecipitationEmitter>(*e).is_none()
+                // Streamed cells belong to their manifest, not to the scene that streams them.
+                && world.get::<crate::cell_streaming::Streamed>(*e).is_none()
         })
         .collect();
     entities_to_json(world, registry, &all).expect("a live world has unique persistent ids")
@@ -1265,6 +1267,65 @@ mod tests {
         assert_eq!(settings.ddgi_probe_spacing_m, 3.5);
         assert_eq!(settings.ddgi_update_budget, 16);
         assert_eq!(settings.ddgi_hysteresis, 0.8);
+    }
+
+    /// 17 Oct 2026: what The Somnus Fracture drove, authored in a scene and saved with it.
+    #[test]
+    fn game_driven_render_settings_survive_a_scene_round_trip() {
+        let registry = component_registry();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Look"),
+            Transform::default(),
+            crate::PostProcessComponent {
+                lens_flare: 0.6,
+                traced_reflections: true,
+                traced_reflection_roughness: 0.35,
+                picture_shift: 3,
+                picture_shift_progress: 0.4,
+                picture_shift_origin: [1.0, 2.0, -3.0],
+                picture_shift_reach: 25.0,
+                ..crate::PostProcessComponent::default()
+            },
+        ));
+        world.spawn((
+            Name::new("Blinds"),
+            Transform::default(),
+            LightComponent {
+                cookie: 2,
+                ..LightComponent::spot(800.0, 12.0, 0.4, 0.6)
+            },
+        ));
+        world.spawn((
+            Name::new("Camera"),
+            Transform::default(),
+            crate::CameraSettingsComponent {
+                graphics_scalability: crate::GraphicsScalability::Custom,
+                custom_scale: 0.8,
+                ..crate::CameraSettingsComponent::default()
+            },
+        ));
+        let (loaded, report) = round_trip(&mut world, &registry);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let look = loaded
+            .get::<crate::PostProcessComponent>(find(&loaded, "Look"))
+            .unwrap();
+        assert_eq!(look.lens_flare, 0.6);
+        assert!(look.traced_reflections);
+        assert_eq!(look.traced_reflection_roughness, 0.35);
+        assert_eq!(look.picture_shift, 3);
+        assert_eq!(look.picture_shift_progress, 0.4);
+        assert_eq!(look.picture_shift_origin, [1.0, 2.0, -3.0]);
+        assert_eq!(look.picture_shift_reach, 25.0);
+        assert_eq!(
+            loaded.get::<LightComponent>(find(&loaded, "Blinds")).unwrap().cookie,
+            2
+        );
+        let camera = loaded
+            .get::<crate::CameraSettingsComponent>(find(&loaded, "Camera"))
+            .unwrap();
+        assert_eq!(camera.graphics_scalability, crate::GraphicsScalability::Custom);
+        assert_eq!(camera.custom_scale, 0.8);
     }
 
     /// A field that did not exist when the file was written must load as an

@@ -112,9 +112,9 @@ pub(crate) fn build_inspector(
     let post_census_toggle = check(ui, diagnostics, "Pixel census", font_id);
     let post_bins_toggle = check(ui, diagnostics, "Shade bins", font_id);
 
-    let dreams_section = section(ui, parent, "DREAMS Sampling");
+    let dreams_section = section(ui, parent, "Temporal Sampling");
     let dreams_grain_toggle = check(ui, dreams_section, "Shared grain", font_id);
-    let dreams_stf_toggle = check(ui, dreams_section, "Terrain STF", font_id);
+    let dreams_stf_toggle = check(ui, dreams_section, "Terrain stochastic filtering", font_id);
 
     let terrain_section = section(ui, parent, "Terrain Tools");
     let terrain_paint_toggle = check(ui, terrain_section, "Layer paint", font_id);
@@ -282,6 +282,14 @@ pub(crate) fn build_generated_details(
     let mut collection_actions = HashMap::new();
 
     presentation.begin();
+    // The studio's widgets go with the tree they were built in; a Material panel below builds new ones.
+    presentation.tool_panel.studio.clear();
+    if presentation.entity_details && !panels.is_empty() {
+        // First in Details, where Unity and Unreal both put it: adding comes before scrolling.
+        let add = crate::editor::persona::icon_action(ui, root, crate::icons::IconId::Add, "Add Component");
+        ui.nodes.borrow_mut(add.transmute()).widget.margin = Thickness::new(8.0, 6.0, 8.0, 2.0);
+        presentation.add_component = add;
+    }
     // Identity is already sticky above the scroll area. Keep editable Name
     // metadata available after authored properties, rather than repeating it first.
     let ordered = panels
@@ -308,35 +316,64 @@ pub(crate) fn build_generated_details(
             panel.component.as_str().to_owned(),
             &panel.label,
         );
-        if let Some(path) = panel.preview_path.clone() {
+        if let Some(path) = panel.preview_path.clone()
+            && panel.component.as_str() == "somnium.asset.Material"
+        {
+            // The live preview, its shape and turntable controls, and the presets (`material_studio`).
+            presentation.tool_panel.studio.build(ui, section_root, Some(path), font_id);
+        } else if let Some(path) = panel.preview_path.clone() {
             ui.draw_ctx.thumbnails.request(&path, true);
+            // A framed stage for the preview, centred, at twice the cell so it reads as the material and not as an
+            // icon (Phase ALYX-E).
+            let stage = ui.add_node(
+                crate::widgets::border::BorderBuilder::new(
+                    WidgetBuilder::new()
+                        .with_height(152.0)
+                        .with_margin(Thickness::axes(8.0, 6.0))
+                        .with_background(theme::active().semantic.surface.canvas.bytes())
+                        .with_foreground(theme::active().semantic.border.subtle.bytes()),
+                )
+                .with_stroke_thickness(Thickness::uniform(theme::active().geometry.stroke_hairline))
+                .build(),
+                section_root,
+            );
             let preview = ImageBuilder::new(
                 WidgetBuilder::new()
-                    .with_width(96.0)
-                    .with_height(96.0)
-                    .with_margin(Thickness::uniform(8.0)),
+                    .with_width(128.0)
+                    .with_height(128.0)
+                    .with_horizontal_alignment(crate::types::HorizontalAlignment::Center)
+                    .with_vertical_alignment(crate::types::VerticalAlignment::Center),
             )
             .with_asset(path)
-            .with_size(96.0)
+            .with_size(128.0)
             .build();
-            ui.add_node(preview, section_root);
+            ui.add_node(preview, stage);
         }
-        let mut last_group = None;
-        let mut group_root = section_root;
-        for model in &panel.rows {
-            if model.group != last_group {
-                group_root = if let Some(group) = model.group {
-                    presentation.section(
-                        ui,
-                        section_root,
-                        format!("{}/group/{group}", panel.component),
-                        group,
-                    )
-                } else {
-                    section_root
-                };
-                last_group = model.group;
-            }
+        // Each group once: a group that comes back later in the schema joins its first section rather than opening
+        // a second one with the same name (materials showed "Surface" twice).
+        let mut group_roots: Vec<(&'static str, NodeHandle)> = Vec::new();
+        let ordered_rows = panel
+            .rows
+            .iter()
+            .filter(|row| row.group.is_none())
+            .chain(panel.rows.iter().filter(|row| row.group.is_some()));
+        for model in ordered_rows {
+            let group_root = match model.group {
+                Some(group) => match group_roots.iter().find(|(name, _)| *name == group) {
+                    Some(&(_, root)) => root,
+                    None => {
+                        let root = presentation.section(
+                            ui,
+                            section_root,
+                            format!("{}/group/{group}", panel.component),
+                            group,
+                        );
+                        group_roots.push((group, root));
+                        root
+                    }
+                },
+                None => section_root,
+            };
             let row = PropertyRowBuilder::new(
                 WidgetBuilder::new()
                     .with_clip_to_bounds(false)
@@ -523,13 +560,68 @@ pub(crate) fn build_generated_details(
                             .unwrap_or(0),
                         _ => 0,
                     };
+                    let paths = std::iter::once(None)
+                        .chain(candidates.iter().map(|candidate| {
+                            assets
+                                .get(somnium_asset::database::AssetId::from_raw(
+                                    candidate.id.raw(),
+                                ))
+                                .map(|record| record.absolute_path.clone())
+                        }))
+                        .collect::<Vec<_>>();
+                    // A texture slot shows the texture it holds beside its picker; the combo keeps the picture in
+                    // step with every change of choice, from the list or from the model.
+                    let texture_slot =
+                        model.asset_kind_mask == somnium_asset::database::ASSET_KIND_TEXTURE;
+                    let (combo_parent, combo_widget) = if texture_slot {
+                        const SWATCH: f32 = 40.0;
+                        let pair = ui.add_node(
+                            GridBuilder::new(widget)
+                                .add_row(Row::auto())
+                                .add_column(Column::strict(SWATCH + 6.0))
+                                .add_column(Column::stretch())
+                                .build(),
+                            row_handle,
+                        );
+                        let swatch = ui.add_node(
+                            crate::node::UiNode::new(
+                                WidgetBuilder::new()
+                                    .with_column(0)
+                                    .with_horizontal_alignment(crate::types::HorizontalAlignment::Left)
+                                    .with_vertical_alignment(VerticalAlignment::Center)
+                                    .build(),
+                                Box::new(crate::widgets::combo_box::AssetSwatch {
+                                    asset: paths.get(selected).cloned().flatten(),
+                                    icon: crate::icons::IconId::Texture,
+                                    size: SWATCH,
+                                    framed: true,
+                                }),
+                            ),
+                            pair,
+                        );
+                        (
+                            pair,
+                            (
+                                WidgetBuilder::new()
+                                    .with_column(1)
+                                    .with_enabled(!model.read_only)
+                                    .with_vertical_alignment(VerticalAlignment::Center),
+                                swatch,
+                            ),
+                        )
+                    } else {
+                        (row_handle, (widget, NodeHandle::NONE))
+                    };
+                    let (combo_widget, swatch) = combo_widget;
                     let handle = ui.add_node(
-                        ComboBoxBuilder::new(widget)
+                        ComboBoxBuilder::new(combo_widget)
                             .with_items(labels.iter().map(String::as_str))
                             .with_selected(selected)
+                            .with_asset_paths(paths.clone())
+                            .with_swatch(swatch)
                             .with_font_id(font_id)
                             .build(),
-                        row_handle,
+                        combo_parent,
                     );
                     let picker = picker_popup(ui, handle, 360.0);
                     let popup = picker.popup;
@@ -541,15 +633,6 @@ pub(crate) fn build_generated_details(
                     .with_font_id(font_id)
                     .build();
                     let search = ui.add_node(search, picker.header);
-                    let paths = std::iter::once(None)
-                        .chain(candidates.iter().map(|candidate| {
-                            assets
-                                .get(somnium_asset::database::AssetId::from_raw(
-                                    candidate.id.raw(),
-                                ))
-                                .map(|record| record.absolute_path.clone())
-                        }))
-                        .collect::<Vec<_>>();
                     let list = ComboDropdownBuilder::new(WidgetBuilder::new())
                         .with_items(labels.iter().map(String::as_str))
                         .with_asset_paths(paths)
@@ -775,6 +858,48 @@ pub(crate) fn build_generated_details(
         asset_actions,
         collection_actions,
     )
+}
+
+impl crate::UiManager {
+    /// Re-read every open asset picker from a new asset snapshot: its list, the names in it, the pictures beside it,
+    /// and its current choice. A picker built before the first scan published (a material opened at start-up) listed
+    /// nothing and called its own value "Missing asset", and kept doing so until Details happened to be rebuilt.
+    pub(crate) fn refresh_asset_pickers(&mut self) {
+        use crate::editor::property_editors::AssetEditorContext;
+        let record = |db: &somnium_asset::database::AssetDbSnapshot, id: somnium_ecs::reflect::AssetRef| {
+            db.get(somnium_asset::database::AssetId::from_raw(id.raw())).cloned()
+        };
+        let pickers: Vec<_> = self.generated_asset_searches.values().copied().collect();
+        for picker in pickers {
+            let current = match self.generated_bindings.get(&picker.combo).map(|binding| &binding.value) {
+                Some(somnium_ecs::reflect::ReflectValue::Asset(current)) => *current,
+                _ => None,
+            };
+            let candidates = AssetEditorContext::query(&self.asset_db, "", picker.kind_mask);
+            let mut choices: Vec<_> = std::iter::once(None).chain(candidates.iter().map(|c| Some(c.id))).collect();
+            let mut labels: Vec<String> =
+                std::iter::once("None".to_string()).chain(candidates.iter().map(|c| c.label.clone())).collect();
+            let (selected, added) = crate::editor::persona::retain_asset_choice(&mut choices, current);
+            if added {
+                labels.push(
+                    current
+                        .and_then(|id| record(&self.asset_db, id))
+                        .map_or_else(|| "Missing asset".to_string(), |r| r.relative_path),
+                );
+            }
+            let paths: Vec<_> = choices
+                .iter()
+                .map(|choice| choice.and_then(|id| record(&self.asset_db, id)).map(|r| r.absolute_path))
+                .collect();
+            for target in [picker.combo, picker.list] {
+                self.native_ui.send(UiMessage::new(target, MessageDirection::ToWidget, ComboBoxMessage::SetItems(labels.clone())));
+            }
+            // The list hands the paths on to its combo, which keeps the swatch beside it in step.
+            self.native_ui.send(UiMessage::new(picker.list, MessageDirection::ToWidget, ComboBoxMessage::SetAssetPaths(paths)));
+            self.native_ui.send(ComboBoxMessage::set_selected(picker.combo, selected));
+            self.generated_asset_choices.insert(picker.combo, choices);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ mod gpu;
 #[test]
 #[ignore = "Requires a graphics adapter; run for FSR integration changes"]
 fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
-    let (device, queue) = gpu::device();
+    let (device, queue) = gpu::device_with(crate::context::FSR_FEATURES);
     let size = 16;
     let sampled = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     let src = gpu::texture(&device, size, wgpu::TextureFormat::Rgba16Float, sampled);
@@ -22,6 +22,13 @@ fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
     let visibility = gpu::texture(&device, size, wgpu::TextureFormat::Rg32Uint, sampled);
     let motion = gpu::texture(&device, size, wgpu::TextureFormat::Rg32Float, sampled);
     let sprites = gpu::texture(&device, size, wgpu::TextureFormat::Rgba8Unorm, sampled);
+    // Where the pass copies the motion FSR reads (binding 12, added with the velocity pass's object motion, C2).
+    let motion_out = gpu::texture(
+        &device,
+        size,
+        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureUsages::STORAGE_BINDING,
+    );
     let coverage = alloc_coverage(&device, [size; 2]);
     let mask = gpu::texture(
         &device,
@@ -102,6 +109,7 @@ fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
             &mask,
             &motion,
             &sprites,
+            &motion_out,
         ]
         .map(|texture| texture.create_view(&Default::default()))
         .into();
@@ -127,6 +135,7 @@ fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
                 bind_view(9, &views[7]),
                 bind_view(10, &views[8]),
                 bind_view(11, &views[9]),
+                bind_view(12, &views[10]),
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -152,25 +161,28 @@ fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
         }
         gpu::read_rgba(&device, &queue, encoder, &mask)
     };
+    // A moving actor's edge and its jitter footprint doubt history at the edge strength (18 Oct 2026: full rejection
+    // made everything animated shimmer under FSR); particles, which have no motion of their own, keep 1.0.
+    let edge = 0.45;
     let first = frame(0, Some((4, 4)), 0.0, false, None);
-    assert_eq!(sample(&first, 4, 4), 1.0);
-    assert_eq!(sample(&first, 3, 3), 1.0, "jitter footprint");
+    assert_eq!(sample(&first, 4, 4), edge);
+    assert_eq!(sample(&first, 3, 3), edge, "jitter footprint");
     assert_eq!(sample(&first, 14, 2), 0.0, "static scene must keep history");
     let moved = frame(1, Some((11, 11)), 0.0, true, None);
     assert_eq!(
         sample(&moved, 4, 4),
-        1.0,
+        edge,
         "old silhouette must reject history"
     );
     assert_eq!(
         sample(&moved, 11, 11),
-        1.0,
+        edge,
         "new silhouette must reject history"
     );
     let removed = frame(2, None, 0.0, true, None);
     assert_eq!(
         sample(&removed, 11, 11),
-        1.0,
+        edge,
         "removed actor, new background depth"
     );
     assert_eq!(
@@ -188,7 +200,7 @@ fn dynamic_mask_covers_motion_removal_camera_reprojection_and_reset() {
     let camera = frame(5, None, -0.25, true, None);
     assert_eq!(
         sample(&camera, 8, 4),
-        1.0,
+        edge,
         "camera reprojection carries old coverage"
     );
     frame(6, Some((4, 4)), 0.0, true, None);

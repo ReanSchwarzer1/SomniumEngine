@@ -100,13 +100,15 @@ impl WorldCheckpoint {
     /// entity with no durable name cannot be restored onto itself.
     #[must_use]
     pub fn capture(world: &mut World, registry: &TypeRegistry) -> Self {
-        let all: Vec<Entity> = world.entities().collect();
+        // Streamed cells come and go with the view during Play; the streamer owns them, not the checkpoint.
+        let streamed = |world: &World, entity: Entity| world.get::<crate::cell_streaming::Streamed>(entity).is_some();
+        let all: Vec<Entity> = world.entities().filter(|e| !streamed(world, *e)).collect();
         for entity in &all {
             let _ = world.ensure_persistent_id(*entity);
         }
 
         let mut entities = BTreeMap::new();
-        for entity in world.entities().collect::<Vec<_>>() {
+        for entity in all {
             let Some(id) = world.persistent_id(entity) else {
                 continue;
             };
@@ -134,9 +136,10 @@ impl WorldCheckpoint {
             .collect::<Vec<_>>()
             .into_iter()
             .filter(|entity| {
-                world
-                    .persistent_id(*entity)
-                    .is_none_or(|id| !self.entities.contains_key(&id))
+                world.get::<crate::cell_streaming::Streamed>(*entity).is_none()
+                    && world
+                        .persistent_id(*entity)
+                        .is_none_or(|id| !self.entities.contains_key(&id))
             })
             .collect();
         for entity in intruders {

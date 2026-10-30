@@ -50,7 +50,7 @@ pub use command::{DrawCommand, SortKey};
 pub use context::RenderContext;
 pub use pass::gizmo::{GizmoAxis, GizmoMode, gizmo_hit_test};
 pub use quality::{GraphicsBudget, GraphicsPreset};
-pub use renderer::{SceneTarget, SomniumRenderer, UploadedNode};
+pub use renderer::{PreparedScene, SceneTarget, SomniumRenderer, UploadedNode};
 pub use viewport_resolution::{VIEWPORT_RESOLUTION_LABELS, scene_size_for_preset};
 
 /// The eye drawn in the sky by the shading pass (from `somnium.SkyEye`).

@@ -146,7 +146,15 @@ fn fs_flare(in: VOut) -> @location(0) vec4<f32> {
     var halo_vec = dir / len * 0.42;
     halo_vec.x /= aspect;
     let halo_at = uv + halo_vec;
-    result += flare_tap(halo_at, toward, 4.0) * vec3<f32>(0.85, 0.9, 1.0) * 0.5;
+    // Read over a disc round that point, not at it: one tap drew a lamp's halo as a crisp thin ring a third of the
+    // screen across, which read as overexposure (TSF, 23 Oct 2026). The disc spreads the same light into a broad,
+    // soft band.
+    var halo = vec3<f32>(0.0);
+    for (var k = 0u; k < 8u; k++) {
+        let a = f32(k) * 0.7853982;
+        halo += flare_tap(halo_at + vec2<f32>(cos(a) / aspect, sin(a)) * 0.035, toward, 4.0);
+    }
+    result += halo * 0.125 * vec3<f32>(0.85, 0.9, 1.0) * 0.5;
     let finite = select(vec3<f32>(0.0), result, result == result);
     return vec4<f32>(min(finite * params.filter_radius, vec3<f32>(60000.0)), 1.0);
 }

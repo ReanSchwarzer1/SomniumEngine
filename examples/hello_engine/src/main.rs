@@ -21,6 +21,7 @@
 
 mod animated_preview;
 mod authoring_demo;
+mod combat_demo;
 mod dreams_fixture;
 mod fracture_demo;
 
@@ -485,7 +486,7 @@ fn apply_capture_camera_overrides(
                 None => tracing::warn!("SOMNIUM_TIME_VIEW={view} wants terrain, and there is none"),
             }
         }
-        tracing::info!(view, "DOOM-A timing viewpoint");
+        tracing::info!(view, "Timing viewpoint");
     }
     if let Ok(view) = std::env::var("SOMNIUM_KIT_VIEW") {
         if let Some(terrain) = terrain {
@@ -610,7 +611,9 @@ impl VoxelTerrain {
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
-                wind: [0.0; 4],
+                wind: [0.0; 2],
+                subsurface: 0.0,
+                reserved: 0.0,
             },
         );
 
@@ -714,9 +717,19 @@ impl VoxelTerrain {
 // Game struct
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
 
-struct HelloGame {
+/// The editor shell: embed it in a game's own `GameApp` and forward each hook (see Rimeborn's `src/lib.rs`).
+pub struct HelloGame {
+    /// Spawn the scripted first-person character (and its camera, which wins the view) on Play. On by default; a game
+    /// with its own player and camera (Rimeborn's isometric rig) turns it off.
+    pub play_character: bool,
+    /// Roofs and upper floors opened for the camera while the viewer is inside (somnium_core::cutaway).
+    cutaways: somnium_core::cutaway::Cutaways,
+    /// Levels of detail not drawn this frame (somnium_core::lod_group).
+    lods: somnium_core::lod_group::Lods,
     interactions: authoring_demo::InteractionDemo,
     work_demo: fracture_demo::Demo,
+    /// The combat sandbox (Create > Examples > Combat Sandbox), while Play runs it.
+    combat: combat_demo::CombatDemo,
     animated_previews: animated_preview::Previews,
     log_timer: f32,
     camera: EditorCamera,
@@ -817,12 +830,16 @@ impl HelloGame {
         ));
     }
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut runtime_ui = somnium_core::UiCanvas::new(640.0, 360.0);
         runtime_ui.add_pause_banner("Hello Engine - UI Canvas");
         Self {
+            play_character: true,
+            cutaways: Default::default(),
+            lods: Default::default(),
             interactions: Default::default(),
             work_demo: Default::default(),
+            combat: Default::default(),
             animated_previews: Default::default(),
             log_timer: 0.0,
             camera: EditorCamera::new(Vec3::new(0.0, 2.0, 8.0)),
@@ -1149,10 +1166,11 @@ impl GameApp for HelloGame {
     fn register_authoring(&mut self, registration: &mut somnium_core::authoring::GameRegistration) {
         authoring_demo::register(registration);
         fracture_demo::register(registration);
+        combat_demo::register(registration);
         animated_preview::register(registration);
     }
     fn authoring_state(&self) -> serde_json::Value {
-        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state()})
+        serde_json::json!({"work_demo":self.work_demo.status,"interaction_demo":self.interactions.state(),"animated_previews":self.animated_previews.state(),"combat":self.combat.state()})
     }
 
     /// MORROWIND-M2. Where the engine delivers a script's `setUiProperty`.
@@ -1677,6 +1695,16 @@ impl GameApp for HelloGame {
             }),
         );
 
+        // Evidence hook, inert unless set: `SOMNIUM_COMBAT_SANDBOX=1` builds what
+        // Create > Examples > Combat Sandbox builds, so a capture run can pair it
+        // with `SOMNIUM_AUDIT_UI_STATE=cmd:editor.simulation.play`.
+        if std::env::var("SOMNIUM_COMBAT_SANDBOX").as_deref() == Ok("1") {
+            match combat_demo::spawn_at_startup(ctx.world) {
+                Ok(count) => info!("SOMNIUM_COMBAT_SANDBOX=1 - combat sandbox spawned ({count} entities)"),
+                Err(error) => tracing::warn!("SOMNIUM_COMBAT_SANDBOX: {error}"),
+            }
+        }
+
         // CONTROL-A capture harness: select one real, already-spawned entity
         // by its displayed name so the populated Details surface is captured
         // without inventing fixture data or synthesising an Outliner click.
@@ -1694,6 +1722,7 @@ impl GameApp for HelloGame {
 
     fn on_event(&mut self, ctx: &mut EngineContext, event: &EngineEvent) {
         self.work_demo.event(event);
+        self.combat.event(event);
         if play_session(ctx)
             && matches!(
                 event,
@@ -1828,6 +1857,7 @@ impl GameApp for HelloGame {
         if !play_session(ctx) {
             return;
         }
+        self.combat.fixed(ctx);
 
         let (eye, forward) = self
             .player
@@ -2040,13 +2070,23 @@ impl GameApp for HelloGame {
         if playing && !self.was_playing {
             self.interactions.begin_play(ctx.world);
             self.work_demo.reset(ctx.world);
-            spawn_player(self, ctx);
+            // A scene with a player-controlled fighter is the combat
+            // sandbox's: you play the protagonist, not the walker.
+            if combat_demo::claims_play(ctx.world) {
+                self.combat.begin(ctx);
+            } else if self.play_character {
+                spawn_player(self, ctx);
+            }
         } else if !playing && self.was_playing {
             self.interactions.end_play(ctx.world);
             self.work_demo.reset(ctx.world);
+            self.combat.end(ctx);
             despawn_player(self, ctx);
         }
         self.was_playing = playing;
+        if playing {
+            self.combat.update(ctx);
+        }
 
         // Propagate after physics/editor synchronization so render transforms
         // reflect Play, Pause, and Stop in the same frame.
@@ -2118,7 +2158,12 @@ impl GameApp for HelloGame {
         // stream chunks around the camera (async generation; finished meshes
         // are uploaded here, freed allocations recycled).
         self.sync_voxel_terrain(ctx);
-        let eye = active_view(ctx, &self.camera, self.player.as_ref()).1;
+        let eye = self
+            .combat
+            .view(ctx.world)
+            .map(camera_view_from_world)
+            .unwrap_or_else(|| active_view(ctx, &self.camera, self.player.as_ref()))
+            .1;
         if let (Some(vt), Some(renderer), Some(render_ctx)) =
             (&mut self.voxel_terrain, &mut ctx.renderer, &ctx.render_ctx)
         {
@@ -2135,7 +2180,12 @@ impl GameApp for HelloGame {
     fn on_render(&mut self, ctx: &mut EngineContext) {
         fracture_demo::Demo::sync(ctx.world);
         somnium_core::propagate_transforms(ctx.world);
-        let (view_mat, eye) = active_view(ctx, &self.camera, self.player.as_ref());
+        let (view_mat, eye) = self
+            .combat
+            .view(ctx.world)
+            .map(camera_view_from_world)
+            .unwrap_or_else(|| active_view(ctx, &self.camera, self.player.as_ref()));
+        self.combat.render(ctx);
         if let Some(renderer) = &mut ctx.renderer {
             let (rw, rh) = renderer.scene_extent();
             let aspect = rw as f32 / rh.max(1) as f32;
@@ -2335,16 +2385,30 @@ impl GameApp for HelloGame {
                     let l_col = archetype
                         .column_index(ComponentId::of::<LightComponent>())
                         .unwrap();
+                    // A lamp parented under a building or a prop sits where its world transform puts it, not at its
+                    // local offset (which put every child lamp near the world origin, under the ground: WS2-8).
+                    let w_col = archetype.column_index(ComponentId::of::<somnium_core::WorldTransform>());
                     // Hiding a light hides what it lights, not just its gizmo.
                     // One lookup per archetype, since most carry no flags.
                     let flags_col = archetype.column_index(ComponentId::of::<EditorFlags>());
+                    // A failing fixture dims at submission (the authored light is untouched).
+                    let flicker_col = archetype.column_index(ComponentId::of::<
+                        somnium_core::light_flicker::LightFlickerComponent,
+                    >());
                     for row in 0..archetype.len() {
                         if let Some(col) = flags_col
                             && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
                         {
                             continue;
                         }
-                        let transform = unsafe { archetype.column(t_col).get::<Transform>(row) };
+                        let local = unsafe { archetype.column(t_col).get::<Transform>(row) };
+                        let world = w_col.map(|col| {
+                            let (_, rotation, translation) = unsafe { archetype.column(col).get::<somnium_core::WorldTransform>(row) }
+                                .0
+                                .to_scale_rotation_translation();
+                            Transform { translation, rotation, ..*local }
+                        });
+                        let transform = world.as_ref().unwrap_or(local);
                         let light = unsafe { archetype.column(l_col).get::<LightComponent>(row) };
 
                         // Two different conventions, easy to mix up:
@@ -2422,28 +2486,14 @@ impl GameApp for HelloGame {
                             | LightType::Rect
                             | LightType::Disc
                             | LightType::Tube => {
-                                let l_type = match light.light_type {
-                                    LightType::Point => 0,
-                                    LightType::Spot => 1,
-                                    LightType::Rect => 2,
-                                    LightType::Disc => 3,
-                                    LightType::Tube => 4,
-                                    LightType::Directional => 0,
-                                };
-                                renderer.submit_local_light(
-                                    somnium_renderer::cluster::GpuLocalLight {
-                                        position_ws: transform.translation.to_array(),
-                                        range: light.range,
-                                        color: light.photometric_color().to_array(),
-                                        light_type: l_type,
-                                        // Spot/rect axis = travel direction. Unused for point lights.
-                                        direction_ws: forward.to_array(),
-                                        spot_cos_outer: light.outer_angle.cos(),
-                                        spot_cos_inner: light.inner_angle.cos(),
-                                        radius: light.source_radius,
-                                        _pad: [light.area_width, light.area_height],
-                                    },
-                                );
+                                let flicker = flicker_col.map_or(1.0, |col| {
+                                    unsafe { archetype.column(col).get::<somnium_core::light_flicker::LightFlickerComponent>(row) }
+                                        .factor(ctx.time.elapsed().as_secs_f32())
+                                });
+                                // Spot/rect axis = travel direction. A spot keeps its cookie.
+                                if let Some(lamp) = light.local_light(transform.translation, forward, flicker) {
+                                    renderer.submit_local_light(lamp);
+                                }
                             }
                         }
                     }
@@ -2488,7 +2538,9 @@ impl GameApp for HelloGame {
                         height_depth: 0.0,
                         weathering: 0.0,
                         detile: 0.0,
-                        wind: [0.0; 4],
+                        wind: [0.0; 2],
+                        subsurface: 0.0,
+                        reserved: 0.0,
                     },
                 );
 
@@ -2516,13 +2568,22 @@ impl GameApp for HelloGame {
                             index_count: alloc.index_count,
                         },
                     );
-                    let _ = ctx.world.insert_component(
-                        entity,
-                        MaterialComponent {
-                            asset: somnium_asset::database::AssetId::NONE,
-                            runtime_id: default_mat,
-                        },
-                    );
+                    // An authored material (an asset id) is kept: the engine
+                    // resolves its runtime slot. Only a bare primitive gets
+                    // the default grey.
+                    let authored = ctx
+                        .world
+                        .get::<MaterialComponent>(entity)
+                        .is_some_and(|m| m.asset != somnium_asset::database::AssetId::NONE);
+                    if !authored {
+                        let _ = ctx.world.insert_component(
+                            entity,
+                            MaterialComponent {
+                                asset: somnium_asset::database::AssetId::NONE,
+                                runtime_id: default_mat,
+                            },
+                        );
+                    }
                     if ctx.world.get::<WorldTransform>(entity).is_none() {
                         let transform = ctx
                             .world
@@ -2546,6 +2607,13 @@ impl GameApp for HelloGame {
                     }
                 }
             }
+
+            // Cutaways: the viewer a game names (its player, its camera's focus), else the camera.
+            self.cutaways.update(
+                ctx.world,
+                somnium_core::cutaway::viewer(ctx.world).unwrap_or(renderer.camera_pos),
+            );
+            self.lods.update(ctx.world, renderer.camera_pos);
 
             // Phase 11.5A-2: Use WorldTransform for rendering instead of Transform::to_matrix().
             let required = ComponentSet::from_ids(vec![
@@ -2575,11 +2643,21 @@ impl GameApp for HelloGame {
                 let painted = archetype
                     .column_index(ComponentId::of::<somnium_core::vertex_paint::VertexPaintComponent>())
                     .is_some();
+                let water_col = archetype.column_index(ComponentId::of::<somnium_core::WaterComponent>());
                 for row in 0..archetype.len() {
                     if let Some(col) = flags_col
                         && unsafe { archetype.column(col).get::<EditorFlags>(row) }.hidden
                     {
                         continue;
+                    }
+                    // A water body the water pass draws (below) is not also drawn as its plain mesh: that opaque copy
+                    // sat in the depth buffer exactly under the surface, and the water's soft edge faded it to
+                    // nothing over it (imported rivers and springs showed as their dark glTF material, WS1-21).
+                    if let Some(col) = water_col {
+                        let water = unsafe { archetype.column(col).get::<somnium_core::WaterComponent>(row) };
+                        if water.enabled && water.water_id != u32::MAX && water.preset != 0 {
+                            continue;
+                        }
                     }
                     let wt = unsafe { archetype.column(wt_col).get::<WorldTransform>(row) };
                     let mesh = unsafe { archetype.column(m_col).get::<MeshComponent>(row) };
@@ -2598,7 +2676,7 @@ impl GameApp for HelloGame {
                     } else {
                         0
                     };
-                    renderer.submit(somnium_renderer::command::DrawCommand {
+                    let command = somnium_renderer::command::DrawCommand {
                         paint,
                         casts_shadow,
                         sort_key: somnium_renderer::command::SortKey::new(
@@ -2611,7 +2689,16 @@ impl GameApp for HelloGame {
                         index_count: mesh.index_count,
                         material_id: material.runtime_id,
                         transform: wt.0,
-                    });
+                    };
+                    if self.lods.is_hidden(entity) {
+                        continue;
+                    }
+                    // An opened roof keeps shading the room it covers.
+                    if self.cutaways.is_shadow_only(entity) {
+                        renderer.submit_shadow_only(command);
+                    } else {
+                        renderer.submit(command);
+                    }
                 }
             }
 
@@ -2848,6 +2935,7 @@ impl GameApp for HelloGame {
         if self.runtime_ui_enabled {
             frame.draw(&mut self.runtime_ui);
         }
+        self.combat.draw_ui(frame);
     }
 
     fn on_shutdown(&mut self) {
@@ -3188,7 +3276,7 @@ fn setup_scripting(game: &mut HelloGame, ctx: &mut EngineContext) {
         set.attach(attachment);
     }
 
-    info!("Phase 16-C: `Scripted Rotator` attached to {DEMO_SCRIPT_PATH} â€” press Play to run it");
+    info!("`Scripted Rotator` attached to {DEMO_SCRIPT_PATH} â€” press Play to run it");
 }
 
 // â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”
@@ -3223,7 +3311,9 @@ fn spawn_procedural_scene(
             height_depth: 0.0,
             weathering: 0.0,
             detile: 0.0,
-            wind: [0.0; 4],
+            wind: [0.0; 2],
+            subsurface: 0.0,
+            reserved: 0.0,
         },
     );
     let mat_red = renderer.materials_pool.add_material(
@@ -3248,7 +3338,9 @@ fn spawn_procedural_scene(
             height_depth: 0.0,
             weathering: 0.0,
             detile: 0.0,
-            wind: [0.0; 4],
+            wind: [0.0; 2],
+            subsurface: 0.0,
+            reserved: 0.0,
         },
     );
 
@@ -3338,7 +3430,9 @@ fn spawn_procedural_scene(
                 height_depth: 0.0,
                 weathering: 0.0,
                 detile: 0.0,
-                wind: [0.0; 4],
+                wind: [0.0; 2],
+                subsurface: 0.0,
+                reserved: 0.0,
             },
         )
     };

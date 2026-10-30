@@ -75,6 +75,19 @@ pub mod define {
     pub const DREAMS_STF: Defines = Defines::bit(DREAMS_STF_BIT);
 }
 
+/// `SOMNIUM_SHADER_SALT`: a measuring rail for a cold first run, not a feature.
+///
+/// The driver keeps compiled pipelines on disk under a hash of the SPIR-V, shared by every program on the machine, so a
+/// second run never shows what a player's first one costs, and that cache is not ours to clear. With a salt, every
+/// composed module ends in a comment naming it and the instance turns on `InstanceFlags::DEBUG`, which writes the WGSL
+/// into the SPIR-V: new text, new hash, a cold compile for every pipeline built from composed WGSL. Prebuilt SPIR-V
+/// (Slang, FSR) and the few inline sources stay warm. Use a new salt for each cold run.
+pub fn salt() -> Option<&'static str> {
+    static SALT: std::sync::LazyLock<Option<String>> =
+        std::sync::LazyLock::new(|| std::env::var("SOMNIUM_SHADER_SALT").ok().filter(|s| !s.is_empty()));
+    SALT.as_deref()
+}
+
 /// The renderer's shader system.
 pub struct Shaders {
     system: Mutex<ShaderSystem>,
@@ -114,6 +127,7 @@ impl Shaders {
             "cull.wgsl",
             "dof.wgsl",
             "ddgi.wgsl",
+            "depth_tie.wgsl",
             "fsr_sanitize.wgsl",
             "fsr_untonemap.wgsl",
             "fxaa.wgsl",
@@ -122,6 +136,7 @@ impl Shaders {
             "dream_lens.wgsl",
             "game_highlight.wgsl",
             "game_highlight_mask.wgsl",
+            "editor_glow.wgsl",
             "grid.wgsl",
             "gtao.wgsl",
             "hextile.wgsl",
@@ -162,6 +177,7 @@ impl Shaders {
             "water_reflection.wgsl",
             "water_spectrum.wgsl",
             "wind.wgsl",
+            "preview_studio.wgsl",
         );
         // SAFETY: this is a checked-in Somnium-authored artifact produced by
         // the pinned Slang compiler. `tools/slangcook/run.py --check` recooks
@@ -209,7 +225,10 @@ impl Shaders {
             .lock()
             .expect("shader system poisoned")
             .source(key)
-            .map(str::to_string)
+            .map(|text| match salt() {
+                Some(salt) => format!("{text}\n// salt {salt}\n"),
+                None => text.to_string(),
+            })
     }
 
     /// The names of every module a composed root draws from, itself included.
@@ -248,6 +267,12 @@ impl Shaders {
         name: &str,
         defines: Defines,
     ) -> Result<wgpu::ShaderModule, ShaderError> {
+        if salt().is_some() {
+            return Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(self.source(name, defines)?.into()),
+            }));
+        }
         let key = ShaderKey {
             module: self.id(name),
             defines,
@@ -298,6 +323,26 @@ impl Shaders {
             .lock()
             .expect("shader system poisoned")
             .budget_table()
+    }
+
+    /// The first 16 hex digits of a SHA-256 over every registered module's name and text, and the salt: changes when
+    /// any shader does.
+    ///
+    /// ponytail: the WGSL alone, not the SPIR-V wgpu makes of it, so a wgpu upgrade that changes no shader keeps
+    /// the same answer (a game that skips its warm-up on it then compiles on demand once); hash naga's output if
+    /// that ever matters.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let system = self.system.lock().expect("shader system poisoned");
+        let registry = system.registry();
+        let mut hash = Sha256::new();
+        for id in registry.ids() {
+            hash.update(registry.name(id).unwrap_or_default());
+            hash.update(registry.raw_source(id).unwrap_or_default());
+        }
+        hash.update(salt().unwrap_or_default());
+        hash.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -371,6 +416,8 @@ mod tests {
             "wind.wgsl",
             "sky_eye.wgsl",
             "shading.wgsl",
+            // 17 Oct 2026: every spot cone's shape and cookie (small, bounded; no noise or parallax).
+            "spot_cookie.wgsl",
         ];
         expected.sort_unstable();
         assert_eq!(
@@ -400,6 +447,8 @@ mod tests {
             "sampling.wgsl",
             "atmosphere.wgsl",
             "terrain_splat_core.wgsl",
+            // The bounce light shapes spot cones like the raster does (17 Oct 2026); a few lines, no heavy modules.
+            "spot_cookie.wgsl",
         ];
         gi.sort_unstable();
         assert_eq!(
