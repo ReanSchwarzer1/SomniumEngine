@@ -2531,15 +2531,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // Handedness, from the sign of the UV determinant.
     //
-    // A mirrored UV island has a negative determinant, and mirroring is
-    // routine on bark and other trunk-like meshes because it halves the
-    // texture needed for a symmetric surface. Without this sign the bitangent
-    // points the wrong way there, which inverts the normal map's green channel
-    // and tilts the shading normal away from the light. It shows as hard-edged
-    // patches that follow UV seams rather than anything in the geometry —
-    // dark navy where the wrongly-tilted normal picks up sky instead of sun.
+    // A mirrored UV island has the opposite determinant to its neighbours, and
+    // mirroring is routine on bark and other trunk-like meshes because it
+    // halves the texture needed for a symmetric surface. Without this sign the
+    // bitangent points the wrong way there, which inverts the normal map's
+    // green channel and tilts the shading normal away from the light. It shows
+    // as hard-edged patches that follow UV seams rather than anything in the
+    // geometry — dark navy where the wrongly-tilted normal picks up sky
+    // instead of sun.
+    //
+    // glTF's v runs down the image, so an unmirrored island on a front-facing
+    // (counter-clockwise) triangle has a NEGATIVE determinant, and the map's
+    // green (+Y, up the image) is -dP/dv = cross(N, T) there. Sunscar, 30 Oct
+    // 2026: this read `* handedness`, which inverted green on every island
+    // (a raking sun lit stones from below; the DirectX-green copy of the same
+    // scan looked right). The forward passes' screen-derivative frames
+    // (`transparent.wgsl`, `preview_studio.wgsl`) already agree with this one.
     let handedness = select(-1.0, 1.0, tbn_det >= 0.0);
-    let bitangent = cross(geo_normal, tangent) * handedness;
+    let bitangent = cross(geo_normal, tangent) * -handedness;
     let tbn       = mat3x3<f32>(tangent, bitangent, geo_normal);
 
     // Parallax occlusion: every map below is sampled at the displaced UV.
