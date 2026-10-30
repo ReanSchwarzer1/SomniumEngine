@@ -980,6 +980,37 @@ static DISPLAY_REQUEST: std::sync::Mutex<Option<WindowDisplay>> = std::sync::Mut
 /// The window's screen as last seen: its own size, and the sizes of its video modes (smallest first).
 static DISPLAY_SIZES: std::sync::Mutex<(Option<[u32; 2]>, Vec<[u32; 2]>)> = std::sync::Mutex::new((None, Vec::new()));
 
+/// `SOMNIUM_BACKGROUND_WINDOW=WIDTHxHEIGHT` (29 Oct 2026): checks run while someone works at the machine. The window
+/// opens at that size off every screen, is never activated and stays off the taskbar; it never goes fullscreen or
+/// resizes for a game's display options, and never captures the pointer (somnium_core `sync_play_cursor`). Pictures
+/// still come from its own frames, since the capture copies the swap chain. The developer: "i would prefer it if you
+/// stopped taking the mouse away for checks".
+pub fn background_window() -> Option<[u32; 2]> {
+    static SIZE: std::sync::LazyLock<Option<[u32; 2]>> = std::sync::LazyLock::new(|| {
+        parse_window_size(&std::env::var("SOMNIUM_BACKGROUND_WINDOW").ok()?)
+    });
+    *SIZE
+}
+
+fn parse_window_size(text: &str) -> Option<[u32; 2]> {
+    let (w, h) = text.split_once(['x', 'X'])?;
+    let size = [w.trim().parse().ok()?, h.trim().parse().ok()?];
+    size.iter().all(|v| (240..=8192).contains(v)).then_some(size)
+}
+
+#[cfg(test)]
+mod background_window_tests {
+    #[test]
+    fn a_background_window_size_is_width_by_height() {
+        use super::parse_window_size;
+        assert_eq!(parse_window_size("2560x1440"), Some([2560, 1440]));
+        assert_eq!(parse_window_size(" 1920 X 1080 "), Some([1920, 1080]));
+        assert_eq!(parse_window_size("1"), None, "a size, not a switch");
+        assert_eq!(parse_window_size("100x100"), None, "too small to picture anything");
+        assert_eq!(parse_window_size("2560x"), None);
+    }
+}
+
 /// Ask for the player's window to be shown this way; applied before the next frame, and whenever the window goes
 /// immersive after that.
 pub fn request_window_display(display: WindowDisplay) {
@@ -7616,6 +7647,10 @@ impl UiManager {
         sizes.dedup();
         if let Ok(mut published) = DISPLAY_SIZES.lock() {
             *published = (native, sizes);
+        }
+        // A background window (`background_window`) keeps its size and its place off the screens.
+        if background_window().is_some() {
+            return;
         }
         match self.player_display.mode {
             WindowMode::Borderless => self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor))),

@@ -1416,6 +1416,35 @@ fn own_window(attrs: WindowAttributes, _owner: &Window) -> WindowAttributes {
     attrs
 }
 
+/// A background window (`somnium_ui::background_window`) after it is shown: a tool window that is never activated,
+/// so it has no taskbar button, is not in Alt+Tab and a click can't bring it forward. winit has neither style for a
+/// main window, and rewrites the extended style when its own flags change, hence after `set_visible`.
+#[cfg(target_os = "windows")]
+fn keep_off_the_desktop(window: &Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    if let Ok(handle) = window.window_handle()
+        && let RawWindowHandle::Win32(win32) = handle.as_raw()
+    {
+        let hwnd = win32.hwnd.get();
+        // SAFETY: the handle is this live window's own; only its extended style changes.
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn keep_off_the_desktop(_window: &Window) {}
+
 /// Whether a point on the desktop falls inside a window's client area.
 ///
 /// Client rather than outer: a title bar belongs to the system, and a panel let
@@ -3962,6 +3991,21 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
         {
             attrs = attrs.with_undecorated_shadow(true);
         }
+        // A background window (`somnium_ui::background_window`): off every screen, shown without being activated,
+        // off the taskbar, at the size asked for. Nothing on the desktop changes and the pointer stays where it is.
+        if let Some([w, h]) = somnium_ui::background_window() {
+            attrs = attrs
+                .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+                .with_position(winit::dpi::PhysicalPosition::new(-30000, -30000))
+                .with_resizable(false)
+                .with_active(false);
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs = attrs.with_skip_taskbar(true);
+            }
+            info!(width = w, height = h, "background window (SOMNIUM_BACKGROUND_WINDOW): off screen, never focused");
+        }
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
@@ -3969,7 +4013,7 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.a11y = Some(crate::a11y_bridge::A11yBridge::new(event_loop, &window));
 
                 let window = Arc::new(window);
-                if std::env::var("SOMNIUM_MAXIMIZE").as_deref() == Ok("1") {
+                if std::env::var("SOMNIUM_MAXIMIZE").as_deref() == Ok("1") && somnium_ui::background_window().is_none() {
                     window.set_maximized(true);
                     info!("Window maximized (SOMNIUM_MAXIMIZE=1)");
                 }
@@ -4035,6 +4079,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
 
                 // MORROWIND-I. Everything is initialised; show the window.
                 window.set_visible(true);
+                if somnium_ui::background_window().is_some() {
+                    keep_off_the_desktop(&window);
+                }
 
                 self.state = LifecycleState::Running;
                 // Craft defect C11's other half: work that survived a crash is
@@ -8630,14 +8677,17 @@ impl<G: GameApp> Engine<G> {
             let fsr_fallback = pp.fsr_enabled() && !fsr_active;
             r.taa_pass
                 .set_enabled((pp.taa_enabled() || fsr_fallback) && !fsr_active && !retro);
-            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !path_active && !retro;
+            // On under the path tracer too: the raster keeps the sky's fill there, and its contact shadows with it.
+            r.gtao_pass.enabled = pp.gtao_enabled && budget.gtao && !retro;
             r.bloom_pass.enabled = pp.bloom_enabled;
             r.bloom_pass.intensity = pp.bloom_intensity;
             r.bloom_pass.lens_flare = pp.lens_flare.max(r.lens_flare_requested).max(0.0);
             r.dof_pass.enabled = pp.dof_enabled && budget.camera_effects && !retro;
             r.dof_pass.focus_distance = pp.dof_focus_distance;
             r.dof_pass.f_stop = pp.aperture_f_stops;
-            r.restir_pass.enabled = pp.restir_enabled && budget.traced_direct && !path_active && !retro;
+            // The path tracer traces only the bounced light (29 Oct 2026): the direct light stays the raster's, so its
+            // traced shadows (the sun's visibility here, the lamps' rays in shading) stay on under it, at any tier.
+            r.restir_pass.enabled = (pp.restir_enabled && budget.traced_direct || path_active) && !retro;
             let restir_gi_active = pp.restir_gi_enabled
                 && budget.traced_gi
                 && r.restir_gi_pass.supported()
@@ -8690,6 +8740,8 @@ impl<G: GameApp> Engine<G> {
             r.volumetric_pass.fog.shafts = pp.light_shafts && budget.light_shafts;
             r.volumetric_pass.fog.shaft_intensity = pp.shaft_intensity;
             r.volumetric_pass.fog.sky_occlusion = pp.fog_sky_occlusion;
+            r.volumetric_pass.max_distance = pp.fog_range.max(10.0);
+            r.volumetric_pass.fog.skylight = pp.fog_skylight;
             r.vertex_paint.fade = pp.paint_fade;
             r.vertex_paint.green = pp.foliage_green;
             r.vertex_paint.fog = [pp.retro_fog[0], pp.retro_fog[1], pp.retro_fog_color[0], pp.retro_fog_color[1], pp.retro_fog_color[2]];
@@ -8707,8 +8759,9 @@ impl<G: GameApp> Engine<G> {
                 r.path_tracer_pass.reflections = traced_reflections;
                 r.path_tracer_pass.reflection_roughness = pp.traced_reflection_roughness;
                 if path_active {
-                    // Path tracing replaces the frame (renderer `path_tracer`, which sets shading's path-mode bit).
-                    // Baking caches/probes or tracing the separate specular buffer underneath it only wastes work.
+                    // Path tracing replaces the bounced light and the reflections (renderer `path_tracer`, which sets
+                    // shading's path-mode bit). Baking caches/probes or tracing the separate specular buffer under it
+                    // only wastes work.
                     flags = 0;
                 } else {
                     if pp.world_cache && budget.traced_gi && rt && !ddgi_active {

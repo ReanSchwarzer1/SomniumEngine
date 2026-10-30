@@ -5,7 +5,9 @@
 //    view starts over. Up to `max_history` frames, so a still view converges and a moving one keeps its detail.
 // 2. `atrous`: an edge-stopping a-trous filter (Dammertz 2010, as SVGF uses it), a 5 x 5 B3 kernel at growing steps,
 //    weighed by distance, normal and light; it filters harder where the history is short.
-// 3. `remodulate`: the albedo multiplied back in, the unfiltered glow and sky added.
+// 3. `remodulate`: the albedo multiplied back in (with the material's occlusion and the fog's transmittance, mode 0).
+// 4. `composite_vs`/`composite_fs` (mode 0): that added over the raster's picture, which holds the direct light, the
+//    glow, the sky and the fog's own light but no ambient while the path tracer runs (shading.wgsl).
 // The light is demodulated (divided by the surface's albedo) all through, so texture stays sharp.
 //
 // Reflections (`_pad.y` is 1 + the roughness limit; path_tracer.wgsl mode 1): the albedo is white with the surface's
@@ -30,7 +32,6 @@ struct DnParams {
 @group(0) @binding(5) var history: texture_2d<f32>;
 @group(0) @binding(6) var velocity: texture_2d<f32>;
 @group(0) @binding(7) var albedo: texture_2d<f32>;
-@group(0) @binding(8) var emission: texture_2d<f32>;
 @group(0) @binding(9) var out_tex: texture_storage_2d<rgba16float, write>;
 
 fn dn_luma(c: vec3<f32>) -> f32 {
@@ -152,13 +153,12 @@ fn remodulate(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let g = textureLoad(gbuf, p, 0);
-    let glow = textureLoad(emission, p, 0).rgb;
-    var color = glow;
+    var color = vec3<f32>(0.0);
     if g.w > 0.0 {
-        color = textureLoad(input_tex, p, 0).rgb * textureLoad(albedo, p, 0).rgb + glow;
+        color = textureLoad(input_tex, p, 0).rgb * textureLoad(albedo, p, 0).rgb;
     }
-    // SOMNIUM_PATH_DEBUG (path_tracer.rs): 1 magenta (is the output composited at all), 2 the primary albedo, 3 the
-    // noisy light before any filtering (history holds it), 4 the glow and sky alone.
+    // SOMNIUM_PATH_DEBUG (path_tracer.rs): 1 magenta (is the output composited at all), 2 what the light is
+    // multiplied back by, 3 the noisy light before any filtering (history holds it).
     let debug = u32(dn._pad.x);
     if debug == 1u {
         color = vec3<f32>(1.0, 0.0, 1.0) * 1000.0;
@@ -166,14 +166,24 @@ fn remodulate(@builtin(global_invocation_id) gid: vec3<u32>) {
         color = textureLoad(albedo, p, 0).rgb;
     } else if debug == 3u {
         color = textureLoad(history, p, 0).rgb * textureLoad(albedo, p, 0).rgb;
-    } else if debug == 4u {
-        color = glow;
     }
-    // Debug 99: alpha 0, so shading keeps its own raster picture (what the camera really sees) while this runs.
-    var alpha = select(1.0, 0.0, debug == 99u);
+    var alpha = 1.0;
     if dn._pad.y > 0.5 {
         let limit = max(dn._pad.y - 1.0, 0.05);
         alpha = select(0.0, 1.0 - smoothstep(limit * 0.7, limit, textureLoad(albedo, p, 0).a), g.w > 0.0);
     }
     textureStore(out_tex, p, vec4<f32>(select(vec3<f32>(0.0), color, color == color), alpha));
+}
+
+// The composite (mode 0), a full-screen triangle over the scene's HDR target with additive blending (path_tracer.rs
+// `composite`). Its layout binds only `input_tex`, the remodulated output, at the target's own size.
+@vertex
+fn composite_vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn composite_fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(textureLoad(input_tex, vec2<i32>(position.xy), 0).rgb, 0.0);
 }

@@ -166,12 +166,14 @@ impl<G: GameApp> Engine<G> {
         let menu_up = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_free());
         // A game that draws its own pointer over its menus keeps the OS one hidden while it is free.
         let drawn = self.ui_manager.as_ref().is_some_and(|ui| ui.game_cursor_drawn());
+        // A background window (`somnium_ui::background_window`) never captures the pointer, focused or not.
         let target = self.play_window().filter(|w| {
-            capture_allowed(
-                self.play_cursor.requested && !menu_up,
-                self.simulation_clock.state,
-                w.has_focus(),
-            )
+            somnium_ui::background_window().is_none()
+                && capture_allowed(
+                    self.play_cursor.requested && !menu_up,
+                    self.simulation_clock.state,
+                    w.has_focus(),
+                )
         });
         if self.play_cursor.window == target.as_ref().map(|w| w.id()) {
             if target.is_none() && let Some(window) = self.play_window() {

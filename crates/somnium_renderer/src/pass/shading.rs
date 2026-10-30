@@ -250,6 +250,8 @@ pub struct ShadingPass {
     /// Vertex paint words (see `crate::vertex_paint`), grown on demand.
     paint_buffer: wgpu::Buffer,
     paint_capacity_words: u64,
+    /// Where the finished surface goes while the path tracer runs (bindings 31-33).
+    path_surface: [wgpu::TextureView; 3],
     /// Kept so growing the paint buffer can rebuild the bind group.
     visibility_view: wgpu::TextureView,
     _virtual_shadow_dummy: wgpu::Texture,
@@ -288,6 +290,7 @@ impl ShadingPass {
         decals: &crate::pass::decal::DecalGrid,
         grain_packed: &wgpu::Buffer,
         local_shadow_tlas: Option<&wgpu::Tlas>,
+        path_surface: [&wgpu::TextureView; 3],
     ) -> Self {
         let mut layout_entries = vec![
                 // binding 0: vis_buffer (R32Uint)
@@ -595,6 +598,19 @@ impl ShadingPass {
                     count: None,
                 },
             ];
+        // bindings 31-33: the finished surface, for the path tracer while it runs (path_tracer.rs `surface_views`).
+        for binding in 31..34 {
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            });
+        }
         if local_shadow_tlas.is_some() {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 29,
@@ -726,6 +742,7 @@ impl ShadingPass {
             grain_packed,
             &paint_buffer,
             local_shadow_tlas,
+            path_surface,
         );
 
         // MORROWIND-C: composition is declared in `shading.wgsl` and
@@ -856,6 +873,7 @@ impl ShadingPass {
             grain_packed: grain_packed.clone(),
             paint_buffer,
             paint_capacity_words,
+            path_surface: path_surface.map(Clone::clone),
             visibility_view: visibility_view.clone(),
             _virtual_shadow_dummy: virtual_shadow_dummy,
             clipmap_layout,
@@ -931,7 +949,10 @@ impl ShadingPass {
         vertex_entry: &str,
         depth_split: Option<wgpu::CompareFunction>,
     ) -> wgpu::RenderPipeline {
-        let constants = spec.constants();
+        // The depth split's pipelines leave out the path tracer's surface writes, which would cost them early-Z
+        // (shading.wgsl `path_surface`); the split never runs under the tracer (renderer.rs).
+        let mut constants = spec.constants().to_vec();
+        constants.push(("path_surface", f64::from(u32::from(depth_split.is_none()))));
         let compilation_options = wgpu::PipelineCompilationOptions {
             constants: &constants,
             zero_initialize_workgroup_memory: true,
@@ -1341,6 +1362,7 @@ impl ShadingPass {
         grain_packed: &wgpu::Buffer,
         paint: &wgpu::Buffer,
         local_shadow_tlas: Option<&wgpu::Tlas>,
+        path_surface: [&wgpu::TextureView; 3],
     ) -> wgpu::BindGroup {
         let mut entries = vec![
                 wgpu::BindGroupEntry {
@@ -1468,6 +1490,9 @@ impl ShadingPass {
             entries.push(wgpu::BindGroupEntry {
                 binding: 29, resource: wgpu::BindingResource::AccelerationStructure(tlas),
             });
+        }
+        for (binding, view) in (31..).zip(path_surface) {
+            entries.push(wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) });
         }
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shading Pass Bind Group"), layout, entries: &entries,
@@ -1642,9 +1667,16 @@ impl ShadingPass {
         self.rebind(device);
     }
 
-    /// Read another target as the lighting aux (the path tracer's output while it runs, lighting_extra's otherwise).
-    pub fn set_lighting_aux(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+    /// Read another target as the lighting aux (the path tracer's output while it runs, lighting_extra's otherwise),
+    /// and write the finished surface to the path tracer's current targets (`PathTracerPass::surface_views`).
+    pub fn set_lighting_aux(
+        &mut self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        path_surface: [&wgpu::TextureView; 3],
+    ) {
         self.lighting_aux_view = view.clone();
+        self.path_surface = path_surface.map(Clone::clone);
         self.rebind(device);
     }
 
@@ -1680,6 +1712,7 @@ impl ShadingPass {
             &self.grain_packed,
             &self.paint_buffer,
             self.local_shadow_tlas.as_ref(),
+            [&self.path_surface[0], &self.path_surface[1], &self.path_surface[2]],
         );
     }
 

@@ -1357,6 +1357,16 @@ pub struct PostProcessComponent {
     /// 0 (default) lights fog with the whole sky everywhere; toward 1, fog
     /// under roofs and dense canopy loses its skylit glow.
     pub fog_sky_occlusion: f32,
+    /// How far the fog volume reaches, in metres (default 1200). Its 32
+    /// slices are spread evenly over this, so thick fog that hides everything
+    /// past ~100 m reads finer up close with a short range (~150 m puts a
+    /// slice every 5 m instead of every 37). Past the range the last slice
+    /// holds, so it should reach about as far as the fog lets anyone see.
+    pub fog_range: f32,
+    /// Scale on the sky light the fog scatters (default 1), apart from the
+    /// sun's and the lamps'. Under 1, a moon can light the ground while the fog
+    /// away from the lights stays blue-black.
+    pub fog_skylight: f32,
     /// How far every vertex-painted layer and every material's authored
     /// weathering is taken back toward the bare material, 0..=1. 0 (default)
     /// is as authored. A whole level shown as it was before it decayed.
@@ -1534,6 +1544,8 @@ impl Default for PostProcessComponent {
             analytic_grad: std::env::var("SOMNIUM_ANALYTIC_GRAD").as_deref() != Ok("0"),
             shaft_intensity: 1.5,
             fog_sky_occlusion: 0.0,
+            fog_range: 1200.0,
+            fog_skylight: 1.0,
             paint_fade: 0.0,
             foliage_green: 0.0,
             aa,

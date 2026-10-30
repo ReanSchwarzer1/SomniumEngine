@@ -194,7 +194,7 @@ fn fog_skylight_follows_the_sun_shadow_when_asked() {
     let vol = include_str!("../src/shaders/volumetric.wgsl");
     assert!(vol.contains("if vol.shafts_enabled != 0u || vol.fog_sky_occlusion > 0.0 {"), "lookup gate");
     assert!(vol.contains("sky_vis = mix(1.0, shadow_vis, saturate(vol.fog_sky_occlusion));"));
-    assert!(vol.contains("+ vec3<f32>(fog) * multiscatter * sky_vis;"), "fog skylight term");
+    assert!(vol.contains("+ vec3<f32>(fog) * multiscatter * sky_vis * vol.fog_skylight;"), "fog skylight term");
 }
 
 /// Phase 24L. The GI pass binds the same `@group(0)` pool the shading pass

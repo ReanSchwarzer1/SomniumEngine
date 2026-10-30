@@ -631,7 +631,8 @@ fn next_split(split: usize, share: f32, seen: &[Option<f32>; 7]) -> Option<usize
     seen[next].is_none_or(|was| (was - 0.5).abs() < (share - 0.5).abs()).then_some(next)
 }
 
-fn is_cut(last: glam::Mat4, now: glam::Mat4) -> bool {
+/// Whether the view jumped between two frames (the renderer's own camera-cut test uses it too).
+pub(crate) fn is_cut(last: glam::Mat4, now: glam::Mat4) -> bool {
     let (a, b) = (last.inverse(), now.inverse());
     let moved = (a.w_axis.truncate() - b.w_axis.truncate()).length();
     let fa = (-a.z_axis.truncate()).normalize_or_zero();

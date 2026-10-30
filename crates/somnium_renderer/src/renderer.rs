@@ -387,6 +387,9 @@ pub struct SomniumRenderer {
     game_ui_empty_warned: bool,
     /// AMD FSR 3 frame generation (pass/frame_gen.rs; hooks in renderer_frame_gen.rs).
     frame_gen: crate::pass::frame_gen::FrameGenPass,
+    /// A camera cut asked for (`camera_cut`) and the last primary view drawn, for the cut test (`camera_cut_now`).
+    camera_cut_requested: bool,
+    cut_view: Option<glam::Mat4>,
     /// Which gizmo operation is active.
     pub gizmo_mode: GizmoMode,
     /// World-space position of the selected entity (None when nothing selected).
@@ -826,8 +829,11 @@ impl SomniumRenderer {
         //
         // Enabled only when the near spec actually has something to drop.
         // Compiling a second pipeline identical to the first would cost a
-        // shader compile and a second full-screen pass to save nothing.
+        // shader compile and a second full-screen pass to save nothing. Never
+        // under the path tracer: the split's pipelines leave out the surface
+        // writes it reads (shading.wgsl `path_surface`), for their early-Z.
         let split = (self.aerial_split_enabled
+            && !self.path_tracer_pass.enabled
             && (spec.hex || spec.pom)
             && self.shade_ablate == crate::pass::shading::ablate::OFF)
             .then(|| {
@@ -1198,6 +1204,7 @@ impl SomniumRenderer {
             &shaders,
             &global_pool.layout,
             raytrace_pass.supported(),
+            HDR_FORMAT,
             ctx.config.width,
             ctx.config.height,
         );
@@ -1380,6 +1387,7 @@ impl SomniumRenderer {
             if std::env::var("SOMNIUM_LOCAL_SHADOWS").as_deref() != Ok("0") {
                 raytrace_pass.tlas()
             } else { None },
+            path_tracer_pass.surface_views(),
         );
 
         // Phase 21: forward pass for blended materials. Built here because it
@@ -1622,6 +1630,8 @@ impl SomniumRenderer {
             editor_overlays_enabled: true,
             game_ui_empty_warned: false,
             frame_gen: crate::pass::frame_gen::FrameGenPass::new(),
+            camera_cut_requested: false,
+            cut_view: None,
             outline_pass,
             outline_entity: None,
             game_highlight_pass,
@@ -2612,7 +2622,8 @@ impl SomniumRenderer {
         view_data.extend_from_slice(bytemuck::bytes_of(&self.camera_pos.to_array()));
         view_data.extend_from_slice(bytemuck::bytes_of(&debug_flag));
         view_data.extend_from_slice(bytemuck::bytes_of(&self.time));
-        view_data.extend_from_slice(bytemuck::bytes_of(&[self.fsr_pass.lod_scale(), 0.0, 0.0]));
+        let tie_slope = crate::pass::visibility::depth_tie_slope(&self.proj_matrix, self.render_height);
+        view_data.extend_from_slice(bytemuck::bytes_of(&[self.fsr_pass.lod_scale(), tie_slope, 0.0]));
         let mut wind = self.foliage_wind;
         let budget = self.graphics_budget();
         if !budget.foliage_wind {
@@ -3904,6 +3915,15 @@ impl SomniumRenderer {
         self.underwater_pass.invalidate();
         self.cloud_pass.reset_history();
         self.clear_gizmo();
+        // A new scene's first frame follows from nothing drawn before it (a chapter's load).
+        self.camera_cut();
+    }
+
+    /// The next frame's camera does not follow from this one's: a cinematic's cut, a chapter's first frame. Its
+    /// temporal history starts over (FSR, TAA, frame generation, the clouds, the path tracer) and motion blur sits it
+    /// out, so the jump is not smeared as motion. Jumps of 2 m or 50 degrees in a frame count without being told.
+    pub fn camera_cut(&mut self) {
+        self.camera_cut_requested = true;
     }
 
     /// Mutable access to a terrain (sculpting, painting, raycasts).
@@ -4815,6 +4835,19 @@ impl SomniumRenderer {
         // of `&mut *encoder`.
         let mut encoder = encoder;
         self.apply_scene_view(ctx, view, primary, slot);
+        // A camera cut (`camera_cut`, or a jump between this frame's view and the last one drawn): the temporal passes
+        // start over and motion blur sits this frame out (FSR's reset and the blur below).
+        let cut = primary && {
+            let cut = camera_cut_now(std::mem::take(&mut self.camera_cut_requested), self.cut_view, self.view_matrix);
+            self.cut_view = Some(self.view_matrix);
+            if cut {
+                self.taa_pass.reset_history();
+                self.cloud_pass.reset_history();
+                self.path_tracer_pass.reset_history();
+                self.frame_gen.request_reset();
+            }
+            cut
+        };
         // ── Phase 13C: Clustered lighting assignment ───────────────────────
         // Bit 4 must be uniform for the whole draw: a per-pixel `traced.a`
         // skip of PCSS is varying, DXC flattens it, and every terrain pixel
@@ -5277,6 +5310,19 @@ impl SomniumRenderer {
             }
             self.instances.add_instance(instance);
         }
+        // Which of two faces in one plane the visibility pass keeps, the same every frame (`depth_tie`).
+        // `SOMNIUM_DEPTH_TIE=0` (comparisons only) leaves every tie at 0, as before 29 Oct 2026.
+        static DEPTH_TIES: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| std::env::var("SOMNIUM_DEPTH_TIE").as_deref() != Ok("0"));
+        let ties: Vec<u32> = self
+            .draw_queue
+            .iter()
+            .map(|cmd| {
+                let terrain = self.terrain_lod_by_vertex.contains_key(&cmd.vertex_offset);
+                if *DEPTH_TIES { depth_tie(cmd, self.geometry.mesh_aabb(cmd.vertex_offset), terrain) } else { 0 }
+            })
+            .collect();
+        self.vis_pass.set_depth_ties(&ctx.device, &ctx.queue, &ties);
         for cmd in &self.shadow_only_queue {
             self.instances.add_instance(gpu_instance_from_cmd(
                 &self.terrain_lod_by_vertex,
@@ -5894,9 +5940,11 @@ impl SomniumRenderer {
             // half-grid extent. Publish the actual DDGI lattice rather than
             // the 64^3 SDF volume's dimensions.
             self.ddgi_pass.publish_shading_lattice(&mut lighting_params);
-            // The real-time path tracer's output is composited through the same path-mode bit as the old one; its
-            // reflections through the traced-specular bit (which lighting_extra's own specular trace then gives up).
-            if self.path_tracer_pass.enabled && self.path_tracer_pass.supported() {
+            // The real-time path tracer's mode 0 through the path-mode bit (shading writes its surface for it and
+            // leaves its ambient to it: only once there is a scene to trace); its reflections through the
+            // traced-specular bit (which lighting_extra's own specular trace then gives up).
+            let traced_scene = self.path_tracer_pass.supported() && self.raytrace_pass.tlas().is_some();
+            if self.path_tracer_pass.enabled && traced_scene {
                 lighting_params[0] = f32::from_bits(lighting_params[0].to_bits() | crate::pass::lighting_extra::FLAG_PATH);
             } else if self.path_tracer_pass.reflections && self.path_tracer_pass.supported() {
                 lighting_params[0] = f32::from_bits(lighting_params[0].to_bits() | crate::pass::lighting_extra::FLAG_SPECULAR);
@@ -5939,8 +5987,8 @@ impl SomniumRenderer {
         self.profiler.end(&mut encoder);
 
         // ── 6.85 The real-time path tracer (17 Oct 2026; path_tracer.rs) ────
-        // After velocity (its history reprojects through it), before shading
-        // (which composites its output where the path-mode bit is set).
+        // After velocity (its history reprojects through it). Its reflections (mode 1) record here, before shading,
+        // which reads them; the whole tracer (mode 0) records after shading (7.1), from the surface shading wrote.
         let path_on = (self.path_tracer_pass.enabled || self.path_tracer_pass.reflections)
             && self.path_tracer_pass.supported()
             && self.raytrace_pass.tlas().is_some();
@@ -5957,11 +6005,11 @@ impl SomniumRenderer {
             } else {
                 self.lighting_extra_pass.aux_view().clone()
             };
-            self.shading_pass.set_lighting_aux(&ctx.device, &aux);
+            self.shading_pass.set_lighting_aux(&ctx.device, &aux, self.path_tracer_pass.surface_views());
             self.path_aux_bound = path_on;
             self.path_tracer_pass.reset_history();
         }
-        if path_on && let Some(tlas) = self.raytrace_pass.tlas() {
+        if path_on && !self.path_tracer_pass.enabled && let Some(tlas) = self.raytrace_pass.tlas() {
             self.profiler.begin(&mut encoder, "Path tracer");
             self.path_tracer_pass.record(
                 &ctx.device,
@@ -6387,6 +6435,28 @@ impl SomniumRenderer {
         }
         self.profiler.end(&mut encoder);
 
+        // ── 7.1 The path tracer, the whole picture (mode 0; path_tracer.rs) ──
+        // From the surface the shading pass just wrote at every pixel; its traced bounced light is added over the
+        // shading pass's picture, which has the direct light and no ambient while this runs.
+        if path_on && self.path_tracer_pass.enabled && let Some(tlas) = self.raytrace_pass.tlas() {
+            self.profiler.begin(&mut encoder, "Path tracer");
+            self.path_tracer_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.global_pool.bind_group,
+                tlas,
+                &self.ibl_pass.cube_view,
+                &self.ibl_pass.sampler,
+                self.velocity_pass.view(),
+                &self.vis_pass.view,
+                self.view_proj_unjittered.inverse(),
+                self.camera_pos,
+            );
+            self.path_tracer_pass.composite(&ctx.device, &mut encoder, &self.postprocess_pass.hdr_view);
+            self.profiler.end(&mut encoder);
+        }
+
         // ── 7.2 Skin: gather the light the shading pass left on it ───────────
         // Straight after shading, while the HDR target holds nothing else and
         // the visibility buffer still says whose pixel each one is.
@@ -6692,17 +6762,20 @@ impl SomniumRenderer {
         // gather's dither, and blurring the resolved image instead would smear
         // a frame that has already been blended with its own past.
         self.profiler.begin(&mut encoder, "Motion Blur");
-        self.motion_blur_pass.record(
-            &ctx.device,
-            &ctx.queue,
-            &mut encoder,
-            &self.postprocess_pass.hdr_view,
-            &self.postprocess_pass.hdr_texture,
-            self.velocity_pass.view(),
-            &self.vis_pass.depth_view,
-            self.render_width,
-            self.render_height,
-        );
+        // Not across a camera cut: its velocities are the jump itself, which smeared every lore film's cuts.
+        if !cut {
+            self.motion_blur_pass.record(
+                &ctx.device,
+                &ctx.queue,
+                &mut encoder,
+                &self.postprocess_pass.hdr_view,
+                &self.postprocess_pass.hdr_texture,
+                self.velocity_pass.view(),
+                &self.vis_pass.depth_view,
+                self.render_width,
+                self.render_height,
+            );
+        }
         self.profiler.end(&mut encoder);
 
         self.profiler.begin(&mut encoder, "TAA");
@@ -6893,7 +6966,7 @@ impl SomniumRenderer {
             self.exposure,
             self.proj_matrix,
             self.frame_delta_time,
-            false,
+            cut,
         );
         if fsr_ok {
             self.postprocess_pass
@@ -7638,6 +7711,36 @@ fn gpu_instance_from_cmd(
     }
 }
 
+/// Whether this frame is a camera cut: one was asked for (`SomniumRenderer::camera_cut`), or the view jumped from
+/// the last one drawn by as much as frame generation's own test calls a cut (2 m or 50 degrees). The first frame is
+/// not: every temporal pass already starts over on it.
+fn camera_cut_now(requested: bool, last: Option<glam::Mat4>, now: glam::Mat4) -> bool {
+    requested || last.is_some_and(|last| crate::pass::frame_gen::is_cut(last, now))
+}
+
+/// A draw's depth tie (visibility.wgsl `depth_ties`, 29 Oct 2026): where two things' faces lie in one plane, the one
+/// with the higher tie is kept, every frame. Smaller things (a bounding radius under 0.6 m) take 8 to 15 and larger
+/// ones 0 to 7, so a sheet of paper, a book or a trim stays over its desk, shelf or wall; within each, three bits
+/// hashed from what the draw is (its mesh, index range, material and paint) and where it stands decide between
+/// equals: two copies of one table, two layers of one wall, two parts of one model in one plane. Seven pairs in eight
+/// tell apart; two draws the same in all of that draw the same pixels. Terrain takes 0. Unknown size counts as large.
+fn depth_tie(cmd: &DrawCommand, aabb: Option<([f32; 3], [f32; 3])>, terrain: bool) -> u32 {
+    use crate::pass::visibility::DEPTH_TIE_LEVELS;
+    if terrain {
+        return 0;
+    }
+    let radius = aabb.map_or(f32::INFINITY, |(min, max)| {
+        cmd.transform.transform_vector3((glam::Vec3::from(max) - glam::Vec3::from(min)) * 0.5).length()
+    });
+    let at = cmd.transform.w_axis;
+    let mut h = cmd.vertex_offset.wrapping_mul(0x9E37_79B1);
+    for v in [cmd.index_offset, cmd.material_id, cmd.paint, at.x.to_bits(), at.y.to_bits(), at.z.to_bits()] {
+        h = (h ^ v).wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+    }
+    u32::from(radius < 0.6) * DEPTH_TIE_LEVELS + h % DEPTH_TIE_LEVELS
+}
+
 /// What a caster is beyond its command: the first-person rig (nearest cascade only), and a skinned mesh posed in
 /// place (`Some(frame)`, which changes its cascades every frame).
 #[derive(Clone, Copy, Debug, Default)]
@@ -8131,6 +8234,66 @@ mod frame_instance_layout_tests {
             transform: glam::Mat4::from_translation(glam::Vec3::new(tx, 0.0, 0.0)),
             casts_shadow: true,
         }
+    }
+
+    #[test]
+    fn a_depth_tie_keeps_small_things_over_large_and_splits_equals_by_place() {
+        use super::depth_tie;
+        let paper = ([-0.1, 0.0, -0.15], [0.1, 0.002, 0.15]);
+        let desk = ([-0.8, 0.0, -0.4], [0.8, 0.75, 0.4]);
+        let wall = ([-3.0, 0.0, -0.05], [3.0, 2.6, 0.05]);
+        for x in 0..40 {
+            let at = x as f32 * 0.37;
+            let small = depth_tie(&draw(5, 0, 1, at), Some(paper), false);
+            assert!((8..=15).contains(&small), "a sheet of paper is a small thing: {small}");
+            assert!(depth_tie(&draw(6, 0, 1, at), Some(desk), false) <= 7, "the paper stays over its desk");
+            assert!(depth_tie(&draw(7, 0, 1, at), Some(wall), false) <= 7, "a wall never goes over what is on it");
+            assert_eq!(depth_tie(&draw(7, 0, 1, at), Some(wall), true), 0, "terrain takes 0");
+            assert_eq!(small, depth_tie(&draw(5, 0, 1, at), Some(paper), false), "the same every frame");
+        }
+        // Two copies of one table a few centimetres apart, and two layers of one mesh at one place (another material,
+        // another index range), mostly get different ties: seven in eight.
+        let table = ([-0.5, 0.0, -0.5], [0.5, 0.74, 0.5]);
+        let tie = |index: u32, material: u32, x: f32| depth_tie(&draw(9, index, material, x), Some(table), false);
+        let moved = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(0, 1, k as f32 * 0.05 + 0.03)).count();
+        let layered = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(0, 2, k as f32 * 0.05)).count();
+        let parts = (0..256).filter(|&k| tie(0, 1, k as f32 * 0.05) != tie(36, 1, k as f32 * 0.05)).count();
+        for (what, apart) in [("copies moved", moved), ("layers", layered), ("parts", parts)] {
+            assert!(apart > 200, "{what}: only {apart} of 256 pairs tell apart");
+        }
+    }
+
+    #[test]
+    fn a_camera_cut_is_one_asked_for_or_a_jump() {
+        use super::camera_cut_now;
+        let at = |x: f32, yaw: f32| {
+            glam::Mat4::look_at_rh(glam::vec3(x, 1.6, 0.0), glam::vec3(x + yaw.sin(), 1.6, -yaw.cos()), glam::Vec3::Y)
+        };
+        assert!(!camera_cut_now(false, None, at(0.0, 0.0)), "the first frame starts over anyway");
+        assert!(!camera_cut_now(false, Some(at(0.0, 0.0)), at(0.1, 0.05)), "a step and a small turn");
+        assert!(camera_cut_now(true, Some(at(0.0, 0.0)), at(0.0, 0.0)), "asked for (a cinematic's cut nearby)");
+        assert!(camera_cut_now(false, Some(at(0.0, 0.0)), at(3.0, 0.0)), "a 3 m jump");
+        assert!(camera_cut_now(false, Some(at(0.0, 0.0)), at(0.0, 1.2)), "a 69 degree turn");
+    }
+
+    #[test]
+    fn the_tie_constants_match_the_shaders() {
+        use crate::pass::visibility::{DEPTH_TIE_FADE, DEPTH_TIE_LEVELS, DEPTH_TIE_REACH, DEPTH_TIE_STEP_MAX};
+        let ties = include_str!("shaders/depth_tie.wgsl");
+        assert!(ties.contains(&format!("const DEPTH_TIE_STEP_MAX: f32 = {DEPTH_TIE_STEP_MAX:e};")), "STEP_MAX");
+        assert!(ties.contains(&format!("const DEPTH_TIE_REACH: f32 = {DEPTH_TIE_REACH:e};")), "REACH");
+        assert!(ties.contains(&format!("const DEPTH_TIE_FADE_START: f32 = {:.1};", DEPTH_TIE_FADE[0])), "FADE_START");
+        assert!(ties.contains(&format!("const DEPTH_TIE_FADE_END: f32 = {:.1};", DEPTH_TIE_FADE[1])), "FADE_END");
+        assert!(ties.contains(&format!("const DEPTH_TIE_GLASS: f32 = {:.1};", f64::from(2 * DEPTH_TIE_LEVELS))), "glass above all");
+        assert!(DEPTH_TIE_REACH >= (2 * DEPTH_TIE_LEVELS) as f32 * DEPTH_TIE_STEP_MAX, "the reach covers every tie");
+        for shader in [include_str!("shaders/visibility.wgsl"), include_str!("shaders/transparent.wgsl"), include_str!("shaders/cull.wgsl")] {
+            assert!(shader.contains("//!include \"depth_tie.wgsl\""), "every user of the ties includes depth_tie.wgsl");
+        }
+        // The slope for the game's camera (74 degrees, near 0.035 m) at 1440 rows: a step for a plane 1 m away.
+        let proj = glam::Mat4::perspective_rh(74f32.to_radians(), 16.0 / 9.0, 0.035, 350.0);
+        let slope = crate::pass::visibility::depth_tie_slope(&proj, 1440);
+        assert!((slope - 0.035 * 2.0 / (proj.y_axis.y * 1440.0) / 64.0).abs() < 1e-12, "{slope}");
+        assert_eq!(crate::pass::visibility::depth_tie_slope(&glam::Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, 0.1, 9.0), 1440), 0.0);
     }
 
     #[test]

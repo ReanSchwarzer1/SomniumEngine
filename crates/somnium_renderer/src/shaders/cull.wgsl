@@ -1,3 +1,4 @@
+//!include "depth_tie.wgsl"
 // Phase 15B: GPU instance frustum culling.
 // Phase 15E2: plus two-phase Hi-Z occlusion culling.
 //
@@ -88,6 +89,7 @@ fn is_occluded(world_min: vec3<f32>, world_max: vec3<f32>) -> bool {
     var lo = vec2<f32>(1e30);
     var hi = vec2<f32>(-1e30);
     var min_z = 1e30;
+    var min_w = 1e30;
 
     for (var c = 0u; c < 8u; c = c + 1u) {
         let corner = vec3<f32>(
@@ -107,6 +109,7 @@ fn is_occluded(world_min: vec3<f32>, world_max: vec3<f32>) -> bool {
         lo = min(lo, uv);
         hi = max(hi, uv);
         min_z = min(min_z, ndc.z);
+        min_w = min(min_w, clip.w);
     }
 
     lo = clamp(lo, vec2<f32>(0.0), vec2<f32>(1.0));
@@ -141,7 +144,10 @@ fn is_occluded(world_min: vec3<f32>, world_max: vec3<f32>) -> bool {
     if furthest >= 1.0 {
         return false;
     }
-    return min_z > furthest;
+    // A draw's depth tie (depth_tie.wgsl) can draw it up to `DEPTH_TIE_REACH` nearer than its box, in front of what
+    // the pyramid recorded, so it is kept until it is behind by more than that; ties fade out by 24 m, and so does the
+    // allowance, from the box's nearest point (F's check, 29 Oct: a constant one cost far culling metres of depth).
+    return min_z - DEPTH_TIE_REACH * depth_tie_fade(min_w) > furthest;
 }
 
 // Both phases run this entry point; `params.phase` selects the behaviour.

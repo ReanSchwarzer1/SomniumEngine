@@ -1,5 +1,6 @@
 // Visibility Buffer - Rasterization Pass
 //!include "wind.wgsl"
+//!include "depth_tie.wgsl"
 
 // wgpu 30 requires `binding_array<...>` to be behind an explicit enable
 // directive; wgpu 29 accepted it without one. Found by MORROWIND-C, because
@@ -36,7 +37,7 @@ struct View {
     _padding:      f32,
     time:          f32,
     lod_scale:     f32,  // see global_pool.wgsl
-    _time_pad1:    f32,
+    depth_tie_slope: f32,  // pass/visibility.rs `depth_tie_slope`
     _time_pad2:    f32,
     wind:          vec4<f32>,
     wind_time:     vec4<f32>,
@@ -96,6 +97,15 @@ struct Material {
 @group(0) @binding(5) var<storage, read> materials: array<Material>;
 
 @group(1) @binding(0) var cutout_sampler: sampler;
+/// Each instance's place when two things' faces lie in one plane (renderer.rs `depth_tie`, 29 Oct 2026). The depth
+/// test cannot tell such faces apart: which one a pixel keeps comes down to rounding a few steps of the depth buffer
+/// either way, and FSR's or TAA's jitter moves the sample every frame, so the winner flips and the overlap shimmers
+/// (the developer: "a lot of z fighting with tables stacked", gone with FSR off, whose resolve averages it away).
+/// A higher tie is drawn that many steps nearer (depth_tie.wgsl, each step sized for the plane), so the same face wins
+/// every frame: smaller things over larger (a sheet of paper over its desk, a trim over its wall), then by a hash of
+/// the draw. A fixed step before was too little edge-on (one step apart still fought there) and too much face-on,
+/// where it could put whole layers (a painting a few mm off its wall) behind each other.
+@group(1) @binding(1) var<storage, read> depth_ties: array<u32>;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -176,7 +186,14 @@ fn vs_main(
         world += wind_offset(world, instance.model[3].xyz, m.wind_bend, m.wind_flutter,
                              view.wind_time.x, view.wind, view.camera_pos);
     }
-    out.clip_pos = view.view_proj * vec4<f32>(world, 1.0);
+    out.clip_pos = depth_tie_clip(view.view_proj, world, view.camera_pos);
+    // Ties between faces in one plane go the same way every frame (`depth_ties`), in steps sized for this plane.
+    let tie = f32(depth_ties[inst_idx]);
+    if tie > 0.0 {
+        let normal = (instance.model * vec4<f32>(vertex.norm_x, vertex.norm_y, vertex.norm_z, 0.0)).xyz;
+        out.clip_pos.z -= depth_tie_offset(tie, normal, world, out.clip_pos.w, view.view, view.camera_pos,
+                                           view.depth_tie_slope);
+    }
     out.instance_id = inst_idx;
     out.prim_id = v_idx / 3u;
     

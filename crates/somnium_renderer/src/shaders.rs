@@ -127,6 +127,7 @@ impl Shaders {
             "cull.wgsl",
             "dof.wgsl",
             "ddgi.wgsl",
+            "depth_tie.wgsl",
             "fsr_sanitize.wgsl",
             "fsr_untonemap.wgsl",
             "fxaa.wgsl",

@@ -91,6 +91,8 @@ struct VolumetricParams {
     grain_enabled: u32,
     /// How far the sun's shadow map also hides skylight from the fog, 0..1.
     fog_sky_occlusion: f32,
+    /// Scale on the sky light the fog scatters (1 as the sky gives it), apart from the sun's and the lamps'.
+    fog_skylight: f32,
 }
 
 @group(0) @binding(0) var<uniform> vol: VolumetricParams;
@@ -392,7 +394,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // it is the same term the air already uses, so the two media
                 // now agree about what is illuminating them.
                 step_scatter += vec3<f32>(fog * fog_phase) * sun_vis * sun_transmittance
-                    + vec3<f32>(fog) * multiscatter * sky_vis;
+                    + vec3<f32>(fog) * multiscatter * sky_vis * vol.fog_skylight;
                 extinction += vec3<f32>(fog);
             }
 

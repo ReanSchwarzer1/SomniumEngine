@@ -2,8 +2,13 @@
 //!
 //! Replaces the 24O accumulator in `lighting_extra` (a Lambert-only, sun-only average that paused the simulation to
 //! gather): one path a pixel a frame with GGX specular, the sun, the moon and the level's lamps sampled directly,
-//! then a reprojected temporal accumulation and an edge-stopping a-trous filter, so it runs while the game runs. Its
-//! output stands in for the shading pass's lighting aux (shading composites it where the path mode bit is set).
+//! then a reprojected temporal accumulation and an edge-stopping a-trous filter, so it runs while the game runs.
+//!
+//! `enabled` (mode 0, 29 Oct 2026) traces the bounced light from the raster's own surface: the shading pass, with the
+//! path mode bit set, writes its finished material into `surface_views` and draws its direct light without the
+//! ambient; `record` then runs after it, and `composite` adds the traced light over its picture. So every material
+//! detail the raster draws (normal, roughness and metal maps, paint, baked light, decals, terrain layers) is the
+//! traced picture's too.
 //!
 //! Off unless `enabled`; with no ray query on the device it never records, and `output_view` is a cleared target.
 //!
@@ -82,11 +87,13 @@ struct Targets {
     gbuf: Target,
     gbuf_prev: Target,
     albedo: Target,
-    emission: Target,
     accum: [Target; 2],
     ping: Target,
     pong: Target,
     output: Target,
+    /// The raster's surface (shading.wgsl `path_surface_*`): albedo and metallic, normal and roughness, occlusion
+    /// and the fog's transmittance.
+    surface: [Target; 3],
 }
 
 impl Targets {
@@ -96,11 +103,15 @@ impl Targets {
             gbuf: target(device, width, height, "Path tracer normal and distance"),
             gbuf_prev: target(device, width, height, "Path tracer last normal and distance"),
             albedo: target(device, width, height, "Path tracer albedo"),
-            emission: target(device, width, height, "Path tracer emission"),
             accum: [target(device, width, height, "Path tracer history A"), target(device, width, height, "Path tracer history B")],
             ping: target(device, width, height, "Path tracer filter A"),
             pong: target(device, width, height, "Path tracer filter B"),
             output: target(device, width, height, "Path tracer output"),
+            surface: [
+                target(device, width, height, "Path tracer surface albedo"),
+                target(device, width, height, "Path tracer surface normal"),
+                target(device, width, height, "Path tracer surface extra"),
+            ],
         }
     }
 }
@@ -112,6 +123,8 @@ struct Pipelines {
     atrous: wgpu::ComputePipeline,
     remodulate: wgpu::ComputePipeline,
     denoise_layout: wgpu::BindGroupLayout,
+    composite: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
 }
 
 pub struct PathTracerPass {
@@ -183,11 +196,13 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl PathTracerPass {
+    /// `hdr_format`: the scene's HDR target, which `composite` draws over.
     pub fn new(
         device: &wgpu::Device,
         shaders: &crate::shaders::Shaders,
         global_layout: &wgpu::BindGroupLayout,
         supported: bool,
+        hdr_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
     ) -> Self {
@@ -220,7 +235,7 @@ impl PathTracerPass {
                 })
             })
             .collect();
-        let pipelines = supported.then(|| Self::pipelines(device, shaders, global_layout));
+        let pipelines = supported.then(|| Self::pipelines(device, shaders, global_layout, hdr_format));
         Self {
             pipelines,
             targets: Targets::new(device, width, height),
@@ -240,7 +255,12 @@ impl PathTracerPass {
         }
     }
 
-    fn pipelines(device: &wgpu::Device, shaders: &crate::shaders::Shaders, global_layout: &wgpu::BindGroupLayout) -> Pipelines {
+    fn pipelines(
+        device: &wgpu::Device,
+        shaders: &crate::shaders::Shaders,
+        global_layout: &wgpu::BindGroupLayout,
+        hdr_format: wgpu::TextureFormat,
+    ) -> Pipelines {
         let trace_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("path_tracer.wgsl"),
             source: wgpu::ShaderSource::Wgsl(shaders.source_or_panic("path_tracer.wgsl").into()),
@@ -274,7 +294,6 @@ impl PathTracerPass {
                 storage(5),
                 storage(6),
                 storage(7),
-                storage(8),
                 wgpu::BindGroupLayoutEntry {
                     binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -285,6 +304,9 @@ impl PathTracerPass {
                     },
                     count: None,
                 },
+                sampled(10),
+                sampled(11),
+                sampled(12),
             ],
         });
         let trace_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -303,7 +325,6 @@ impl PathTracerPass {
                 sampled(5),
                 sampled(6),
                 sampled(7),
-                sampled(8),
                 storage(9),
             ],
         });
@@ -322,6 +343,61 @@ impl PathTracerPass {
                 cache: None,
             })
         };
+        // The composite: the remodulated light added over the scene's HDR target, its alpha left as it is.
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Path composite BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let composite_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Path composite PL"),
+            bind_group_layouts: &[Some(&composite_layout)],
+            immediate_size: 0,
+        });
+        let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Path composite"),
+            layout: Some(&composite_pl),
+            vertex: wgpu::VertexState {
+                module: &denoise_module,
+                entry_point: Some("composite_vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &denoise_module,
+                entry_point: Some("composite_fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: hdr_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Pipelines {
             trace: make(&trace_pl, &trace_module, "path_trace"),
             trace_layout,
@@ -329,6 +405,8 @@ impl PathTracerPass {
             atrous: make(&denoise_pl, &denoise_module, "atrous"),
             remodulate: make(&denoise_pl, &denoise_module, "remodulate"),
             denoise_layout,
+            composite,
+            composite_layout,
         }
     }
 
@@ -339,6 +417,13 @@ impl PathTracerPass {
     /// What the shading pass composites while the path tracer runs.
     pub fn output_view(&self) -> &wgpu::TextureView {
         &self.targets.output.view
+    }
+
+    /// Where the shading pass writes its finished surface while `enabled` (shading.wgsl `path_surface_*`). New ones
+    /// after a resize, like `output_view`.
+    pub fn surface_views(&self) -> [&wgpu::TextureView; 3] {
+        let [a, b, c] = &self.targets.surface;
+        [&a.view, &b.view, &c.view]
     }
 
     /// True when the targets were made anew: whoever reads `output_view` must take the new one.
@@ -415,8 +500,10 @@ impl PathTracerPass {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&t.light.view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t.gbuf.view) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&t.albedo.view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&t.emission.view) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(vis_view) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&t.surface[0].view) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&t.surface[1].view) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&t.surface[2].view) },
             ],
         });
         {
@@ -466,7 +553,6 @@ impl PathTracerPass {
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&history.view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(velocity_view) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&t.albedo.view) },
-                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&t.emission.view) },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&output.view) },
                 ],
             });
@@ -482,6 +568,36 @@ impl PathTracerPass {
             wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
         );
         self.current = prev;
+    }
+
+    /// Mode 0, after `record`: the traced light added over `target`, the scene's HDR picture the shading pass drew
+    /// (its direct light, glow, sky and fog). The same size as this pass's targets.
+    pub fn composite(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let Some(p) = &self.pipelines else { return };
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Path composite BG"),
+            layout: &p.composite_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&self.targets.output.view),
+            }],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Path composite"),
+            multiview_mask: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&p.composite);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
 
