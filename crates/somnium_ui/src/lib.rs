@@ -4032,6 +4032,14 @@ impl UiManager {
         self.prompt_unsaved_action(EditorEvent::NewScene);
     }
 
+    /// Ask "Save changes?" before the editor closes; the answer comes back as [`EditorEvent::Quit`]. Asking again
+    /// while it is open changes nothing.
+    pub fn prompt_unsaved_quit(&mut self) {
+        if !self.unsaved_open {
+            self.prompt_unsaved_action(EditorEvent::Quit { after_save: false });
+        }
+    }
+
     fn prompt_unsaved_action(&mut self, action: EditorEvent) {
         if !self.scene_dirty {
             self.editor_events.push_back(action);
@@ -9483,10 +9491,8 @@ impl UiManager {
                 }
                 if msg.destination == self.unsaved_save {
                     self.close_unsaved();
-                    self.editor_events.push_back(EditorEvent::SaveScene);
-                    if let Some(action) = self.pending_scene_action.take() {
-                        self.editor_events.push_back(action);
-                    }
+                    let action = self.pending_scene_action.take();
+                    self.editor_events.extend(events_after_save(action));
                     continue;
                 }
                 if msg.destination == self.unsaved_discard {
@@ -11115,6 +11121,33 @@ mod dpi_tests {
         let mut ui = UserInterface::new(1280.0, 720.0);
         ui.draw_ctx.font_atlas.set_render_scale(2.0);
         assert_eq!(ui.draw_ctx.font_atlas.render_scale, 2.0);
+    }
+}
+
+/// What "Save" in "Save changes?" sends: the save, then the action that asked. Quitting saves inside the quit, so a
+/// save that fails or is cancelled keeps the editor open.
+fn events_after_save(action: Option<EditorEvent>) -> Vec<EditorEvent> {
+    match action {
+        Some(EditorEvent::Quit { .. }) => vec![EditorEvent::Quit { after_save: true }],
+        action => std::iter::once(EditorEvent::SaveScene).chain(action).collect(),
+    }
+}
+
+#[cfg(test)]
+mod unsaved_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn save_then_quit_is_one_quit_that_saves_first() {
+        let events = events_after_save(Some(EditorEvent::Quit { after_save: false }));
+        assert!(matches!(events.as_slice(), [EditorEvent::Quit { after_save: true }]));
+    }
+
+    #[test]
+    fn save_then_new_still_saves_then_runs_the_action() {
+        let events = events_after_save(Some(EditorEvent::NewScene));
+        assert!(matches!(events.as_slice(), [EditorEvent::SaveScene, EditorEvent::NewScene]));
+        assert!(matches!(events_after_save(None).as_slice(), [EditorEvent::SaveScene]));
     }
 }
 

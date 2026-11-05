@@ -571,6 +571,12 @@ pub enum EditorEvent {
     ToggleWaterUnderwater,
     /// Title-bar close — same path as the native window X.
     CloseWindow,
+    /// The answer to "Save changes?" on the way out: quit, saving first when `after_save` (a save that fails or is
+    /// cancelled keeps the editor open).
+    Quit {
+        /// Save before quitting.
+        after_save: bool,
+    },
 
     // ── Phase 16-D: scripting ───────────────────────────────────────────
     /// Attach the `.luau` file at this path to the selected entity.
