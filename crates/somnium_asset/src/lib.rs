@@ -841,6 +841,86 @@ fn images_for_parts(document: &gltf::Document, parts: &HashSet<usize>) -> HashSe
     images
 }
 
+/// One uploaded part of a glTF, as the editor names it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GltfPart {
+    /// The node's name.
+    pub node: String,
+    /// The mesh's name.
+    pub mesh: String,
+    /// The material's name.
+    pub material: String,
+    /// The image files (or embedded image names) the material reads.
+    pub images: Vec<String>,
+}
+
+/// What each uploaded part of a glTF is, in `ImportedMesh.node` order. Reads the JSON only (a `.glb`'s first chunk),
+/// never geometry or pixels, so asking about a 400 MB bank costs one JSON parse.
+///
+/// # Errors
+/// The file cannot be read or is not glTF.
+pub fn describe_gltf_parts(path: &Path) -> Result<Vec<GltfPart>, String> {
+    use std::io::Read;
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut file = std::fs::File::open(path).map_err(|e| fail(&e))?;
+    let mut bytes = Vec::new();
+    let mut header = [0u8; 20];
+    if file.read_exact(&mut header).is_ok() && &header[..4] == b"glTF" {
+        let length = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
+        bytes.resize(length, 0);
+        file.read_exact(&mut bytes).map_err(|e| fail(&e))?;
+    } else {
+        bytes = std::fs::read(path).map_err(|e| fail(&e))?;
+    }
+    let gltf::Gltf { document, .. } = gltf::Gltf::from_slice(&bytes).map_err(|e| fail(&e))?;
+    fn image(texture: Option<gltf::Texture>) -> Option<String> {
+        let source = texture?.source();
+        Some(match source.source() {
+            gltf::image::Source::Uri { uri, .. } => uri.to_owned(),
+            gltf::image::Source::View { .. } => {
+                source.name().map_or_else(|| format!("embedded image {}", source.index()), str::to_owned)
+            }
+        })
+    }
+    fn walk(node: &gltf::Node, parts: &mut Vec<GltfPart>) {
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                let material = primitive.material();
+                let pbr = material.pbr_metallic_roughness();
+                let images = [
+                    image(pbr.base_color_texture().map(|t| t.texture())),
+                    image(material.normal_texture().map(|t| t.texture())),
+                    image(pbr.metallic_roughness_texture().map(|t| t.texture())),
+                    image(material.occlusion_texture().map(|t| t.texture())),
+                    image(material.emissive_texture().map(|t| t.texture())),
+                ];
+                let mut seen = Vec::new();
+                for name in images.into_iter().flatten() {
+                    if !seen.contains(&name) {
+                        seen.push(name);
+                    }
+                }
+                parts.push(GltfPart {
+                    node: node.name().unwrap_or_default().to_owned(),
+                    mesh: mesh.name().unwrap_or_default().to_owned(),
+                    material: material.name().unwrap_or("(default material)").to_owned(),
+                    images: seen,
+                });
+            }
+        }
+        for child in node.children() {
+            walk(&child, parts);
+        }
+    }
+    let mut parts = Vec::new();
+    if let Some(scene) = document.default_scene().or_else(|| document.scenes().next()) {
+        for root in scene.nodes() {
+            walk(&root, &mut parts);
+        }
+    }
+    Ok(parts)
+}
+
 /// Every image the document holds, decoded on all cores (only `wanted`, if
 /// given; the rest are 1×1 magenta stand-ins). The first failure fails the
 /// file, as `gltf::import` did.
@@ -1385,6 +1465,49 @@ mod height_sidecar_tests {
         assert!((depth - 0.035).abs() < 1e-6, "the note sets the depth");
         assert!(sidecar_height_path(&root, "textures/stone_diff_2k.jpg").is_none(), "no map, no parallax");
         assert!(sidecar_height_path(&root, "textures/brick.png").is_none(), "only _diff colour maps qualify");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod describe_parts_tests {
+    use super::*;
+
+    /// Two parts in walk order, each named with its material and the images it reads; the geometry is never read.
+    #[test]
+    fn parts_are_named_in_import_order_with_their_material_and_images() {
+        let root = std::env::temp_dir().join(format!("somnium-describe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("bench.gltf");
+        let json = r#"{
+          "asset": {"version": "2.0"},
+          "scene": 0,
+          "scenes": [{"nodes": [0]}],
+          "nodes": [{"name": "Bench", "mesh": 0, "children": [1]}, {"name": "Cushion", "mesh": 1}],
+          "meshes": [
+            {"name": "bench_mesh", "primitives": [{"attributes": {"POSITION": 0}, "material": 0}]},
+            {"name": "cushion_mesh", "primitives": [{"attributes": {"POSITION": 0}, "material": 1}]}
+          ],
+          "materials": [
+            {"name": "oak", "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}, "normalTexture": {"index": 1}},
+            {"name": "velvet"}
+          ],
+          "textures": [{"source": 0}, {"source": 1}],
+          "images": [{"uri": "textures/oak_diff.png"}, {"uri": "textures/oak_nor.png"}],
+          "buffers": [{"byteLength": 36, "uri": "missing.bin"}],
+          "bufferViews": [{"buffer": 0, "byteLength": 36}],
+          "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                         "min": [0, 0, 0], "max": [1, 1, 1]}]
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let parts = describe_gltf_parts(&path).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].node, "Bench");
+        assert_eq!(parts[0].material, "oak");
+        assert_eq!(parts[0].images, vec!["textures/oak_diff.png", "textures/oak_nor.png"]);
+        assert_eq!(parts[1].node, "Cushion");
+        assert_eq!(parts[1].material, "velvet");
+        assert!(parts[1].images.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 }
