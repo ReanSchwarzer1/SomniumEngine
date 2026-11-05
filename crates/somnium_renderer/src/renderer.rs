@@ -657,6 +657,9 @@ pub struct SomniumRenderer {
 
     /// The list of draw commands submitted this frame.
     draw_queue: Vec<DrawCommand>,
+    /// Last frame's opaque draw commands, swapped out of `draw_queue` rather than cleared: the editor clicks and
+    /// stands objects on what games draw themselves (TSF's rooms), which has no mesh component to ask.
+    last_frame_draws: Vec<DrawCommand>,
 
     /// Per-entity vertex paint masks (see `crate::vertex_paint`).
     pub vertex_paint: crate::vertex_paint::VertexPaintPool,
@@ -1739,6 +1742,7 @@ impl SomniumRenderer {
             clipmap_pass,
             terrain_queue: Vec::with_capacity(4),
             draw_queue: Vec::with_capacity(256),
+            last_frame_draws: Vec::new(),
             vertex_paint: crate::vertex_paint::VertexPaintPool::default(),
 
             water_textures_bind_group,
@@ -3473,6 +3477,12 @@ impl SomniumRenderer {
     /// Mark what is submitted until the next call as the first-person rig (or not): see `first_person`.
     pub fn set_first_person(&mut self, on: bool) {
         self.first_person = on;
+    }
+
+    /// The opaque draws of the last rendered frame, for the editor's picking and ground queries.
+    #[must_use]
+    pub fn last_frame_draws(&self) -> &[DrawCommand] {
+        &self.last_frame_draws
     }
 
     pub fn submit(&mut self, cmd: DrawCommand) {
@@ -7203,6 +7213,7 @@ impl SomniumRenderer {
     /// Must run on *every* path out of `render`, including the ones that bail
     /// before drawing.
     fn clear_frame_queues(&mut self) {
+        std::mem::swap(&mut self.last_frame_draws, &mut self.draw_queue);
         self.draw_queue.clear();
         self.reactive_draws.clear();
         self.first_person_casters.clear();

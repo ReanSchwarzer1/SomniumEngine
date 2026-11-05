@@ -216,7 +216,7 @@ const GRID: f32 = 8.0;
 
 impl MeshIndex {
     fn build(world: &World, renderer: &SomniumRenderer) -> Self {
-        let mut items = Vec::new();
+        let mut items = drawn_items(world, renderer);
         for (entity, mesh) in world.iter_with::<MeshComponent>() {
             if crate::is_hidden(world, entity) {
                 continue;
@@ -267,6 +267,41 @@ impl MeshIndex {
         found.dedup();
         found
     }
+}
+
+/// What a game drew itself last frame for entities with no mesh component (TSF's rooms: a name, a transform and its own
+/// room component), as mesh items. The draw's sort key names the entity, by the convention the selection outline uses;
+/// a draw whose box is nowhere near its entity is someone else's key (characters key by vertex offset) and is left out.
+fn drawn_items(world: &World, renderer: &SomniumRenderer) -> Vec<MeshItem> {
+    let mut items = Vec::new();
+    for draw in renderer.last_frame_draws() {
+        let index = draw.sort_key.0 as u32;
+        if index == 0 {
+            continue;
+        }
+        let Some(entity) = world.find_entity_by_index(index) else {
+            continue;
+        };
+        if world.get::<MeshComponent>(entity).is_some() || crate::is_hidden(world, entity) {
+            continue;
+        }
+        let Some((min, max)) = renderer.geometry.mesh_aabb(draw.vertex_offset) else {
+            continue;
+        };
+        let (lo, hi) = transformed_box(draw.transform, glam::Vec3::from_array(min), glam::Vec3::from_array(max));
+        let at = model_of(world, entity).map_or(glam::Vec3::ZERO, |m| m.w_axis.truncate());
+        let near = at.cmpge(lo - glam::Vec3::ONE).all() && at.cmple(hi + glam::Vec3::ONE).all();
+        if !near || !lo.is_finite() || !hi.is_finite() {
+            continue;
+        }
+        let mesh = MeshComponent {
+            vertex_offset: draw.vertex_offset,
+            index_offset: draw.index_offset,
+            index_count: draw.index_count,
+        };
+        items.push(MeshItem { entity, mesh, model: draw.transform, min: lo, max: hi });
+    }
+    items
 }
 
 /// The nearest terrain hit along a unit ray.
@@ -779,6 +814,26 @@ impl<G: GameApp> Engine<G> {
                 boxes.push((d2.sqrt(), entity));
             }
         }
+        // What the game drew itself (TSF's rooms): picked by the same box-then-triangles test.
+        let drawn = drawn_items(&self.world, renderer);
+        let mut drawn_meshes: HashMap<Entity, (MeshComponent, glam::Mat4)> = HashMap::new();
+        for item in &drawn {
+            if !pickable(&self.world, item.entity) {
+                continue;
+            }
+            let inverse = item.model.inverse();
+            let (lo, hi) = renderer
+                .geometry
+                .mesh_aabb(item.mesh.vertex_offset)
+                .map_or((glam::Vec3::ZERO, glam::Vec3::ZERO), |(a, b)| (glam::Vec3::from_array(a), glam::Vec3::from_array(b)));
+            let local_origin = inverse.transform_point3(origin);
+            let local_direction = inverse.transform_vector3(direction);
+            if let Some(t) = ray_aabb_distance(local_origin, local_direction, lo, hi) {
+                let hit = item.model.transform_point3(local_origin + local_direction * t);
+                boxes.push((origin.distance(hit), item.entity));
+                drawn_meshes.insert(item.entity, (item.mesh, item.model));
+            }
+        }
         boxes.sort_by(|a, b| a.0.total_cmp(&b.0));
         boxes.dedup_by_key(|(_, entity)| *entity);
         let mut best: Option<(f32, Entity)> = None;
@@ -786,10 +841,8 @@ impl<G: GameApp> Engine<G> {
             if best.is_some_and(|(d, _)| box_distance > d) {
                 break;
             }
-            let exact = if let Some(mesh) = self.world.get::<MeshComponent>(entity).copied() {
-                let Some(model) = model_of(&self.world, entity) else {
-                    continue;
-                };
+            let own = self.world.get::<MeshComponent>(entity).copied().zip(model_of(&self.world, entity));
+            let exact = if let Some((mesh, model)) = own.or_else(|| drawn_meshes.get(&entity).copied()) {
                 match self.bvh_for(mesh) {
                     Some(bvh) => {
                         let surface = MeshSurface {
