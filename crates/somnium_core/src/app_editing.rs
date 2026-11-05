@@ -1513,12 +1513,18 @@ impl<G: GameApp> Engine<G> {
         let tools = self.editing.prefix_tools.get(&prefix)?;
         match tools.as_slice() {
             [] => None,
-            [one] => Some(format!("{one} (it writes \"{prefix} / ...\")")),
-            [first, rest @ ..] => Some(format!("{first} and {} more tool{} (they write \"{prefix} / ...\")", rest.len(), if rest.len() == 1 { "" } else { "s" })),
+            [one] => Some(format!("{one} (it names its objects \"{prefix} / ...\")")),
+            [first, rest @ ..] => Some(format!(
+                "{first} (it names its objects \"{prefix} / ...\"; {} more tool{} touch them)",
+                rest.len(),
+                if rest.len() == 1 { "" } else { "s" }
+            )),
         }
     }
 
-    /// The project's tools whose source mentions `prefix`, newest first.
+    /// The project's tools whose source mentions `prefix`, likeliest maker first: a tool that sets the prefix as a
+    /// constant (`TAG = 'Furnish 20261005'`), then one whose file name shares a word with it, then the oldest, since
+    /// the maker predates the fixers and audits that mention its objects later.
     fn tools_writing(&self, prefix: &str) -> Vec<String> {
         let Some(root) = self.config.project_root.as_ref() else {
             return Vec::new();
@@ -1526,19 +1532,19 @@ impl<G: GameApp> Engine<G> {
         let Ok(entries) = std::fs::read_dir(root.join("tools")) else {
             return Vec::new();
         };
-        let mut found: Vec<(std::time::SystemTime, String)> = entries
+        let mut found: Vec<(u8, std::time::SystemTime, String)> = entries
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "py"))
             .filter_map(|entry| {
                 let text = std::fs::read_to_string(entry.path()).ok()?;
-                text.contains(prefix).then(|| {
-                    let when = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-                    (when, format!("tools/{}", entry.file_name().to_string_lossy()))
-                })
+                let stem = entry.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let score = maker_score(prefix, &stem, &text)?;
+                let when = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                Some((score, when, format!("tools/{}", entry.file_name().to_string_lossy())))
             })
             .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0));
-        found.into_iter().map(|(_, name)| name).collect()
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, _, name)| name).collect()
     }
 
     /// What has been done to it: saved in the layer, or changed since it was first selected.
@@ -1613,6 +1619,30 @@ fn made_by(document: &Value) -> Option<String> {
         .find_map(|value| value.as_str().map(str::to_owned))
 }
 
+/// How likely a tool (file `stem`, source `text`) is to be the one that makes objects named `prefix / ...`: 2 for
+/// setting it as a constant (`TAG = 'Furnish 20261005'`), 1 for a file name sharing a word with it; `None` when it
+/// never mentions it.
+fn maker_score(prefix: &str, stem: &str, text: &str) -> Option<u8> {
+    if !text.contains(prefix) {
+        return None;
+    }
+    let sets_it = text.lines().any(|line| {
+        let Some((name, value)) = line.trim_start().split_once('=') else {
+            return false;
+        };
+        let name = name.trim();
+        !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && value.trim_start().trim_start_matches('f').trim_start_matches(['\'', '"']).starts_with(prefix)
+    });
+    let stem = stem.to_ascii_lowercase();
+    let named = prefix
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.len() >= 4)
+        .any(|word| stem.contains(&word.to_ascii_lowercase()));
+    Some(u8::from(sets_it) * 2 + u8::from(named))
+}
+
 /// A short list for a toast: the first few, then a count.
 fn summarise(items: &[String]) -> String {
     let shown: Vec<&str> = items.iter().take(3).map(String::as_str).collect();
@@ -1655,6 +1685,16 @@ mod tests {
         assert_eq!(project_relative(Some(root), joined), "scenes/terrain_tiles/t_0_0.scene.json");
         let cell = Path::new("F:/Somnium Games/rimeborn-fp/scenes/sunscar_cells/s_-64_9.scene.json");
         assert_eq!(project_relative(Some(root), cell), "scenes/sunscar_cells/s_-64_9.scene.json");
+    }
+
+    #[test]
+    fn the_tool_that_names_a_prefix_is_its_maker_not_the_ones_that_mention_it() {
+        let maker = "import json\nTAG = 'Furnish 20261005'\n";
+        let fixer = "names = ('Furnish 20261005 / Design studio / chair',)\n";
+        assert_eq!(maker_score("Furnish 20261005", "furnish_20261005", maker), Some(3));
+        assert_eq!(maker_score("Furnish 20261005", "reach_fix_20261005", fixer), Some(1), "the date in its name");
+        assert_eq!(maker_score("Furnish 20261005", "forest_o_20261029", fixer), Some(0));
+        assert_eq!(maker_score("Furnish 20261005", "anything", "nothing here"), None);
     }
 
     #[test]
