@@ -86,6 +86,11 @@ def _distance(a, b):
     return math.dist(a, b)
 
 
+def same_name(recorded, name):
+    """The same name, or the engine's 63-byte cut of it (recorded names come from the live world)."""
+    return recorded == name or (len(recorded.encode("utf-8")) >= 60 and name.startswith(recorded))
+
+
 class _Index:
     """Every entity across one or more documents: by id, with its file and its parent's name."""
 
@@ -99,12 +104,12 @@ class _Index:
 
 
 def _mismatch(entry, entity, parent):
-    if entry.get("name") and name_of(entity) != entry["name"]:
+    if entry.get("name") and not same_name(entry["name"], name_of(entity)):
         return f'its id now names "{name_of(entity)}", not "{entry["name"]}"'
     mesh = mesh_of(entity)
     if entry.get("mesh") and mesh and mesh != entry["mesh"]:
         return f"its id now names a different mesh ({mesh})"
-    if entry.get("parent") and parent and parent != entry["parent"]:
+    if entry.get("parent") and parent and not same_name(entry["parent"], parent):
         return f'its id now sits under "{parent}", not "{entry["parent"]}"'
     return None
 
@@ -114,11 +119,11 @@ def _rematch(entry, index, claimed, radius):
         return None
     best = []
     for i, (_, entity) in enumerate(index.entities):
-        if name_of(entity) != entry["name"] or entity.get("persistent_id") in claimed:
+        if not same_name(entry["name"], name_of(entity)) or entity.get("persistent_id") in claimed:
             continue
         if entry.get("mesh") and mesh_of(entity) != entry["mesh"]:
             continue
-        if entry.get("parent") and index.parent_names[i] != entry["parent"]:
+        if entry.get("parent") and not same_name(entry["parent"], index.parent_names[i]):
             continue
         was, now = entry.get("was"), translation_of(entity)
         if was is None:
@@ -277,6 +282,11 @@ def self_check():
                                   cells=True)
     assert kept == 1 and layer["entities"][0]["from"] == "scenes/cells/s_1_0.scene.json" and not lost
     assert layer["entities"][1].get("from") == "", "the scene's own entry is not a cell's"
+    # A name the engine cut at 63 bytes still matches the whole one.
+    whole = "Lights 20261004 / panel for Visual 20260930 / signed drawing task spot"
+    layer = {"format": FORMAT, "entities": [change("p", whole[:63], [-7.12, 2.0, -14.9])]}
+    assert match(layer, {"": {"entities": [entity("p", whole, [-7.12, 2.0, -14.9])]}})[0] == 1
+    assert not same_name("Bench", "Bench 2")
     print("self-check ok")
 
 

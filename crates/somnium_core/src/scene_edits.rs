@@ -201,6 +201,12 @@ fn id_of(entity: &Value) -> Option<&str> {
     entity.get("persistent_id").and_then(Value::as_str)
 }
 
+/// Whether a recorded name is this entity's: the same, or the engine's 63-byte `Name` cut of it (a recorded name
+/// comes from the live world, a document's from the generator, which writes names whole).
+fn same_name(recorded: &str, name: &str) -> bool {
+    recorded == name || (recorded.len() >= 60 && name.starts_with(recorded))
+}
+
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
@@ -303,14 +309,14 @@ impl Index {
 
 /// Why `entity` is not the object `entry` was recorded against, or `None` when it is.
 fn mismatch(entry: &EditEntry, entity: &Value, parent: &str) -> Option<String> {
-    if !entry.name.is_empty() && name_of(entity) != entry.name {
+    if !entry.name.is_empty() && !same_name(&entry.name, name_of(entity)) {
         return Some(format!("its id now names \"{}\", not \"{}\"", name_of(entity), entry.name));
     }
     let mesh = mesh_of(entity);
     if !entry.mesh.is_empty() && !mesh.is_empty() && mesh != entry.mesh {
         return Some(format!("its id now names a different mesh ({mesh})"));
     }
-    if !entry.parent.is_empty() && !parent.is_empty() && parent != entry.parent {
+    if !entry.parent.is_empty() && !parent.is_empty() && !same_name(&entry.parent, parent) {
         return Some(format!("its id now sits under \"{parent}\", not \"{}\"", entry.parent));
     }
     None
@@ -331,10 +337,10 @@ fn rematch(
     let mut best: Vec<(f32, usize)> = entities
         .iter()
         .enumerate()
-        .filter(|(_, e)| name_of(e) == entry.name)
+        .filter(|(_, e)| same_name(&entry.name, name_of(e)))
         .filter(|(_, e)| id_of(e).is_some_and(|id| !claimed.contains(id)))
         .filter(|(_, e)| entry.mesh.is_empty() || mesh_of(e) == entry.mesh)
-        .filter(|(_, e)| entry.parent.is_empty() || index.parent_name(e) == entry.parent)
+        .filter(|(_, e)| entry.parent.is_empty() || same_name(&entry.parent, &index.parent_name(e)))
         .filter_map(|(i, e)| match (entry.was, translation_of(e)) {
             (Some(was), Some(now)) => (distance(was, now) <= radius).then_some((distance(was, now), i)),
             (None, _) => Some((0.0, i)),
@@ -702,6 +708,20 @@ mod tests {
         assert_eq!(applied.rematched, vec![(A.to_owned(), B.to_owned())]);
         assert_eq!(translation_of(&regenerated["entities"][0]), Some([1.0, 0.0, 2.0]));
         assert_eq!(translation_of(&regenerated["entities"][1]), Some([2.5, 0.2, 2.0]), "the other weed is untouched");
+    }
+
+    #[test]
+    fn a_name_the_engine_cut_at_63_bytes_still_matches_the_whole_one() {
+        let whole = "Lights 20261004 / panel for Visual 20260930 / signed drawing task spot";
+        let cut = &whole[..63];
+        let lamp = entity(A, cut, [-7.12, 2.0, -14.9]);
+        let mut edits = layer();
+        record_change(&mut edits, &lamp, &moved(&lamp, [-7.12, 1.6, -14.9]), &Origin::default());
+        let mut document = scene(vec![entity(A, whole, [-7.12, 2.0, -14.9])]);
+        let applied = apply(&mut document, &mut edits, Scope::Scene);
+        assert_eq!(applied.changed, vec![A.to_owned()], "{:?}", applied.orphaned);
+        // A short name is never a prefix match: "Bench" is not "Bench 2".
+        assert!(!same_name("Bench", "Bench 2"));
     }
 
     #[test]
