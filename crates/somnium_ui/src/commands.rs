@@ -1255,6 +1255,16 @@ fn declarations() -> Vec<Command> {
             selection
         ),
         command!(
+            "editor.level.select_looked_at",
+            "Select What You Look At",
+            "Level",
+            Some(Chord::press(CommandKey::Function(4))),
+            "Select the object at the centre of the view. In Play it stops first and selects it in the editor, framed.",
+            A::LevelTool(L::SelectLookedAt),
+            VIEW,
+            always
+        ),
+        command!(
             "editor.level.copy_identity",
             "Copy What This Is",
             "Level",
@@ -2464,6 +2474,7 @@ pub fn icon_for(id: &str) -> crate::icons::IconId {
         "editor.level.isolate" => I::Focus,
         "editor.level.select_parent" => I::Select,
         "editor.level.copy_identity" => I::Copy,
+        "editor.level.select_looked_at" => I::Focus,
         "editor.asset.import_model" => I::Import,
         "editor.asset.new_material" => I::MaterialBall,
         "editor.edit.undo" => I::Undo,

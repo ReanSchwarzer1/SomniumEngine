@@ -2942,6 +2942,21 @@ impl GameApp for HelloGame {
         info!("HelloGame shutting down â€” goodbye!");
     }
 
+    /// A level opens where its author put its camera, not where the last map left the editor's: a streamed world
+    /// opened elsewhere showed an empty grey void until something was selected and framed.
+    fn on_scene_loaded(&mut self, ctx: &mut EngineContext, _path: &std::path::Path) {
+        if play_session(ctx) {
+            return;
+        }
+        if let Some(world) = scene_camera_world(ctx.world) {
+            let (_, rotation, position) = world.to_scale_rotation_translation();
+            let forward = rotation * Vec3::NEG_Z;
+            self.camera.position = position;
+            self.camera.yaw = forward.z.atan2(forward.x).to_degrees();
+            self.camera.pitch = forward.y.clamp(-1.0, 1.0).asin().to_degrees();
+        }
+    }
+
     fn on_map_loaded(&mut self, ctx: &mut EngineContext, result: &MapLoadResult) {
         self.apply_loaded_map(ctx, result);
     }

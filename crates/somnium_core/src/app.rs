@@ -113,22 +113,27 @@ fn shortcut_action_for(
     modifiers: somnium_ui::message::Modifiers,
     game_owns_keyboard: bool,
 ) -> Option<somnium_ui::commands::CommandAction> {
-    somnium_ui::commands::Chord::from_winit(
+    use somnium_ui::{commands::CommandAction as A, editor_event::LevelTool as L};
+    let chord = somnium_ui::commands::Chord::from_winit(
         code,
         modifiers.command(),
         modifiers.shift,
         modifiers.alt,
         false,
-    )
+    )?;
+    let action = somnium_ui::commands::registry().binding(chord)?.action;
     // While the game owns the keyboard — flying the viewport, or in a play
     // session — an unmodified shortcut stands down and the key falls through.
     // Modified chords are unaffected: `Ctrl+S` is unambiguous and should still
-    // save mid-flight and mid-play.
-    .filter(|chord| !game_owns_keyboard || chord.has_modifier())
-    .and_then(|chord| somnium_ui::commands::registry().binding(chord))
-    .map(|command| command.action)
-    // The level tools are edit-mode tools, modified or not: Shift+F or Shift+H mid-play is a sprinting player's key.
-    .filter(|action| !game_owns_keyboard || !matches!(action, somnium_ui::commands::CommandAction::LevelTool(_)))
+    // save mid-flight and mid-play. The level tools are edit-mode tools,
+    // modified or not (Shift+F mid-play is a sprinting player's key), except
+    // Select What You Look At (F4), which is made for Play.
+    if game_owns_keyboard && !matches!(action, A::LevelTool(L::SelectLookedAt)) {
+        if !chord.has_modifier() || matches!(action, A::LevelTool(_)) {
+            return None;
+        }
+    }
+    Some(action)
 }
 
 fn shortcut_preserves_game_key(action: somnium_ui::commands::CommandAction) -> bool {
@@ -204,6 +209,11 @@ mod shortcut_input_tests {
             Some(CommandAction::LevelTool(LevelTool::DropToGround))
         );
         assert_eq!(shortcut_action_for(KeyCode::End, Modifiers::default(), true), None);
+        assert_eq!(
+            shortcut_action_for(KeyCode::F4, Modifiers::default(), true),
+            Some(CommandAction::LevelTool(LevelTool::SelectLookedAt)),
+            "F4 is made for Play: what you see, stopped and selected"
+        );
     }
 
     /// The same rule, reached the other way: a play session.
@@ -11138,6 +11148,7 @@ impl<G: GameApp> Engine<G> {
                     L::SelectParent => self.select_parent(),
                     L::SaveSceneAs => self.save_scene_as(),
                     L::CopyIdentity => self.copy_identity(),
+                    L::SelectLookedAt => self.select_looked_at(),
                 }
             }
 

@@ -792,6 +792,8 @@ pub enum LevelTool {
     SaveSceneAs,
     /// Put the selection's identity card on the clipboard.
     CopyIdentity,
+    /// Select the object at the centre of the view; in Play, stop first, so what you saw is what you fix.
+    SelectLookedAt,
 }
 
 /// Designer actions whose implementation belongs to the engine host.

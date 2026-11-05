@@ -723,6 +723,44 @@ impl<G: GameApp> Engine<G> {
     /// the whole object it belongs to. Clicking the selected object again picks the part.
     pub(super) fn click_pick(&mut self) -> Option<Entity> {
         let (origin, direction) = self.cursor_ray()?;
+        self.pick_along(origin, direction)
+    }
+
+    /// F4: the object at the centre of the view. In Play, stop first and select it in the restored editor world (by
+    /// persistent id), framed, so what you saw while playing is what you fix.
+    pub(super) fn select_looked_at(&mut self) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let origin = renderer.camera_pos;
+        let centre = renderer.picking_view_proj().inverse().project_point3(glam::Vec3::new(0.0, 0.0, 0.5));
+        let direction = (centre - origin).normalize_or_zero();
+        let primary = self.selection.primary.take();
+        let hit = (direction != glam::Vec3::ZERO).then(|| self.pick_along(origin, direction)).flatten();
+        self.selection.primary = primary;
+        let id = hit.and_then(|e| self.world.persistent_id(e));
+        let name = hit.map(|e| name_of(&self.world, e));
+        if self.play_session_active {
+            self.handle_editor_event(EditorEvent::StopSimulation);
+        }
+        let Some(name) = name else {
+            self.toast("Nothing to select at the centre of the view (the ground and grass are not objects)");
+            return;
+        };
+        match id.and_then(|id| self.world.entity_by_persistent_id(id)) {
+            Some(entity) => {
+                self.selection.set_single(Some(entity));
+                self.after_selection_change();
+                self.focus_camera_on_selection();
+                self.reveal_selection_in_outliner(true);
+                self.toast(&format!("{name}: selected, the thing you were looking at. End drops it; Ctrl+S keeps it"));
+            }
+            None => self.toast(&format!("{name} only exists while the game runs (the game made it), so there is nothing to edit")),
+        }
+    }
+
+    /// The object nearest along a world ray, triangle-accurate, as [`Self::click_pick`] means it.
+    fn pick_along(&mut self, origin: glam::Vec3, direction: glam::Vec3) -> Option<Entity> {
         let renderer = self.renderer.as_ref()?;
         let pickable = |world: &World, entity: Entity| {
             world.get::<EditorFlags>(entity).is_none_or(|flags| !flags.locked && !flags.hidden)
