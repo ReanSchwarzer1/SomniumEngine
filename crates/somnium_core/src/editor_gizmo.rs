@@ -15,6 +15,8 @@ pub(crate) struct GizmoFollower {
     pub start_transform: Transform,
     pub start_world_translation: glam::Vec3,
     pub parent_world_inverse: glam::Mat4,
+    /// The parent's world rotation, so a world-space turn can be written into the local rotation.
+    pub parent_rotation: glam::Quat,
 }
 
 pub(crate) fn capture_followers(
@@ -36,6 +38,7 @@ pub(crate) fn capture_followers(
                 start_transform,
                 start_world_translation,
                 parent_world_inverse: invert_affine(parent_world)?,
+                parent_rotation: parent_world.to_scale_rotation_translation().1,
             })
         })
         .collect()
@@ -60,7 +63,7 @@ pub(crate) fn apply_followers(
         moved.translation = follower
             .parent_world_inverse
             .transform_point3(follower.start_world_translation + world_offset);
-        moved.rotation = spin * follower.start_transform.rotation;
+        moved.rotation = spin_in_parent(follower.parent_rotation, spin) * follower.start_transform.rotation;
         moved.scale = follower.start_transform.scale * growth;
         if let Some(pivot) = pivot {
             let arm = follower.start_world_translation - pivot;
@@ -105,9 +108,28 @@ pub(crate) fn invert_affine(model: glam::Mat4) -> Option<glam::Mat4> {
     (determinant.is_finite() && determinant.abs() >= 1e-8).then(|| model.inverse())
 }
 
+/// A world-space turn written in the frame of a local rotation: its parent's. A part of a turned object turns about
+/// the axis the gizmo shows, not about that axis read in the parent's frame.
+pub(crate) fn spin_in_parent(parent_rotation: glam::Quat, world_spin: glam::Quat) -> glam::Quat {
+    parent_rotation.inverse() * world_spin * parent_rotation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A part of a turned object turns about the world axis the gizmo drew: its world rotation after the drag is the
+    /// drag's turn times its world rotation before.
+    #[test]
+    fn a_part_of_a_turned_parent_turns_about_the_world_axis() {
+        let parent = glam::Quat::from_rotation_z(0.7) * glam::Quat::from_rotation_x(0.4);
+        let local = glam::Quat::from_rotation_y(0.3);
+        let turn = glam::Quat::from_axis_angle(glam::Vec3::Y, 0.5);
+        let after = parent * spin_in_parent(parent, turn) * local;
+        assert!(after.abs_diff_eq(turn * parent * local, 1e-5));
+        // The old rule, `turn * local`, turned it about the parent's Y instead.
+        assert!(!(parent * turn * local).abs_diff_eq(turn * parent * local, 1e-3));
+    }
 
     #[test]
     fn one_singular_parent_refuses_the_entire_capture() {

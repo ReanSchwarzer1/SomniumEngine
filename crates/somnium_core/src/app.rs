@@ -4951,7 +4951,14 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 || new_t.translation - start.translation,
                 |drag| drag.parent_world.transform_point3(new_t.translation) - drag.gizmo_pos,
             );
-            let spin = new_t.rotation * start.rotation.inverse();
+            // The followers take the turn in world space (each writes it into its own parent's frame).
+            let spin = self.gizmo_drag.as_ref().map_or_else(
+                || new_t.rotation * start.rotation.inverse(),
+                |drag| {
+                    let parent = drag.parent_world.to_scale_rotation_translation().1;
+                    parent * new_t.rotation * start.rotation.inverse() * parent.inverse()
+                },
+            );
             let growth = glam::Vec3::new(
                 safe_ratio(new_t.scale.x, start.scale.x),
                 safe_ratio(new_t.scale.y, start.scale.y),
@@ -13357,8 +13364,11 @@ fn apply_gizmo_drag(
                     snap.rotate_deg,
                 )
                 .to_radians();
+                // The turn is about a world axis; the authored rotation is in the parent's frame.
+                let turn = glam::Quat::from_axis_angle(axis_dir, delta);
+                let parent = drag.parent_world.to_scale_rotation_translation().1;
                 result.rotation =
-                    glam::Quat::from_axis_angle(axis_dir, delta) * drag.start_transform.rotation;
+                    crate::editor_gizmo::spin_in_parent(parent, turn) * drag.start_transform.rotation;
             }
         }
     }
