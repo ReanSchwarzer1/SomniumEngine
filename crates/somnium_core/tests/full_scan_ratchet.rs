@@ -30,7 +30,7 @@ const BASELINE: &[(&str, usize)] = &[
     ("crates/somnium_core/src/app_authoring_specialized.rs", 1),
     ("crates/somnium_core/src/app_designer.rs", 1),
     ("crates/somnium_core/src/authoring/transaction.rs", 3),
-    ("crates/somnium_core/src/clipboard.rs", 8),
+    ("crates/somnium_core/src/clipboard.rs", 7),
     ("crates/somnium_core/src/editor_commands.rs", 12),
     ("crates/somnium_core/src/map.rs", 1),
     ("crates/somnium_core/src/prefab.rs", 7),

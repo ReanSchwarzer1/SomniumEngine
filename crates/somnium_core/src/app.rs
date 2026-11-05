@@ -12080,84 +12080,50 @@ impl<G: GameApp> Engine<G> {
             }
 
             EditorEvent::DuplicateSelected => {
-                if let Some(entity) = self.selection.primary {
-                    let transform = self
-                        .world
-                        .get::<Transform>(entity)
-                        .copied()
-                        .unwrap_or_else(|| Transform::from_translation(glam::Vec3::ZERO));
-                    let name = self
-                        .world
-                        .get::<Name>(entity)
-                        .map(|n| Name::new(&format!("{}_copy", n.as_str())))
-                        .unwrap_or_else(|| Name::new("Entity_copy"));
-                    let light = self.world.get::<LightComponent>(entity).copied();
-                    let audio = self
-                        .world
-                        .get::<crate::AudioEmitterComponent>(entity)
-                        .cloned();
-                    let mesh = self.world.get::<MeshComponent>(entity).copied();
-                    let mat = self.world.get::<MaterialComponent>(entity).copied();
-                    let mesh_kind = self.world.get::<MeshKind>(entity).copied();
-                    let mut water = self.world.get::<WaterComponent>(entity).copied();
-                    if let Some(component) = water.as_mut() {
-                        if let (Some(renderer), Some(render_ctx)) =
-                            (&mut self.renderer, &self.render_ctx)
-                        {
-                            component.water_id = renderer.allocate_water_body_id();
-                            if let Err(error) =
-                                renderer.ensure_water_body(render_ctx, component.descriptor())
-                            {
-                                warn!("Failed to duplicate water data: {error}");
-                            }
+                if self.selection.is_empty() {
+                    return;
+                }
+                // The whole object, every part (an imported model's root alone is an empty shell), beside its
+                // original: the clipboard's subtree copy, under the original's parent, as one undo step.
+                let mut clipboard =
+                    crate::clipboard::EntityClipboard::duplicate(&self.world, self.selection.as_slice());
+                let (renderer, render_ctx) = (&mut self.renderer, &self.render_ctx);
+                clipboard.for_each_snapshot_mut(|snapshot, root| {
+                    if root {
+                        // Offset the duplicate slightly so it's visible.
+                        if let Some(transform) = snapshot.transform.as_mut() {
+                            transform.translation += glam::Vec3::X;
+                        }
+                        let name = snapshot.name.as_ref().map_or_else(|| "Entity".to_owned(), |n| n.as_str().to_owned());
+                        snapshot.name = Some(Name::new(&format!("{name}_copy")));
+                    }
+                    // Terrains are not duplicated — two entities sharing one terrain_id would draw the same
+                    // terrain twice. Nor is the scene's environment, or what was painted onto the original.
+                    snapshot.environment = false;
+                    snapshot.terrain = None;
+                    snapshot.world_partition = None;
+                    snapshot.ui_canvas = None;
+                    snapshot.voxel_terrain = None;
+                    snapshot.foliage = None;
+                    if let Some(component) = snapshot.water.as_mut()
+                        && let (Some(renderer), Some(render_ctx)) = (renderer.as_mut(), render_ctx.as_ref())
+                    {
+                        component.water_id = renderer.allocate_water_body_id();
+                        if let Err(error) = renderer.ensure_water_body(render_ctx, component.descriptor()) {
+                            warn!("Failed to duplicate water data: {error}");
                         }
                     }
-                    let parent = self.world.get::<Parent>(entity).copied();
-                    let is_particle_emitter =
-                        self.world.get::<crate::ParticleEmitter>(entity).is_some();
-                    // Offset the duplicate slightly so it's visible
-                    let mut dup_transform = transform;
-                    dup_transform.translation += glam::Vec3::new(1.0, 0.0, 0.0);
-                    let snapshot = EntitySnapshot {
-                        reflected: EntitySnapshot::capture(&self.world, entity).reflected,
-                        spline: self.world.get::<crate::SplineComponent>(entity).cloned(),
-                        blockout: self
-                            .world
-                            .get::<crate::blockout::BlockoutComponent>(entity)
-                            .copied(),
-                        prefab: None,
-                        persistent_id: Some(somnium_ecs::PersistentId::mint()),
-                        surface_tags: self
-                            .world
-                            .get::<crate::scatter_scene::SurfaceTagsComponent>(entity)
-                            .cloned(),
-                        transform: Some(dup_transform),
-                        name: Some(name),
-                        light,
-                        audio,
-                        mesh,
-                        mat,
-                        wt: Some(WorldTransform::identity()),
-                        environment: false,
-                        decal: None,
-                        mesh_kind,
-                        is_particle_emitter,
-                        // Terrains are not duplicated — two entities sharing
-                        // one terrain_id would draw the same terrain twice.
-                        terrain: None,
-                        world_partition: None,
-                        ui_canvas: None,
-                        voxel_terrain: None,
-                        foliage: None,
-                        water,
-                        parent,
-                        children: None,
-                    };
-                    let cmd = Box::new(CreateEntityCmd::new(snapshot));
-                    self.undo_stack
-                        .push(cmd, &mut self.world, &mut self.selection.primary);
-                    info!("Duplicated entity {}", entity.index());
-                }
+                });
+                let count = clipboard.root_count();
+                use crate::editor_commands::EditorCommand as _;
+                let mut command = crate::clipboard::PasteEntitiesCmd::new(clipboard, None);
+                command.execute(&mut self.world, &mut self.selection.primary);
+                let roots = command.roots().to_vec();
+                self.undo_stack.push_silent(Box::new(command));
+                self.selection.set_many(roots);
+                self.after_selection_change();
+                self.scene_dirty = true;
+                info!("Duplicated {count} object(s) with their parts");
             }
 
             EditorEvent::LoadScene(path) => self.load_scene_file(&path),

@@ -19,6 +19,8 @@ pub struct ClipNode {
     snapshot: EntitySnapshot,
     scripts: Option<somnium_script::attachment::ScriptSet>,
     children: Vec<ClipNode>,
+    /// Where a duplicate goes: its original's parent. `None` for copies, which go where they are pasted.
+    home: Option<Entity>,
 }
 
 /// A copied forest. Empty until something is copied; a paste of an empty
@@ -51,11 +53,21 @@ impl EntityClipboard {
     /// what "these entities" means.
     #[must_use]
     pub fn copy(world: &World, selection: &[Entity]) -> Self {
+        // Children by `Parent`, not the 16-slot `Children` list, so an object with more parts keeps them all.
+        let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        for (entity, parent) in world.iter_with::<Parent>() {
+            if world.is_alive(parent.entity) {
+                children.entry(parent.entity).or_default().push(entity);
+            }
+        }
+        for parts in children.values_mut() {
+            parts.sort_by_key(|part| part.index());
+        }
         let roots: Vec<_> = selection
             .iter()
             .copied()
             .filter(|entity| !has_selected_ancestor(world, *entity, selection))
-            .map(|entity| capture(world, entity))
+            .map(|entity| capture(world, &children, entity))
             .collect();
         let external_ids = world
             .entities()
@@ -64,6 +76,29 @@ impl EntityClipboard {
         Self {
             roots,
             external_ids,
+        }
+    }
+
+    /// Copy a selection to duplicate it: like [`Self::copy`], but each copy goes back under its original's parent.
+    #[must_use]
+    pub fn duplicate(world: &World, selection: &[Entity]) -> Self {
+        let mut clipboard = Self::copy(world, selection);
+        for root in &mut clipboard.roots {
+            root.home = parent_of(world, root.source);
+        }
+        clipboard
+    }
+
+    /// Change every copied snapshot before a paste; the flag says whether it is a top-level copy.
+    pub fn for_each_snapshot_mut(&mut self, mut change: impl FnMut(&mut EntitySnapshot, bool)) {
+        fn walk(node: &mut ClipNode, root: bool, change: &mut impl FnMut(&mut EntitySnapshot, bool)) {
+            change(&mut node.snapshot, root);
+            for child in &mut node.children {
+                walk(child, false, change);
+            }
+        }
+        for root in &mut self.roots {
+            walk(root, true, &mut change);
         }
     }
 }
@@ -86,7 +121,7 @@ fn parent_of(world: &World, entity: Entity) -> Option<Entity> {
         .filter(|parent| world.is_alive(*parent))
 }
 
-fn capture(world: &World, entity: Entity) -> ClipNode {
+fn capture(world: &World, children: &HashMap<Entity, Vec<Entity>>, entity: Entity) -> ClipNode {
     let mut snapshot = EntitySnapshot::capture(world, entity);
     // Links are rebuilt from the tree, so the captured handles are dead
     // weight — and worse, they are handles into the *source* world.
@@ -97,10 +132,11 @@ fn capture(world: &World, entity: Entity) -> ClipNode {
     // original instance root would make edits propagate into unrelated copies.
     snapshot.persistent_id = None;
     snapshot.prefab = None;
-    let children = world
-        .entities()
-        .filter(|child| parent_of(world, *child) == Some(entity))
-        .map(|child| capture(world, child))
+    let parts = children
+        .get(&entity)
+        .into_iter()
+        .flatten()
+        .map(|child| capture(world, children, *child))
         .collect();
     ClipNode {
         source: entity,
@@ -108,7 +144,8 @@ fn capture(world: &World, entity: Entity) -> ClipNode {
         scripts: world
             .get::<somnium_script::attachment::ScriptSet>(entity)
             .cloned(),
-        children,
+        children: parts,
+        home: None,
     }
 }
 
@@ -189,7 +226,8 @@ impl EditorCommand for PasteEntitiesCmd {
         let roots = self.clipboard.roots.clone();
         let parent = self.parent.filter(|parent| world.is_alive(*parent));
         for node in &roots {
-            let entity = self.spawn_node(world, node, parent);
+            let home = node.home.filter(|home| world.is_alive(*home)).or(parent);
+            let entity = self.spawn_node(world, node, home);
             self.roots.push(entity);
         }
         // Internal targets follow the copy; external targets resolve by durable
@@ -519,6 +557,44 @@ mod tests {
         // …and the original is untouched.
         assert_eq!(world.get::<Children>(root).unwrap().count, 1);
         undo.push(Box::new(command), &mut world, &mut selected);
+    }
+
+    /// Duplicate copies every part, past the 16 slots of `Children`, and puts the copy beside its original.
+    #[test]
+    fn a_duplicate_keeps_every_part_and_its_parent() {
+        let mut world = World::new();
+        let room = world.spawn((Name::new("room"), Transform::default(), WorldTransform::identity()));
+        let chest = world.spawn((
+            Name::new("chest"),
+            Transform::default(),
+            WorldTransform::identity(),
+            Parent { entity: room },
+        ));
+        for part in 0..20 {
+            world.spawn((
+                Name::new(&format!("part{part}")),
+                Transform::default(),
+                WorldTransform::identity(),
+                Parent { entity: chest },
+            ));
+        }
+        let mut clipboard = EntityClipboard::duplicate(&world, &[chest]);
+        let mut roots = 0;
+        clipboard.for_each_snapshot_mut(|_, root| roots += usize::from(root));
+        assert_eq!(roots, 1);
+
+        let before = world.entity_count();
+        let mut selected = None;
+        let mut command = PasteEntitiesCmd::new(clipboard, None);
+        command.execute(&mut world, &mut selected);
+        let copy = command.roots()[0];
+        assert_eq!(world.entity_count(), before + 21);
+        assert_eq!(world.get::<Parent>(copy).unwrap().entity, room);
+        let parts = world.iter_with::<Parent>().filter(|(_, p)| p.entity == copy).count();
+        assert_eq!(parts, 20, "every part, not the 16 the Children list holds");
+
+        command.undo(&mut world, &mut selected);
+        assert_eq!(world.entity_count(), before);
     }
 
     /// Pasting is one gesture: one undo removes the whole subtree.
