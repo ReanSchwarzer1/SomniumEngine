@@ -254,8 +254,11 @@ impl<G: GameApp> Engine<G> {
 
     /// Put a parsed cell's entities into the world and restore their GPU state (from the cache, as a rule).
     fn install_cell(&mut self, index: usize, document: &serde_json::Value) -> Result<(), String> {
-        let report = crate::scene_schema::scene_from_json(&mut self.world, &self.type_registry, document)
-            .map_err(|error| error.to_string())?;
+        // The edit layer's entries for this cell (and moves not yet saved) go in before it spawns.
+        let edited = self.edits_before_cell_spawn(index, document);
+        let report =
+            crate::scene_schema::scene_from_json(&mut self.world, &self.type_registry, edited.as_ref().unwrap_or(document))
+                .map_err(|error| error.to_string())?;
         // Which uploads this cell keeps alive (for eviction once no loaded cell draws them).
         let sources: Vec<PathBuf> = cells::sources_of(document)
             .into_keys()
@@ -291,6 +294,7 @@ impl<G: GameApp> Engine<G> {
             }
         }
         if let Some(entities) = self.cell_streamer.loaded.remove(&index) {
+            self.edits_before_cell_unload(&entities);
             for entity in entities.into_iter().rev() {
                 if self.world.is_alive(entity) {
                     self.world.despawn(entity);

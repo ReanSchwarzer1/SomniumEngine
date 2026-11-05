@@ -269,6 +269,8 @@ pub struct OutlinerRow {
     /// Lowercase component tags — `light`, `mesh`, `terrain`, `script`, … —
     /// which is what makes `type:light` a filter rather than a name search.
     pub tags: Vec<&'static str>,
+    /// The mesh file (and material, when it has its own) it draws, for `asset:`.
+    pub asset: String,
 }
 
 /// `app.rs` drains these after each frame and applies them to the ECS world.
@@ -284,6 +286,8 @@ pub enum EditorEvent {
     CreateComponent(String),
     /// Native authoring actions shared by menus and the command palette.
     DesignerTool(DesignerTool),
+    /// Level editing on a generated world: drop, align, floating, hide, isolate, find, save as.
+    LevelTool(LevelTool),
     /// Prefab commands share one route from menus and the command palette.
     Prefab(PrefabAction),
     /// Export the selected authored blockout as a standard mesh asset.
@@ -763,6 +767,31 @@ pub enum GraphToolAction {
     Quest,
     /// Check the open dialogue against the project and play it from the selected node.
     Play,
+}
+
+/// Level-editing actions on whatever world is open, generated or hand-made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelTool {
+    /// Move each selected object down (or up) until it rests on what is under it.
+    DropToGround,
+    /// Tilt each selected object to the surface under it, then drop it.
+    AlignToSurface,
+    /// Select every object near the camera that hangs in the air.
+    FindFloating,
+    /// Hide the selected objects, or show them again when they are all hidden.
+    ToggleHide,
+    /// Hide everything but the selection, for a while.
+    Isolate,
+    /// Show what Isolate hid.
+    EndIsolation,
+    /// Scroll the Outliner to the selection and open its parents.
+    FindInOutliner,
+    /// Select the parent of the selection.
+    SelectParent,
+    /// Write the whole scene to a file you choose.
+    SaveSceneAs,
+    /// Put the selection's identity card on the clipboard.
+    CopyIdentity,
 }
 
 /// Designer actions whose implementation belongs to the engine host.

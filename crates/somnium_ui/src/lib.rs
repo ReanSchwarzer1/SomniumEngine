@@ -3620,6 +3620,47 @@ impl UiManager {
         }
     }
 
+    /// The viewport's selection card: what the selection is and where it came from, several lines. `None` leaves the
+    /// one-line name [`Self::set_status_selection`] put there.
+    pub fn set_selection_card(&mut self, card: Option<&str>) {
+        if let Some(card) = card {
+            self.native_ui
+                .send(TextMessage::set_text(self.vp_overlay_text, card.to_owned()));
+            self.native_ui.set_visibility(self.vp_overlay, true);
+        }
+    }
+
+    /// Open every row above `id` and scroll the Outliner so it shows. False when the Outliner's search hides it.
+    pub fn reveal_outliner_row(&mut self, id: u32, ancestors: &[u32]) -> bool {
+        self.outliner_expanded.extend(ancestors.iter().copied());
+        let Some((rows, _)) = self.last_outliner_state.as_ref() else {
+            return false;
+        };
+        let filter = crate::outliner_filter::OutlinerFilter::parse(&format!(
+            "{} {}",
+            self.outliner_filter, self.persona.outliner_scope
+        ));
+        let mut visible = crate::outliner_filter::OutlinerVisibility::new(filter.is_empty());
+        let position = rows
+            .iter()
+            .filter(|row| filter.matches(row) && visible.shows(row, &self.outliner_expanded))
+            .position(|row| row.id == id);
+        // Rebuilt next frame with the rows just opened.
+        self.last_outliner_state = None;
+        let Some(position) = position else {
+            return false;
+        };
+        let row = theme::active().density.row_tree;
+        let view = self.native_ui.screen_bounds(self.outliner_scroll).h;
+        let offset = (position as f32 * row - view * 0.4).max(0.0);
+        self.native_ui.send(UiMessage::new(
+            self.outliner_scroll,
+            MessageDirection::ToWidget,
+            crate::widgets::scroll_viewer::ScrollViewerMessage::ScrollTo(offset),
+        ));
+        true
+    }
+
     /// Right-hand statistics cluster. Object count is what the editor can
     /// state honestly today; triangles and memory join it when the renderer
     /// reports them per frame (Zeta-G).
@@ -5784,6 +5825,7 @@ impl UiManager {
             A::DesignerTool(action) => self
                 .editor_events
                 .push_back(EditorEvent::DesignerTool(action)),
+            A::LevelTool(tool) => self.editor_events.push_back(EditorEvent::LevelTool(tool)),
             A::ExportBlockout => self.editor_events.push_back(EditorEvent::ExportBlockout),
             A::GraphTool(action) => self.run_graph_tool_action(action),
             A::ImportModel => self.editor_events.push_back(EditorEvent::ImportModel),
@@ -7692,6 +7734,7 @@ impl UiManager {
                 locked: false,
                 script_error: false,
                 tags: Vec::new(),
+                asset: String::new(),
             })
             .collect();
         self.update_outliner_tree(&rows, selected);
@@ -7717,8 +7760,9 @@ impl UiManager {
             self.outliner_filter, self.persona.outliner_scope
         ));
         let mut items = Vec::new();
+        let mut visible = crate::outliner_filter::OutlinerVisibility::new(filter.is_empty());
         for row in entities {
-            if !filter.matches(row) {
+            if !filter.matches(row) || !visible.shows(row, &self.outliner_expanded) {
                 continue;
             }
             let expanded = self.outliner_expanded.contains(&row.id) || !row.has_children;

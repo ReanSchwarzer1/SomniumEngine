@@ -117,6 +117,7 @@ impl OutlinerHierarchy {
                 locked: false,
                 script_error: false,
                 tags: Vec::new(),
+                asset: String::new(),
             });
             if let Some(kids) = kids {
                 pending.extend(kids.iter().rev().map(|&kid| (kid, depth.saturating_add(1))));
@@ -270,6 +271,7 @@ mod tests {
                 locked: false,
                 script_error: false,
                 tags: Vec::new(),
+                asset: String::new(),
             });
             if let Some(kids) = children.get(&id) {
                 for &kid in kids {

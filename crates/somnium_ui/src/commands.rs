@@ -24,6 +24,8 @@ pub enum CommandKey {
     Delete,
     /// A function key.
     Function(u8),
+    /// End.
+    End,
 }
 
 impl fmt::Display for CommandKey {
@@ -33,6 +35,7 @@ impl fmt::Display for CommandKey {
             Self::Space => f.write_str("Space"),
             Self::Delete => f.write_str("Del"),
             Self::Function(number) => write!(f, "F{number}"),
+            Self::End => f.write_str("End"),
         }
     }
 }
@@ -140,6 +143,7 @@ impl Chord {
             KeyCode::KeyZ => CommandKey::Letter('Z'),
             KeyCode::Space => CommandKey::Space,
             KeyCode::Delete => CommandKey::Delete,
+            KeyCode::End => CommandKey::End,
             KeyCode::F1 => CommandKey::Function(1),
             KeyCode::F2 => CommandKey::Function(2),
             KeyCode::F3 => CommandKey::Function(3),
@@ -248,6 +252,7 @@ pub enum CommandSurface {
 pub enum CommandAction {
     CreateComponent(&'static str),
     DesignerTool(crate::editor_event::DesignerTool),
+    LevelTool(crate::editor_event::LevelTool),
     Prefab(crate::editor_event::PrefabAction),
     GraphTool(crate::editor_event::GraphToolAction),
     ExportBlockout,
@@ -674,6 +679,7 @@ fn camera_commands() -> Vec<Command> {
 
 fn declarations() -> Vec<Command> {
     use crate::viewport_layout::ViewportLayout as VL;
+    use crate::editor_event::LevelTool as L;
     use CommandAction as A;
     use CreateKind as C;
     use Workspace as W;
@@ -1169,6 +1175,96 @@ fn declarations() -> Vec<Command> {
             selection
         ),
         command!(
+            "editor.level.drop_to_ground",
+            "Drop to Ground",
+            "Level",
+            Some(Chord::press(CommandKey::End)),
+            "Move the selected objects down (or up) until they rest on what is under them.",
+            A::LevelTool(L::DropToGround),
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.align_to_surface",
+            "Align to Surface",
+            "Level",
+            Some(Chord::press(CommandKey::End).shift()),
+            "Tilt the selected objects to the surface under them, then drop them onto it.",
+            A::LevelTool(L::AlignToSurface),
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.find_floating",
+            "Find Floating Objects",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('F')).ctrl().shift()),
+            "Select every object near the camera that hangs in the air; End then drops them all.",
+            A::LevelTool(L::FindFloating),
+            EDIT,
+            always
+        ),
+        command!(
+            "editor.level.hide",
+            "Hide or Show Selected",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('H'))),
+            "Hide the selected objects, or show them again when they are all hidden.",
+            A::LevelTool(L::ToggleHide),
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.isolate",
+            "Isolate Selection",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('H')).shift()),
+            "Hide everything but the selected objects until Show Everything. Never saved.",
+            A::LevelTool(L::Isolate),
+            VIEW_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.end_isolation",
+            "Show Everything",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('H')).alt()),
+            "Show again everything Isolate Selection hid.",
+            A::LevelTool(L::EndIsolation),
+            VIEW,
+            always
+        ),
+        command!(
+            "editor.level.find_in_outliner",
+            "Find in Outliner",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('F')).shift()),
+            "Scroll the Outliner to the selection and open the rows above it.",
+            A::LevelTool(L::FindInOutliner),
+            VIEW_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.select_parent",
+            "Select Parent",
+            "Level",
+            None,
+            "Select what the selection hangs under: a click picks a whole object, this climbs further.",
+            A::LevelTool(L::SelectParent),
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
+            "editor.level.copy_identity",
+            "Copy What This Is",
+            "Level",
+            Some(Chord::press(CommandKey::Letter('C')).ctrl().shift()),
+            "Copy the selection's card: name, ids, mesh, material, textures, file and the tool that made it.",
+            A::LevelTool(L::CopyIdentity),
+            EDIT_OUTLINER,
+            selection
+        ),
+        command!(
             "editor.view.focus_selection",
             "Focus Selection",
             "View",
@@ -1186,6 +1282,16 @@ fn declarations() -> Vec<Command> {
             "Open editor preferences, project settings and the keyboard map.",
             A::OpenPreferences,
             WINDOW,
+            always
+        ),
+        command!(
+            "editor.scene.save_as",
+            "Save Scene As…",
+            "Scene",
+            Some(Chord::press(CommandKey::Letter('S')).ctrl().shift()),
+            "Write the whole scene, edits included, to a file you choose. Save (Ctrl+S) keeps your edits beside the scene instead.",
+            A::LevelTool(L::SaveSceneAs),
+            FILE,
             always
         ),
         command!(
@@ -2351,7 +2457,13 @@ pub fn icon_for(id: &str) -> crate::icons::IconId {
         "editor.scene.open" | "editor.file.open_project" => I::FolderOpen,
         "editor.file.welcome" => I::Home,
         "editor.file.save_thumbnail" => I::Screenshot,
-        "editor.scene.save" => I::Save,
+        "editor.scene.save" | "editor.scene.save_as" => I::Save,
+        "editor.level.drop_to_ground" | "editor.level.align_to_surface" => I::Landscape,
+        "editor.level.find_floating" | "editor.level.find_in_outliner" => I::Search,
+        "editor.level.hide" | "editor.level.end_isolation" => I::View,
+        "editor.level.isolate" => I::Focus,
+        "editor.level.select_parent" => I::Select,
+        "editor.level.copy_identity" => I::Copy,
         "editor.asset.import_model" => I::Import,
         "editor.asset.new_material" => I::MaterialBall,
         "editor.edit.undo" => I::Undo,
@@ -2767,9 +2879,9 @@ mod tests {
     fn extra_modifiers_do_not_match_a_registered_binding() {
         assert!(
             registry()
-                .binding(Chord::press(CommandKey::Letter('S')).ctrl().shift())
+                .binding(Chord::press(CommandKey::Letter('S')).ctrl().alt())
                 .is_none(),
-            "Ctrl+Shift+S must not silently run the Ctrl+S command"
+            "Ctrl+Alt+S must not silently run the Ctrl+S command"
         );
         assert!(
             registry()
