@@ -48,6 +48,8 @@ pub(crate) struct EditingState {
     bvhs: HashMap<(u32, u32, u32), Option<Arc<TriangleBvh>>>,
     /// Tools that write a name prefix, by prefix.
     prefix_tools: HashMap<String, Vec<String>>,
+    /// A unit cube's BVH, for static box colliders.
+    cube: Option<Arc<TriangleBvh>>,
     /// Entities Isolate hid, with the flags they had.
     isolated: Vec<(Entity, Option<EditorFlags>)>,
     /// What the last scene load did with its layer, for one toast.
@@ -302,6 +304,16 @@ fn drawn_items(world: &World, renderer: &SomniumRenderer) -> Vec<MeshItem> {
         items.push(MeshItem { entity, mesh, model: draw.transform, min: lo, max: hi });
     }
     items
+}
+
+/// A unit cube's triangles (corners at +-0.5), for box colliders.
+fn unit_cube() -> TriangleBvh {
+    let corners: Vec<glam::Vec3> = (0..8)
+        .map(|i| glam::Vec3::new(if i & 1 == 0 { -0.5 } else { 0.5 }, if i & 2 == 0 { -0.5 } else { 0.5 }, if i & 4 == 0 { -0.5 } else { 0.5 }))
+        .collect();
+    let faces: [[u32; 4]; 6] = [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]];
+    let indices: Vec<u32> = faces.iter().flat_map(|f| [f[0], f[1], f[2], f[0], f[2], f[3]]).collect();
+    TriangleBvh::build(&corners, &indices)
 }
 
 /// The nearest terrain hit along a unit ray.
@@ -981,13 +993,40 @@ impl<G: GameApp> Engine<G> {
                 picked.push((bvh, i));
             }
         }
-        let meshes = picked
+        let mut meshes: Vec<MeshSurface<'_>> = picked
             .iter()
             .map(|(bvh, i)| {
                 let item = &index.items[*i];
                 MeshSurface { bvh, model: item.model, inverse: item.model.inverse(), min: item.min, max: item.max }
             })
             .collect();
+        // Static box colliders: a game's walls and floors when they are colliders, not meshes (TSF's rooms). A box
+        // inside the object's own bounds is its own collider, which floats with it and must not hold it up.
+        let cube = self.editing.cube.get_or_insert_with(|| Arc::new(unit_cube())).clone();
+        let boxes: Vec<(glam::Mat4, glam::Vec3, glam::Vec3)> = self
+            .physics
+            .as_ref()
+            .map(|physics| physics.static_boxes())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(half, position, rotation)| {
+                let model = glam::Mat4::from_scale_rotation_translation(half * 2.0, rotation, position);
+                let (lo, hi) = transformed_box(model, glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5));
+                (model, lo, hi)
+            })
+            .filter(|(_, lo, hi)| lo.cmple(column_max).all() && hi.cmpge(column_min).all())
+            .filter(|(_, lo, hi)| {
+                let inside = lo.cmpge(min - glam::Vec3::splat(0.1)).all() && hi.cmple(max + glam::Vec3::splat(0.1)).all();
+                !inside
+            })
+            .collect();
+        meshes.extend(boxes.iter().map(|&(model, lo, hi)| MeshSurface {
+            bvh: &cube,
+            model,
+            inverse: model.inverse(),
+            min: lo,
+            max: hi,
+        }));
         let renderer = self.renderer.as_ref();
         let terrain = move |origin: glam::Vec3, direction: glam::Vec3, max: f32| {
             renderer.and_then(|renderer| terrain_hit(renderer, terrains, origin, direction, max))
@@ -1748,6 +1787,15 @@ mod tests {
         assert_eq!(maker_score("Furnish 20261005", "reach_fix_20261005", fixer), Some(1), "the date in its name");
         assert_eq!(maker_score("Furnish 20261005", "forest_o_20261029", fixer), Some(0));
         assert_eq!(maker_score("Furnish 20261005", "anything", "nothing here"), None);
+    }
+
+    #[test]
+    fn a_unit_cube_is_hit_on_its_top_face() {
+        let cube = unit_cube();
+        let (t, _) = cube.raycast(glam::Vec3::new(0.1, 2.0, -0.2), glam::Vec3::NEG_Y, 10.0).unwrap();
+        assert!((t - 1.5).abs() < 1e-5, "{t}");
+        let (t, _) = cube.raycast(glam::Vec3::new(-2.0, 0.3, 0.0), glam::Vec3::X, 10.0).unwrap();
+        assert!((t - 1.5).abs() < 1e-5, "{t}: and on its side");
     }
 
     #[test]

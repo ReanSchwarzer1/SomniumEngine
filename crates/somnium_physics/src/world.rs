@@ -13,6 +13,9 @@ pub struct PhysicsWorld {
     config: PhysicsConfig,
     pub(crate) ragdolls:
         std::collections::BTreeMap<crate::animation::RagdollId, crate::animation::NativeRagdoll>,
+    /// Half extents of every static box body, by body id: what the editor stands objects on when a game's walls and
+    /// floors are colliders rather than meshes (TSF's rooms).
+    static_boxes: std::collections::HashMap<u32, Vec3>,
 }
 
 impl PhysicsWorld {
@@ -37,6 +40,7 @@ impl PhysicsWorld {
                 system,
                 config,
                 ragdolls: Default::default(),
+                static_boxes: Default::default(),
             }
         }
     }
@@ -82,6 +86,10 @@ impl PhysicsWorld {
                 // Jolt refuses bodies past `max_bodies`; say so rather than
                 // leave a wall or door without collision.
                 tracing::warn!(max_bodies = self.config.max_bodies, "create_body: body refused (limit reached?)");
+            } else if let (crate::body::MotionType::Static, crate::shape::ColliderShape::Box { half_extents }) =
+                (desc.motion_type, &desc.shape)
+            {
+                self.static_boxes.insert(body.0, *half_extents);
             }
             body
         }
@@ -89,6 +97,7 @@ impl PhysicsWorld {
 
     /// Remove a body from the simulation (but don't destroy it).
     pub fn remove_body(&mut self, id: BodyId) {
+        self.static_boxes.remove(&id.0);
         unsafe {
             jph_body_interface_remove_body(self.system, id.0);
         }
@@ -99,10 +108,20 @@ impl PhysicsWorld {
     /// Jolt asserts (`IsInBroadPhase` / `IsActive`) if `DestroyBody` runs while
     /// the body is still in the world — that shows up as Windows `0x80000003`.
     pub fn destroy_body(&mut self, id: BodyId) {
+        self.static_boxes.remove(&id.0);
         unsafe {
             jph_body_interface_remove_body(self.system, id.0);
             jph_body_interface_destroy_body(self.system, id.0);
         }
+    }
+
+    /// Every static box body: its half extents, position and rotation now.
+    #[must_use]
+    pub fn static_boxes(&self) -> Vec<(Vec3, Vec3, Quat)> {
+        self.static_boxes
+            .iter()
+            .map(|(&id, &half)| (half, self.get_position(BodyId(id)), self.get_rotation(BodyId(id))))
+            .collect()
     }
 
     /// Check if a body is active (not sleeping).
