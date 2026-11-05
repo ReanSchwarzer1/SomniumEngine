@@ -306,6 +306,16 @@ fn drawn_items(world: &World, renderer: &SomniumRenderer) -> Vec<MeshItem> {
     items
 }
 
+/// Whether the box `model` (a unit cube transformed) meets the world box `min..max`: the world box's corners taken
+/// into the cube's space, bounded, against the cube. Generous for a turned box, which is the safe side here.
+fn box_overlaps(model: glam::Mat4, min: glam::Vec3, max: glam::Vec3) -> bool {
+    let Some(inverse) = invert_affine(model) else {
+        return false;
+    };
+    let (lo, hi) = transformed_box(inverse, min, max);
+    lo.cmple(glam::Vec3::splat(0.5)).all() && hi.cmpge(glam::Vec3::splat(-0.5)).all()
+}
+
 /// A unit cube's triangles (corners at +-0.5), for box colliders.
 fn unit_cube() -> TriangleBvh {
     let corners: Vec<glam::Vec3> = (0..8)
@@ -1033,7 +1043,11 @@ impl<G: GameApp> Engine<G> {
         };
         let terrain: &dyn Fn(glam::Vec3, glam::Vec3, f32) -> Option<Hit> = &terrain;
         let ground = Ground { meshes, terrain: Some(terrain) };
-        editor_ground::support_at(&ground, base, min, max)
+        let mut support = editor_ground::support_at(&ground, base, min, max);
+        // Set into a wall collider (a sconce, a picture, a ceiling panel resting on the walls): touching, not floating.
+        let contact = glam::Vec3::splat(editor_ground::CONTACT);
+        support.touching |= boxes.iter().any(|(model, ..)| box_overlaps(*model, min - contact, max + contact));
+        support
     }
 
     /// Drop (and with `align`, first tilt) each selected object onto what is under it, as one undoable step.
@@ -1209,8 +1223,8 @@ impl<G: GameApp> Engine<G> {
         }
         let (worst_gap, _, worst) = &found[0];
         let message = format!(
-            "{} floating object{} selected (worst {worst_gap:.2} m: {worst}). End drops them all; the Outliner's \
-             \"floating\" search lists them.",
+            "{} floating object{} selected (worst {worst_gap:.2} m: {worst}); the Outliner's \"floating\" search \
+             lists them. Look before pressing End: it drops every one selected.",
             found.len(),
             if found.len() == 1 { "" } else { "s" }
         );
@@ -1787,6 +1801,14 @@ mod tests {
         assert_eq!(maker_score("Furnish 20261005", "reach_fix_20261005", fixer), Some(1), "the date in its name");
         assert_eq!(maker_score("Furnish 20261005", "forest_o_20261029", fixer), Some(0));
         assert_eq!(maker_score("Furnish 20261005", "anything", "nothing here"), None);
+    }
+
+    #[test]
+    fn a_sconce_set_into_a_wall_collider_touches_it() {
+        // An 18 cm wall, 2.8 m tall and 12 m long, centred at the origin; a sconce half in it, one 20 cm off it.
+        let wall = glam::Mat4::from_scale(glam::Vec3::new(0.18, 2.8, 12.0));
+        assert!(box_overlaps(wall, glam::Vec3::new(0.05, 1.0, -0.1), glam::Vec3::new(0.25, 1.2, 0.1)));
+        assert!(!box_overlaps(wall, glam::Vec3::new(0.29, 1.0, -0.1), glam::Vec3::new(0.45, 1.2, 0.1)));
     }
 
     #[test]
