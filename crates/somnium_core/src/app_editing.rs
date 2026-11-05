@@ -1456,6 +1456,8 @@ impl<G: GameApp> Engine<G> {
                     }
                 }
                 None if action == "save" => self.handle_editor_event(EditorEvent::SaveScene),
+                // The title bar's X: with unsaved edits, the editor asks before it closes.
+                None if action == "close" => self.handle_editor_event(EditorEvent::CloseWindow),
                 _ => warn!(action = %action, "editor script: unknown step"),
             }
         }
