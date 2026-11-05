@@ -127,6 +127,8 @@ fn shortcut_action_for(
     .filter(|chord| !game_owns_keyboard || chord.has_modifier())
     .and_then(|chord| somnium_ui::commands::registry().binding(chord))
     .map(|command| command.action)
+    // The level tools are edit-mode tools, modified or not: Shift+F or Shift+H mid-play is a sprinting player's key.
+    .filter(|action| !game_owns_keyboard || !matches!(action, somnium_ui::commands::CommandAction::LevelTool(_)))
 }
 
 fn shortcut_preserves_game_key(action: somnium_ui::commands::CommandAction) -> bool {
@@ -182,6 +184,26 @@ mod shortcut_input_tests {
             shortcut_action_for(KeyCode::KeyS, ctrl, true),
             Some(CommandAction::SaveScene),
         );
+    }
+
+    /// The level tools never take a key from the game: Shift is a sprint, and Shift+F mid-play is the player's.
+    #[test]
+    fn level_tools_stand_down_while_the_game_owns_the_keyboard() {
+        use somnium_ui::editor_event::LevelTool;
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            shortcut_action_for(KeyCode::KeyF, shift, false),
+            Some(CommandAction::LevelTool(LevelTool::FindInOutliner))
+        );
+        assert_eq!(shortcut_action_for(KeyCode::KeyF, shift, true), None);
+        assert_eq!(
+            shortcut_action_for(KeyCode::End, Modifiers::default(), false),
+            Some(CommandAction::LevelTool(LevelTool::DropToGround))
+        );
+        assert_eq!(shortcut_action_for(KeyCode::End, Modifiers::default(), true), None);
     }
 
     /// The same rule, reached the other way: a play session.

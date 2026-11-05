@@ -295,10 +295,13 @@ impl<G: GameApp> Engine<G> {
     pub(super) fn edits_before_scene_spawn(&mut self, path: &str, document: &Value) -> Option<Value> {
         let scene = PathBuf::from(path);
         self.reset_editing(Some(scene.clone()));
-        let root = self.config.project_root.clone();
-        self.editing.base = ids_in(document);
-        if let Some(label) = made_by(document) {
-            self.editing.made_by.insert(project_relative(root.as_deref(), &scene), label);
+        // A shipped game applies the layer and keeps nothing else: the bookkeeping below serves the editor.
+        if !self.config.player_mode {
+            let root = self.config.project_root.clone();
+            self.editing.base = ids_in(document);
+            if let Some(label) = made_by(document) {
+                self.editing.made_by.insert(project_relative(root.as_deref(), &scene), label);
+            }
         }
         match SceneEdits::read(&scene) {
             Ok(Some(mut layer)) => {
@@ -366,14 +369,16 @@ impl<G: GameApp> Engine<G> {
     pub(super) fn edits_before_cell_spawn(&mut self, index: usize, document: &Value) -> Option<Value> {
         let root = self.config.project_root.clone();
         let file = project_relative(root.as_deref(), &self.cell_streamer.cells[index].file);
-        self.editing.base.extend(ids_in(document));
-        if let Some(label) = made_by(document) {
-            self.editing.made_by.insert(file.clone(), label);
-        }
-        if let Some(sources) = document.get("sources").and_then(Value::as_object) {
-            for (id, label) in sources {
-                if let (Some(id), Some(label)) = (PersistentId::parse_hex(id), label.as_str()) {
-                    self.editing.sources.insert(id, label.to_owned());
+        if !self.config.player_mode {
+            self.editing.base.extend(ids_in(document));
+            if let Some(label) = made_by(document) {
+                self.editing.made_by.insert(file.clone(), label);
+            }
+            if let Some(sources) = document.get("sources").and_then(Value::as_object) {
+                for (id, label) in sources {
+                    if let (Some(id), Some(label)) = (PersistentId::parse_hex(id), label.as_str()) {
+                        self.editing.sources.insert(id, label.to_owned());
+                    }
                 }
             }
         }
