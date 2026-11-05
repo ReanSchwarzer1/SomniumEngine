@@ -985,11 +985,39 @@ static DISPLAY_SIZES: std::sync::Mutex<(Option<[u32; 2]>, Vec<[u32; 2]>)> = std:
 /// resizes for a game's display options, and never captures the pointer (somnium_core `sync_play_cursor`). Pictures
 /// still come from its own frames, since the capture copies the swap chain. The developer: "i would prefer it if you
 /// stopped taking the mouse away for checks".
+///
+/// Set to anything that is not a size (`1`, `true`), it still means a background window, at 1600x900, and says so:
+/// a value that silently failed to parse used to open an ordinary window that took the focus (5 Nov 2026).
 pub fn background_window() -> Option<[u32; 2]> {
     static SIZE: std::sync::LazyLock<Option<[u32; 2]>> = std::sync::LazyLock::new(|| {
-        parse_window_size(&std::env::var("SOMNIUM_BACKGROUND_WINDOW").ok()?)
+        background_window_size(std::env::var("SOMNIUM_BACKGROUND_WINDOW").ok().as_deref())
     });
     *SIZE
+}
+
+fn background_window_size(value: Option<&str>) -> Option<[u32; 2]> {
+    let value = value?.trim();
+    if value.is_empty() || matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no") {
+        return None;
+    }
+    Some(parse_window_size(value).unwrap_or_else(|| {
+        tracing::warn!(value, "SOMNIUM_BACKGROUND_WINDOW is not WIDTHxHEIGHT: a background window at 1600x900");
+        [1600, 900]
+    }))
+}
+
+#[cfg(test)]
+mod background_window_flag_tests {
+    #[test]
+    fn any_set_value_means_a_background_window() {
+        use super::background_window_size as size;
+        assert_eq!(size(Some("2560x1440")), Some([2560, 1440]));
+        assert_eq!(size(Some("1")), Some([1600, 900]), "a flag, not a size, must not open an ordinary window");
+        assert_eq!(size(Some("true")), Some([1600, 900]));
+        assert_eq!(size(Some("0")), None);
+        assert_eq!(size(Some("")), None);
+        assert_eq!(size(None), None);
+    }
 }
 
 fn parse_window_size(text: &str) -> Option<[u32; 2]> {
