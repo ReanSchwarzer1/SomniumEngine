@@ -10,7 +10,7 @@ use crate::editor_ground::{self, Ground, Hit, MeshSurface, TriangleBvh};
 use crate::scene_edits::{self, EditOp, Origin, SceneEdits, Scope};
 use serde_json::Value;
 use somnium_ecs::{Entity, PersistentId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,6 +20,37 @@ const CONTAINER_PARTS: usize = 400;
 const FLOAT_RADIUS: f32 = 80.0;
 /// Meshes with more triangles than this are clicked and stood on by their box.
 const BVH_TRIANGLE_LIMIT: u32 = 3_000_000;
+/// Painted copies (foliage kept with its ground, not entities) are looked for this far along a click.
+const PAINTED_REACH: f32 = 600.0;
+/// The click ray is walked in steps this long, each visiting the foliage cells within this distance of it.
+const PAINTED_STEP: f32 = 24.0;
+/// Copies whose box the ray enters are tested by their triangles, nearest first, at most this many.
+const PAINTED_REFINE: usize = 32;
+/// A painted kind smaller than this (box diagonal, metres, at scale 1) never hides an object behind it: grass and
+/// litter cover the ground everywhere, and a click meant for a rock should find the rock.
+const PAINTED_SMALL: f32 = 1.5;
+/// Words that make a model file tree-like, for the census's list of trees from outside the painted palette.
+const TREE_WORDS: [&str; 22] = [
+    "tree", "oak", "pine", "cypress", "fig", "olive", "chestnut", "beech", "maple", "ash", "alder", "willow",
+    "poplar", "plane", "holm", "juniper", "carob", "hornbeam", "shrub", "bush", "palm", "laurel",
+];
+
+/// Whether a model path names a tree: a whole word of it (folders included, plurals too) is a tree word, so
+/// `trees/grown/holm_oak_b.gltf` and `wall_fig.gltf` are and `silver_street_01.gltf` is not.
+fn tree_like(path: &str) -> bool {
+    path.to_ascii_lowercase().split(|c: char| !c.is_ascii_alphabetic()).any(|word| {
+        TREE_WORDS.contains(&word) || word.strip_suffix('s').is_some_and(|single| TREE_WORDS.contains(&single))
+    })
+}
+
+/// A painted copy a click found: the ground it lives with, its place in that ground's list, its kind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaintedPick {
+    pub terrain: u32,
+    pub index: usize,
+    pub kind: u8,
+    pub distance: f32,
+}
 
 /// What the editor knows about the open scene's edits and the level tools' state.
 #[derive(Default)]
@@ -64,6 +95,12 @@ pub(crate) struct EditingState {
     touched_selection: Vec<Entity>,
     /// Frames counted for `SOMNIUM_EDITOR_SCRIPT`.
     script_frame: u64,
+    /// The painted copy the last click found; the card describes it while nothing is selected.
+    painted: Option<PaintedPick>,
+    /// Its card, built once per pick.
+    painted_card: Option<(PaintedPick, String)>,
+    /// Each painted kind's box in its own units (the union of its parts); `None` while it has no mesh.
+    kind_boxes: HashMap<u8, Option<(glam::Vec3, glam::Vec3)>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -780,7 +817,14 @@ impl<G: GameApp> Engine<G> {
     /// the whole object it belongs to. Clicking the selected object again picks the part.
     pub(super) fn click_pick(&mut self) -> Option<Entity> {
         let (origin, direction) = self.cursor_ray()?;
-        self.pick_along(origin, direction)
+        let hit = self.pick_hit(origin, direction);
+        // A painted copy (a tree, a shrub) nearer than any object is what was clicked: not an entity, so the
+        // selection clears and the card names the copy.
+        self.editing.painted = self.pick_painted(origin, direction, hit.map(|(d, _)| d));
+        if self.editing.painted.is_some() {
+            return None;
+        }
+        hit.map(|(_, entity)| entity)
     }
 
     /// F4: the object at the centre of the view. In Play, stop first and select it in the restored editor world (by
@@ -793,8 +837,21 @@ impl<G: GameApp> Engine<G> {
         let centre = renderer.picking_view_proj().inverse().project_point3(glam::Vec3::new(0.0, 0.0, 0.5));
         let direction = (centre - origin).normalize_or_zero();
         let primary = self.selection.primary.take();
-        let hit = (direction != glam::Vec3::ZERO).then(|| self.pick_along(origin, direction)).flatten();
+        let found = (direction != glam::Vec3::ZERO).then(|| self.pick_hit(origin, direction)).flatten();
         self.selection.primary = primary;
+        let painted = (direction != glam::Vec3::ZERO).then(|| self.pick_painted(origin, direction, found.map(|(d, _)| d))).flatten();
+        if let Some(pick) = painted {
+            if self.play_session_active {
+                self.handle_editor_event(EditorEvent::StopSimulation);
+            }
+            self.selection.clear();
+            self.after_selection_change();
+            self.editing.painted = Some(pick);
+            let name = self.foliage_kind_name(pick.kind).to_owned();
+            self.toast(&format!("{name}: a painted copy (it lives with its ground, so it is not an object). The card says where it is from"));
+            return;
+        }
+        let hit = found.map(|(_, entity)| entity);
         let id = hit.and_then(|e| self.world.persistent_id(e));
         let name = hit.map(|e| name_of(&self.world, e));
         if self.play_session_active {
@@ -816,8 +873,8 @@ impl<G: GameApp> Engine<G> {
         }
     }
 
-    /// The object nearest along a world ray, triangle-accurate, as [`Self::click_pick`] means it.
-    fn pick_along(&mut self, origin: glam::Vec3, direction: glam::Vec3) -> Option<Entity> {
+    /// The object nearest along a world ray, triangle-accurate, as [`Self::click_pick`] means it, and how far.
+    fn pick_hit(&mut self, origin: glam::Vec3, direction: glam::Vec3) -> Option<(f32, Entity)> {
         let renderer = self.renderer.as_ref()?;
         let pickable = |world: &World, entity: Entity| {
             world.get::<EditorFlags>(entity).is_none_or(|flags| !flags.locked && !flags.hidden)
@@ -889,12 +946,331 @@ impl<G: GameApp> Engine<G> {
                 best = Some((d, entity));
             }
         }
-        Some(self.object_for_click(best?.1))
+        let (distance, part) = best?;
+        Some((distance, self.object_for_click(part)))
+    }
+
+    /// A painted kind's box in its own units: the union of its parts' boxes, each through its part transform.
+    fn kind_box(&mut self, kind: u8) -> Option<(glam::Vec3, glam::Vec3)> {
+        if let Some(found) = self.editing.kind_boxes.get(&kind) {
+            return *found;
+        }
+        let renderer = self.renderer.as_ref()?;
+        let parts = self.foliage_meshes.get(usize::from(kind)).and_then(Option::as_ref)?;
+        let mut bounds: Option<(glam::Vec3, glam::Vec3)> = None;
+        for part in parts {
+            let Some((min, max)) = renderer.geometry.mesh_aabb(part.vertex_offset) else { continue };
+            let (lo, hi) = transformed_box(part.local, glam::Vec3::from_array(min), glam::Vec3::from_array(max));
+            bounds = Some(bounds.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        }
+        self.editing.kind_boxes.insert(kind, bounds);
+        bounds
+    }
+
+    /// The nearest painted copy a world ray meets, nearer than the object hit at `object` (if any): each terrain's
+    /// foliage grid is visited along the ray, every copy's box tested, then the nearest few by their triangles. Small
+    /// kinds (grass, litter) never hide an object behind them.
+    fn pick_painted(&mut self, origin: glam::Vec3, direction: glam::Vec3, object: Option<f32>) -> Option<PaintedPick> {
+        let limit = object.unwrap_or(PAINTED_REACH).min(PAINTED_REACH);
+        // Copy out what the walk needs, so the box cache can borrow `self` afterwards.
+        let mut copies: Vec<(u32, usize, somnium_renderer::terrain::foliage_paint::PaintedFoliage, glam::Mat4)> = Vec::new();
+        {
+            let renderer = self.renderer.as_ref()?;
+            for (_, terrain) in self.world.iter_with::<TerrainComponent>() {
+                let (Some(data), Some(grid)) = (renderer.terrain(terrain.terrain_id), self.foliage_grids.get(&terrain.terrain_id))
+                else {
+                    continue;
+                };
+                let inverse = data.model.inverse();
+                let (local_origin, local_direction) =
+                    (inverse.transform_point3(origin), inverse.transform_vector3(direction).normalize_or_zero());
+                let mut seen: HashSet<usize> = HashSet::new();
+                for step in 0..=(limit / PAINTED_STEP).ceil() as usize {
+                    let p = local_origin + local_direction * (step as f32 * PAINTED_STEP);
+                    grid.visit([p.x, p.z], PAINTED_STEP, |i| {
+                        seen.insert(i);
+                    });
+                }
+                for index in seen {
+                    if let Some(copy) = data.painted_foliage.get(index) {
+                        copies.push((terrain.terrain_id, index, *copy, data.model));
+                    }
+                }
+            }
+        }
+        let mut entered: Vec<(f32, u32, usize, u8, glam::Mat4)> = Vec::new();
+        for (terrain, index, copy, ground) in copies {
+            let Some((lo, hi)) = self.kind_box(copy.kind) else { continue };
+            if object.is_some() && (hi - lo).length() < PAINTED_SMALL {
+                continue;
+            }
+            let model = ground
+                * glam::Mat4::from_scale_rotation_translation(
+                    glam::Vec3::splat(copy.scale),
+                    glam::Quat::from_rotation_y(copy.yaw) * glam::Quat::from_rotation_x(copy.tilt),
+                    copy.position,
+                );
+            let inverse = model.inverse();
+            let (local_origin, local_direction) = (inverse.transform_point3(origin), inverse.transform_vector3(direction));
+            if let Some(t) = ray_aabb_distance(local_origin, local_direction, lo, hi) {
+                let distance = origin.distance(model.transform_point3(local_origin + local_direction * t));
+                if distance < limit {
+                    entered.push((distance, terrain, index, copy.kind, model));
+                }
+            }
+        }
+        entered.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut best: Option<PaintedPick> = None;
+        for (box_distance, terrain, index, kind, model) in entered.into_iter().take(PAINTED_REFINE) {
+            if best.is_some_and(|b| box_distance > b.distance) {
+                break;
+            }
+            let parts: Vec<(MeshComponent, glam::Mat4)> = self
+                .foliage_meshes
+                .get(usize::from(kind))
+                .and_then(Option::as_ref)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(|p| (MeshComponent { vertex_offset: p.vertex_offset, index_offset: p.index_offset, index_count: p.index_count }, p.local))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (mesh, local) in parts {
+                let Some(bvh) = self.bvh_for(mesh) else { continue };
+                let world = model * local;
+                let surface = MeshSurface {
+                    bvh: &bvh,
+                    model: world,
+                    inverse: world.inverse(),
+                    min: glam::Vec3::splat(f32::NEG_INFINITY),
+                    max: glam::Vec3::splat(f32::INFINITY),
+                };
+                if let Some(hit) = surface.raycast(origin, direction, limit)
+                    && best.is_none_or(|b| hit.distance < b.distance)
+                {
+                    best = Some(PaintedPick { terrain, index, kind, distance: hit.distance });
+                }
+            }
+        }
+        best
+    }
+
+    /// The card for a painted copy: what kind, which model file, where it lives and which file keeps it.
+    fn painted_card(&mut self, pick: PaintedPick) -> Option<String> {
+        if let Some((cached, card)) = &self.editing.painted_card
+            && *cached == pick
+        {
+            return Some(card.clone());
+        }
+        let root = self.config.project_root.clone();
+        let renderer = self.renderer.as_ref()?;
+        let data = renderer.terrain(pick.terrain)?;
+        let copy = *data.painted_foliage.get(pick.index)?;
+        let total = data.painted_foliage.len();
+        let same = data.painted_foliage.iter().filter(|p| p.kind == pick.kind).count();
+        let at = data.model.transform_point3(copy.position);
+        let ground = self.world.iter_with::<TerrainComponent>().find(|(_, t)| t.terrain_id == pick.terrain).map(|(e, _)| e);
+        let file: Option<PathBuf> = ground
+            .and_then(|e| self.world.get::<crate::cell_streaming::Streamed>(e).copied())
+            .and_then(|s| self.cell_streamer.cells.get(s.cell as usize))
+            .map(|cell| cell.file.clone())
+            .or_else(|| self.editing.scene.clone());
+        let name = self.foliage_kind_name(pick.kind).to_owned();
+        let model = self.project_foliage.get(&pick.kind).map_or_else(
+            || format!("built-in kind {} (the engine's own palette)", pick.kind),
+            |entry| project_relative(root.as_deref(), &entry.source),
+        );
+        let mut lines = vec![
+            format!("{name}   painted copy, kind {} (not an object: it lives with its ground)", pick.kind),
+            format!("model     {model}"),
+            format!("copy      {} of {total} on this ground; {same} of this kind here", pick.index + 1),
+        ];
+        match &file {
+            Some(file) => {
+                lines.push(format!("ground    {}", project_relative(root.as_deref(), file)));
+                // The copies are kept beside the ground's file: `<file>.terrain<id>.bin.foliage.json`.
+                let stem = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let kept: Vec<String> = file
+                    .parent()
+                    .and_then(|dir| std::fs::read_dir(dir).ok())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with(&stem) && n.ends_with(".foliage.json"))
+                    .collect();
+                match kept.as_slice() {
+                    [one] => lines.push(format!("kept in   {one}")),
+                    [] => {}
+                    many => lines.push(format!("kept in   one of {} (.foliage.json beside the ground)", many.len())),
+                }
+            }
+            None => lines.push("ground    (a scene with no file yet)".to_owned()),
+        }
+        lines.push(format!(
+            "at        x {:.1}  y {:.1}  z {:.1}   scale {:.2}   turned {:.0} deg",
+            at.x,
+            at.y,
+            at.z,
+            copy.scale,
+            copy.yaw.to_degrees().rem_euclid(360.0)
+        ));
+        lines.push("Census (Level) counts every painted kind and model loaded".to_owned());
+        let card = lines.join("\n");
+        info!("painted card:\n{card}");
+        self.editing.painted_card = Some((pick, card.clone()));
+        Some(card)
+    }
+
+    /// Count what the loaded world is made of: painted copies by kind, and the model files objects draw (parts and
+    /// whole objects). Written beside the scene as `<scene>.census.md`, with the tree-like models that come from
+    /// outside the painted palette listed apart (the "old trees" question).
+    pub(super) fn census(&mut self) {
+        let root = self.config.project_root.clone();
+        let mut painted: BTreeMap<u8, usize> = BTreeMap::new();
+        let mut grounds = 0;
+        if let Some(renderer) = self.renderer.as_ref() {
+            for (_, terrain) in self.world.iter_with::<TerrainComponent>() {
+                if let Some(data) = renderer.terrain(terrain.terrain_id) {
+                    grounds += 1;
+                    for copy in &data.painted_foliage {
+                        *painted.entry(copy.kind).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut models: BTreeMap<String, (usize, HashSet<Entity>)> = BTreeMap::new();
+        let imported: Vec<(Entity, String)> =
+            self.world.iter_with::<crate::ImportedMesh>().map(|(e, m)| (e, m.source.clone())).collect();
+        for (entity, source) in &imported {
+            let object = self.object_of(*entity);
+            let entry = models.entry(source.clone()).or_default();
+            entry.0 += 1;
+            entry.1.insert(object);
+        }
+        let palette: HashSet<String> =
+            self.project_foliage.values().map(|e| project_relative(root.as_deref(), &e.source)).collect();
+        let copies: usize = painted.values().sum();
+        let mut report = vec![
+            format!(
+                "# Census of {}",
+                self.editing.scene.as_deref().map_or_else(|| "the open scene".to_owned(), |s| project_relative(root.as_deref(), s))
+            ),
+            String::new(),
+            format!(
+                "What is loaded now: {grounds} grounds and {} objects round the camera. Cells streamed out are not counted.",
+                imported.iter().map(|(e, _)| self.object_of(*e)).collect::<HashSet<_>>().len()
+            ),
+            String::new(),
+            format!("## Painted copies by kind ({copies} in {} kinds; they live with their ground, not as objects)", painted.len()),
+            String::new(),
+            "| copies | kind | name | model |".to_owned(),
+            "|---:|---:|---|---|".to_owned(),
+        ];
+        let mut by_count: Vec<(u8, usize)> = painted.iter().map(|(k, n)| (*k, *n)).collect();
+        by_count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (kind, count) in &by_count {
+            let model = self
+                .project_foliage
+                .get(kind)
+                .map_or_else(|| "built-in".to_owned(), |e| project_relative(root.as_deref(), &e.source));
+            report.push(format!("| {count} | {kind} | {} | {model} |", self.foliage_kind_name(*kind)));
+        }
+        report.push(String::new());
+        report.push(format!("## Models the objects draw ({} files)", models.len()));
+        report.push(String::new());
+        report.push("| objects | parts | model |".to_owned());
+        report.push("|---:|---:|---|".to_owned());
+        let mut drawn: Vec<(&String, usize, usize)> = models.iter().map(|(s, (parts, objects))| (s, objects.len(), *parts)).collect();
+        drawn.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        for (source, objects, parts) in &drawn {
+            report.push(format!("| {objects} | {parts} | {source} |"));
+        }
+        let outside: Vec<&(&String, usize, usize)> =
+            drawn.iter().filter(|(s, _, _)| tree_like(s.as_str()) && !palette.contains(s.as_str())).collect();
+        report.push(String::new());
+        report.push(format!("## Tree-like models from outside the painted palette ({})", outside.len()));
+        report.push(String::new());
+        if outside.is_empty() {
+            report.push("None: every tree-like model loaded is a painted palette kind.".to_owned());
+        } else {
+            report.push("Objects (places, ruins, points of interest) that draw a tree-like model the palette does not list. \
+                         These are the likeliest \"old trees\". Select one and use Select All Using This Model.".to_owned());
+            report.push(String::new());
+            for (source, objects, _) in &outside {
+                report.push(format!("- {source}: {objects} objects"));
+            }
+        }
+        let text = report.join("\n") + "\n";
+        let target = self
+            .editing
+            .scene
+            .as_ref()
+            .map(|s| PathBuf::from(format!("{}.census.md", s.display())))
+            .or_else(|| root.as_ref().map(|r| r.join("census.md")));
+        let summary = format!(
+            "Census: {copies} painted copies in {} kinds, {} model files; {} tree-like models from outside the palette",
+            painted.len(),
+            models.len(),
+            outside.len()
+        );
+        match target.map(|path| std::fs::write(&path, &text).map(|()| path)) {
+            Some(Ok(path)) => {
+                info!("{summary}; written to {}", path.display());
+                self.toast(&format!("{summary}. Written to {}", project_relative(root.as_deref(), &path)));
+            }
+            Some(Err(error)) => self.toast(&format!("{summary}. Not written: {error}")),
+            None => self.toast(&summary),
+        }
+    }
+
+    /// Select every object that draws the selected object's model files.
+    pub(super) fn select_same_asset(&mut self) {
+        let Some(selected) = self.selection.primary.filter(|e| self.world.is_alive(*e)) else {
+            let painted = self.editing.painted.is_some();
+            self.toast(if painted {
+                "Painted copies are not objects; the Census lists every copy of each kind"
+            } else {
+                "Select something first"
+            });
+            return;
+        };
+        let children = children_map(&self.world);
+        let object = self.object_of(selected);
+        let sources: HashSet<String> = subtree(&children, object)
+            .into_iter()
+            .filter_map(|e| self.world.get::<crate::ImportedMesh>(e).map(|m| m.source.clone()))
+            .collect();
+        if sources.is_empty() {
+            self.toast("It draws no model file");
+            return;
+        }
+        let parts: Vec<Entity> = self
+            .world
+            .iter_with::<crate::ImportedMesh>()
+            .filter(|(_, m)| sources.contains(&m.source))
+            .map(|(e, _)| e)
+            .collect();
+        let mut objects: Vec<Entity> = parts.into_iter().map(|e| self.object_of(e)).collect();
+        objects.sort_by_key(|e| e.index());
+        objects.dedup();
+        let count = objects.len();
+        self.selection.set_many(objects);
+        self.after_selection_change();
+        let named = if sources.len() == 1 { sources.iter().next().cloned().unwrap_or_default() } else { format!("its {} model files", sources.len()) };
+        self.toast(&format!("{count} objects draw {named}"));
     }
 
     /// The object a click on `part` means: its highest ancestor that is still one object (not a container of
     /// hundreds), or the part itself when that object is already selected.
     fn object_for_click(&self, part: Entity) -> Entity {
+        let object = self.object_of(part);
+        if object != part && self.selection.primary == Some(object) { part } else { object }
+    }
+
+    /// The object `part` belongs to: its highest ancestor that is still one object, not a container of hundreds.
+    fn object_of(&self, part: Entity) -> Entity {
         let children = children_map(&self.world);
         let mut object = part;
         loop {
@@ -907,11 +1283,7 @@ impl<G: GameApp> Engine<G> {
             }
             object = parent;
         }
-        if object != part && self.selection.primary == Some(object) {
-            part
-        } else {
-            object
-        }
+        object
     }
 
     /// The selection's objects: each selected entity, minus any under another selected one.
@@ -1383,6 +1755,11 @@ impl<G: GameApp> Engine<G> {
 
     /// What the primary selection is, where it came from and what can be done to it, several lines.
     pub(super) fn selection_card(&mut self) -> Option<String> {
+        if self.selection.primary.is_some() {
+            self.editing.painted = None;
+        } else if let Some(pick) = self.editing.painted {
+            return self.painted_card(pick);
+        }
         let entity = self.selection.primary.filter(|e| self.world.is_alive(*e))?;
         let id = self.world.persistent_id(entity);
         let key = CardKey {
@@ -1798,6 +2175,16 @@ fn decal_slab_distance(world: &World, entity: Entity, origin: glam::Vec3, direct
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_like_is_whole_words_of_the_path() {
+        assert!(tree_like("assets/foliage/trees/grown/holm_oak_b.gltf"));
+        assert!(tree_like("assets/foliage/trees/grown/wall_fig.gltf"));
+        assert!(tree_like("assets/props/Old_Pines_03.glb"));
+        assert!(tree_like("assets/props/cypress.glb"));
+        assert!(!tree_like("assets/architecture/places/monargent/silver_street_+1_0_01.gltf"));
+        assert!(!tree_like("assets/props/airplane_wreck.glb"));
+    }
 
     #[test]
     fn a_cell_path_reads_the_same_however_it_was_joined() {

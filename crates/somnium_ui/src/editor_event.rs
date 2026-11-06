@@ -798,6 +798,10 @@ pub enum LevelTool {
     SaveSceneAs,
     /// Put the selection's identity card on the clipboard.
     CopyIdentity,
+    /// Count what the loaded world is made of (painted kinds, the models objects draw) and write a report.
+    Census,
+    /// Select every object that draws the selection's model files.
+    SelectSameAsset,
     /// Select the object at the centre of the view; in Play, stop first, so what you saw is what you fix.
     SelectLookedAt,
 }

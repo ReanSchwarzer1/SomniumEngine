@@ -11201,6 +11201,8 @@ impl<G: GameApp> Engine<G> {
                     L::SaveSceneAs => self.save_scene_as(),
                     L::CopyIdentity => self.copy_identity(),
                     L::SelectLookedAt => self.select_looked_at(),
+                    L::Census => self.census(),
+                    L::SelectSameAsset => self.select_same_asset(),
                 }
             }
 

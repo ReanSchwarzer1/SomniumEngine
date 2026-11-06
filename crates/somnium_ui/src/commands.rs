@@ -1255,6 +1255,26 @@ fn declarations() -> Vec<Command> {
             selection
         ),
         command!(
+            "editor.level.census",
+            "Census of the World",
+            "Level",
+            None,
+            "Count every painted kind (trees, shrubs, grass) and every model the loaded objects draw, and write the list beside the scene. Tree models from outside the painted palette are listed apart.",
+            A::LevelTool(L::Census),
+            EDIT,
+            always
+        ),
+        command!(
+            "editor.level.select_same_asset",
+            "Select All Using This Model",
+            "Level",
+            None,
+            "Select every object that draws the selected object's model files.",
+            A::LevelTool(L::SelectSameAsset),
+            EDIT,
+            always
+        ),
+        command!(
             "editor.level.select_looked_at",
             "Select What You Look At",
             "Level",
@@ -2475,6 +2495,8 @@ pub fn icon_for(id: &str) -> crate::icons::IconId {
         "editor.level.select_parent" => I::Select,
         "editor.level.copy_identity" => I::Copy,
         "editor.level.select_looked_at" => I::Focus,
+        "editor.level.census" => I::Search,
+        "editor.level.select_same_asset" => I::Select,
         "editor.asset.import_model" => I::Import,
         "editor.asset.new_material" => I::MaterialBall,
         "editor.edit.undo" => I::Undo,
