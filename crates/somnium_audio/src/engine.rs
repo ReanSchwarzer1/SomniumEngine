@@ -170,7 +170,8 @@ pub fn spatial_settings(
 
 /// The audio subsystem.
 pub struct AudioEngine {
-    manager: AudioManager,
+    /// `None` with no sound device: the engine runs silent (`AudioEngine::silent`).
+    manager: Option<AudioManager>,
     /// The mixer graph. Public because an options screen drives it directly.
     pub mixer: Mixer,
     /// Decoded sounds.
@@ -199,7 +200,7 @@ impl AudioEngine {
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
         let acoustics = crate::acoustics::Acoustics::new(&mut manager).ok();
         Ok(Self {
-            manager,
+            manager: Some(manager),
             acoustics,
             binaural: false,
             mono: HashMap::new(),
@@ -208,6 +209,29 @@ impl AudioEngine {
             listener: Listener::default(),
             doppler_scale: 0.0,
         })
+    }
+
+    /// An engine with no sound device: every play succeeds and plays nothing. What `new` fails over to, so a
+    /// machine with its audio device off, missing or held by another program still runs the game, silent, instead
+    /// of panicking on the first frame (the window used to unwrap an engine that was never made).
+    #[must_use]
+    pub fn silent() -> Self {
+        Self {
+            manager: None,
+            acoustics: None,
+            binaural: false,
+            mono: HashMap::new(),
+            mixer: Mixer::default(),
+            sounds: Sounds::new(),
+            listener: Listener::default(),
+            doppler_scale: 0.0,
+        }
+    }
+
+    /// Whether this engine has no sound device and plays nothing.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.manager.is_none()
     }
 
     /// Play a one-shot sound on the SFX bus.
@@ -226,9 +250,11 @@ impl AudioEngine {
         settings: SoundSettings,
     ) -> Result<SoundHandle, AudioError> {
         let gain = self.mixer.gain(bus);
+        let Some(manager) = self.manager.as_mut() else {
+            return Ok(SoundHandle::silent());
+        };
         let data = self.sounds.load(path)?;
-        let handle = self
-            .manager
+        let handle = manager
             .play(data.with_settings(kira_settings(&settings, gain)))
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
         Ok(SoundHandle::kira(handle))
@@ -261,7 +287,7 @@ impl AudioEngine {
     ) -> Result<Option<SoundHandle>, AudioError> {
         let spatial = evaluate(&self.listener, emitter, doppler_scale);
         let gain = self.mixer.gain(bus);
-        if spatial.gain <= 1e-4 || gain <= 1e-4 {
+        if spatial.gain <= 1e-4 || gain <= 1e-4 || self.manager.is_none() {
             return Ok(None);
         }
         let data = self.sounds.load(path)?;
@@ -273,12 +299,13 @@ impl AudioEngine {
             let (azimuth, elevation) = crate::hrtf::direction(&self.listener, emitter.position);
             let voice = crate::hrtf::HrtfSoundData { samples, rate, looping: settings.looping, azimuth, elevation,
                 gain: (settings.volume * f64::from(gain) * f64::from(spatial.gain)) as f32, destination };
-            let handle = self.manager.play(voice).map_err(|_| AudioError::PlayError("binaural voice".into()))?;
+            let Some(manager) = self.manager.as_mut() else { return Ok(None) };
+            let handle = manager.play(voice).map_err(|_| AudioError::PlayError("binaural voice".into()))?;
             return Ok(Some(SoundHandle::binaural(handle)));
         }
         let kira_settings = spatial_settings(&settings, gain, &spatial).output_destination(destination);
-        let handle = self
-            .manager
+        let Some(manager) = self.manager.as_mut() else { return Ok(None) };
+        let handle = manager
             .play(data.with_settings(kira_settings))
             .map_err(|e| AudioError::PlayError(e.to_string()))?;
         Ok(Some(SoundHandle::kira(handle)))
@@ -319,6 +346,24 @@ mod tests {
     use super::*;
     use crate::listener::Attenuation;
     use glam::Vec3;
+
+    /// With no sound device the engine runs silent: every kind of play succeeds and plays nothing, without decoding
+    /// the file (which need not even exist), and what it hands back reads as stopped so no caller waits on it.
+    #[test]
+    fn a_silent_engine_plays_nothing_and_never_fails() {
+        let mut audio = AudioEngine::silent();
+        assert!(audio.is_silent());
+        let mut handle = audio.play("sounds/not_there.ogg", SoundSettings::default()).expect("silent play succeeds");
+        assert!(handle.is_stopped() && !handle.is_paused());
+        handle.pause();
+        handle.set_gain(0.5);
+        handle.stop();
+        assert_eq!(handle.position_seconds(), 0.0);
+        let near = Emitter::default();
+        assert!(audio.play_spatial(Mixer::SFX, "sounds/not_there.ogg", SoundSettings::default(), &near).unwrap().is_none());
+        audio.binaural = true;
+        assert!(audio.play_spatial(Mixer::SFX, "sounds/not_there.ogg", SoundSettings::default(), &near).unwrap().is_none());
+    }
 
     /// **The test that would have caught the bug this sub-phase is named for.**
     ///

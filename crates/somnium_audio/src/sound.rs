@@ -9,6 +9,8 @@ pub struct SoundHandle {
 pub(crate) enum Voice {
     Kira(StaticSoundHandle),
     Binaural(crate::hrtf::HrtfHandle),
+    /// From an engine with no sound device: nothing plays, and it reads as already stopped.
+    Silent,
 }
 
 impl SoundHandle {
@@ -20,10 +22,15 @@ impl SoundHandle {
         Self { voice: Voice::Binaural(handle) }
     }
 
+    pub(crate) fn silent() -> Self {
+        Self { voice: Voice::Silent }
+    }
+
     pub fn pause(&mut self) {
         match &mut self.voice {
             Voice::Kira(handle) => { let _ = handle.pause(kira::tween::Tween::default()); }
             Voice::Binaural(handle) => handle.set_paused(true),
+            Voice::Silent => {}
         }
     }
 
@@ -31,6 +38,7 @@ impl SoundHandle {
         match &mut self.voice {
             Voice::Kira(handle) => { let _ = handle.resume(kira::tween::Tween::default()); }
             Voice::Binaural(handle) => handle.set_paused(false),
+            Voice::Silent => {}
         }
     }
 
@@ -38,6 +46,7 @@ impl SoundHandle {
         match &mut self.voice {
             Voice::Kira(handle) => { let _ = handle.stop(kira::tween::Tween::default()); }
             Voice::Binaural(handle) => handle.stop(),
+            Voice::Silent => {}
         }
     }
 
@@ -47,6 +56,7 @@ impl SoundHandle {
         match &self.voice {
             Voice::Kira(handle) => handle.position(),
             Voice::Binaural(handle) => handle.position_seconds(),
+            Voice::Silent => 0.0,
         }
     }
 
@@ -56,6 +66,7 @@ impl SoundHandle {
         match &self.voice {
             Voice::Kira(handle) => matches!(handle.state(), kira::sound::PlaybackState::Paused),
             Voice::Binaural(handle) => handle.is_paused(),
+            Voice::Silent => false,
         }
     }
 
@@ -65,6 +76,7 @@ impl SoundHandle {
         match &self.voice {
             Voice::Kira(handle) => matches!(handle.state(), kira::sound::PlaybackState::Stopped),
             Voice::Binaural(handle) => handle.is_stopped(),
+            Voice::Silent => true,
         }
     }
 
@@ -79,6 +91,7 @@ impl SoundHandle {
                 let _ = handle.set_playback_rate(playback_rate.clamp(0.25, 4.0), tween);
             }
             Voice::Binaural(handle) => handle.set_gain(gain as f32),
+            Voice::Silent => {}
         }
     }
 
@@ -96,6 +109,7 @@ impl SoundHandle {
                 let _ = handle.set_volume(kira::Volume::Amplitude(gain.max(0.0)), kira::tween::Tween::default());
             }
             Voice::Binaural(handle) => handle.set_gain(gain as f32),
+            Voice::Silent => {}
         }
     }
 }

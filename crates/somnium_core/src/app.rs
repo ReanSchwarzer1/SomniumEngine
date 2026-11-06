@@ -3983,10 +3983,22 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
             self.physics = Some(PhysicsWorld::new(PhysicsConfig::default()));
         }
 
+        // SOMNIUM_NO_AUDIO=1 runs silent on purpose: capture runs, and the proof that a machine with no sound device
+        // still runs.
+        let no_audio = std::env::var("SOMNIUM_NO_AUDIO").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false" | "off"));
+        if self.audio.is_none() && no_audio {
+            info!("SOMNIUM_NO_AUDIO: running without sound");
+            self.audio = Some(AudioEngine::silent());
+        }
         if self.audio.is_none() {
             match AudioEngine::new() {
                 Ok(engine) => self.audio = Some(engine),
-                Err(e) => tracing::error!("Failed to initialize audio: {}", e),
+                Err(e) => {
+                    // No device (off, missing, or held by another program): run silent rather than
+                    // panic at the first frame, which unwraps the engine in a dozen places.
+                    tracing::error!("Failed to initialize audio: {e}; running without sound");
+                    self.audio = Some(AudioEngine::silent());
+                }
             }
         }
 
