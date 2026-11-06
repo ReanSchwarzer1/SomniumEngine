@@ -236,6 +236,25 @@ fn slots_overwrite_atomically_reject_escape_and_migrate_old_format() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+/// One damaged slot used to fail the whole list, which emptied a load menu and TSF's chapter select.
+#[test]
+fn one_unreadable_slot_does_not_hide_the_others() {
+    let directory = std::env::temp_dir().join(format!("somnium-save-{}", PersistentId::mint()));
+    let slots = SaveSlots::new(&directory);
+    let mut save = SaveGame::new(12);
+    for slot in ["chapter_1", "chapter_3"] {
+        save.metadata.title = slot.into();
+        slots.write(slot, &save).unwrap();
+    }
+    std::fs::write(directory.join("chapter_2.somsave"), b"{cut short").unwrap();
+    let listed = slots.list().expect("a bad slot no longer fails the list");
+    assert_eq!(listed.iter().map(|(slot, _)| slot.as_str()).collect::<Vec<_>>(), ["chapter_1", "chapter_3"]);
+    let (readable, unreadable) = slots.list_with_unreadable().unwrap();
+    assert_eq!(readable.len(), 2);
+    assert_eq!(unreadable.iter().map(|(slot, _)| slot.as_str()).collect::<Vec<_>>(), ["chapter_2"]);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn removed_content_is_reported_without_losing_the_players_override() {
     let registry = somnium_core::reflect_registry::component_registry();

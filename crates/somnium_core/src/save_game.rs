@@ -318,23 +318,40 @@ impl SaveSlots {
             .map_err(|e| e.to_string())?;
         SaveGame::from_bytes(&bytes)
     }
-    /// Sorted slot names and metadata for a load/save menu.
+    /// Sorted slot names and metadata for a load/save menu. A slot that cannot be read (damaged, cut short, from a
+    /// newer build) is left out and logged: one bad file used to fail the whole list, which emptied a load menu and
+    /// a chapter select.
     pub fn list(&self) -> Result<Vec<(String, SaveMetadata)>, String> {
+        let (slots, unreadable) = self.list_with_unreadable()?;
+        for (slot, error) in unreadable {
+            tracing::warn!(slot, %error, "save slot cannot be read; left out of the list");
+        }
+        Ok(slots)
+    }
+
+    /// The readable slots, sorted, and the slots that could not be read with why, for a menu that wants to say so.
+    pub fn list_with_unreadable(&self) -> Result<(Vec<(String, SaveMetadata)>, Vec<(String, String)>), String> {
         if !self.directory.exists() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let mut slots: Vec<(String, SaveMetadata)> = Vec::new();
+        let mut unreadable: Vec<(String, String)> = Vec::new();
         for entry in std::fs::read_dir(&self.directory).map_err(|e| e.to_string())? {
-            let path = entry.map_err(|e| e.to_string())?.path();
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("somsave") {
                 continue;
             }
             if let Some(slot) = path.file_stem().and_then(|s| s.to_str()) {
-                slots.push((slot.into(), self.read(slot)?.metadata));
+                match self.read(slot) {
+                    Ok(save) => slots.push((slot.into(), save.metadata)),
+                    Err(error) => unreadable.push((slot.into(), error)),
+                }
             }
         }
         slots.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(slots)
+        unreadable.sort();
+        Ok((slots, unreadable))
     }
 }
 
