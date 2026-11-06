@@ -4076,6 +4076,9 @@ impl<G: GameApp> ApplicationHandler for Engine<G> {
                 self.window = Some(Arc::clone(&window));
 
                 info!("Initializing rendering subsystems...");
+                // A GPU error stops the game, with the GPU named for its crash report; the editor logs it and stays
+                // up, so a bad shader edit can be saved around and fixed.
+                somnium_renderer::context::set_gpu_errors_fatal(self.config.player_mode);
                 let render_ctx = pollster::block_on(RenderContext::new(Arc::clone(&window)));
                 let started = std::time::Instant::now();
                 let renderer = SomniumRenderer::new(&render_ctx);

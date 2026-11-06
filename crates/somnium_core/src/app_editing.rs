@@ -1458,6 +1458,19 @@ impl<G: GameApp> Engine<G> {
                 None if action == "save" => self.handle_editor_event(EditorEvent::SaveScene),
                 // The title bar's X: with unsaved edits, the editor asks before it closes.
                 None if action == "close" => self.handle_editor_event(EditorEvent::CloseWindow),
+                // One deliberately invalid GPU call (a buffer both read- and write-mapped), for the proof that the
+                // editor logs a GPU error, names the GPU, and stays up.
+                None if action == "gpu_error" => {
+                    if let Some(ctx) = self.render_ctx.as_ref() {
+                        use somnium_ui::wgpu;
+                        drop(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("editor script: deliberately invalid"),
+                            size: 4,
+                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE,
+                            mapped_at_creation: false,
+                        }));
+                    }
+                }
                 _ => warn!(action = %action, "editor script: unknown step"),
             }
         }
