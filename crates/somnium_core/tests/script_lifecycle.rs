@@ -45,10 +45,19 @@ impl Harness {
     }
 
     fn load(&mut self, text: &str) -> ScriptAssetId {
+        // A module's first run is not a frame's callback. Under the 2 ms callback budget a machine busy with other
+        // builds preempted it now and then ("exceeded its 2ms budget and was interrupted", 6 Nov), failing tests
+        // that are about something else. Loading gets room; the frames keep the default.
         let asset = ScriptAssetId::mint();
-        self.host
-            .load_script(asset, "test.luau", text)
-            .unwrap_or_else(|d| panic!("compile failed: {d}"))
+        let loading = Budget {
+            per_call: std::time::Duration::from_millis(500),
+            per_phase: std::time::Duration::from_millis(1000),
+            ..Budget::default()
+        };
+        self.host.runtime_mut().set_budget(loading);
+        let loaded = self.host.load_script(asset, "test.luau", text);
+        self.host.runtime_mut().set_budget(Budget::default());
+        loaded.unwrap_or_else(|d| panic!("compile failed: {d}"))
     }
 
     fn spawn_scripted(&mut self, asset: ScriptAssetId, name: &str) -> (Entity, InstanceUuid) {
